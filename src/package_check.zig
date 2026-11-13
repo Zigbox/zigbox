@@ -114,7 +114,9 @@ fn check_validity(
 ) void {
     const until_text = valid_until orelse {
         if (required) {
-            checker.fail("{s} has no Valid-Until; build with -Dsigned-at", .{release.apt_release_path});
+            checker.fail("{s} has no Valid-Until; build with -Dsigned-at", .{
+                release.apt_release_path,
+            });
         }
         return;
     };
@@ -510,7 +512,8 @@ test "a Release without Valid-Until is refused under the owner's signatures only
     var sink: std.Io.Writer.Allocating = .init(memory);
     var source: TreeSource = .{ .files = files };
     const owner: Options = .{ .signatures_required = true, .test_key = false };
-    try std.testing.expectError(error.CheckFailed, check(source.source(), memory, &sink.writer, owner));
+    const refused = check(source.source(), memory, &sink.writer, owner);
+    try std.testing.expectError(error.CheckFailed, refused);
     const message = "has no Valid-Until; build with -Dsigned-at";
     try std.testing.expect(std.mem.indexOf(u8, sink.written(), message) != null);
     const loose: Options = .{ .signatures_required = false, .test_key = false };
@@ -549,7 +552,7 @@ fn signatures_of(memory: Allocator, files: []const model.TreeFile) !release.Sign
 }
 
 /// A tree the owner signed carries Valid-Until, so these trees are built with a signing time.
-const test_signed_at: u64 = 1_800_000_000;
+const stamp: u64 = 1_800_000_000;
 
 test "a swapped or stale round-2 signature is refused, a matching one is placed" {
     // Goal: the owner's signature files are tied to the bytes they sign. Signatures made over
@@ -557,11 +560,17 @@ test "a swapped or stale round-2 signature is refused, a matching one is placed"
     var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
     defer arena.deinit();
     const memory = arena.allocator();
-    const signed = try release.build(memory, &test_inputs, .{ .test_key = true, .signed_at = test_signed_at });
+    const signed = try release.build(memory, &test_inputs, .{
+        .test_key = true,
+        .signed_at = stamp,
+    });
     var sink: std.Io.Writer.Allocating = .init(memory);
 
     const good = try signatures_of(memory, signed);
-    const placed = try release.build(memory, &test_inputs, .{ .signatures = good, .signed_at = test_signed_at });
+    const placed = try release.build(memory, &test_inputs, .{
+        .signatures = good,
+        .signed_at = stamp,
+    });
     try check_placed_signatures(placed, memory, &sink.writer);
     var tree: TreeSource = .{ .files = placed };
     const strict: Options = .{ .signatures_required = true, .test_key = false };
@@ -570,7 +579,10 @@ test "a swapped or stale round-2 signature is refused, a matching one is placed"
 
     var swapped = good;
     swapped.repomd_asc = .{ good.repomd_asc[1], good.repomd_asc[0] };
-    const crossed = try release.build(memory, &test_inputs, .{ .signatures = swapped, .signed_at = test_signed_at });
+    const crossed = try release.build(memory, &test_inputs, .{
+        .signatures = swapped,
+        .signed_at = stamp,
+    });
     try std.testing.expectError(
         error.CheckFailed,
         check_placed_signatures(crossed, memory, &sink.writer),
@@ -583,7 +595,7 @@ test "a swapped or stale round-2 signature is refused, a matching one is placed"
     try std.testing.expectError(error.CheckFailed, refused);
 
     const other: release.Inputs = .{ .version = "1.2.4", .zbx = test_inputs.zbx, .license = "x\n" };
-    const stale = try release.build(memory, &other, .{ .signatures = good, .signed_at = test_signed_at });
+    const stale = try release.build(memory, &other, .{ .signatures = good, .signed_at = stamp });
     try std.testing.expectError(
         error.CheckFailed,
         check_placed_signatures(stale, memory, &sink.writer),
@@ -597,14 +609,20 @@ test "swapped, missing or half-placed rpm header signatures are refused" {
     var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
     defer arena.deinit();
     const memory = arena.allocator();
-    const signed = try release.build(memory, &test_inputs, .{ .test_key = true, .signed_at = test_signed_at });
+    const signed = try release.build(memory, &test_inputs, .{
+        .test_key = true,
+        .signed_at = stamp,
+    });
     var sink: std.Io.Writer.Allocating = .init(memory);
     const good = try signatures_of(memory, signed);
     const strict: Options = .{ .signatures_required = true, .test_key = false };
 
     var swapped = good;
     swapped.header = .{ good.header[1], good.header[0] };
-    const crossed = try release.build(memory, &test_inputs, .{ .signatures = swapped, .signed_at = test_signed_at });
+    const crossed = try release.build(memory, &test_inputs, .{
+        .signatures = swapped,
+        .signed_at = stamp,
+    });
     try std.testing.expectError(
         error.CheckFailed,
         check_placed_signatures(crossed, memory, &sink.writer),
@@ -618,7 +636,10 @@ test "swapped, missing or half-placed rpm header signatures are refused" {
     sink.clearRetainingCapacity();
     var none = good;
     none.header = .{ null, null };
-    const unsigned = try release.build(memory, &test_inputs, .{ .signatures = none, .signed_at = test_signed_at });
+    const unsigned = try release.build(memory, &test_inputs, .{
+        .signatures = none,
+        .signed_at = stamp,
+    });
     try std.testing.expectError(
         error.CheckFailed,
         check_placed_signatures(unsigned, memory, &sink.writer),
@@ -631,7 +652,10 @@ test "swapped, missing or half-placed rpm header signatures are refused" {
     sink.clearRetainingCapacity();
     var half: release.Signatures = .{};
     half.header[0] = good.header[0];
-    const partial = try release.build(memory, &test_inputs, .{ .signatures = half, .signed_at = test_signed_at });
+    const partial = try release.build(memory, &test_inputs, .{
+        .signatures = half,
+        .signed_at = stamp,
+    });
     try std.testing.expectError(
         error.CheckFailed,
         check_placed_signatures(partial, memory, &sink.writer),
@@ -640,7 +664,10 @@ test "swapped, missing or half-placed rpm header signatures are refused" {
     sink.clearRetainingCapacity();
     var round_one: release.Signatures = .{};
     round_one.header = good.header;
-    const first = try release.build(memory, &test_inputs, .{ .signatures = round_one, .signed_at = test_signed_at });
+    const first = try release.build(memory, &test_inputs, .{
+        .signatures = round_one,
+        .signed_at = stamp,
+    });
     try check_placed_signatures(first, memory, &sink.writer);
     try std.testing.expectEqual(@as(usize, 0), sink.written().len);
 }
