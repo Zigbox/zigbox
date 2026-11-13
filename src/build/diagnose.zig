@@ -1217,7 +1217,7 @@ pub fn build_interrupted(diag: *Diag, signal: u8) void {
     assert(signal == constants.signal_interrupt or signal == constants.signal_term);
     const name = if (signal == constants.signal_interrupt) "SIGINT" else "SIGTERM";
     diag.raise(.E0808);
-    diag.cause("the build was stopped by {s}; the work of its unfinished steps was released", .{
+    diag.cause("stopped by {s}; the unfinished steps' work was released", .{
         name,
     });
     assert(diag.code.? == .E0808);
