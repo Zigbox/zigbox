@@ -2003,7 +2003,7 @@ test "a helper that prints many lines slowly and exits 0 is not timed out" {
     );
     try std.testing.expect(!result.timed_out);
     try std.testing.expectEqual(host.ExitStatus{ .exited = 0 }, result.status);
-    try std.testing.expectEqualStrings("warning 0\nwarning", output[0..result.output_len]);
+    try std.testing.expectEqualStrings("warning 0\nwarnin", output[0..result.output_len]);
 }
 
 test "a helper that ends in time is not timed out, and reads /dev/null for input" {

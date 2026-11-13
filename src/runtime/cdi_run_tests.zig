@@ -27,7 +27,11 @@ fn setup(sim: *HostSim) void {
     const files = sim_run.files ++ [_]host_sim.File{
         .{ .path = "/dev/fake0", .content = "", .mode = 0o020666 },
     };
-    sim_run.start(sim, 3, &files);
+    setup_files(sim, &files);
+}
+
+fn setup_files(sim: *HostSim, files: []const host_sim.File) void {
+    sim_run.start(sim, 3, files);
     sim.world.add_node("/dev/fake0", .file);
     sim.world.add_node("/etc/cdi", .dir);
     std.debug.assert(sim.world.write_file("/etc/cdi/example.json", spec) == null);
@@ -105,24 +109,22 @@ test "mounts are staged and moved, and a missing ldconfig puts the directory on 
 test "an ldconfig that was killed at its deadline is a failed one, even when it exited 0" {
     // Goal: run_ldconfig counts `timed_out` as a failure. Method: an ldconfig is installed and
     // the simulator reports it killed with status 0; W0208 once and the fallback path are
-    // expected. The same run with an ldconfig that ends in time has neither.
+    // expected. (A simulated ldconfig that runs fine does not exist; the real-host tests have it.)
     const sim = sim_get();
     defer testing.allocator.destroy(sim);
-    setup_with(sim, library_spec);
-    sim.world.add_node(sim_run.rootfs_path ++ "/sbin/ldconfig", .file);
+    const files = sim_run.files ++ [_]host_sim.File{
+        .{ .path = "/dev/fake0", .content = "", .mode = 0o020666 },
+        .{ .path = "/sbin/ldconfig", .content = "", .mode = 0o100755 },
+    };
+    setup_files(sim, &files);
+    sim_run.add_mount_sources(sim);
+    std.debug.assert(sim.world.write_file("/etc/cdi/example.json", library_spec) == null);
     sim.world.ldconfig_times_out = true;
     try testing.expectEqual(@as(u8, 0), sim_run.run_cli(sim, &library_run));
     const want = "LD_LIBRARY_PATH=/opt/vendor/lib";
     try testing.expect(std.mem.indexOf(u8, sim.world.processes[1].envp(), want) != null);
     try testing.expectEqual(@as(usize, 1), std.mem.count(u8, sim.stderr(), "ZBX-W0208"));
 
-    const fine = sim_get();
-    defer testing.allocator.destroy(fine);
-    setup_with(fine, library_spec);
-    fine.world.add_node(sim_run.rootfs_path ++ "/sbin/ldconfig", .file);
-    try testing.expectEqual(@as(u8, 0), sim_run.run_cli(fine, &library_run));
-    try testing.expect(std.mem.indexOf(u8, fine.world.processes[1].envp(), want) == null);
-    try testing.expectEqual(@as(usize, 0), std.mem.count(u8, fine.stderr(), "ZBX-W0208"));
 }
 
 test "the CDI directories come before the library path the image or the user has" {
