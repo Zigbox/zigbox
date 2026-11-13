@@ -22,7 +22,10 @@ comptime {
     // casts plain `objc_msgSend`, which is right for scalar and pointer returns on both; a struct
     // return would need `objc_msgSend_stret` on x86-64, so `send` refuses one.
     assert(builtin.os.tag == .macos);
-    assert(builtin.cpu.arch == .aarch64 or builtin.cpu.arch == .x86_64);
+    switch (builtin.cpu.arch) {
+        .aarch64, .x86_64 => {},
+        else => @compileError("objc.zig supports arm64 and x86-64 macOS only"),
+    }
 }
 
 pub const Id = ?*anyopaque;
