@@ -13,7 +13,7 @@
 //! written (`ready`), and the child tells the parent about a failed or skipped step (`report`).
 //!
 //! Storage belongs to the caller. A `Handle` holds the plan, the doctor's `Facts` and the run's
-//! state, about 480 KiB (`constants.handle_bytes_max`); the caller passes it by pointer to `start`
+//! state, under 768 KiB (`constants.handle_bytes_max`); the caller passes it by pointer to `start`
 //! and may not move it until `wait` returns. The library has no module-level state but the real
 //! host's per-thread errno and the panic handler's settings (`diag/panic.zig`, which only the `zbx`
 //! program sets), so two callers on two threads each use their own (tested). The stack stays small:
@@ -278,6 +278,9 @@ pub const Handle = struct {
     /// the `Spec` when nothing was expanded): what the plan binds. `devices` is what was asked.
     effective: []const devices_mod.Device,
     gpu_expanded: gpu_mod.Expanded,
+    /// What resolving CDI specs needs while it runs (far too big for a stack): the probe of
+    /// `--gpu all` and the resolving of the CDI names use it one after the other.
+    cdi_scratch: cdi_discover.Scratch,
     /// The devices' paths as the plan takes them.
     device_paths: [constants.run_devices_max][]const u8,
     /// What the CDI devices among `devices` resolved to, null: none was asked. Only while
@@ -492,7 +495,7 @@ fn resolve_devices(
         devices_diagnose.refused(diag, path, refusal.problem);
         return error.StartFailed;
     }
-    if (!expand_gpu(host, container, handle, diag)) return error.StartFailed;
+    if (!expand_gpu(host, container, handle, storage, diag)) return error.StartFailed;
     if (!resolve_cdi(host, container, handle, storage, diag)) return error.StartFailed;
     handle.devices = container.devices; // What was asked: the record keeps it.
     var note: Diag = undefined;
@@ -504,7 +507,13 @@ fn resolve_devices(
 
 /// Turns `--gpu` keywords into devices (`gpu.expand`), into `handle.effective`. A run without a
 /// keyword looks at nothing more and keeps its devices as they were.
-fn expand_gpu(host: Host, container: *const Spec, handle: *Handle, diag: *Diag) bool {
+fn expand_gpu(
+    host: Host,
+    container: *const Spec,
+    handle: *Handle,
+    storage: *cdi_mod.Resolved,
+    diag: *Diag,
+) bool {
     assert(diag.code == null);
     assert(handle.effective.len == 0);
     var wants = false;
@@ -524,7 +533,9 @@ fn expand_gpu(host: Host, container: *const Spec, handle: *Handle, diag: *Diag) 
     var trouble = false;
     // Only `all` looks at the specs: `dri` is the render nodes, with no vendor tooling. A
     // resolution the caller gave replaces the host's specs, so there is nothing to probe.
-    if (wants_all and container.cdi == null) switch (gpu_mod.probe_nvidia(host, diag)) {
+    const probe = gpu_mod.probe_nvidia;
+    const nvidia_probe = wants_all and container.cdi == null;
+    if (nvidia_probe) switch (probe(host, &handle.cdi_scratch, storage, diag)) {
         .offered => nvidia = true,
         .absent => {},
         .trouble => trouble = true,
@@ -538,7 +549,8 @@ fn expand_gpu(host: Host, container: *const Spec, handle: *Handle, diag: *Diag) 
             return false;
         },
         .too_many => {
-            devices_diagnose.bad_path(diag, container.devices[0].path, .too_many);
+            const keyword: []const u8 = if (wants_all) "all" else "dri";
+            devices_diagnose.too_many_gpu_nodes(diag, dri.count, keyword);
             return false;
         },
     }
@@ -547,7 +559,7 @@ fn expand_gpu(host: Host, container: *const Spec, handle: *Handle, diag: *Diag) 
 }
 
 /// The CDI devices among the asked ones: the caller's resolution if it gave one, else the specs
-/// of this host. The scratch of the resolving is on this function's stack and gone after it.
+/// of this host. The scratch of the resolving is the handle's, and is dead after this.
 fn resolve_cdi(
     host: Host,
     container: *const Spec,
@@ -571,8 +583,7 @@ fn resolve_cdi(
         storage.* = given.*;
         if (!cdi_discover.host_has(host, storage, asked[0..count], diag)) return false;
     } else {
-        var scratch: cdi_discover.Scratch = undefined;
-        if (!cdi_discover.resolve(host, asked[0..count], &scratch, storage, diag)) {
+        if (!cdi_discover.resolve(host, asked[0..count], &handle.cdi_scratch, storage, diag)) {
             return false;
         }
     }

@@ -27,7 +27,15 @@ pub const Files = struct {
     cache_disk: []const u8 = "",
     /// demo-m0's experiment: provision a Delegate= drop-in for user managers.
     delegate_dropin: bool = false,
+    /// Further files by path (demo-m10's fake driver library, its probe and the script that
+    /// makes its glibc rootfs); none by default.
+    extra: []const vm.Route = &.{},
 };
+
+/// The routes `start` serves at most besides `Files.extra`: the four named ones.
+const named_routes_max = 4;
+/// `Files.extra` holds at most this many.
+pub const extra_routes_max = 4;
 
 /// Renders the demo seed and starts the session with `files`. `session` must not move
 /// afterwards (its server borrows from it).
@@ -46,7 +54,8 @@ pub fn start(
         &cloud_init.config;
     const user_data_buffer = try arena.alloc(u8, vm.limits.user_data_bytes_max);
     const meta_data_buffer = try arena.alloc(u8, vm.limits.meta_data_bytes_max);
-    const routes = try arena.alloc(vm.Route, 4);
+    std.debug.assert(files.extra.len <= extra_routes_max);
+    const routes = try arena.alloc(vm.Route, named_routes_max + extra_routes_max);
     var count: usize = 0;
     const named = [_]vm.Route{
         .{ .path = "/zbx", .body = files.binary },
@@ -55,8 +64,14 @@ pub fn start(
         .{ .path = "/rootfs.tar.gz", .body = files.rootfs },
     };
     std.debug.assert(files.binary.len > 0);
+    comptime std.debug.assert(named.len == named_routes_max);
     for (named) |route| {
         if (route.body.len == 0) continue;
+        routes[count] = route;
+        count += 1;
+    }
+    for (files.extra) |route| {
+        std.debug.assert(route.body.len > 0);
         routes[count] = route;
         count += 1;
     }
