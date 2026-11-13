@@ -561,10 +561,13 @@ jobs:
           fixed=$(printf '%s\n' "zbx-$VERSION-linux-x86_64.tar.gz" "zbx-$VERSION-linux-aarch64.tar.gz" \
             "zbx-$VERSION.cdx.json" zigbox-repos.tar.gz | sort)
           [ "$(comm -23 <(printf '%s\n' "$fixed") <(printf '%s\n' "$linux"))" = "" ] ||
-            fail "SHA256SUMS lacks one of: $(printf '%s ' $fixed)"
+            fail "SHA256SUMS lacks one of: ${fixed//$'\n'/ }"
           rest=$(comm -13 <(printf '%s\n' "$fixed") <(printf '%s\n' "$linux"))
-          [ "$(grep -c '\.deb$' <<< "$rest" || true)" = 2 ] && [ "$(grep -c '\.rpm$' <<< "$rest" || true)" = 2 ] &&
-            [ "$(grep -c . <<< "$rest")" = 4 ] || fail "SHA256SUMS does not name exactly two debs and two rpms besides the fixed assets: $rest"
+          debs=$(grep -c '\.deb$' <<< "$rest" || true)
+          rpms=$(grep -c '\.rpm$' <<< "$rest" || true)
+          if [ "$debs" != 2 ] || [ "$rpms" != 2 ] || [ "$(grep -c . <<< "$rest")" != 4 ]; then
+            fail "SHA256SUMS does not name exactly two debs and two rpms besides the fixed assets: $rest"
+          fi
           want=$(printf '%s\n' "$linux" SHA256SUMS SHA256SUMS.asc SHA256SUMS.macos \
             "$zip" "$zip.sha256" zigbox.rb | sort)
           have=$(/bin/ls -A | sort)
