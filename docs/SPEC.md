@@ -1,6 +1,6 @@
 # Zigbox: A First-Principles Container Runtime in Zig
 
-Snapshot of https://claude.ai/artifact/6D9js8mxSLYmfuZe3rQ26w taken 2026-11-04 (doc rev 91), Parts I to III. The live doc is authoritative; update this file when it changes. The three diagrams in the live doc are listed as figure notes, not reproduced.
+Snapshot of https://claude.ai/artifact/6D9js8mxSLYmfuZe3rQ26w taken 2026-11-04 (doc rev 91); Part II's C4 lines resynced 2026-11-13 (doc rev 103), Parts I to III. The live doc is authoritative; update this file when it changes. The three diagrams in the live doc are listed as figure notes, not reproduced.
 
 ## Purpose and design principles
 
@@ -432,7 +432,7 @@ These are out of scope for M0 to M10. Raise a change to this doc before building
 
 ## Part II · Zigcube: orchestrating Zigbox
 
-Zigcube runs Zigbox workloads across a fleet of machines. It keeps the one idea Kubernetes got right, declared desired state reconciled by controllers against a watchable store, and rebuilds everything around it to exploit Zigbox's content-addressed images, signatures and explicit grants. Its control plane starts in parallel with Zigbox, against a fake runtime (see When Zigcube starts, below), and keeps the same demo-first contract: every C-milestone ends in a live demo on a small VM cluster. Zigcube is also how a developer runs more than one service on one machine (zbx has no Compose equivalent): zcube-server on the SQLite store with one agent on the same laptop, and services reaching each other by name. C1 starts that local mode with one command; reaching services by name, a single-node form of C4's DNS and grants without WireGuard, comes with C4.
+Zigcube runs Zigbox workloads across a fleet of machines. It keeps the one idea Kubernetes got right, declared desired state reconciled by controllers against a watchable store, and rebuilds everything around it to exploit Zigbox's content-addressed images, signatures and explicit grants. Its control plane starts in parallel with Zigbox, against a fake runtime (see When Zigcube starts, below), and keeps the same demo-first contract: every C-milestone ends in a live demo on a small VM cluster. Zigcube is also how a developer runs more than one service on one machine (zbx has no Compose equivalent): zcube-server on the SQLite store with one agent on the same laptop, and services reaching each other by name. C1 starts that local mode with one command; reaching services by name, a single-node form of C4's service names and grants, comes with C4.
 
 Principles it adds on top of Part I:
 
@@ -551,7 +551,7 @@ The demo environment is a set of three to five QEMU VMs on one host, created by 
 
 **Goal:** services find each other by name, talk over authenticated encrypted links, and only along declared grants.
 
-**Scope:** WireGuard tunnels between nodes; cluster DNS for service names; per-workload identity issued by the control plane and bound to service name, image digest and placement epoch (the epoch is carried in every identity from C4 and enforced for stateful services from C7, so C7 needs no change to the identity format); mutual TLS between workloads (or WireGuard-level identity, decided at C4 start); grants such as `web → db:5432` compiled into per-node rules. Default deny. Local mode gains the single-node form, moved here from C1 (owner, 2026-10-30): services on one machine reach each other by name where the service file grants it, without WireGuard; the demo applies an app and postgres with the app granted `db:5432`, and without the grant the connection is refused and `zcube why` names the missing grant.
+**Scope:** mutual TLS on every connection between the supervisors at each end, with no WireGuard (owner, 2026-11-13); service names resolved through a per-container /etc/hosts, rewritten by its supervisor, that maps every service to a stable 127.77.x.y address, not cluster DNS; per-workload identity issued by the control plane and bound to service name, image digest and placement epoch (the epoch is carried in every identity from C4 and enforced for stateful services from C7, so C7 needs no change to the identity format); TCP health checks (HTTP checks are out of C4); grants, declared on the destination service so that whoever owns the data decides who reaches it, such as `web → db:5432` compiled into per-node rules. Default deny. Local mode gains the single-node form, moved here from C1 (owner, 2026-10-30): services on one machine reach each other by name where the service file grants it, without WireGuard; the demo applies an app and postgres with the app granted db:5432, and without the grant the connection is refused and zcube why names the missing grant. Local mode's mesh needs the Zigbox runtime on Linux; with the fake runtime or on macOS it refuses grants with one line saying why. C3's deferred "zero errors under real traffic" is measured here: a client at 20 requests per second, one connection per request, sees no refused or reset connection and no non-200 within 2 s across a rolling update (long-lived connections across a rollout are not claimed).
 
 **Demo script:**
 
@@ -669,7 +669,7 @@ The demo environment is a set of three to five QEMU VMs on one host, created by 
 - [ ] Control-plane store, decided: Postgres, with OrioleDB (`USING orioledb`) for the hot, update-heavy observed-state tables and plain heap for the rest. FoundationDB rejected as too hard to operate. Open: fall back to all-heap if OrioleDB is still alpha or lacks a needed feature when C0 starts.
 - [ ] Is the control plane also written in Zig, or in a language with a richer server ecosystem, keeping Zig for the agent and runtime?
 - [ ] Service config format: same as the M7 build file, so one language describes build and run?
-- [ ] Workload identity at C4: mTLS per connection, or identity carried at the WireGuard layer?
+- [ ] Workload identity at C4, decided: mTLS per connection between supervisors, no WireGuard (owner, 2026-11-13). WireGuard would need root or CAP_NET_ADMIN on every node, or a new userspace crypto implementation, and would still not say which workload is calling.
 
 ## Part III · The ecosystem: how Zigbox wins people, not just benchmarks
 
