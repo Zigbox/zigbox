@@ -6,9 +6,9 @@ warning[ZBX-W0209]: groups show as nogroup inside the container
   more   zbx explain W0209 · rerun with --verbose for the full cause chain
   docs   https://zigbox.github.io/zigbox/errors/W0209.html
 warning[ZBX-W0208]: driver libraries found through LD_LIBRARY_PATH
-  cause  the image's ldconfig is missing, failed, or ran past its 10 seconds (and
-         was killed), so the driver libraries are found through LD_LIBRARY_PATH
-         instead of the library cache
+  cause  the image's ldconfig is missing, failed, or ran past its 10 seconds
+         (and was killed), so the driver libraries are found through
+         LD_LIBRARY_PATH instead of the library cache
   fix    nothing to do for an image that finds them; a musl image such as Alpine cannot load glibc driver libraries, use a glibc image
   more   zbx explain W0208 · rerun with --verbose for the full cause chain
   docs   https://zigbox.github.io/zigbox/errors/W0208.html
