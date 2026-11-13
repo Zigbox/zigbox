@@ -1242,7 +1242,9 @@ const RootsSeen = struct {
         var made: [8]roots.Root = undefined;
         seen.roots = build_roots(&made);
         seen.removable_with = removable_trees();
-        for (made[0..seen.roots]) |root| roots.remove(&store, root.digest) catch unreachable;
+        for (made[0..seen.roots]) |root| {
+            roots.remove(&store, root.digest) catch unreachable; // The root was listed just now.
+        }
         seen.removable_without = removable_trees();
         seen.fired = true;
     }

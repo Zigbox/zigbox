@@ -886,7 +886,8 @@ pub const Context = struct {
         const patterns = ws.copy_patterns[0..texts.len];
         const to = file.text(entry.to);
         const name = file.text(file.steps[index].name);
-        const selected = copy_mod.select(assembling, &ws.copying, source, patterns, to) catch |err| {
+        const picked = copy_mod.select(assembling, &ws.copying, source, patterns, to);
+        const selected = picked catch |err| {
             switch (err) {
                 error.PoolFull => {
                     const failed = ws.copying.failed_pattern;
