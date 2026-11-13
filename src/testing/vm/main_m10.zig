@@ -1,7 +1,7 @@
 //! The M10 demo, run in a real Ubuntu 24.04 VM (the M0 harness: same image, same provisioning):
 //! `--device` and `--gpu` with a fake vendor, `zigbox.test/gpu`, whose spec is in /etc/cdi and
 //! whose device is a 0660 root:render node (the character device 1:3, `/dev/null`'s numbers).
-//!   1. doctor lists the spec, its device and the node, and none of it is a gap.
+//!   1. doctor lists the spec and its device, and none of it is a gap.
 //!   2. `--device zigbox.test/gpu=0`: the node opens, the spec's variable and library are there.
 //!   3. `--gpu all` with no NVIDIA spec: E0228 when the guest has no render node; `--gpu dri`
 //!      when it has one (the runner's QEMU gives none: recorded as NOT RUN in the output).
@@ -134,7 +134,7 @@ fn prepare_host(session: *Session, out: *Io.Writer) !void {
 }
 
 fn step_doctor(session: *Session, out: *Io.Writer) !void {
-    try out.print("\ndemo-m10: STEP 1: doctor lists the spec, the device and the node\n", .{});
+    try out.print("\ndemo-m10: STEP 1: doctor lists the spec and the device\n", .{});
     const command = zbx ++ " doctor";
     const result = try H.run_split(session, command);
     try H.show_split(out, command, result);

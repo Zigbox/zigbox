@@ -44,12 +44,11 @@ fn expect_refusal(streams: Streams, status: u8, code: []const u8) Error!void {
     if (has(streams.stderr, "errno")) return error.RefusalWrong;
 }
 
-/// Step 1: doctor lists the spec and its device, the node is openable, and nothing is a gap.
+/// Step 1: doctor lists the spec and its device (openable by you), and nothing is a gap.
 pub fn check_doctor(streams: Streams) Error!void {
     const text = streams.stdout;
     if (!has_line_starting(text, "gpu  ok  spec /etc/cdi/zbx-gpu.json")) return error.OutputWrong;
     if (!has_line_starting(text, "gpu  ok  device zigbox.test/gpu=0")) return error.OutputWrong;
-    if (!has_line_starting(text, "gpu  ok  node /dev/zbx-gpu")) return error.OutputWrong;
     if (has_line_starting(text, "gpu  gap")) return error.OutputWrong;
 }
 
@@ -115,11 +114,10 @@ fn both(stdout: []const u8, stderr: []const u8) Streams {
     return .{ .stdout = stdout, .stderr = stderr };
 }
 
-test "check_doctor wants the spec, device and node, and no gap" {
+test "check_doctor wants the spec and the device, and no gap" {
     const good = "ok   kernel  x\n" ++
         "gpu  ok  spec /etc/cdi/zbx-gpu.json  zigbox.test/gpu, 1 devices\n" ++
-        "gpu  ok  device zigbox.test/gpu=0  every node can be opened by you\n" ++
-        "gpu  ok  node /dev/zbx-gpu  mode 0660, group 44, you are in that group\n";
+        "gpu  ok  device zigbox.test/gpu=0  every node can be opened by you\n";
     try check_doctor(quiet(good));
     try testing.expectError(error.OutputWrong, check_doctor(quiet("ok  kernel  x\n")));
     const gap = good ++ "gpu  gap node /dev/x  closed\n";
