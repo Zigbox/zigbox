@@ -44,6 +44,18 @@ then:
 sudo dnf install zigbox
 ```
 
+### Renewing the keyring
+
+The signing subkey is renewed once a year, and the keyring you fetched above carries its expiry.
+Nothing updates that file, so when a release's notes say the subkey was renewed, fetch the keyring
+again before the date they give, or `apt update` fails with `EXPKEYSIG`:
+
+```sh
+curl -fsSL https://zigbox.org/zigbox-archive-keyring.gpg | sudo tee /usr/share/keyrings/zigbox.gpg >/dev/null
+sudo rpm --import https://zigbox.org/zigbox-archive-keyring.asc   # dnf systems
+```
+
+
 The package holds the one `zbx` binary. It recommends `uidmap` (on Fedora, `shadow-utils`) and
 `passt`, which step 2 needs. It does not change `/etc/subuid` or `/etc/subgid`.
 

@@ -89,9 +89,31 @@ gpg --armor --export-secret-subkeys "${NEWSUBKEY:-$SUBKEY}"'!' |
   gh secret set ZIGBOX_SIGNING_KEY --env release --repo Zigbox/zigbox
 ```
 
-Then the next release's archive carries the updated public key; users who trust the primary
-key's fingerprint need do nothing (apt and dnf read the keyring files from zigbox.org). The
-workflow takes the subkey that is unexpired and can sign, and fails if there are none or two.
+Renewal does **not** reach existing installs by itself. Users fetched the keyring once
+(`curl` into `/usr/share/keyrings/zigbox.gpg`) and nothing updates that file, so apt on every
+installed machine keeps the old expiry date and `apt update` fails with `EXPKEYSIG` the day the
+original expiry passes, even when the owner renewed in time. dnf reads the `.repo` file's
+`gpgkey=` URL when it first imports the key and then uses rpm's stored copy, with the old expiry,
+so a renewal is not picked up there either (a rpm that enforces key expiry refuses it). So each renewal is
+also a user action, and the owner:
+
+- renews at least 28 days before the expiry (the refresh refuses a closer key anyway), so users
+  have the weeks before the old expiry to act;
+- puts the "re-fetch the keyring" notice in the release notes of the first release after the
+  renewal and in the announcement (template below), and keeps it in the next release's notes too;
+- checks that `https://zigbox.org/zigbox-archive-keyring.gpg` carries the new expiry.
+
+Users re-fetch with the install command (`curl ... | sudo tee /usr/share/keyrings/zigbox.gpg`);
+for dnf, `sudo rpm --import https://zigbox.org/zigbox-archive-keyring.asc`. A
+`zigbox-archive-keyring` package that updates the file through `apt upgrade` is the lasting fix and
+is a follow-up
+([decision](../decisions/2026-11-13-keyring-renewal-needs-refetch.md)).
+
+Release-notes line for the first release after a renewal:
+
+> The signing subkey was renewed. Fetch the keyring again before `YYYY-MM-DD` (the old expiry), or
+> `apt update` and `dnf` will refuse the repository: see "Renewing the keyring" in the install guide.
+
 If the subkey leaks, revoke it with the primary key and set a new one the same way.
 
 ## What the workflow runs
@@ -103,7 +125,9 @@ If the subkey leaks, revoke it with the primary key and set a new one the same w
    `--pinentry-mode loopback --passphrase-file`. Neither is printed, written to the workspace or
    passed as an argument, and there is no `set -x`.
 2. Checks the key's primary fingerprint is `ZIGBOX_SIGNING_FPR` (set by the workflow to the
-   pinned value), that the primary and the signing subkey are RSA 4096, and picks the one subkey.
+   pinned value), that the primary and the signing subkey are RSA 4096 and neither expires within
+   28 days of the signing time (the rule and messages of the weekly refresh), and picks the one
+   subkey.
 3. Round 1: `zig build packages` writes unsigned rpms and `zig-out/packages/to-sign/<rpm>.header`;
    each header gets a binary detached signature, `<rpm file>.header.sig`, in a fresh directory.
    Each is tied to the header it signs (its 16 digest bits and its issuer fingerprint), so a
@@ -112,8 +136,8 @@ If the subkey leaks, revoke it with the primary key and set a new one the same w
 4. Round 2: `zig build packages -Dsignatures=DIR` embeds them and rewrites the trees (the rpm
    digests now cover the signed files). Then `InRelease` (clearsigned `Release`), `Release.gpg`
    and both `repomd.<arch>.xml.asc` are signed.
-5. A final `zig build packages -Dsignatures=DIR` places them, and `zig build packages-check
-   -Dsignatures=DIR` reads the tree back: every file against the metadata that names it, every
+5. A final `zig build packages -Dsigned-at=N -Dsignatures=DIR` places them, and `zig build
+   packages-check -Dsigned-at=N -Dsignatures=DIR` (the same `N` as every other run) reads the tree back: every file against the metadata that names it, every
    signature file against the file beside it, all by one key. That check compares the 16 digest
    bits, so it catches a swapped or stale file and not a forged one; the next step verifies.
 6. Exports the public keyring as `zigbox-archive-keyring.asc` and `.gpg`, then, in a home that
