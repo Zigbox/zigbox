@@ -362,6 +362,11 @@ test {
 }
 
 test {
+    // The Dockerfile translator (M9 slice 3).
+    _ = @import("dockerfile/refusal.zig");
+}
+
+test {
     // CDI devices (M10 slice 2): the spec parser and resolver, a run with one, and the fuzzer.
     _ = @import("runtime/cdi.zig");
     _ = @import("runtime/cdi_tests.zig");

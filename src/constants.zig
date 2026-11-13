@@ -1020,6 +1020,30 @@ pub const build_step_format_version: u32 = 1;
 /// `SOURCE_DATE_EPOCH` for every step, 1980-01-01T00:00:00Z: the earliest time `zip` stores.
 /// Every file a step sees carries it as its mtime (`store_mtime_seconds`).
 pub const build_source_date_epoch: u64 = 315_532_800;
+
+// M9 `zbx import` (docs/briefs/M9-dockerfile-import.md). A Dockerfile, its `.dockerignore` and
+// what the import holds of them are bounded here; the build file it writes is bounded by the
+// `build_*` constants above, and going past one of those is E0815.
+/// The largest Dockerfile read (the survey's largest is under 16 KiB).
+pub const import_dockerfile_bytes_max: u32 = 256 * 1024;
+/// The largest `.dockerignore` read; its lines are the build file's `.exclude`.
+pub const import_dockerignore_bytes_max: u32 = 64 * 1024;
+/// Instructions in one Dockerfile, every stage counted.
+pub const import_instructions_max: u32 = 2048;
+/// Stages in one Dockerfile.
+pub const import_stages_max: u32 = 64;
+/// Words in one instruction after splitting (sources, pairs, argv).
+pub const import_words_max: u32 = 256;
+/// Variables one stage can hold: arguments, `ENV` and the base image's environment.
+pub const import_variables_max: u32 = 256;
+/// Bytes of words and variable values made while translating one instruction or stage.
+pub const import_scratch_bytes_max: u32 = 256 * 1024;
+/// `--build-arg` given on one command line.
+pub const import_build_args_max: u32 = 64;
+/// Lines of the import report (steps, notes and flags).
+pub const import_report_lines_max: u32 = 1024;
+/// The report's text, held whole before it is written.
+pub const import_report_bytes_max: u32 = 128 * 1024;
 /// A key's preimage (`build/key.zig`): one step's strings are at most the file's pool, its
 /// base's env at most an image's settings, and the rest (digests, needs, the fixed environment,
 /// the length prefixes) fits in the margin.
@@ -1108,6 +1132,14 @@ comptime {
     assert(build_glob_pool_bytes_max / build_glob_matches_max >= 64);
     assert(build_exclude_lines_max * build_pattern_bytes_max <= build_pool_bytes);
     assert(build_glob_parts_max * 2 <= build_pattern_bytes_max);
+    // M9 import: a Dockerfile's steps fit the build file, and its words fit a list.
+    assert(import_stages_max <= build_steps_max);
+    assert(import_instructions_max >= build_steps_max);
+    assert(import_words_max >= build_step_argv_max);
+    assert(import_words_max >= build_copy_sources_max);
+    assert(import_variables_max >= build_config_env_max);
+    assert(import_dockerfile_bytes_max <= import_scratch_bytes_max);
+    assert(import_build_args_max <= import_variables_max);
     // Step indexes are `u16`.
     assert(build_steps_max <= std.math.maxInt(u16));
 }
