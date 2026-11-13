@@ -348,7 +348,8 @@ const type_file: u32 = 0o100000;
 /// A `--mount` is looked at by `resolve_sources` instead.
 pub fn look(host: Host, mount: *const Mount) Looked {
     assert(mount_problem(mount) == null);
-    assert(mount.kind != .mount and mount.kind != .cache);
+    assert(mount.kind != .mount);
+    assert(mount.kind != .cache);
     if (mount.kind == .tmpfs) return .{ .shape = .tmpfs };
     var path: [constants.mount_path_bytes_max + 1:0]u8 = undefined;
     @memcpy(path[0..mount.source.len], mount.source);
@@ -462,7 +463,8 @@ fn resolve_one(
     out: *Resolution,
     diag: *Diag,
 ) ResolveError!void {
-    assert(mount.kind == .mount or mount.kind == .cache);
+    const typed = mount.kind == .mount or mount.kind == .cache;
+    assert(typed);
     assert(index < constants.mounts_max);
     assert(limit.len > 1);
     var path: project_mod.Path = undefined;

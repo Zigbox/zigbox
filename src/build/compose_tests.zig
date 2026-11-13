@@ -1090,7 +1090,8 @@ test "steps that share a cache id come one after another, each after the nearest
     // holder before it, none from the step without caches, and stays a valid order.
     const text =
         ".{ .version = 1, .image = .{}, .steps = .{\n" ++
-        " .{ .name = \"a\", .base = \"b\", .run = .{\"x\"}, .caches = .{ .{ .id = \"go\", .path = \"/c\" } } },\n" ++
+        " .{ .name = \"a\", .base = \"b\", .run = .{\"x\"},\n" ++
+        "   .caches = .{ .{ .id = \"go\", .path = \"/c\" } } },\n" ++
         " .{ .name = \"m\", .base = \"b\", .run = .{\"x\"} },\n" ++
         " .{ .name = \"b\", .base = \"b\", .run = .{\"x\"}, .caches = .{\n" ++
         "   .{ .id = \"go\", .path = \"/c\" }, .{ .id = \"npm\", .path = \"/n\" } } },\n" ++

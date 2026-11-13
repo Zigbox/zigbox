@@ -232,7 +232,8 @@ pub fn cache_edges(file: *const file_mod.BuildFile, plan: *schedule.Plan) void {
             const before = holder_before(file, plan, position, file.text(held.id)) orelse continue;
             if (std.mem.indexOfScalar(u8, plan.needs_of(step), before) != null) continue;
             const at = plan.needs_count[step];
-            assert(at < constants.build_step_edges_max); // One more per cache, and the bound has room.
+            // One more per cache, and the bound has room.
+            assert(at < constants.build_step_edges_max);
             plan.needs[step][at] = before;
             plan.needs_count[step] = at + 1;
         }
@@ -1284,7 +1285,10 @@ fn fill_lists(
             .path = file.text(wanted.path),
             .ro = wanted.ro,
             // A mode was checked by the parser (`is_mode`): octal digits.
-            .mode = if (wanted.mode) |text| std.fmt.parseInt(u16, file.text(text), 8) catch null else null,
+            .mode = if (wanted.mode) |text|
+                std.fmt.parseInt(u16, file.text(text), 8) catch null
+            else
+                null,
             .uid = wanted.uid,
             .gid = wanted.gid,
         };

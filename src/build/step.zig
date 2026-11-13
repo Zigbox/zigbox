@@ -282,7 +282,8 @@ fn name_paths(request: *const Request, store: *const Store, ws: *Workspace) Erro
     for (spec.caches, 0..) |cache, index| {
         var dir_name: [cache_dir_bytes_max]u8 = undefined;
         const dir = cache_dir_name(&dir_name, cache.id);
-        paths.caches[index].set(&.{ paths.caches_root.text(), "/", dir }) catch unreachable;
+        const parts = [_][]const u8{ paths.caches_root.text(), "/", dir };
+        paths.caches[index].set(&parts) catch unreachable; // Sized for the longest.
     }
 }
 
@@ -442,7 +443,8 @@ fn build_mounts(spec: *const key_mod.Spec, ws: *Workspace) u32 {
         count += 1;
     }
     for (spec.caches, 0..) |cache, index| {
-        ws.mounts[count] = bind(if (cache.ro) .bind else .cache, paths.caches[index].text(), cache.path);
+        const kind: mounts_mod.Kind = if (cache.ro) .bind else .cache;
+        ws.mounts[count] = bind(kind, paths.caches[index].text(), cache.path);
         count += 1;
     }
     assert(count <= mounts_count);
