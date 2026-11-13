@@ -1002,3 +1002,83 @@ test "a config user written as a name becomes its numbers, and an unknown name i
     try testing.expectError(error.Failed, context.numeric_user());
     try testing.expectEqual(codes.Code.E0817, diag.code.?);
 }
+
+fn copy_project_loaded() !void {
+    registry_started(&registry.fixture.oci.amd64.digest);
+    var buffer: [512]u8 = undefined;
+    const text = try std.fmt.bufPrint(&buffer, "{s}{s}{s}", .{
+        ".{ .version = 1, .image = .{}, .steps = .{ .{ .name = \"put\", .base = \"",
+        locked_reference,
+        "\", .copy = .{ .{ .src = .{\"a.txt\"}, .to = \"/opt/\" } } } } }\n",
+    });
+    var problem: file_mod.Problem = undefined;
+    const parsed = file_mod.parse(text, &loaded.file, &problem);
+    try testing.expectEqual(file_mod.ParseResult.parsed, parsed);
+    files.put_dir("/p", 0o755);
+    files.put_file("/p/a.txt", 0o644, "a\n");
+    set_path(&loaded.project, "/p");
+    set_path(&loaded.path, "/p/zbx.build.zon");
+}
+
+fn import_entry(entry: ?u32) !Digest {
+    var input: input_tree.Workspace = undefined;
+    var problem: inputs_mod.Problem = undefined;
+    const request: input_job.Request = .{
+        .host = sim.interface(),
+        .facts = &facts,
+        .store = &store,
+        .loaded = &loaded,
+        .step = 0,
+        .entry = entry,
+        .ws = &input,
+        .problem = &problem,
+    };
+    return input_job.import(&request, &diag);
+}
+
+test "a copy's project source is a root between the import and the selection" {
+    // Goal: a concurrent `store gc` cannot remove the source tree a copy selects from. Method:
+    // import entry 0 as `begin_copy` does and read the root record (named for the step, as a
+    // step's output root is); an import that is no copy entry's makes none; a root the user
+    // made first is kept as it was; a build that selects drops only the root it made.
+    try copy_project_loaded();
+    var text: [constants.store_source_bytes_max]u8 = undefined;
+    const rootless = try import_entry(null);
+    try testing.expect(root_source(rootless, &text) == null);
+    const source = try import_entry(0);
+    try testing.expect(!source.eql(rootless)); // The entry selects part of the project.
+    try testing.expectEqualStrings("build:put", root_source(source, &text).?);
+    var kept: roots.Root = undefined;
+    var errno: u16 = 0;
+    try roots.load(&store, source, &kept, &errno);
+    kept.set_source("mine");
+    var failure: @import("../store/fs.zig").Failure = undefined;
+    try roots.save(&store, &kept, &failure);
+    _ = try import_entry(0);
+    try testing.expectEqualStrings("mine", root_source(source, &text).?);
+    try testing.expect(diag.code == null);
+}
+
+test "a copy step leaves no root of its project source behind" {
+    // Goal: the root is for the window only. Method: build the copy step as the test above's
+    // file has it, then look for the source's root.
+    try copy_project_loaded();
+    try testing.expect(try context.begin(0) == .hit);
+    try testing.expect(diag.code == null);
+    var text: [constants.store_source_bytes_max]u8 = undefined;
+    try testing.expect(root_source(try import_entry(null), &text) == null);
+}
+
+test "a copy source's root that cannot be written is one diagnostic, not a crash" {
+    // Goal: the failure path of the root. Method: a full disk after the import's own writes is
+    // hard to aim at, so the tree is imported once, and then the next write of the model fails:
+    // the second import finds the tree and its first write is the root record's.
+    try copy_project_loaded();
+    _ = try import_entry(0);
+    const source = try import_entry(0);
+    var path: @import("../store/fs.zig").PathBuf = undefined;
+    files.remove_path(store.root_record_path(&path, source));
+    files.faults.fail_mutation = files.mutations;
+    try testing.expectError(error.Failed, import_entry(0));
+    try testing.expect(diag.code != null);
+}

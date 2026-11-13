@@ -730,6 +730,8 @@ pub const Context = struct {
         for (entries, 0..) |entry, at| {
             const source = try context.copy_source(index, @intCast(at), &entry);
             if (at == 0) ws.step_inputs[index] = source;
+            // A project source was rooted by its import; the selection is what the key keeps.
+            defer if (entry.from == null) context.unroot(source);
             const selected = try context.copy_select(index, &entry, source);
             ws.copy_keys[at] = .{ .source = selected, .to = file.text(entry.to) };
         }
