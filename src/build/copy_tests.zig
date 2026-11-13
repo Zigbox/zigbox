@@ -142,7 +142,8 @@ test "a directory source puts its contents, not itself, into the destination" {
     const source = try source_tree();
     const selected = try copy.select(context, &ws, source, &.{"/src/"}, "/app");
     var text: [64]u8 = undefined;
-    try testing.expectEqualStrings("a.go b.go notes.txt sub", try names_at(selected, &.{"app"}, &text));
+    const names = try names_at(selected, &.{"app"}, &text);
+    try testing.expectEqualStrings("a.go b.go notes.txt sub", names);
 }
 
 test "a file to a destination without a slash is renamed, and the whole tree is `.`" {
@@ -160,7 +161,8 @@ test "nothing matched is NoMatch" {
     // Goal: the empty selection is refused, not an empty copy. Method: a pattern with no match.
     const context = start();
     const source = try source_tree();
-    try testing.expectError(error.NoMatch, copy.select(context, &ws, source, &.{"src/*.rs"}, "/x/"));
+    const none = copy.select(context, &ws, source, &.{"src/*.rs"}, "/x/");
+    try testing.expectError(error.NoMatch, none);
 }
 
 test "a later copy replaces a file and merges a directory; a plain add still conflicts" {

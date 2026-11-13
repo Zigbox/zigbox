@@ -27,7 +27,6 @@ const Digest = digest_mod.Digest;
 
 pub const Error = error{ Failed, PoolFull, NoMatch };
 
-
 /// One matched entry, its strings in `Workspace.bytes`.
 const Item = struct {
     name_at: u32,

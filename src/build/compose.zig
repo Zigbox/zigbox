@@ -1074,7 +1074,8 @@ pub const Context = struct {
         if (text.len == 0) return;
         if (file_mod.is_numeric_user(text)) return;
         const tree = ws.record.tree;
-        const found = image_user.resolve(context.store, &ws.user_ws, tree, text, context.diag) catch {
+        const store = context.store;
+        const found = image_user.resolve(store, &ws.user_ws, tree, text, context.diag) catch {
             context.diag.reset();
             diagnose.user_not_found(context.diag, ".image .config", text);
             return error.Failed;
