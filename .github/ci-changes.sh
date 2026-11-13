@@ -87,7 +87,7 @@ classify() {
     # A harness file named for a demo (checks_m3.zig, upgrade_m6b.zig, m7_project/): that demo and
     # every later one, which repeat its parts. The files named for no demo are shared.
     src/testing/vm/m8b/* | src/testing/vm/*_m8b.zig) want_one m8b; return ;;
-    src/testing/vm/*_m10.zig) want_one m10; return ;;
+    src/testing/vm/*_m10.zig | src/testing/vm/m10_fixture/*) want_one m10; return ;;
     src/testing/vm/*_m8.zig | src/testing/vm/m8_*) want_one m8; return ;;
     src/testing/vm/m7_* | src/testing/vm/*_m7.zig) want_from m7; return ;;
     src/testing/vm/*_m6b.zig) want_from m6b; return ;;

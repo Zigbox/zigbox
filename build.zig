@@ -625,6 +625,7 @@ fn add_demo_step(
         });
         harness.dependOn(&vm.step);
         // The top-20 run tells a seccomp refusal from another EPERM by the allowlist itself.
+        if (std.mem.eql(u8, demo.step, "demo-m10")) add_gpu_fixtures(b, vm.root_module);
         if (is_top20) {
             vm.root_module.addAnonymousImport("seccomp_policy", .{
                 .root_source_file = b.path("src/runtime/policy/seccomp.zon"),
@@ -654,6 +655,40 @@ fn add_demo_step(
         const step = b.step(demo.step, demo.help);
         step.dependOn(&run.step);
     }
+}
+
+/// demo-m10's fake driver library (soname `libzbxgpu.so.1`) and the program that needs it, built
+/// for the guest (x86_64, glibc's loader as the interpreter, no libc linked) and embedded in the
+/// harness, which serves them to the guest. The harness serves the x86_64 `zbx` too.
+fn add_gpu_fixtures(b: *std.Build, harness_module: *std.Build.Module) void {
+    const target = b.resolveTargetQuery(.{ .cpu_arch = .x86_64, .os_tag = .linux, .abi = .gnu });
+    const library = b.addLibrary(.{
+        .linkage = .dynamic,
+        .name = "zbxgpu",
+        .version = .{ .major = 1, .minor = 0, .patch = 0 },
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/testing/vm/m10_fixture/library.zig"),
+            .target = target,
+            .optimize = .ReleaseSmall,
+            .link_libc = false,
+        }),
+    });
+    const probe = b.addExecutable(.{
+        .name = "zbxgpu-probe",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/testing/vm/m10_fixture/probe.zig"),
+            .target = target,
+            .optimize = .ReleaseSmall,
+            .link_libc = false,
+        }),
+    });
+    probe.root_module.linkLibrary(library);
+    harness_module.addAnonymousImport("zbxgpu_library", .{
+        .root_source_file = library.getEmittedBin(),
+    });
+    harness_module.addAnonymousImport("zbxgpu_probe", .{
+        .root_source_file = probe.getEmittedBin(),
+    });
 }
 
 /// The commit whose zbx a demo's upgrade test starts from (`old_release.zon`), if it has one.

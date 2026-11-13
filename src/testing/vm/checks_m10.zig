@@ -52,20 +52,35 @@ pub fn check_doctor(streams: Streams) Error!void {
     if (has_line_starting(text, "gpu  gap")) return error.OutputWrong;
 }
 
-/// Step 2: the device brings its node (opened), its variable and its library, exit 0, no error.
+/// Step 2: the device brings its node, its variable and its library, exit 0, no error.
+/// - The node reads as four zero bytes. Only the bound character device 1:5 gives them: a bind
+///   that failed leaves the empty file it was to cover, which reads as nothing.
+/// - `ldconfig -p` lists the library from the mount, and the probe, which needs it and has no
+///   `LD_LIBRARY_PATH`, starts and prints the library's answer.
+/// - No W0208: that note means the `ldconfig` step did not run and the run fell back.
 pub fn check_device_run(streams: Streams, status: u8) Error!void {
     if (status != 0) return error.ExitCodeWrong;
+    if (!has_line(streams.stdout, "00 00 00 00")) return error.OutputWrong;
     if (!has_line(streams.stdout, "ZBXGPU=on")) return error.OutputWrong;
-    if (!has_line(streams.stdout, "NODE-OPEN")) return error.OutputWrong;
-    if (!has_line(streams.stdout, "libzbxgpu.so")) return error.OutputWrong;
+    if (!has_line(streams.stdout, "LDP=")) return error.OutputWrong;
+    if (!has_line_starting(streams.stdout, "libzbxgpu.so.1 (")) return error.OutputWrong;
+    if (!has(streams.stdout, "=> /opt/zbx-gpu-lib/libzbxgpu.so.1")) return error.OutputWrong;
+    if (!has_line(streams.stdout, "zbxgpu-probe: answer 42")) return error.OutputWrong;
     if (has(streams.stderr, "ZBX-E")) return error.OutputWrong;
+    if (has(streams.stderr, "ZBX-W0208")) return error.OutputWrong;
 }
 
-/// Step 4: a user not in the node's group is refused with E0225 naming the node and the group.
-pub fn check_not_in_group(streams: Streams, status: u8) Error!void {
+/// Step 4: a user not in the node's group is refused with E0225 naming the node and the group,
+/// by the id `render` has in the guest (`gid`, as `getent` printed it).
+pub fn check_not_in_group(streams: Streams, status: u8, gid: []const u8) Error!void {
+    std.debug.assert(gid.len > 0);
+    std.debug.assert(gid.len <= 10);
     try expect_refusal(streams, status, "E0225");
     if (!has(streams.stderr, "/dev/zbx-gpu")) return error.RefusalWrong;
-    if (!has(streams.stderr, "group")) return error.RefusalWrong;
+    var buffer: [16]u8 = undefined;
+    const named = std.fmt.bufPrint(&buffer, "group {s}", .{gid}) catch unreachable; // 6 + 10 bytes.
+    if (!has(streams.stderr, named)) return error.RefusalWrong;
+    if (!has(streams.stderr, "not in that group")) return error.RefusalWrong;
 }
 
 /// Step 5, doctor: the YAML spec is refused with the JSON fix, and the JSON spec's device is fine.
@@ -124,25 +139,56 @@ test "check_doctor wants the spec and the device, and no gap" {
     try testing.expectError(error.OutputWrong, check_doctor(quiet(gap)));
 }
 
-test "check_device_run wants the node open, the variable and the library" {
-    const out = "ZBXGPU=on\nNODE-OPEN\nlibzbxgpu.so\n";
+const device_zeros = " 00 00 00 00\n";
+const device_rest = "ZBXGPU=on\nLDP=\n" ++
+    "\tlibzbxgpu.so.1 (libc6,x86-64) => /opt/zbx-gpu-lib/libzbxgpu.so.1\n" ++
+    "zbxgpu-probe: answer 42\n";
+
+test "check_device_run wants zero bytes from the node, the variable and the library loaded" {
+    const out = device_zeros ++ device_rest;
     try check_device_run(both(out, "warning[ZBX-W0209]: x\n"), 0);
     try testing.expectError(error.ExitCodeWrong, check_device_run(quiet(out), 1));
-    const unopened = quiet("ZBXGPU=on\nlibzbxgpu.so\n");
-    try testing.expectError(error.OutputWrong, check_device_run(unopened, 0));
     const refused = both(out, "error[ZBX-E0225]: x\n");
     try testing.expectError(error.OutputWrong, check_device_run(refused, 0));
 }
 
+test "check_device_run refuses a run whose node bind failed" {
+    // Goal: the review of #140 (MUST 3). A failed bind leaves the empty mountpoint file, which
+    // opens and reads as nothing; the old check (the node opens) passed it. Method: feed what
+    // the guest prints then: `od` prints no line at all, everything else is as in a good run.
+    try testing.expectError(error.OutputWrong, check_device_run(quiet(device_rest), 0));
+    const other_bytes = " 76 65 6e 64\n" ++ device_rest;
+    try testing.expectError(error.OutputWrong, check_device_run(quiet(other_bytes), 0));
+}
+
+test "check_device_run refuses a run where the library was not cached or not loaded" {
+    // Goal: the review of #140 (MUSTs 1 and 2). Method: drop each line that proves the
+    // `ldconfig` step and the load, one at a time, and add the fallback's W0208 and its path.
+    const no_cache = device_zeros ++ "ZBXGPU=on\nLDP=\nzbxgpu-probe: answer 42\n";
+    try testing.expectError(error.OutputWrong, check_device_run(quiet(no_cache), 0));
+    const no_load = device_zeros ++ "ZBXGPU=on\nLDP=\n" ++
+        "\tlibzbxgpu.so.1 (libc6,x86-64) => /opt/zbx-gpu-lib/libzbxgpu.so.1\n";
+    try testing.expectError(error.OutputWrong, check_device_run(quiet(no_load), 0));
+    const out = device_zeros ++ device_rest;
+    const fell_back = both(out, "warning[ZBX-W0208]: x\n");
+    try testing.expectError(error.OutputWrong, check_device_run(fell_back, 0));
+    const by_path = device_zeros ++ "ZBXGPU=on\nLDP=/opt/zbx-gpu-lib\n" ++
+        "\tlibzbxgpu.so.1 (libc6,x86-64) => /opt/zbx-gpu-lib/libzbxgpu.so.1\n" ++
+        "zbxgpu-probe: answer 42\n";
+    try testing.expectError(error.OutputWrong, check_device_run(quiet(by_path), 0));
+}
+
 test "check_not_in_group wants one coded line naming the node and the group" {
     const text = "error[ZBX-E0225]: can't bind that device\n" ++
-        "  cause  you cannot open /dev/zbx-gpu: group 44\n";
-    try check_not_in_group(loud(text), 125);
-    try testing.expectError(error.ExitCodeWrong, check_not_in_group(loud(text), 1));
-    const other_code = loud("error[ZBX-E0226]: x /dev/zbx-gpu group\n");
-    try testing.expectError(error.RefusalWrong, check_not_in_group(other_code, 125));
+        "  cause  you cannot open /dev/zbx-gpu: group 991 (you are not in that group)\n";
+    try check_not_in_group(loud(text), 125, "991");
+    try testing.expectError(error.ExitCodeWrong, check_not_in_group(loud(text), 1, "991"));
+    const other_code = loud("error[ZBX-E0226]: x /dev/zbx-gpu group 991\n");
+    try testing.expectError(error.RefusalWrong, check_not_in_group(other_code, 125, "991"));
     const no_names = loud("error[ZBX-E0225]: x\n");
-    try testing.expectError(error.RefusalWrong, check_not_in_group(no_names, 125));
+    try testing.expectError(error.RefusalWrong, check_not_in_group(no_names, 125, "991"));
+    // A wrong group (the node's gid read wrongly) is refused, though the word is there.
+    try testing.expectError(error.RefusalWrong, check_not_in_group(loud(text), 125, "44"));
 }
 
 test "the YAML checks want the fix and the file named" {

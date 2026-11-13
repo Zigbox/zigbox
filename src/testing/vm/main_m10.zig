@@ -1,8 +1,11 @@
 //! The M10 demo, run in a real Ubuntu 24.04 VM (the M0 harness: same image, same provisioning):
 //! `--device` and `--gpu` with a fake vendor, `zigbox.test/gpu`, whose spec is in /etc/cdi and
-//! whose device is a 0660 root:render node (the character device 1:3, `/dev/null`'s numbers).
+//! whose device is a 0660 root:render node (the character device 1:5, `/dev/zero`'s numbers),
+//! and whose driver library `libzbxgpu.so.1` is a real shared object (m10_fixture/).
 //!   1. doctor lists the spec and its device, and none of it is a gap.
-//!   2. `--device zigbox.test/gpu=0`: the node opens, the spec's variable and library are there.
+//!   2. `--device zigbox.test/gpu=0` in a glibc rootfs: the node reads as four zero bytes, the
+//!      spec's variable is set, the image's `ldconfig` cached the library, and a program that
+//!      needs it starts with no LD_LIBRARY_PATH.
 //!   3. `--gpu all` with no NVIDIA spec: E0228 when the guest has no render node; `--gpu dri`
 //!      when it has one (the runner's QEMU gives none: recorded as NOT RUN in the output).
 //!   4. A user removed from `render` is refused with E0225 naming the node and the group.
@@ -27,6 +30,9 @@ const Session = session_mod.Session;
 const H = harness;
 
 const rootfs_dir = "/home/demo/alpine";
+/// A glibc rootfs the guest makes from its own Ubuntu files (`glibc_rootfs_script`), so that the
+/// image's `ldconfig` is glibc's, as in `debian:12`; the fake driver's probe is in it.
+const glibc_dir = "/home/demo/glibc";
 const zbx = H.as_demo ++ "/home/demo/zbx";
 const run_prefix = zbx ++ " run --rootfs " ++ rootfs_dir;
 
@@ -75,9 +81,15 @@ fn demo(init: std.process.Init, out: *Io.Writer, options: H.Options) !void {
     defer if (!options.keep_overlay) Io.Dir.cwd().deleteFile(io, overlay) catch {};
 
     var session: Session = undefined;
+    const extra = [_]@import("zigbox_vm").Route{
+        .{ .path = "/m10/libzbxgpu.so.1", .body = @embedFile("zbxgpu_library") },
+        .{ .path = "/m10/zbxgpu-probe", .body = @embedFile("zbxgpu_probe") },
+        .{ .path = "/m10/glibc-rootfs.sh", .body = glibc_rootfs_script },
+    };
     try session_mod.start(&session, init, out, overlay, accel, .{
         .binary = binary,
         .rootfs = rootfs,
+        .extra = &extra,
     });
     defer session.deinit();
     var timer = H.Timer.start();
@@ -113,9 +125,32 @@ fn unpack_rootfs(session: *Session, out: *Io.Writer) !void {
     if (result.status != 0) return error.UnpackFailed;
 }
 
-/// The fake vendor: a node 0660 root:render that `demo` can open (it is put in `render`), a
-/// library directory, and a spec with the node, a mount, a variable and the NVIDIA-style
-/// library cache hook.
+/// Makes a glibc rootfs at `$1` from the guest's own Ubuntu 24.04 files: the shell, the tools
+/// step 2 runs, glibc's `ldconfig` (Ubuntu's is a script that execs `ldconfig.real`) and the
+/// libraries `ldd` names, with Ubuntu's merged-/usr links. `$2` is the probe, put in `/usr/bin`.
+const glibc_rootfs_script =
+    \\set -e
+    \\R=$1
+    \\mkdir -p $R/usr/bin $R/usr/sbin $R/usr/lib $R/usr/lib64 $R/etc $R/var/cache/ldconfig
+    \\mkdir -p $R/tmp $R/dev $R/proc $R/sys $R/opt $R/root
+    \\ln -s usr/bin $R/bin; ln -s usr/sbin $R/sbin; ln -s usr/lib $R/lib; ln -s usr/lib64 $R/lib64
+    \\for f in /usr/bin/dash /usr/bin/head /usr/bin/od /usr/bin/grep /usr/bin/ls /usr/bin/id \
+    \\    /usr/sbin/ldconfig /usr/sbin/ldconfig.real; do
+    \\  cp $f $R$f
+    \\  for l in $(ldd $f 2>/dev/null | grep -o '/[^ ]*' || true); do
+    \\    mkdir -p $(dirname $R$l); cp -L $l $R$l
+    \\  done
+    \\done
+    \\ln -s dash $R/usr/bin/sh
+    \\: > $R/etc/ld.so.conf
+    \\install -m 0755 $2 $R/usr/bin/zbxgpu-probe
+    \\test -x $R/lib64/ld-linux-x86-64.so.2
+    \\
+;
+
+/// The fake vendor: a node 0660 root:render that `demo` can open (it is put in `render`), the
+/// driver library in its own directory, a glibc rootfs with a program that needs that library,
+/// and a spec with the node, a mount, a variable and the NVIDIA-style library cache hook.
 fn prepare_host(session: *Session, out: *Io.Writer) !void {
     try out.print("\ndemo-m10: the fake vendor zigbox.test/gpu: node, library, spec\n", .{});
     const spec = "{\"cdiVersion\":\"0.6.0\",\"kind\":\"zigbox.test/gpu\",\"devices\":[" ++
@@ -125,12 +160,24 @@ fn prepare_host(session: *Session, out: *Io.Writer) !void {
         "\"hooks\":[{\"hookName\":\"createContainer\",\"path\":\"/usr/bin/nvidia-cdi-hook\"," ++
         "\"args\":[\"nvidia-cdi-hook\",\"update-ldcache\",\"--folder\",\"/opt/zbx-gpu-lib\"]}]}}";
     const setup = "groupadd -f render && usermod -aG render demo && " ++
-        "mknod /dev/zbx-gpu c 1 3 && chgrp render /dev/zbx-gpu && chmod 0660 /dev/zbx-gpu && " ++
-        "mkdir -p /etc/cdi /opt/zbx-gpu-lib && echo vendor > /opt/zbx-gpu-lib/libzbxgpu.so && " ++
-        "printf '%s' '" ++ spec ++ "' > /etc/cdi/zbx-gpu.json";
+        "mknod /dev/zbx-gpu c 1 5 && chgrp render /dev/zbx-gpu && chmod 0660 /dev/zbx-gpu && " ++
+        "mkdir -p /etc/cdi && printf '%s' '" ++ spec ++ "' > /etc/cdi/zbx-gpu.json";
     const prepared = try session.run(setup, limits.command_timeout_kvm_s);
     try H.show(out, "write the spec, make the node, put demo in render", prepared);
     if (prepared.status != 0) return error.DeviceSetupFailed;
+    const library = try std.fmt.allocPrint(
+        session.scratch_allocator(),
+        "mkdir -p /opt/zbx-gpu-lib && cd /tmp && U=http://10.0.2.2:{d}/m10 && " ++
+            "curl -fsS -o /opt/zbx-gpu-lib/libzbxgpu.so.1 $U/libzbxgpu.so.1 && " ++
+            "curl -fsS -o zbxgpu-probe $U/zbxgpu-probe && " ++
+            "curl -fsS -o glibc-rootfs.sh $U/glibc-rootfs.sh && " ++
+            "sh glibc-rootfs.sh {s} /tmp/zbxgpu-probe && chown -R demo:demo {s} && " ++
+            "du -sh {s} && ls -l /opt/zbx-gpu-lib",
+        .{ session.server.port, glibc_dir, glibc_dir, glibc_dir },
+    );
+    const made = try session.run(library, limits.command_timeout_kvm_s);
+    try H.show(out, "fetch the driver library and the probe, make the glibc rootfs", made);
+    if (made.status != 0) return error.DeviceSetupFailed;
 }
 
 fn step_doctor(session: *Session, out: *Io.Writer) !void {
@@ -143,9 +190,12 @@ fn step_doctor(session: *Session, out: *Io.Writer) !void {
 
 fn step_device(session: *Session, out: *Io.Writer) !void {
     try out.print("\ndemo-m10: STEP 2: --device zigbox.test/gpu=0: node, variable, library\n", .{});
-    const inside = "'echo ZBXGPU=$ZBXGPU; : </dev/zbx-gpu && echo NODE-OPEN; " ++
-        "ls /opt/zbx-gpu-lib'";
-    const command = run_prefix ++ " --name gpu-dev --device zigbox.test/gpu=0 -- sh -c " ++ inside;
+    // The node must read as /dev/zero (a failed bind leaves an empty file), and the probe must
+    // start with LD_LIBRARY_PATH empty, so only the cache `ldconfig` wrote can find the library.
+    const inside = "'head -c 4 /dev/zbx-gpu | od -An -tx1; echo ZBXGPU=$ZBXGPU; " ++
+        "echo LDP=$LD_LIBRARY_PATH; ldconfig -p | grep libzbxgpu; zbxgpu-probe'";
+    const command = zbx ++ " run --rootfs " ++ glibc_dir ++
+        " --name gpu-dev --device zigbox.test/gpu=0 -- sh -c " ++ inside;
     const result = try H.run_split(session, command);
     try H.show_split(out, command, result);
     checks.check_device_run(result.streams, result.status) catch |err| {
@@ -179,6 +229,11 @@ fn step_gpu(session: *Session, out: *Io.Writer) !void {
 
 fn step_not_in_group(session: *Session, out: *Io.Writer) !void {
     try out.print("\ndemo-m10: STEP 4: a user outside the node's group is refused\n", .{});
+    const gid = try session.run("getent group render | cut -d: -f3", limits.command_timeout_kvm_s);
+    if (gid.status != 0) return error.DeviceSetupFailed;
+    // A result's output is the session's scratch, which the next command overwrites.
+    const trimmed = std.mem.trim(u8, gid.output, " \r\n");
+    const render_gid = try session.scratch_allocator().dupe(u8, trimmed);
     const removed = try session.run("gpasswd -d demo render", limits.command_timeout_kvm_s);
     try H.show(out, "take demo out of render", removed);
     const command = run_prefix ++ " --name gpu-out --device zigbox.test/gpu=0 -- sh -c 'echo ran'";
@@ -186,7 +241,7 @@ fn step_not_in_group(session: *Session, out: *Io.Writer) !void {
     try H.show_split(out, command, result);
     const back = try session.run("usermod -aG render demo", limits.command_timeout_kvm_s);
     if (back.status != 0) return error.DeviceSetupFailed;
-    checks.check_not_in_group(result.streams, result.status) catch |err| {
+    checks.check_not_in_group(result.streams, result.status, render_gid) catch |err| {
         return fail_step(out, "STEP 4", err);
     };
 }
