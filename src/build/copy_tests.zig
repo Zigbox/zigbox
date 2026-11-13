@@ -205,3 +205,29 @@ test "a file replaces a directory and a directory replaces a file" {
     try testing.expectEqualStrings("-", try names_at(image, &.{"y"}, &text));
     try testing.expect(try is_content(image, &.{"y"}, "file"));
 }
+
+test "a selection is a pure function of what the patterns take" {
+    // Goal: the key of a copy holds the selection, so a source file no pattern takes must leave
+    // it alone, and the same source must give the same selection however often it is made.
+    // Method: select `a.txt` from three sources that differ only in `other.txt`, and from one
+    // that differs in `a.txt`.
+    const context = start();
+    const patterns: []const []const u8 = &.{"a.txt"};
+    const plain = try directory(&.{
+        .{ .name = "a.txt", .content = "a" },
+        .{ .name = "other.txt", .content = "o" },
+    }, true);
+    const other = try directory(&.{
+        .{ .name = "a.txt", .content = "a" },
+        .{ .name = "other.txt", .content = "changed" },
+    }, true);
+    const edited = try directory(&.{
+        .{ .name = "a.txt", .content = "edited" },
+        .{ .name = "other.txt", .content = "o" },
+    }, true);
+    const first = try copy.select(context, &ws, plain, patterns, "/opt/");
+    try testing.expect(first.eql(try copy.select(context, &ws, plain, patterns, "/opt/")));
+    try testing.expect(first.eql(try copy.select(context, &ws, other, patterns, "/opt/")));
+    try testing.expect(!first.eql(try copy.select(context, &ws, edited, patterns, "/opt/")));
+    try testing.expect(!first.eql(try copy.select(context, &ws, plain, patterns, "/usr/")));
+}
