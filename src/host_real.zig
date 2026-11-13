@@ -1994,7 +1994,8 @@ test "a helper that prints many lines slowly and exits 0 is not timed out" {
     // bound, finish well inside the deadline: not killed, exit 0, first bytes kept.
     var real: HostReal = .{};
     const envp = [_:null]?[*:0]const u8{null};
-    const script = "i=0; while [ $i -lt 150 ]; do echo \"warning $i\"; i=$((i+1)); sleep 0.005; done";
+    const script =
+        "i=0; while [ $i -lt 150 ]; do echo \"warning $i\"; i=$((i+1)); sleep 0.005; done";
     const argv = [_:null]?[*:0]const u8{ "sh", "-c", script, null };
     var output: [16]u8 = undefined;
     const result = try real.interface().run_helper(

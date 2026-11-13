@@ -124,7 +124,6 @@ test "an ldconfig that was killed at its deadline is a failed one, even when it 
     const want = "LD_LIBRARY_PATH=/opt/vendor/lib";
     try testing.expect(std.mem.indexOf(u8, sim.world.processes[1].envp(), want) != null);
     try testing.expectEqual(@as(usize, 1), std.mem.count(u8, sim.stderr(), "ZBX-W0208"));
-
 }
 
 test "the CDI directories come before the library path the image or the user has" {
