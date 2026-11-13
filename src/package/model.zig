@@ -75,6 +75,9 @@ pub const Error = error{
     OutOfMemory,
     /// The writer ran out of room or hit a bound the caller's data should not reach.
     WriteFailed,
+    /// A `Release` file lacks the `Date` line a re-date replaces, or a signing time is outside
+    /// `constants.apt_signed_at_min` to `apt_signed_at_max`.
+    BadRelease,
 };
 
 /// One line saying what a package problem is, for the build tool to print after `package: `.
@@ -93,6 +96,7 @@ pub fn describe(err: Error) []const u8 {
         error.TooManyRecommends => "the package names more weak dependencies than the bound allows",
         error.OutOfMemory => "out of memory",
         error.WriteFailed => "an output buffer could not grow",
+        error.BadRelease => "a Release file has no Date line, or the signing time is out of range",
     };
 }
 

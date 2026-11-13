@@ -46,7 +46,10 @@ pub fn build(b: *std.Build) void {
     add_tidy_step(b);
     const fuzz = add_fuzz_step(b, options, target);
     add_release_step(b, options);
-    add_packages_steps(b, options);
+    const packages_help = "Package tree for packages-redate and release-assets";
+    const packages_dir = b.option([]const u8, "packages-dir", packages_help);
+    add_packages_steps(b, options, packages_dir);
+    add_release_assets_step(b, options, packages_dir);
     add_demo_step(b, options, vm_module);
     add_errors_site_steps(b);
     add_trust_wasm_step(b);
@@ -93,12 +96,17 @@ fn add_package_module(
 /// `zig-out/packages/`; `-Dsignatures=<dir>` adds the owner's signatures, `-Dtest-key` signs with
 /// the fixed test key (CI). `packages-check` places the same files, then checks every digest.
 /// It never runs `gpg`: it prints the commands (docs/releases/packaging.md).
-fn add_packages_steps(b: *std.Build, options: *std.Build.Step.Options) void {
+fn add_packages_steps(
+    b: *std.Build,
+    options: *std.Build.Step.Options,
+    packages_dir: ?[]const u8,
+) void {
     const signatures_help =
         "Directory of the owner's signatures for `packages` (docs/releases/packaging.md)";
     const signatures = b.option([]const u8, "signatures", signatures_help);
     const test_key_help = "Sign the packages with the fixed test key";
     const test_key = b.option(bool, "test-key", test_key_help) orelse false;
+    const signed_at = b.option([]const u8, "signed-at", signed_at_help);
     const tool = package_tool(b);
     const out = "zig-out/packages";
     var steps: [2]*std.Build.Step.Run = undefined;
@@ -112,6 +120,7 @@ fn add_packages_steps(b: *std.Build, options: *std.Build.Step.Options) void {
         run.addArgs(&.{ "--out", out });
         if (signatures) |directory| run.addArgs(&.{ "--signatures", directory });
         if (test_key) run.addArg("--test-key");
+        if (signed_at) |seconds| run.addArgs(&.{ "--signed-at", seconds });
         if (checking) run.addArg("--check");
         run.has_side_effects = true;
         slot.* = run;
@@ -121,7 +130,86 @@ fn add_packages_steps(b: *std.Build, options: *std.Build.Step.Options) void {
     b.step("packages", packages_help).dependOn(&steps[0].step);
     const check_help = "Place the signatures, then check every file of the package trees";
     b.step("packages-check", check_help).dependOn(&steps[1].step);
+    add_redate_step(b, tool, signed_at, packages_dir);
 }
+
+const signed_at_help =
+    "Unix seconds of the signing: the apt Release gets this Date and a Valid-Until 21 days later";
+
+/// `zig build packages-redate -Dsigned-at=N -Dpackages-dir=DIR` rewrites the `Date` and
+/// `Valid-Until` of DIR's apt `Release` and drops the signature files that no longer match it,
+/// without rebuilding any package (the weekly refresh signs the result again).
+fn add_redate_step(
+    b: *std.Build,
+    tool: *std.Build.Step.Compile,
+    signed_at: ?[]const u8,
+    directory: ?[]const u8,
+) void {
+    const redate_help = "Re-date an existing apt Release (-Dsigned-at, -Dpackages-dir)";
+    const step = b.step("packages-redate", redate_help);
+    const run = b.addRunArtifact(tool);
+    run.setCwd(b.path("."));
+    run.addArg("--redate");
+    run.addArgs(&.{ "--out", directory orelse "zig-out/packages" });
+    run.addArgs(&.{ "--signed-at", signed_at orelse "0" });
+    run.has_side_effects = true;
+    if (signed_at == null) {
+        step.dependOn(&b.addFail("packages-redate needs -Dsigned-at=SECONDS").step);
+    }
+    step.dependOn(&run.step);
+}
+
+/// `zig build release-assets` writes the tarballs, the SBOM and `SHA256SUMS` under
+/// `zig-out/release-assets/`. With `-Dpackages-dir=DIR` (the signed tree of the release script)
+/// it adds the debs and rpms; `-Drepos-archive=FILE` adds the repository archive; without
+/// `-Dpackages-dir` the step needs `-Dno-packages` (docs/releases/packaging.md).
+fn add_release_assets_step(
+    b: *std.Build,
+    options: *std.Build.Step.Options,
+    packages: ?[]const u8,
+) void {
+    const no_packages_help = "Write release assets without debs and rpms";
+    const no_packages = b.option(bool, "no-packages", no_packages_help) orelse false;
+    const archive_help = "zigbox-repos.tar.gz to add to the assets";
+    const archive = b.option([]const u8, "repos-archive", archive_help);
+    const epoch = b.option([]const u8, "source-date-epoch", "Timestamp of tar entries and SBOM");
+    const tool = b.addExecutable(.{
+        .name = "release_assets_main",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/release_assets_main.zig"),
+            .target = b.graph.host,
+            .optimize = .Debug,
+        }),
+    });
+    const run = b.addRunArtifact(tool);
+    run.setCwd(b.path("."));
+    run.addArgs(&.{ "assets", "--version", @import("build.zig.zon").version });
+    add_release_binaries(b, options, run);
+    run.addArg("--license");
+    run.addFileArg(b.path("LICENSE"));
+    run.addArgs(&.{ "--license-id", license_id });
+    run.addArgs(&.{ "--zig-version", @import("builtin").zig_version_string });
+    run.addArgs(&.{ "--out", "zig-out/release-assets" });
+    if (epoch) |seconds| run.addArgs(&.{ "--source-date-epoch", seconds });
+    if (packages) |directory| run.addArgs(&.{ "--packages", directory });
+    if (no_packages) run.addArg("--no-packages");
+    if (archive) |file| run.addArgs(&.{ "--extra", file });
+    run.has_side_effects = true;
+    const help = "Write the release tarballs, the SBOM and SHA256SUMS (docs/releases/packaging.md)";
+    b.step("release-assets", help).dependOn(&run.step);
+    const sums_dir = b.option([]const u8, "assets-dir", "Directory of assets for release-sums");
+    const name_help = "File release-sums writes";
+    const sums_name = b.option([]const u8, "sums-name", name_help) orelse "SHA256SUMS";
+    const sums = b.addRunArtifact(tool);
+    sums.setCwd(b.path("."));
+    const directory = sums_dir orelse "zig-out/release-assets";
+    sums.addArgs(&.{ "sums", "--dir", directory, "--name", sums_name });
+    sums.has_side_effects = true;
+    const sums_help = "Write SHA256SUMS over a directory again (-Dassets-dir, -Dsums-name)";
+    b.step("release-sums", sums_help).dependOn(&sums.step);
+}
+
+const license_id = "MIT";
 
 fn package_tool(b: *std.Build) *std.Build.Step.Compile {
     return b.addExecutable(.{
@@ -212,6 +300,7 @@ const roots = [_][]const u8{
     "src/zigbox.zig",
     "src/package.zig",
     "src/package_main.zig",
+    "src/release_assets_main.zig",
     "src/tidy.zig",
     "src/fuzz.zig",
     "src/size_check.zig",
@@ -244,6 +333,7 @@ const linux_only = [_][]const u8{
     "src/zigbox.zig",
     "src/package.zig",
     "src/package_main.zig",
+    "src/release_assets_main.zig",
     "src/fuzz.zig",
 };
 

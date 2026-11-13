@@ -12,6 +12,7 @@ const constants = @import("constants.zig");
 const package = @import("package.zig");
 const model = package.model;
 const rpm = package.rpm;
+const apt = package.apt;
 const openpgp = package.openpgp;
 const release = @import("package_release.zig");
 
@@ -80,18 +81,54 @@ fn field(line: []const u8, name: []const u8) ?[]const u8 {
 }
 
 /// `Release` sums every `Packages` file; each `Packages` stanza sums its pool file.
-fn check_apt(checker: *Checker) Error!void {
+fn check_apt(checker: *Checker, valid_until_required: bool) Error!void {
     const text = checker.read(release.apt_release_path) orelse return;
     var lines = std.mem.splitScalar(u8, text, '\n');
     var in_sums = false;
+    var date: ?[]const u8 = null;
+    var valid_until: ?[]const u8 = null;
     while (lines.next()) |line| {
         if (std.mem.eql(u8, line, "SHA256:")) {
             in_sums = true;
+        } else if (field(line, "Date: ")) |value| {
+            date = value;
+        } else if (field(line, "Valid-Until: ")) |value| {
+            valid_until = value;
         } else if (in_sums and line.len > 0 and line[0] == ' ') {
             try check_release_line(checker, line);
         }
     }
     if (!in_sums) checker.fail("{s} has no SHA256 section", .{release.apt_release_path});
+    check_validity(checker, date, valid_until, valid_until_required);
+}
+
+/// A `Release` with `Valid-Until` has a `Date`, both in the one form the writer uses, and the
+/// second is exactly `apt_valid_seconds` after the first. Without `Valid-Until` apt takes the
+/// metadata as valid for ever, so a tree checked with the owner's signatures must have it; only
+/// the test key and an unsigned round-one tree may lack it (a build with no `-Dsigned-at`).
+fn check_validity(
+    checker: *Checker,
+    date: ?[]const u8,
+    valid_until: ?[]const u8,
+    required: bool,
+) void {
+    const until_text = valid_until orelse {
+        if (required) {
+            checker.fail("{s} has no Valid-Until; build with -Dsigned-at", .{
+                release.apt_release_path,
+            });
+        }
+        return;
+    };
+    const date_text = date orelse
+        return checker.fail("{s} has Valid-Until but no Date", .{release.apt_release_path});
+    const start = apt.parse_date(date_text) orelse
+        return checker.fail("the Release Date is not a date the writer makes", .{});
+    const end = apt.parse_date(until_text) orelse
+        return checker.fail("the Release Valid-Until is not a date the writer makes", .{});
+    if (end != start + constants.apt_valid_seconds) {
+        checker.fail("the Release Valid-Until is not 21 days after its Date", .{});
+    }
 }
 
 fn check_release_line(checker: *Checker, line: []const u8) Error!void {
@@ -386,7 +423,7 @@ pub fn check(
         .log = log,
         .headers_required = options.signatures_required,
     };
-    try check_apt(&checker);
+    try check_apt(&checker, options.signatures_required and !options.test_key);
     for (0..release.architectures.len) |index| try check_dnf(&checker, index);
     if (options.signatures_required) try check_signature_files(&checker, true);
     if (options.test_key) try check_test_signatures(&checker);
@@ -466,6 +503,25 @@ test "an unsigned tree passes unless signatures are required" {
     try std.testing.expect(std.mem.indexOf(u8, sink.written(), message) != null);
 }
 
+test "a Release without Valid-Until is refused under the owner's signatures only" {
+    // Goal: a release signed without -Dsigned-at cannot pass packages-check; the test key may.
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const memory = arena.allocator();
+    const files = try release.build(memory, &test_inputs, .{});
+    var sink: std.Io.Writer.Allocating = .init(memory);
+    var source: TreeSource = .{ .files = files };
+    const owner: Options = .{ .signatures_required = true, .test_key = false };
+    const refused = check(source.source(), memory, &sink.writer, owner);
+    try std.testing.expectError(error.CheckFailed, refused);
+    const message = "has no Valid-Until; build with -Dsigned-at";
+    try std.testing.expect(std.mem.indexOf(u8, sink.written(), message) != null);
+    const loose: Options = .{ .signatures_required = false, .test_key = false };
+    sink.clearRetainingCapacity();
+    try check(source.source(), memory, &sink.writer, loose);
+    try std.testing.expectEqual(@as(usize, 0), sink.written().len);
+}
+
 /// The signatures a test-key build made, as the owner's `Signatures` input: the repository trees
 /// embed the header signatures, so the round-2 signatures only match a build that has them too.
 fn signatures_of(memory: Allocator, files: []const model.TreeFile) !release.Signatures {
@@ -495,17 +551,26 @@ fn signatures_of(memory: Allocator, files: []const model.TreeFile) !release.Sign
     return signatures;
 }
 
+/// A tree the owner signed carries Valid-Until, so these trees are built with a signing time.
+const stamp: u64 = 1_800_000_000;
+
 test "a swapped or stale round-2 signature is refused, a matching one is placed" {
     // Goal: the owner's signature files are tied to the bytes they sign. Signatures made over
     // another release, or the two repomd signatures swapped, are refused with one line each.
     var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
     defer arena.deinit();
     const memory = arena.allocator();
-    const signed = try release.build(memory, &test_inputs, .{ .test_key = true });
+    const signed = try release.build(memory, &test_inputs, .{
+        .test_key = true,
+        .signed_at = stamp,
+    });
     var sink: std.Io.Writer.Allocating = .init(memory);
 
     const good = try signatures_of(memory, signed);
-    const placed = try release.build(memory, &test_inputs, .{ .signatures = good });
+    const placed = try release.build(memory, &test_inputs, .{
+        .signatures = good,
+        .signed_at = stamp,
+    });
     try check_placed_signatures(placed, memory, &sink.writer);
     var tree: TreeSource = .{ .files = placed };
     const strict: Options = .{ .signatures_required = true, .test_key = false };
@@ -514,7 +579,10 @@ test "a swapped or stale round-2 signature is refused, a matching one is placed"
 
     var swapped = good;
     swapped.repomd_asc = .{ good.repomd_asc[1], good.repomd_asc[0] };
-    const crossed = try release.build(memory, &test_inputs, .{ .signatures = swapped });
+    const crossed = try release.build(memory, &test_inputs, .{
+        .signatures = swapped,
+        .signed_at = stamp,
+    });
     try std.testing.expectError(
         error.CheckFailed,
         check_placed_signatures(crossed, memory, &sink.writer),
@@ -527,7 +595,7 @@ test "a swapped or stale round-2 signature is refused, a matching one is placed"
     try std.testing.expectError(error.CheckFailed, refused);
 
     const other: release.Inputs = .{ .version = "1.2.4", .zbx = test_inputs.zbx, .license = "x\n" };
-    const stale = try release.build(memory, &other, .{ .signatures = good });
+    const stale = try release.build(memory, &other, .{ .signatures = good, .signed_at = stamp });
     try std.testing.expectError(
         error.CheckFailed,
         check_placed_signatures(stale, memory, &sink.writer),
@@ -541,14 +609,20 @@ test "swapped, missing or half-placed rpm header signatures are refused" {
     var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
     defer arena.deinit();
     const memory = arena.allocator();
-    const signed = try release.build(memory, &test_inputs, .{ .test_key = true });
+    const signed = try release.build(memory, &test_inputs, .{
+        .test_key = true,
+        .signed_at = stamp,
+    });
     var sink: std.Io.Writer.Allocating = .init(memory);
     const good = try signatures_of(memory, signed);
     const strict: Options = .{ .signatures_required = true, .test_key = false };
 
     var swapped = good;
     swapped.header = .{ good.header[1], good.header[0] };
-    const crossed = try release.build(memory, &test_inputs, .{ .signatures = swapped });
+    const crossed = try release.build(memory, &test_inputs, .{
+        .signatures = swapped,
+        .signed_at = stamp,
+    });
     try std.testing.expectError(
         error.CheckFailed,
         check_placed_signatures(crossed, memory, &sink.writer),
@@ -562,7 +636,10 @@ test "swapped, missing or half-placed rpm header signatures are refused" {
     sink.clearRetainingCapacity();
     var none = good;
     none.header = .{ null, null };
-    const unsigned = try release.build(memory, &test_inputs, .{ .signatures = none });
+    const unsigned = try release.build(memory, &test_inputs, .{
+        .signatures = none,
+        .signed_at = stamp,
+    });
     try std.testing.expectError(
         error.CheckFailed,
         check_placed_signatures(unsigned, memory, &sink.writer),
@@ -575,7 +652,10 @@ test "swapped, missing or half-placed rpm header signatures are refused" {
     sink.clearRetainingCapacity();
     var half: release.Signatures = .{};
     half.header[0] = good.header[0];
-    const partial = try release.build(memory, &test_inputs, .{ .signatures = half });
+    const partial = try release.build(memory, &test_inputs, .{
+        .signatures = half,
+        .signed_at = stamp,
+    });
     try std.testing.expectError(
         error.CheckFailed,
         check_placed_signatures(partial, memory, &sink.writer),
@@ -584,7 +664,10 @@ test "swapped, missing or half-placed rpm header signatures are refused" {
     sink.clearRetainingCapacity();
     var round_one: release.Signatures = .{};
     round_one.header = good.header;
-    const first = try release.build(memory, &test_inputs, .{ .signatures = round_one });
+    const first = try release.build(memory, &test_inputs, .{
+        .signatures = round_one,
+        .signed_at = stamp,
+    });
     try check_placed_signatures(first, memory, &sink.writer);
     try std.testing.expectEqual(@as(usize, 0), sink.written().len);
 }

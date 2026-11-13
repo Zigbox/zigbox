@@ -1,0 +1,158 @@
+# Weekly: re-date and re-sign the apt metadata of the newest release that has a package archive,
+# so `Release` never passes its `Valid-Until` (21 days after it is signed). The signing subkey is a
+# secret of the `package-refresh` environment (main only, no reviewer); it re-signs metadata over
+# packages that were signed and published through the `release` environment, and builds nothing
+# (docs/decisions/2026-11-12-apt-valid-until-and-refresh.md; runbook docs/releases/packaging.md,
+# "Keeping apt fresh"). Every action is pinned to a full commit SHA. The signing logic is
+# .github/package-refresh.sh.
+name: package-refresh
+
+on:
+  schedule:
+    - cron: '17 5 * * 1'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: package-refresh
+  cancel-in-progress: false
+
+jobs:
+  refresh:
+    name: re-sign the apt metadata
+    # Only the default branch: the environment's deployment policy says the same.
+    if: ${{ github.ref == 'refs/heads/main' }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    # Holds ZIGBOX_SIGNING_KEY, ZIGBOX_SIGNING_PASSPHRASE and the release App's key.
+    environment: package-refresh
+    permissions:
+      contents: write # `gh release upload` to the release
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      # No toolchain cache: the toolchain runs while the subkey is unlocked.
+      - uses: ./.github/actions/setup-zig
+        with:
+          cache: 'false'
+      - name: Find the newest release with a package archive
+        id: release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          tag=""
+          for candidate in $(gh release list --repo "$GITHUB_REPOSITORY" --limit 10 \
+            --exclude-drafts --exclude-pre-releases --json tagName --jq '.[].tagName'); do
+            if gh release view "$candidate" --repo "$GITHUB_REPOSITORY" --json assets \
+              --jq '.assets[].name' | grep -qx 'zigbox-repos.tar.gz'; then
+              tag=$candidate
+              break
+            fi
+          done
+          [ -n "$tag" ] || { echo "package-refresh: no published release has zigbox-repos.tar.gz" >&2; exit 1; }
+          [[ "$tag" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]] || { echo "package-refresh: '$tag' is not a release tag" >&2; exit 1; }
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+          mkdir -p "$RUNNER_TEMP/old"
+          # The archive, its signed SHA256SUMS (both files, or the script refuses) and the
+          # InRelease the site serves now, which the archive must not be older than.
+          gh release download "$tag" --repo "$GITHUB_REPOSITORY" --dir "$RUNNER_TEMP/old" \
+            --pattern zigbox-repos.tar.gz --pattern SHA256SUMS --pattern SHA256SUMS.asc
+          curl -fsS --retry 3 -o "$RUNNER_TEMP/old/served-InRelease" https://zigbox.org/apt/dists/stable/InRelease
+          echo "package-refresh: refreshing $tag"
+      - name: Re-sign
+        env:
+          ZIGBOX_SIGNING_KEY: ${{ secrets.ZIGBOX_SIGNING_KEY }}
+          ZIGBOX_SIGNING_PASSPHRASE: ${{ secrets.ZIGBOX_SIGNING_PASSPHRASE }}
+          # The same pinned primary fingerprint as release.yml (docs/releases/packaging.md).
+          ZIGBOX_SIGNING_FPR: 09991DC39816D3C914E2A22C5AB00BC328B7DBB7
+          TAG: ${{ steps.release.outputs.tag }}
+        run: |
+          set -euo pipefail
+          .github/package-refresh.sh "$RUNNER_TEMP/old/zigbox-repos.tar.gz" "$RUNNER_TEMP/new" \
+            "$RUNNER_TEMP/old/SHA256SUMS" "$RUNNER_TEMP/old/served-InRelease" "$TAG"
+      # The three files are public and already signed. Kept as an artifact before any upload, so a
+      # half-finished upload is repaired by uploading these again (docs/releases/packaging.md),
+      # not by a re-run, which the script refuses on mixed assets and which would re-date anyway.
+      - name: Keep the signed files
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: package-refresh-${{ steps.release.outputs.tag }}
+          path: |
+            ${{ runner.temp }}/new/zigbox-repos.tar.gz
+            ${{ runner.temp }}/new/SHA256SUMS
+            ${{ runner.temp }}/new/SHA256SUMS.asc
+          if-no-files-found: error
+          retention-days: 30
+      - name: Replace the release's assets
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ steps.release.outputs.tag }}
+        run: |
+          set -euo pipefail
+          # `--clobber` replaces each file in turn, so a failure can leave a mix. Upload all three
+          # again, up to three times; if all fail, the runbook re-uploads the saved artifact.
+          for attempt in 1 2 3; do
+            if gh release upload "$TAG" "$RUNNER_TEMP/new/zigbox-repos.tar.gz" "$RUNNER_TEMP/new/SHA256SUMS" \
+              "$RUNNER_TEMP/new/SHA256SUMS.asc" --clobber --repo "$GITHUB_REPOSITORY"; then
+              exit 0
+            fi
+            echo "package-refresh: upload attempt $attempt failed" >&2
+            sleep $((attempt * 15))
+          done
+          echo "package-refresh: the upload failed; the release may hold mixed assets, re-upload the run's artifact" >&2
+          exit 1
+      - name: Mint the App token
+        id: app
+        uses: actions/create-github-app-token@64ab729a6294000f5aa4a4bc0b73d1f32bc45510 # v3.3.0
+        with:
+          app-id: ${{ vars.RELEASE_APP_ID }}
+          private-key: ${{ secrets.RELEASE_APP_PRIVATE_KEY }}
+          owner: Zigbox
+          repositories: zigbox.github.io
+          permission-contents: write
+          permission-actions: read
+      - name: Dispatch the site deploy and wait for it
+        env:
+          GH_TOKEN: ${{ steps.app.outputs.token }}
+        run: |
+          set -euo pipefail
+          site=Zigbox/zigbox.github.io
+          since=$(date -u -d '30 seconds ago' +%Y-%m-%dT%H:%M:%SZ)
+          gh api -X POST "repos/$site/dispatches" -f event_type=site
+          run_id=""
+          for _ in $(seq 1 60); do
+            run_id=$(gh api -X GET "repos/$site/actions/workflows/deploy.yml/runs" -f event=repository_dispatch \
+              --jq "[.workflow_runs[] | select(.created_at >= \"$since\")] | sort_by(.created_at) | first | .id // empty")
+            [ -n "$run_id" ] && break
+            sleep 10
+          done
+          [ -n "$run_id" ] || { echo "package-refresh: the site deploy did not start within 10 minutes" >&2; exit 1; }
+          echo "site: waiting for https://github.com/$site/actions/runs/$run_id"
+          for _ in $(seq 1 90); do
+            result=$(gh api "repos/$site/actions/runs/$run_id" --jq '"\(.status) \(.conclusion // "")"')
+            case "$result" in
+              "completed success") echo "site: deployed"; exit 0 ;;
+              completed*) echo "package-refresh: the site deploy ended: $result" >&2; exit 1 ;;
+            esac
+            sleep 20
+          done
+          echo "package-refresh: the site deploy did not finish within 30 minutes" >&2
+          exit 1
+      # What clients see: the served InRelease must be the new one and valid for at least ten more
+      # days. A fresh signing gives 21; less than 10 means the refresh did not reach the site.
+      - name: The served InRelease is fresh
+        run: |
+          set -euo pipefail
+          curl -fsS --retry 3 -o "$RUNNER_TEMP/InRelease" https://zigbox.org/apt/dists/stable/InRelease
+          valid=$(sed -n 's/^Valid-Until: //p' "$RUNNER_TEMP/InRelease")
+          [ -n "$valid" ] || { echo "package-refresh: the served InRelease has no Valid-Until" >&2; exit 1; }
+          left=$(( $(date -u -d "$valid" +%s) - $(date +%s) ))
+          if [ "$left" -lt $((10 * 24 * 60 * 60)) ]; then
+            echo "package-refresh: the served InRelease is valid until $valid, under 10 days away" >&2
+            exit 1
+          fi
+          echo "package-refresh: the served InRelease is valid until $valid"
