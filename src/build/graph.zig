@@ -16,7 +16,6 @@ const std = @import("std");
 const assert = std.debug.assert;
 const constants = @import("../constants.zig");
 const file_mod = @import("file.zig");
-const glob_mod = @import("glob.zig");
 
 const BuildFile = file_mod.BuildFile;
 const Text = file_mod.Text;
@@ -138,30 +137,51 @@ pub const Unrunnable = struct {
 /// quietly ignores a field. `--graph` shows every field and does not ask.
 pub fn unrunnable(file: *const BuildFile, graph: *const Graph) ?Unrunnable {
     assert(graph.count == file.steps_count);
-    if (file.exclude.given) return .{ .step = null, .field = ".exclude" };
-    if (graph.image_base != null) return .{ .step = null, .field = ".image .base = \"step:\"" };
-    if (file.image.config.user) |user| {
-        if (!file_mod.is_numeric_user(file.text(user))) {
-            return .{ .step = null, .field = ".image .config .user as a name" };
-        }
-    }
+    assert(file.steps_count <= constants.build_steps_max);
     for (file.steps_slice(), 0..) |*step, index| {
         const at: u8 = @intCast(index);
-        if (step.output == .root) return .{ .step = at, .field = ".output = .root" };
-        if (step.user != null) return .{ .step = at, .field = ".user" };
-        if (step.workdir != null) return .{ .step = at, .field = ".workdir" };
-        if (step.copy.given) return .{ .step = at, .field = ".copy" };
-        if (step.caches.given) return .{ .step = at, .field = ".caches" };
-        if (step.binds.given) return .{ .step = at, .field = ".binds" };
-        if (step.exclude.given) return .{ .step = at, .field = ".exclude" };
-        if (graph.base_step[index] != null) return .{ .step = at, .field = ".base = \"step:\"" };
-        for (step.inputs.slice()) |input| {
-            if (glob_mod.is_glob(file.text(input))) {
-                return .{ .step = at, .field = "an input glob" };
-            }
-        }
+        if (copy_unrunnable(file, step)) |field| return .{ .step = at, .field = field };
+        if (bind_unrunnable(file, step)) |field| return .{ .step = at, .field = field };
     }
     return null;
+}
+
+/// The part of a step's `.copy` that is not built yet: a source that is an image, an owner or a
+/// mode to set, or an exclude on a `step:` source (the recorded cuts of M9 slice 2).
+fn copy_unrunnable(file: *const BuildFile, step: *const file_mod.Step) ?[]const u8 {
+    for (file.copy_entries(step)) |entry| {
+        if (entry.chown != null) return ".copy .chown";
+        if (entry.chmod != null) return ".copy .chmod";
+        const from = entry.from orelse continue;
+        if (file_mod.step_ref(file.text(from)) == null) return ".copy .from an image";
+        if (entry.exclude.given) return ".copy .exclude on a step: source";
+    }
+    return null;
+}
+
+/// The part of a step's `.binds` that is not built, for good: a bind from the project's files
+/// or from a locked image (only a `step:` output is mounted), or on a copy step, which runs no
+/// container to mount it in.
+fn bind_unrunnable(file: *const BuildFile, step: *const file_mod.Step) ?[]const u8 {
+    if (!step.binds.given) return null;
+    if (step.copy.given) return ".binds on a copy step";
+    for (file.step_binds(step)) |bind| {
+        const from = bind.from orelse return ".binds from the project's files";
+        if (file_mod.step_ref(file.text(from)) == null) return ".binds from an image";
+    }
+    return null;
+}
+
+/// The step whose `.base` is an image, at the start of the chain of `step:` bases that
+/// `index` is on (itself when its own base is an image).
+pub fn chain_start(graph: *const Graph, index: u8) u8 {
+    var start = index;
+    var hops: u32 = 0;
+    while (graph.base_step[start]) |next| : (hops += 1) {
+        assert(hops < constants.build_steps_max); // The graph is acyclic.
+        start = next;
+    }
+    return start;
 }
 
 pub fn step_named(file: *const BuildFile, name: []const u8) ?u8 {
@@ -561,9 +581,10 @@ test "a build refuses what it cannot run yet, and a plain M7 file is runnable" {
         ".run = .{\"x\"} } } }";
     try testing.expectEqual(Result.ordered, try order_text(plain, &problem));
     try testing.expect(unrunnable(&test_file, &test_graph) == null);
+    // A bind from the project, from an image, and one on a copy step; each is refused for good.
     const fields = [_][]const u8{
-        ".output = .root",         ".user = \"app\"", ".workdir = \"/w\"", ".exclude = .{}",
-        ".inputs = .{ \"*.go\" }", ".caches = .{}",   ".binds = .{}",
+        ".binds = .{ .{ .source = \"s\", .to = \"/t\" } }",
+        ".binds = .{ .{ .from = \"alpine:3.20\", .source = \"/s\", .to = \"/t\" } }",
     };
     inline for (fields) |field| {
         const text = step_head ++ "}, .steps = .{ .{ .name = \"a\", .base = \"x\", " ++
@@ -571,10 +592,22 @@ test "a build refuses what it cannot run yet, and a plain M7 file is runnable" {
         try testing.expectEqual(Result.ordered, try order_text(text, &problem));
         const found = unrunnable(&test_file, &test_graph).?;
         try testing.expectEqual(@as(?u8, 0), found.step);
+        try testing.expect(std.mem.startsWith(u8, found.field, ".binds "));
     }
+    // A bind from an earlier step's output is built.
+    const step_bind = step_head ++ "}, .steps = .{ .{ .name = \"a\", .base = \"x\", " ++
+        ".run = .{\"x\"} }, .{ .name = \"b\", .base = \"x\", .run = .{\"x\"}, " ++
+        ".binds = .{ .{ .from = \"step:a\", .source = \"/s\", .to = \"/t\" } } } } }";
+    try testing.expectEqual(Result.ordered, try order_text(step_bind, &problem));
+    try testing.expect(unrunnable(&test_file, &test_graph) == null);
+    // An empty list is nothing to refuse.
+    const empty = step_head ++ "}, .steps = .{ .{ .name = \"a\", .base = \"x\", " ++
+        ".run = .{\"x\"}, .binds = .{} } } }";
+    try testing.expectEqual(Result.ordered, try order_text(empty, &problem));
+    try testing.expect(unrunnable(&test_file, &test_graph) == null);
     const base = step_head ++ "}, .steps = .{ .{ .name = \"a\", .base = \"x\", " ++
         ".run = .{\"x\"} }, " ++
         ".{ .name = \"b\", .base = \"step:a\", .run = .{\"x\"} } } }";
     try testing.expectEqual(Result.ordered, try order_text(base, &problem));
-    try testing.expectEqual(@as(?u8, 1), unrunnable(&test_file, &test_graph).?.step);
+    try testing.expect(unrunnable(&test_file, &test_graph) == null);
 }

@@ -438,3 +438,50 @@ test "run --output json lists each writable mount and the user; ps does too" {
     try testing.expectEqual(@as(u8, 0), run_line(&sim, &.{ "ps", "--all", "--output", "json" }));
     try testing.expect(std.mem.indexOf(u8, sim.stdout(), listed) != null);
 }
+
+test "a cache mount is writable below the caches root for any user, and nowhere else" {
+    // Goal: the `cache` kind (the M9 decision): exempt from the user rule, held to its own root.
+    // Method: a user 1000:1000 starts with a cache below the root and the table has a writable
+    // bind; the same cache outside the root, and with no root named, is refused and nothing is
+    // made, and a `--mount` of the same user is still E0213.
+    var sim: HostSim = undefined;
+    const user: spec_mod.User = .{ .uid = 1000, .gid = 1000 };
+    const root = project ++ "/site";
+    const inside = [_]mounts_mod.Mount{
+        .{ .kind = .cache, .source = root ++ "/deep", .target = "/cache", .size_bytes = 0 },
+    };
+    setup(&sim, 20);
+    sim.world.add_node(project ++ "/site/deep", .dir);
+    var container: spec_mod.Spec = .{
+        .rootfs = rootfs,
+        .name = "w-1",
+        .command = &.{"/bin/sh"},
+        .mounts = &inside,
+        .user = user,
+        .caches_root = root,
+    };
+    var diag: Diag = undefined;
+    diag.reset();
+    try run.start(sim.interface(), &container, .{}, &handle, &diag);
+    const table = &sim.world.tables[sim.world.processes[1].table];
+    const at = table.find(rootfs ++ "/cache").?;
+    try testing.expectEqual(@as(?MountKind, .bind_tree), table.mounts[at].kind);
+    try testing.expect(!table.mounts[at].read_only);
+    const outer = [_]mounts_mod.Mount{
+        .{ .kind = .cache, .source = outside, .target = "/cache", .size_bytes = 0 },
+    };
+    const cases = [_]struct { mounts: []const mounts_mod.Mount, root: []const u8 }{
+        .{ .mounts = &outer, .root = root },
+        .{ .mounts = &inside, .root = "" },
+    };
+    for (cases) |case| {
+        setup(&sim, 21);
+        const before = sim_run.baseline(&sim);
+        container.mounts = case.mounts;
+        container.caches_root = case.root;
+        const code = try refused_code(&sim, &container);
+        try testing.expect(code != null and code.? != .E0213);
+        try testing.expect(sim.world.processes[1].state == .unused);
+        try testing.expect(sim_run.leak(&sim, &before) == null);
+    }
+}

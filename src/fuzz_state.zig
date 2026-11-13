@@ -105,7 +105,9 @@ fn check_mount_values(text: []const u8) void {
                 assert(mount.kind == kind);
                 // A `--mount` source is typed, and the record keeps the resolved one: only a
                 // typed source that is also a path the record could hold has a text.
-                if (kind != .mount) assert(mounts.record_problem(&mount) == null);
+                if (kind != .mount and kind != .cache) {
+                    assert(mounts.record_problem(&mount) == null);
+                }
                 if (mounts.record_problem(&mount) != null) continue;
                 var echo: [constants.mount_value_bytes_max]u8 = undefined;
                 const back = mounts.parse_text(mounts.text(&mount, &echo)).?;

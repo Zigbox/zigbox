@@ -287,6 +287,10 @@ test {
 }
 
 test {
+    _ = @import("build/copy_tests.zig");
+}
+
+test {
     // The build file, its graph and `zbx build --graph` (M7).
     _ = @import("build/lexer.zig");
     _ = @import("build/file.zig");

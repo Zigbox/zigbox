@@ -41,6 +41,10 @@ pub const Kind = enum {
     secret,
     /// M6b: writable, below the project directory.
     mount,
+    /// M9: writable, below the store's caches root (`Writable.caches_root`). A build step's cache
+    /// directory; no flag asks for it. Exempt from the rule that a writable mount belongs to the
+    /// user, because the store made the directory and gave it to the step's user.
+    cache,
 
     /// The flag that asks for it, as `help` and the diagnostics spell it.
     pub fn flag(kind: Kind) []const u8 {
@@ -50,6 +54,7 @@ pub const Kind = enum {
             .bind => "--bind",
             .secret => "--secret",
             .mount => "--mount",
+            .cache => "--mount",
         };
     }
 };
@@ -136,7 +141,7 @@ pub fn parse(kind: Kind, value: []const u8) Parsed {
 fn source_problem(kind: Kind, source: []const u8) ?volume.TargetProblem {
     assert(kind != .tmpfs);
     assert(source.len <= constants.arg_bytes_max);
-    if (kind != .mount) return volume.path_problem(source);
+    if (kind != .mount and kind != .cache) return volume.path_problem(source);
     if (source.len == 0) return .empty;
     if (source.len > constants.mount_path_bytes_max) return .too_long;
     for (source) |byte| {
@@ -263,7 +268,7 @@ comptime {
 /// part a name), which is what the run record keeps.
 pub fn record_problem(mount: *const Mount) ?Problem {
     if (mount_problem(mount)) |problem| return problem;
-    if (mount.kind == .mount) {
+    if (mount.kind == .mount or mount.kind == .cache) {
         if (volume.path_problem(mount.source)) |problem| return .{ .source = problem };
     }
     return null;
@@ -344,6 +349,7 @@ const type_file: u32 = 0o100000;
 pub fn look(host: Host, mount: *const Mount) Looked {
     assert(mount_problem(mount) == null);
     assert(mount.kind != .mount);
+    assert(mount.kind != .cache);
     if (mount.kind == .tmpfs) return .{ .shape = .tmpfs };
     var path: [constants.mount_path_bytes_max + 1:0]u8 = undefined;
     @memcpy(path[0..mount.source.len], mount.source);
@@ -373,6 +379,9 @@ pub const Writable = struct {
     /// The user as the caller names it (`--user`, or the image's `User`), for a message; empty
     /// if the caller has no name for it.
     user_text: []const u8 = "",
+    /// The directory a mount of kind `cache` must be in or below, absolute; empty if the run has
+    /// no cache mounts.
+    caches_root: []const u8 = "",
 };
 
 /// The mounts of a run once the host has been looked at: what the plan is given, and the mounts
@@ -398,49 +407,66 @@ pub fn user_is_root(user: ?spec_mod.User) bool {
 /// made. A mount outside the project, or one that is not there, is a diagnostic.
 pub fn resolve_sources(
     host: Host,
-    project_given: []const u8,
+    writable: Writable,
     mounts: []const Mount,
     out: *Resolution,
     diag: *Diag,
 ) ResolveError!void {
     assert(diag.code == null);
     assert(mounts.len <= constants.mounts_max);
+    const project_given = writable.project;
     var any = false;
-    for (mounts) |*mount| any = any or mount.kind == .mount;
-    if (!any) return;
+    var any_cache = false;
+    for (mounts) |*mount| {
+        any = any or mount.kind == .mount;
+        any_cache = any_cache or mount.kind == .cache;
+    }
+    if (!any and !any_cache) return;
     const fs = host.filesystem();
     var project: project_mod.Path = undefined;
-    project_mod.directory(host, fs, project_given, &project) catch {
-        diagnose.writable_source(diag, "", .no_project);
-        return error.StartFailed;
-    };
+    project.len = 0;
+    if (any) {
+        project_mod.directory(host, fs, project_given, &project) catch {
+            diagnose.writable_source(diag, "", .no_project);
+            return error.StartFailed;
+        };
+    }
     var cwd_storage: [constants.path_bytes_max]u8 = undefined;
     const cwd = host.working_directory(&cwd_storage) catch {
         diagnose.writable_source(diag, "", .no_project);
         return error.StartFailed;
     };
     for (mounts, 0..) |*mount, index| {
+        if (mount.kind == .cache) {
+            if (writable.caches_root.len < 2) {
+                diagnose.writable_source(diag, mount.source, .no_project);
+                return error.StartFailed;
+            }
+            try resolve_one(fs, cwd, writable.caches_root, mount, index, out, diag);
+            continue;
+        }
         if (mount.kind != .mount) continue;
         if (project.len == 1) {
             diagnose.outside_project(diag, mount.source, "/", project.text());
             return error.StartFailed;
         }
-        try resolve_one(fs, cwd, &project, mount, index, out, diag);
+        try resolve_one(fs, cwd, project.text(), mount, index, out, diag);
     }
 }
 
 fn resolve_one(
     fs: project_mod.Fs,
     cwd: []const u8,
-    project: *const project_mod.Path,
+    limit: []const u8,
     mount: *const Mount,
     index: usize,
     out: *Resolution,
     diag: *Diag,
 ) ResolveError!void {
-    assert(mount.kind == .mount);
+    const typed = mount.kind == .mount or mount.kind == .cache;
+    assert(typed);
     assert(index < constants.mounts_max);
-    assert(project.len > 1);
+    assert(limit.len > 1);
     var path: project_mod.Path = undefined;
     project_mod.resolve(fs, cwd, mount.source, &path) catch |err| {
         const problem: SourceProblem = switch (err) {
@@ -452,8 +478,8 @@ fn resolve_one(
         diagnose.writable_source(diag, mount.source, problem);
         return error.StartFailed;
     };
-    if (!project_mod.is_inside(project.text(), path.text())) {
-        diagnose.outside_project(diag, mount.source, path.text(), project.text());
+    if (!project_mod.is_inside(limit, path.text())) {
+        diagnose.outside_project(diag, mount.source, path.text(), limit);
         return error.StartFailed;
     }
     if (volume.path_problem(path.text())) |found| {
@@ -477,7 +503,7 @@ fn resolve_one(
     const kept = out.paths[index][0..path.len];
     @memcpy(kept, path.text());
     out.mounts[index] = .{
-        .kind = .mount,
+        .kind = mount.kind,
         .source = kept,
         .target = mount.target,
         .size_bytes = 0,
@@ -520,13 +546,14 @@ pub fn resolve(
         diagnose.conflict(diag, mount.kind.flag(), shown, conflict_sentence(problem.meets.found));
         return error.StartFailed;
     }
-    try resolve_sources(host, writable.project, mounts, out, diag);
+    try resolve_sources(host, writable, mounts, out, diag);
     var any_writable = false;
     for (mounts, 0..) |*mount, index| {
         if (mount.kind == .mount) {
             any_writable = true;
             continue;
         }
+        if (mount.kind == .cache) continue; // Resolved and exempt: the store gives it to the user.
         out.mounts[index] = mount.*;
         switch (look(host, mount)) {
             .shape => |shape| out.inputs[index] = .{

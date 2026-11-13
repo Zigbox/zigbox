@@ -30,32 +30,32 @@ const step = @import("step.zig");
 const testing = std.testing;
 const Digest = digest_mod.Digest;
 
-const store_root = support.user_store;
-const state = "/home/alice/.local/state/zbx/containers";
+pub const store_root = support.user_store;
+pub const state = "/home/alice/.local/state/zbx/containers";
 const work_root = store_root ++ "/build/work";
-const group = "0123456789abcdef";
+pub const group = "0123456789abcdef";
 const log_path = store_root ++ "/build/logs/" ++ group ++ "/fetch.log";
 
-var sim: host_sim.HostSim = undefined;
+pub var sim: host_sim.HostSim = undefined;
 var twin: host_sim.HostSim = undefined;
-var files: fs_sim.SimFs = undefined;
+pub var files: fs_sim.SimFs = undefined;
 var disk: fs_sim.SimFs = undefined;
-var store: layout.Store = undefined;
-var import_ws: import_mod.Workspace = undefined;
-var workspace: step.Workspace = undefined;
-var facts: doctor.Facts = undefined;
-var result: step.Result = undefined;
-var diag: Diag = undefined;
+pub var store: layout.Store = undefined;
+pub var import_ws: import_mod.Workspace = undefined;
+pub var workspace: step.Workspace = undefined;
+pub var facts: doctor.Facts = undefined;
+pub var result: step.Result = undefined;
+pub var diag: Diag = undefined;
 var host_files: [sim_run.files.len + 2]host_sim.File = undefined;
 var farm_text: [constants.store_path_bytes_max]u8 = undefined;
 var out_text: [constants.store_path_bytes_max]u8 = undefined;
 var need_text: [constants.store_path_bytes_max]u8 = undefined;
 const dir: u32 = 0o040755;
 var roots_at_start: u32 = 0;
-var tree_buffer: [constants.store_tree_bytes_max]u8 = undefined;
+pub var tree_buffer: [constants.store_tree_bytes_max]u8 = undefined;
 
 /// A store with two trees: the base (a root file system with a shell) and the step's input.
-const Fixture = struct {
+pub const Fixture = struct {
     base: Digest,
     input: Digest,
     /// The container name `run_step` will pick: the host's random bytes are the seed's.
@@ -81,7 +81,7 @@ fn import_tree(root: []const u8) !Digest {
     return imported.digest;
 }
 
-fn setup(seed: u64, step_name: []const u8) !Fixture {
+pub fn setup(seed: u64, step_name: []const u8) !Fixture {
     sim_run.init(&sim, seed);
     files.init(seed);
     sim.store_fs = &files;
@@ -142,7 +142,7 @@ fn world_dirs(fixture: *const Fixture) void {
     sim.files = &host_files;
 }
 
-fn spec_for(fixture: *const Fixture) key_mod.Spec {
+pub fn spec_for(fixture: *const Fixture) key_mod.Spec {
     return .{
         .platform = "linux/amd64",
         .base_tree = fixture.base,
@@ -156,7 +156,7 @@ fn spec_for(fixture: *const Fixture) key_mod.Spec {
     };
 }
 
-fn run_it(spec: *const key_mod.Spec) step.Error!void {
+pub fn run_it(spec: *const key_mod.Spec) step.Error!void {
     return run_streaming(spec, false);
 }
 
@@ -193,11 +193,11 @@ const Output = struct {
 };
 
 /// Formats a short test path; the buffers are far larger than any of them.
-fn text_of(buffer: []u8, comptime format: []const u8, args: anytype) []const u8 {
+pub fn text_of(buffer: []u8, comptime format: []const u8, args: anytype) []const u8 {
     return std.fmt.bufPrint(buffer, format, args) catch unreachable; // Short test paths.
 }
 
-fn join(buffer: []u8, base: []const u8, tail: []const u8) []const u8 {
+pub fn join(buffer: []u8, base: []const u8, tail: []const u8) []const u8 {
     return text_of(buffer, "{s}{s}", .{ base, tail });
 }
 
@@ -236,7 +236,7 @@ fn record_exists(fixture: *const Fixture) bool {
 
 /// Nothing a failed or finished step may leave: the work directory, the run's record, a held
 /// descriptor, or a host change.
-fn expect_clean(fixture: *const Fixture, before: *const sim_run.Baseline) !void {
+pub fn expect_clean(fixture: *const Fixture, before: *const sim_run.Baseline) !void {
     try testing.expectEqual(@as(u32, 0), work_dirs());
     // A step that imported roots its output as `build:<step>` until the parent writes the cache
     // entry (N8); a step that failed roots nothing.
@@ -248,7 +248,7 @@ fn expect_clean(fixture: *const Fixture, before: *const sim_run.Baseline) !void 
     try testing.expectEqual(@as(u32, 0), files.open_count());
 }
 
-fn expect_tree_in_store(digest: Digest) !void {
+pub fn expect_tree_in_store(digest: Digest) !void {
     var errno: u16 = 0;
     const bytes = try trees.load(&store, digest, &tree_buffer, &errno);
     var decoder: tree.Decoder = undefined;
@@ -259,7 +259,7 @@ fn expect_tree_in_store(digest: Digest) !void {
     try testing.expect(names >= 2);
 }
 
-fn set_output(chunks: []const sim_world.OutChunk) void {
+pub fn set_output(chunks: []const sim_world.OutChunk) void {
     sim.world.out_script = chunks;
     sim.world.out_at = 0;
 }
@@ -590,6 +590,45 @@ test "a sweep clears what a killed step left, and a live step's lock stops it" {
     try testing.expectEqual(@as(u32, 0), files.open_count());
 }
 
+test "clear-caches empties this group's caches under the exclusive lock; busy is E0436" {
+    // Goal: `zbx build --clear-caches` removes `build/caches/<group>` and nothing of another
+    // group, and never under a running step. Method: plant two groups' caches; a shared hold
+    // refuses with E0436 and removes nothing; without it the group's directory is gone.
+    const fixture = try setup(43, "fetch");
+    const mine = store_root ++ "/build/caches/" ++ group;
+    const theirs = store_root ++ "/build/caches/fedcba9876543210";
+    files.put_dir(store_root ++ "/build", 0o755);
+    files.put_dir(store_root ++ "/build/caches", 0o755);
+    inline for ([_][]const u8{ mine, theirs }) |path| {
+        files.put_dir(path, 0o755);
+        files.put_dir(path ++ "/go", 0o755);
+        files.put_file(path ++ "/go/entry", 0o644, "cached");
+    }
+    const spec = spec_for(&fixture);
+    const request: step.Request = .{
+        .host = sim.interface(),
+        .facts = &facts,
+        .spec = &spec,
+        .file = "zbx.build.zon",
+        .group = group,
+    };
+    var other: layout.Store = undefined;
+    other.at(sim.interface(), store_root);
+    try lock.hold(&other, .shared, "build");
+    diag.reset();
+    try testing.expectError(error.Failed, step.clear_caches(&request, &workspace, &diag));
+    try testing.expectEqual(@as(?codes.Code, .E0436), diag.code);
+    try testing.expect(files.kind_of(mine ++ "/go/entry") != null);
+    lock.release(&other);
+    diag.reset();
+    try step.clear_caches(&request, &workspace, &diag);
+    try testing.expect(diag.code == null);
+    try testing.expect(files.kind_of(mine) == null);
+    try testing.expect(files.kind_of(theirs ++ "/go/entry") != null);
+    try step.clear_caches(&request, &workspace, &diag); // Nothing left: not an error.
+    try testing.expectEqual(@as(u32, 0), files.open_count());
+}
+
 test "a sweep of a store that does not exist yet is not an error" {
     // Goal: a clean machine's first `zbx build` has no store directory, so no lock file; the
     // sweep finds nothing and says nothing (the VM demo's second machine was refused with E0417).
@@ -701,4 +740,8 @@ test "a stderr that returns EPIPE stops the streaming and never fails the step" 
     try testing.expectEqualStrings("one\ntwo\n", files.content_of(log_path).?);
     try testing.expect(!sim.sigpipe_would_kill);
     try testing.expect(!sim.world.broken_pipe_ignored); // Back to the default at the end.
+}
+
+test {
+    _ = @import("step_root_tests.zig");
 }

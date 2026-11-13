@@ -39,9 +39,12 @@ const input_tree = @import("input_tree.zig");
 const input_job = @import("input_job.zig");
 const inputs_mod = @import("inputs.zig");
 const diagnose = @import("diagnose.zig");
+const graph_mod = @import("graph.zig");
 const render = @import("../diag/render.zig");
 const schedule = @import("schedule.zig");
 const assemble = @import("assemble.zig");
+const copy_mod = @import("copy.zig");
+const image_user = @import("../image_user.zig");
 const result_mod = @import("result.zig");
 const roots = @import("../store/roots.zig");
 const pull_lib = @import("../pull.zig");
@@ -97,7 +100,21 @@ pub const Workspace = struct {
     step_inputs: [constants.build_steps_max]Digest,
     step_keys: [constants.build_steps_max]Digest,
     provenance: provenance_job.Workspace,
+    /// A copy step: the selection's memory, each entry's key part and its patterns.
+    copying: copy_mod.Workspace,
+    user_ws: image_user.Workspace,
+    copy_keys: [constants.build_copy_entries_max]key_mod.Copy,
+    cache_mounts: [constants.build_step_caches_max]key_mod.CacheMount,
+    bind_keys: [constants.build_step_binds_max]key_mod.Bind,
+    /// How many users of each tree this build rooted are still at work (`hold`, `unroot`): one
+    /// root record exists per digest, so the first user to finish must not drop it under the
+    /// others. Entries are packed at the front.
+    holds: [constants.build_root_holds_max]Hold,
+    holds_count: u32,
+    copy_patterns: [constants.build_copy_sources_max][]const u8,
 };
+
+const Hold = struct { digest: Digest, users: u32 };
 
 /// The timings slot of the image step.
 const image_slot = constants.build_steps_max;
@@ -109,6 +126,8 @@ pub const Timing = struct {
     output: Digest,
     hit: bool,
     network: bool,
+    /// The step mounts a cache (`.caches`): its output can depend on what the cache held.
+    caches: bool,
 };
 
 /// What the caller asks of the build besides the file.
@@ -118,6 +137,8 @@ pub const Options = struct {
     /// `--verbose`: stream each step's output to stderr, a `<step> | ` before each line, and
     /// render a warning with its whole cause chain.
     verbose: bool,
+    /// `--clear-caches`: empty this build file's cache directories before any step runs.
+    clear_caches: bool = false,
 };
 
 /// The most a report line holds: a JSON step record (two digests, a name, numbers) is the
@@ -170,9 +191,16 @@ pub fn run_steps(
         .records_max = constants.trust_records_max,
     };
     for (&ws.slots) |*slot| slot.active = false;
+    ws.holds_count = 0;
+    // A Ctrl-C or a SIGTERM must reach `abort_step` and the roots' removal, which a process
+    // killed by the signal never runs; the scheduler sees it in `begin` and `wait`.
+    host.catch_interrupts(true);
+    defer host.catch_interrupts(false);
     try context.sweep();
+    if (options.clear_caches) try context.clear_caches();
     try context.header();
     context.warn_network();
+    context.warn_caches();
     make_plan(loaded, &ws.plan);
     const executor: schedule.Executor = .{
         .context = &context,
@@ -204,11 +232,48 @@ fn make_plan(loaded: *const load_mod.Workspace, plan: *schedule.Plan) void {
     plan.count = graph.count;
     for (graph.order_slice(), 0..) |index, at| plan.order[at] = index;
     for (0..graph.count) |index| {
-        const needs = graph.needs_slice(&loaded.file, @intCast(index));
+        // The scheduler waits for everything the step reads, not only for its `needs`: a base
+        // or a copy source is a step too (`after_slice`).
+        const needs = graph.after_slice(@intCast(index));
         for (needs, 0..) |need, at| plan.needs[index][at] = need;
         plan.needs_count[index] = @intCast(needs.len);
     }
+    cache_edges(&loaded.file, plan);
     assert(plan.valid());
+}
+
+/// Steps that share a cache id run one at a time (`sharing=locked`): each step comes after the
+/// nearest step before it, in the plan's order, that holds one of its caches.
+pub fn cache_edges(file: *const file_mod.BuildFile, plan: *schedule.Plan) void {
+    for (plan.order[0..plan.count], 0..) |step, position| {
+        for (file.step_caches(&file.steps[step])) |held| {
+            const before = holder_before(file, plan, position, file.text(held.id)) orelse continue;
+            if (std.mem.indexOfScalar(u8, plan.needs_of(step), before) != null) continue;
+            const at = plan.needs_count[step];
+            // One more per cache, and the bound has room.
+            assert(at < constants.build_step_edges_max);
+            plan.needs[step][at] = before;
+            plan.needs_count[step] = at + 1;
+        }
+    }
+}
+
+/// The step nearest before `position` in the plan's order that has a cache `id`, or null.
+fn holder_before(
+    file: *const file_mod.BuildFile,
+    plan: *const schedule.Plan,
+    position: usize,
+    id: []const u8,
+) ?u8 {
+    var at = position;
+    while (at > 0) {
+        at -= 1;
+        const step = plan.order[at];
+        for (file.step_caches(&file.steps[step])) |other| {
+            if (std.mem.eql(u8, file.text(other.id), id)) return step;
+        }
+    }
+    return null;
 }
 
 /// A miss that is running in a worker process.
@@ -218,6 +283,9 @@ pub const Slot = struct {
     pid: host_mod.Pid,
     report: host_mod.Pipe,
     key: key_mod.Key,
+    /// The trees the step's binds select, rooted until the step settles or is aborted.
+    binds: [constants.build_step_binds_max]Digest,
+    binds_count: u8,
 };
 
 /// What the worker needs: it runs on a copy of this process's memory.
@@ -232,6 +300,8 @@ const Job = struct {
 /// encoded diagnostic, each behind a tag byte. The exit code is 0 only with an answer.
 fn worker_entry(raw: *anyopaque) u8 {
     const job: *Job = @ptrCast(@alignCast(raw));
+    // The parent's handlers are not the worker's: a signal ends the worker as it always did.
+    job.host.catch_interrupts(false);
     // A killed build takes its workers with it, as it took its one step before.
     job.host.die_with_parent() catch return 1;
     var diag: Diag = undefined;
@@ -343,6 +413,24 @@ pub const Context = struct {
         return error.Failed;
     }
 
+    /// `--clear-caches`: empties the cache directories of this build file.
+    fn clear_caches(context: *Context) Error!void {
+        const spec: key_mod.Spec = .{
+            .platform = "linux/amd64",
+            .base_tree = Digest.of("clear"),
+            .base_env = &.{},
+            .input_tree = Digest.of("clear"),
+            .needs = &.{},
+            .argv = &.{},
+            .env = &.{},
+            .network = false,
+            .name = "clear",
+        };
+        const clear_request = context.request(&spec);
+        step_mod.clear_caches(&clear_request, &context.ws.step, context.diag) catch
+            return error.Failed;
+    }
+
     /// Clears what a killed build left in `build/work`, before this one starts steps.
     fn sweep(context: *Context) Error!void {
         const spec: key_mod.Spec = .{
@@ -366,22 +454,46 @@ pub const Context = struct {
         const ws = context.ws;
         const file = &loaded.file;
         assert(index < file.steps_count);
+        try context.check_interrupt();
         const step = &file.steps[index];
         const name = file.text(step.name);
-        var spec: key_mod.Spec = undefined;
-        spec.name = name;
-        spec.network = step.network;
-        // `undefined` applies no field defaults, so the M9 fields are set here.
-        spec.root_output = false;
-        spec.user = null;
-        spec.workdir = null;
-        spec.binds = &.{};
-        spec.copies = &.{};
-        try context.resolve_base(file.text(step.base), &spec);
-        spec.input_tree = try context.import_inputs(index);
+        // A literal naming only the fields without defaults: the M9 fields then take theirs by
+        // construction, and a field added to the spec later cannot be left holding stack bytes.
+        var spec: key_mod.Spec = .{
+            .platform = undefined,
+            .base_tree = undefined,
+            .base_env = undefined,
+            .input_tree = undefined,
+            .needs = undefined,
+            .argv = undefined,
+            .env = undefined,
+            .network = step.network,
+            .name = name,
+        };
+        spec.root_output = step.output == .root;
+        if (step.user) |user| spec.user = file.text(user);
+        if (step.workdir) |workdir| spec.workdir = file.text(workdir);
+        try context.resolve_base(index, &spec);
+        spec.input_tree = if (step.copy.given)
+            std.mem.zeroes(Digest)
+        else
+            try context.import_inputs(index, null);
         ws.step_inputs[index] = spec.input_tree;
+        if (!step.copy.given) context.hold(spec.input_tree);
+        // The import rooted the input tree for the worker; it is dropped on a hit, on an error,
+        // and when the worker's step settles or is aborted.
+        var handed_over = false;
+        defer if (!handed_over and !step.copy.given) context.drop(spec.input_tree);
         fill_lists(file, step, ws, &spec);
         spec.needs = fill_needs(loaded, index, ws);
+        if (!step.copy.given) try context.resolve_binds(index, &spec);
+        // The binds' selections are rooted too; they go as the input tree goes, and a worker
+        // that starts takes them over (`fork_worker`).
+        defer if (!handed_over) for (spec.binds) |bind| context.drop(bind.source);
+        // An import can take seconds: a signal that came during it stops the step here, before
+        // a worker starts.
+        try context.check_interrupt();
+        if (step.copy.given) return context.begin_copy(index, &spec);
         key_mod.compute(&spec, &ws.key) catch {
             diagnose.step_env_refused(context.diag, name, loaded.shown(), step.env.count, "");
             return error.Failed;
@@ -398,8 +510,13 @@ pub const Context = struct {
             },
             .miss => {},
         }
-        try context.check_base(file.text(step.base), &spec);
+        // A `step:` base is a tree this build made: the gate judged the image the chain
+        // started from when that step ran, and a derived tree has no statement of its own.
+        if (loaded.graph.base_step[index] == null) {
+            try context.check_base(file.text(step.base), &spec);
+        }
         try context.fork_worker(index, &spec);
+        handed_over = true; // The slot holds the roots now; `settle` or `abort_step` drops them.
         return .running;
     }
 
@@ -477,7 +594,23 @@ pub const Context = struct {
             .pid = pid,
             .report = pipe,
             .key = ws.key,
+            .binds = undefined,
+            .binds_count = @intCast(spec.binds.len),
         };
+        for (spec.binds, 0..) |bind, at| slot.binds[at] = bind.source;
+    }
+
+    /// Fails the build with E0808 when a SIGINT or SIGTERM arrived: the scheduler then aborts
+    /// the running steps, and every root this build made is removed on the way out. Called
+    /// before each step starts, after each import (the longest work done here) and around the
+    /// image's assembly; a wait sees the signal itself. A build that already failed keeps its
+    /// first diagnostic and stops all the same.
+    pub fn check_interrupt(context: *Context) Error!void {
+        const signal = context.host.interrupt_signal();
+        if (signal == 0) return;
+        if (context.diag.code == null) diagnose.build_interrupted(context.diag, signal);
+        assert(context.diag.code != null);
+        return error.Failed;
     }
 
     /// Waits for the first worker to end and settles its step.
@@ -495,6 +628,7 @@ pub const Context = struct {
         }
         assert(count > 0);
         const reaped = host.wait_any(pids[0..count], 0) catch |err| {
+            if (err == error.Interrupted) try context.check_interrupt();
             store_diagnose.worker_ended(context.diag, .{ .step = .{
                 .name = "waiting for a build step",
                 .err = err,
@@ -516,6 +650,8 @@ pub const Context = struct {
             host.signal(slot.pid, constants.signal_kill) catch {};
             _ = host.wait_for(slot.pid) catch {};
             host.close(slot.report.read);
+            context.drop(context.ws.step_inputs[slot.index]);
+            context.drop_binds(slot);
             slot.active = false;
             ended += 1;
         }
@@ -530,6 +666,8 @@ pub const Context = struct {
         assert(slot.active);
         slot.active = false;
         defer host.close(slot.report.read);
+        defer context.drop(ws.step_inputs[slot.index]);
+        defer context.drop_binds(slot);
         var bytes: [failure_bytes_max]u8 = undefined;
         var length: usize = 0;
         while (length < bytes.len) {
@@ -558,12 +696,18 @@ pub const Context = struct {
         return .{ .index = slot.index, .ok = true };
     }
 
-    /// The base's image, from the lock: its platform, tree and environment.
-    fn resolve_base(context: *Context, reference: []const u8, spec: *key_mod.Spec) Error!void {
+    /// The base's platform, tree and environment. A locked image gives all three. A `step:` base
+    /// gives the tree (the output of that step, which ran before this one) and takes the
+    /// platform and environment from the image its chain started from: config is inherited
+    /// field by field from there, not from a step's output.
+    fn resolve_base(context: *Context, index: u8, spec: *key_mod.Spec) Error!void {
         const ws = context.ws;
-        const entry = try context.load_base(reference, spec.name);
+        const file = &context.loaded.file;
+        const graph = &context.loaded.graph;
+        const start = graph_mod.chain_start(graph, index);
+        const entry = try context.load_base(file.text(file.steps[start].base), spec.name);
         spec.platform = entry.platform_text();
-        spec.base_tree = ws.image.tree;
+        spec.base_tree = if (graph.base_step[index]) |target| ws.outputs[target] else ws.image.tree;
         const count = ws.image.settings.count(.env);
         assert(count <= ws.base_env.len);
         for (0..count) |word| ws.base_env[word] = ws.image.settings.word(.env, @intCast(word));
@@ -581,6 +725,10 @@ pub const Context = struct {
         const ws = context.ws;
         const at = ws.locking.lock.find(reference) orelse {
             diagnose.base_not_locked(context.diag, name, reference, false);
+            const file = &context.loaded.file;
+            if (graph_mod.step_named(file, reference) != null) {
+                diagnose.step_name_hint(context.diag, reference);
+            }
             return error.Failed;
         };
         const entry = &ws.locking.lock.entries[at];
@@ -666,7 +814,7 @@ pub const Context = struct {
         };
     }
 
-    fn import_inputs(context: *Context, index: u8) Error!Digest {
+    fn import_inputs(context: *Context, index: u8, entry: ?u32) Error!Digest {
         const ws = context.ws;
         const job: input_job.Request = .{
             .host = context.host,
@@ -674,10 +822,232 @@ pub const Context = struct {
             .store = context.store,
             .loaded = context.loaded,
             .step = index,
+            .entry = entry,
             .ws = &ws.input,
             .problem = &ws.input_problem,
         };
         return input_job.import(&job, context.diag) catch return error.Failed;
+    }
+
+    /// A copy step (`.copy`): the output is the base with each entry's selection laid over it,
+    /// made here, in this process, under one shared lock; no command runs. Each entry's
+    /// selection is in the key, so a file the patterns do not take never changes it.
+    fn begin_copy(context: *Context, index: u8, spec: *key_mod.Spec) Error!schedule.Begin {
+        const ws = context.ws;
+        const file = &context.loaded.file;
+        const step = &file.steps[index];
+        ws.timings[index].start_ms = context.elapsed();
+        const entries = file.copy_entries(step);
+        assert(entries.len > 0);
+        assert(entries.len <= ws.copy_keys.len);
+        // Each selection is rooted by `copy_select` and dropped when this step is done with it.
+        var rooted: usize = 0;
+        defer for (ws.copy_keys[0..rooted]) |part| context.drop(part.source);
+        for (entries, 0..) |entry, at| {
+            const source = try context.copy_source(index, @intCast(at), &entry);
+            if (at == 0) ws.step_inputs[index] = source;
+            // A project source was rooted by its import; the selection is what the key keeps.
+            // A source that is also a selection made here keeps its root until the end.
+            defer if (entry.from == null and !context.is_selection(rooted, source)) {
+                context.unroot(source);
+            };
+            const selected = try context.copy_select(index, &entry, source);
+            ws.copy_keys[at] = .{ .source = selected, .to = file.text(entry.to) };
+            rooted += 1;
+            try context.check_interrupt(); // An entry's import and selection can take seconds.
+        }
+        spec.copies = ws.copy_keys[0..entries.len];
+        spec.root_output = true; // The output is the whole tree, as a root step's is.
+        key_mod.compute(spec, &ws.key) catch {
+            diagnose.step_env_refused(context.diag, spec.name, context.loaded.shown(), 0, "");
+            return error.Failed;
+        };
+        const store = context.store;
+        try store_diagnose.hold(context.diag, store, .shared, "build", "copying files");
+        defer lock.release(store);
+        var failure: cache.Failure = undefined;
+        const found = cache.lookup(store, &ws.cache, &ws.key, &failure) catch
+            return context.cache_failed(&failure);
+        var hit = true;
+        const output = switch (found) {
+            .hit => |existing| existing,
+            .miss => blk: {
+                hit = false;
+                if (context.loaded.graph.base_step[index] == null) {
+                    try context.check_base(file.text(step.base), spec);
+                }
+                const made = try context.copy_assemble(spec.base_tree, entries.len);
+                break :blk cache.record(store, &ws.cache, &ws.key, made, &failure) catch
+                    return context.cache_failed(&failure);
+            },
+        };
+        context.unroot(output);
+        ws.outputs[index] = output;
+        try context.report(index, hit, output);
+        return .hit;
+    }
+
+    /// The tree entry `at` of step `index` takes from: the project's matched paths, imported, or
+    /// the output of the `step:` it names.
+    fn copy_source(
+        context: *Context,
+        index: u8,
+        at: u32,
+        entry: *const file_mod.CopyEntry,
+    ) Error!Digest {
+        const file = &context.loaded.file;
+        const from = entry.from orelse return context.import_inputs(index, at);
+        const name = file_mod.step_ref(file.text(from)) orelse unreachable; // Refused earlier.
+        const target = graph_mod.step_named(file, name) orelse unreachable; // The graph check.
+        assert(target < index);
+        return context.ws.outputs[target];
+    }
+
+    /// Whether `digest` is one of the first `count` selections of the copy step being begun.
+    fn is_selection(context: *const Context, count: usize, digest: Digest) bool {
+        for (context.ws.copy_keys[0..count]) |part| {
+            if (part.source.eql(digest)) return true;
+        }
+        return false;
+    }
+
+    fn copy_select(
+        context: *Context,
+        index: u8,
+        entry: *const file_mod.CopyEntry,
+        source: Digest,
+    ) Error!Digest {
+        const ws = context.ws;
+        const file = &context.loaded.file;
+        const texts = file.texts(entry.src);
+        for (texts, 0..) |text, at| ws.copy_patterns[at] = file.text(text);
+        const store = context.store;
+        try store_diagnose.hold(context.diag, store, .shared, "build", "selecting files to copy");
+        defer lock.release(store);
+        const assembling: assemble.Context = .{
+            .store = store,
+            .ws = &ws.copying.assemble,
+            .failure = &ws.assembly_failure,
+        };
+        const patterns = ws.copy_patterns[0..texts.len];
+        const to = file.text(entry.to);
+        const name = file.text(file.steps[index].name);
+        const picked = copy_mod.select(assembling, &ws.copying, source, patterns, to);
+        const selected = picked catch |err| {
+            switch (err) {
+                error.PoolFull => {
+                    const failed = ws.copying.failed_pattern;
+                    diagnose.glob_pool_full(context.diag, patterns[failed]);
+                },
+                error.NoMatch => {
+                    const from = if (entry.from) |text| file.text(text) else "the project";
+                    diagnose.copy_nothing(context.diag, name, patterns[0], from);
+                },
+                error.Failed => context.assembly_failed(name, to),
+            }
+            return error.Failed;
+        };
+        // Between this write and the cache entry the selection is nothing's output: a root keeps
+        // a `store gc` from taking it.
+        if (!input_job.root_tree(store, selected, name, context.diag)) return error.Failed;
+        context.hold(selected);
+        return selected;
+    }
+
+    /// Each bind of the step becomes the tree its `.source` selects in the output of the `step:`
+    /// it names, the whole output for `/`; the tree's digest is what the key holds, so a file
+    /// the source does not take never changes it. A bind from the project or an image never
+    /// gets here (`graph.unrunnable`). A selection is a plain tree of its own and mounts
+    /// read-only at `.to`.
+    pub fn resolve_binds(context: *Context, index: u8, spec: *key_mod.Spec) Error!void {
+        const ws = context.ws;
+        const file = &context.loaded.file;
+        const step = &file.steps[index];
+        const binds = file.step_binds(step);
+        assert(binds.len <= ws.bind_keys.len);
+        for (binds, 0..) |found, at| {
+            const from = found.from orelse unreachable; // `unrunnable` refused a project bind.
+            const name = file_mod.step_ref(file.text(from)) orelse unreachable; // Same: an image.
+            const target = graph_mod.step_named(file, name) orelse unreachable; // The graph check.
+            assert(target != index);
+            const source = file.text(found.source);
+            const output = ws.outputs[target];
+            const text = file.text(from);
+            const selected = context.bind_select(index, output, source, text) catch |err| {
+                for (ws.bind_keys[0..at]) |done| context.drop(done.source);
+                return err;
+            };
+            ws.bind_keys[at] = .{ .to = file.text(found.to), .source = selected };
+        }
+        spec.binds = ws.bind_keys[0..binds.len];
+    }
+
+    fn bind_select(
+        context: *Context,
+        index: u8,
+        output: Digest,
+        source: []const u8,
+        from: []const u8,
+    ) Error!Digest {
+        const ws = context.ws;
+        const store = context.store;
+        try store_diagnose.hold(context.diag, store, .shared, "build", "selecting a bind's files");
+        defer lock.release(store);
+        const assembling: assemble.Context = .{
+            .store = store,
+            .ws = &ws.copying.assemble,
+            .failure = &ws.assembly_failure,
+        };
+        ws.copy_patterns[0] = source;
+        const patterns = ws.copy_patterns[0..1];
+        const name = context.loaded.file.text(context.loaded.file.steps[index].name);
+        const picked = copy_mod.select(assembling, &ws.copying, output, patterns, "/");
+        const selected = picked catch |err| {
+            switch (err) {
+                error.PoolFull => diagnose.glob_pool_full(context.diag, source),
+                error.NoMatch => diagnose.bind_nothing(context.diag, name, source, from),
+                error.Failed => context.assembly_failed(name, "/"),
+            }
+            return error.Failed;
+        };
+        // The selection is nothing's output and no cache entry names it: until the worker has
+        // mounted it, a root is all that keeps a `store gc` from taking it (N8). The root is
+        // written before the shared lock is let go.
+        if (!input_job.root_tree(store, selected, name, context.diag)) return error.Failed;
+        context.hold(selected);
+        return selected;
+    }
+
+    fn assembly_failed(context: *Context, name: []const u8, to: []const u8) void {
+        const ws = context.ws;
+        const store = context.store;
+        switch (ws.assembly_failure) {
+            .io => |io| store_diagnose.write_failed(context.diag, store, io.step, io.err, io.errno),
+            .damaged => {
+                const operation = "reading a tree to copy";
+                store_diagnose.write_failed(context.diag, store, operation, error.IoFailed, 0);
+            },
+            else => diagnose.copy_refused(context.diag, &ws.assembly_failure, name, to),
+        }
+    }
+
+    /// The base with every entry's selection laid over it (a later file replaces an earlier one).
+    fn copy_assemble(context: *Context, base: Digest, count: usize) Error!Digest {
+        const ws = context.ws;
+        const merging: assemble.Context = .{
+            .store = context.store,
+            .ws = &ws.assembly,
+            .failure = &ws.assembly_failure,
+            .replace = true,
+        };
+        var tree = base;
+        for (ws.copy_keys[0..count]) |part| {
+            tree = assemble.merge(merging, tree, part.source) catch {
+                context.assembly_failed("copy", part.to);
+                return error.Failed;
+            };
+        }
+        return tree;
     }
 
     /// Writes the entry under the shared lock, and returns the tree it names.
@@ -694,19 +1064,76 @@ pub const Context = struct {
         return kept;
     }
 
-    /// The entry roots the output now: drops the root the step's import left (N8). Only a root
-    /// this build made goes: its source starts with `build:` and it was written at or after the
-    /// build's start; a root the user made earlier (the import left it as it was) stays. A
-    /// failure to drop it is no failure of the build: the next `store gc` shows the root and the
-    /// user may remove it.
+    /// The entry roots the output now: drops the root the step's import left (N8), for a tree
+    /// this step never counted (an output, a project source a copy step imported). A tree some
+    /// step holds (`hold`) keeps its root: its last holder drops it (`drop`).
     fn unroot(context: *Context, output: Digest) void {
+        if (context.held(output)) return;
+        context.remove_root(output);
+    }
+
+    /// Only a root this build made goes: its source starts with `build:` and it was written at
+    /// or after the build's start; a root the user made earlier (the import left it as it was)
+    /// stays. A failure to drop it is no failure of the build: the next `store gc` shows the
+    /// root and the user may remove it.
+    fn remove_root(context: *Context, digest: Digest) void {
         const store = context.store;
         var root: roots.Root = undefined;
         var errno: u16 = 0;
-        roots.load(store, output, &root, &errno) catch return;
+        roots.load(store, digest, &root, &errno) catch return;
         if (!std.mem.startsWith(u8, root.source_text(), step_mod.output_root_prefix)) return;
         if (root.time < context.started_s) return;
-        roots.remove(store, output) catch {};
+        roots.remove(store, digest) catch {};
+    }
+
+    /// Counts one more user of a tree this build has rooted (or found rooted).
+    fn hold(context: *Context, digest: Digest) void {
+        const ws = context.ws;
+        assert(ws.holds_count <= ws.holds.len);
+        for (ws.holds[0..ws.holds_count]) |*entry| {
+            if (!entry.digest.eql(digest)) continue;
+            assert(entry.users > 0);
+            entry.users += 1;
+            return;
+        }
+        // The bound is the most trees a build has in use at once (constants.zig).
+        assert(ws.holds_count < ws.holds.len);
+        ws.holds[ws.holds_count] = .{ .digest = digest, .users = 1 };
+        ws.holds_count += 1;
+    }
+
+    /// Whether some step holds the tree.
+    fn held(context: *const Context, digest: Digest) bool {
+        const ws = context.ws;
+        assert(ws.holds_count <= ws.holds.len);
+        for (ws.holds[0..ws.holds_count]) |entry| {
+            if (entry.digest.eql(digest)) return true;
+        }
+        return false;
+    }
+
+    /// One holder of the tree is done with it: the callers are those that counted it (`hold`).
+    /// The root goes with the last holder; a tree nobody holds (a slot a test made) is dropped
+    /// as `unroot` drops one.
+    fn drop(context: *Context, digest: Digest) void {
+        const ws = context.ws;
+        assert(ws.holds_count <= ws.holds.len);
+        for (ws.holds[0..ws.holds_count], 0..) |*entry, at| {
+            if (!entry.digest.eql(digest)) continue;
+            assert(entry.users > 0);
+            entry.users -= 1;
+            if (entry.users > 0) return;
+            ws.holds_count -= 1;
+            ws.holds[at] = ws.holds[ws.holds_count];
+            context.remove_root(digest);
+            return;
+        }
+        context.remove_root(digest);
+    }
+
+    fn drop_binds(context: *Context, slot: *const Slot) void {
+        assert(slot.binds_count <= slot.binds.len);
+        for (slot.binds[0..slot.binds_count]) |digest| context.drop(digest);
     }
 
     fn cache_failed(context: *Context, failure: *const cache.Failure) Error {
@@ -762,6 +1189,25 @@ pub const Context = struct {
         context.write_warning(&warning);
     }
 
+    /// `W0802` once, on stderr, after `W0801`, when the build file has steps with `.caches`.
+    pub fn warn_caches(context: *Context) void {
+        const file = &context.loaded.file;
+        var names: [constants.build_steps_max][]const u8 = undefined;
+        var count: u32 = 0;
+        for (file.steps_slice()) |*step| {
+            if (step.caches.count == 0) continue;
+            names[count] = file.text(step.name);
+            count += 1;
+        }
+        if (count == 0) return;
+        comptime assert(constants.diag_field_bytes_max >= diagnose.cache_label.len + 8);
+        var joined: [constants.diag_field_bytes_max - diagnose.cache_label.len]u8 = undefined;
+        var warning: Diag = undefined;
+        warning.reset();
+        diagnose.cache_steps(&warning, diagnose.network_names(&joined, names[0..count]), count);
+        context.write_warning(&warning);
+    }
+
     /// `warning` on stderr in the build's output mode; a stderr that cannot be written loses it.
     fn write_warning(context: *Context, warning: *const Diag) void {
         const mode: render.Mode = if (context.json)
@@ -798,13 +1244,14 @@ pub const Context = struct {
         timing.key = ws.key.digest;
         const name = if (index == image_slot) "image" else file.text(file.steps[index].name);
         timing.network = index != image_slot and file.steps[index].network;
+        timing.caches = index != image_slot and file.steps[index].caches.count > 0;
         if (hit) context.hits += 1 else context.misses += 1;
         var writer = std.Io.Writer.fixed(&ws.row);
         const word = if (hit) "hit" else "miss";
         if (context.json) {
             writer.print("{{\"schema\":\"zbx.build/1\",\"step\":\"{s}\",\"cache\":\"{s}\"," ++
                 "\"key\":\"{s}\",\"output\":\"{s}\",\"start_ms\":{d},\"end_ms\":{d}," ++
-                "\"network\":{s}}}\n", .{
+                "\"network\":{s}{s}}}\n", .{
                 name,
                 word,
                 &timing.key.text(),
@@ -812,6 +1259,8 @@ pub const Context = struct {
                 timing.start_ms,
                 timing.end_ms,
                 if (timing.network) "true" else "false",
+                // Only a step with caches has the member: a line without it is unchanged.
+                if (timing.caches) ",\"caches\":true" else "",
             }) catch unreachable; // `row_bytes` holds the longest record.
         } else {
             const took = timing.end_ms - timing.start_ms;
@@ -821,6 +1270,7 @@ pub const Context = struct {
                 name_gap, word, name_gap, took / 1000, took % 1000 / 10,
             }) catch unreachable; // Fits.
             if (timing.network) writer.print("{s}net", .{name_gap}) catch unreachable; // Fits.
+            if (timing.caches) writer.print("{s}cache", .{name_gap}) catch unreachable; // Fits.
             writer.writeByte('\n') catch unreachable; // Fits.
         }
         return context.emit(writer.buffered());
@@ -830,13 +1280,22 @@ pub const Context = struct {
     /// record. Runs after every step has an output, in this process, under one shared lock so
     /// that a gc cannot take the trees assembled before the cache entry roots them.
     pub fn build_image(context: *Context) Error!void {
+        // Every step is done; a signal that came meanwhile stops the build before its image.
+        try context.check_interrupt();
         const ws = context.ws;
         const file = &context.loaded.file;
         ws.timings[image_slot].start_ms = context.elapsed();
         var base_tree: ?Digest = null;
         var base: *const images.Settings = &ws.empty_settings;
         ws.empty_settings.clear();
-        if (file.image.base) |text| {
+        if (context.loaded.graph.image_base) |target| {
+            // The result starts from a step's output and inherits the config of the image the
+            // chain of `step:` bases began with.
+            const start = graph_mod.chain_start(&context.loaded.graph, target);
+            _ = try context.load_base(file.text(file.steps[start].base), null);
+            base_tree = ws.outputs[target];
+            base = &ws.image.settings;
+        } else if (file.image.base) |text| {
             _ = try context.load_base(file.text(text), null);
             base_tree = ws.image.tree;
             base = &ws.image.settings;
@@ -876,6 +1335,10 @@ pub const Context = struct {
             },
         };
         ws.record.tree = tree;
+        // Assembly can take seconds: a signal during it means no result is saved, and the
+        // build does not exit 0. The assembled tree is in the cache, as a finished step's is.
+        try context.check_interrupt();
+        try context.numeric_user();
         var saved: result_mod.Failure = undefined;
         const digest = result_mod.save(store, &ws.record, &ws.record_bytes, &saved) catch {
             const err = saved.err;
@@ -885,6 +1348,37 @@ pub const Context = struct {
         try context.write_provenance(tree, digest);
         try context.report(image_slot, hit, tree);
         try context.footer(digest);
+    }
+
+    /// A `config.user` written as a name becomes its `uid:gid`, looked up in the result's tree: the
+    /// record holds numbers only. The key had the name, so a changed passwd in the tree is a new
+    /// result only through the tree.
+    pub fn numeric_user(context: *Context) Error!void {
+        const ws = context.ws;
+        const settings = &ws.record.config.settings;
+        const text = settings.get(.user);
+        if (text.len == 0) return;
+        if (file_mod.is_numeric_user(text)) return;
+        const tree = ws.record.tree;
+        const store = context.store;
+        const found = image_user.resolve(store, &ws.user_ws, tree, text, context.diag) catch {
+            context.diag.reset();
+            // The name may come from the base image's config, which the file never wrote.
+            const set_here = context.loaded.file.image.config.user != null;
+            const where = if (set_here) ".image .config" else "the base image's config";
+            diagnose.user_not_found(context.diag, where, text);
+            return error.Failed;
+        };
+        var buffer: [24]u8 = undefined;
+        const numbers = std.fmt.bufPrint(&buffer, "{d}:{d}", .{
+            found.user.uid, found.user.gid,
+        }) catch unreachable; // Two 32-bit numbers and a colon.
+        // The settings store only grows: the name stays in it beside the numbers, so a base
+        // image whose config fills the budget refuses here, as the same field does when composed.
+        if (settings.set(.user, numbers) == null) {
+            diagnose.config_too_large(context.diag, .user);
+            return error.Failed;
+        }
     }
 
     /// The provenance record of the result just saved (the store lock is held).
@@ -1039,6 +1533,21 @@ fn fill_lists(
     for (step.env.slice(), 0..) |word, at| ws.env[at] = file.text(word);
     spec.argv = ws.argv[0..step.run.count];
     spec.env = ws.env[0..step.env.count];
+    for (file.step_caches(step), 0..) |wanted, at| {
+        ws.cache_mounts[at] = .{
+            .id = file.text(wanted.id),
+            .path = file.text(wanted.path),
+            .ro = wanted.ro,
+            // A mode was checked by the parser (`is_mode`): octal digits.
+            .mode = if (wanted.mode) |text|
+                std.fmt.parseInt(u16, file.text(text), 8) catch null
+            else
+                null,
+            .uid = wanted.uid,
+            .gid = wanted.gid,
+        };
+    }
+    spec.caches = ws.cache_mounts[0..step.caches.count];
 }
 
 fn fill_needs(loaded: *const load_mod.Workspace, index: u8, ws: *Workspace) []const key_mod.Need {

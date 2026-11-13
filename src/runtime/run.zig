@@ -460,6 +460,7 @@ fn resolve_mounts(host: Host, container: *const Spec, handle: *Handle, diag: *Di
     assert(container.mounts.len <= constants.mounts_max);
     const writable: mounts_mod.Writable = .{
         .project = container.project,
+        .caches_root = container.caches_root,
         .user = container.user,
         .user_text = container.user_text,
     };

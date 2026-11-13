@@ -345,6 +345,8 @@ pub const Spec = struct {
     /// `--mount` source may be relative to the working directory; the run holds it to the
     /// project with every symbolic link followed, and refuses a user who is not root.
     project: []const u8 = "",
+    /// The directory a mount of kind `cache` must be in or below (a build step's caches).
+    caches_root: []const u8 = "",
     /// The user as the caller names it (`--user`, or the image's `User`), for a refusal's message.
     user_text: []const u8 = "",
     /// What the run's tree is bound to, written to the run record for the policy gate at

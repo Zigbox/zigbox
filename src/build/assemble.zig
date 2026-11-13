@@ -84,6 +84,10 @@ pub const Context = struct {
     store: *Store,
     ws: *Workspace,
     failure: *Failure,
+    /// A copy step's merge (docs/briefs/M9-dockerfile-import.md, `.copy`): where both trees have
+    /// a name and they are not both directories, the added entry replaces the image's instead
+    /// of being a conflict. Two directories still merge.
+    replace: bool = false,
 };
 
 /// The image tree: `base` (or an empty tree) with `adds` laid over it in order.
@@ -98,6 +102,20 @@ pub fn assemble(context: Context, base: ?Digest, adds: []const Add) Error!Digest
         image = try merge(context, image, top);
     }
     return image;
+}
+
+/// `leaf` (a tree of entries, its own owner ignored) laid at the directory `to` of `base`, with
+/// the context's merge rule. The directories on the way are made, 0755 0:0.
+pub fn lay(context: Context, base: Digest, leaf: Digest, to: []const u8) Error!Digest {
+    assert(to.len > 0);
+    assert(to[0] == '/');
+    const top = try wrap(context, try canonical(context, leaf), to);
+    return merge(context, base, top);
+}
+
+/// A tree holding nothing: the start of a selection.
+pub fn empty(context: Context) Error!Digest {
+    return write_empty(context);
 }
 
 /// Which earlier add put what is at `path` (as a `Conflict` holds it) into the image: the last
@@ -151,7 +169,7 @@ fn io_failed(context: Context, err: host_mod.Error, step: []const u8) Error {
     return error.Failed;
 }
 
-fn put(context: Context, bytes: []const u8) Error!Digest {
+pub fn put(context: Context, bytes: []const u8) Error!Digest {
     assert(bytes.len <= constants.store_tree_bytes_max);
     const digest = Digest.of(bytes);
     var noted: object.Failure = undefined;
@@ -266,7 +284,7 @@ const Step = union(enum) {
     finished: Digest,
 };
 
-fn merge(context: Context, dst: Digest, src: Digest) Error!Digest {
+pub fn merge(context: Context, dst: Digest, src: Digest) Error!Digest {
     const ws = context.ws;
     ws.frames[0] = .{ .dst = dst, .src = src, .done = 0, .results = undefined, .path_len = 0 };
     var depth: u32 = 0;
@@ -362,7 +380,11 @@ const Join = struct {
         const context = join.context;
         const de = &join.de;
         const se = &join.se;
-        if (de.kind != .dir or se.kind != .dir) return join.conflict();
+        if (de.kind != .dir or se.kind != .dir) {
+            if (!context.replace) return join.conflict();
+            if (!emit(&join.writer, se)) return too_large(context);
+            return null;
+        }
         var merged = de.subtree;
         if (!de.subtree.eql(se.subtree)) {
             if (join.common == constants.build_merge_common_max) {

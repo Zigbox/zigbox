@@ -612,6 +612,14 @@ pub const VTable = struct {
     ) Error!void,
     /// Makes a write to a pipe with no reader fail with `EPIPE` instead of killing the process.
     ignore_broken_pipe: *const fn (context: *anyopaque, ignore: bool) void,
+    /// With `catch_it`, SIGINT and SIGTERM stop ending the process and record the signal that
+    /// `interrupt_signal` reads, and a blocked wait returns `Interrupted` (no restart); without,
+    /// they act as they did before (an inherited ignore is kept throughout). A command that
+    /// holds state to release (a build's roots) polls it. A signal can arrive at any moment,
+    /// the moment after catching starts included.
+    catch_interrupts: *const fn (context: *anyopaque, catch_it: bool) void,
+    /// The first SIGINT or SIGTERM that arrived since `catch_interrupts(true)`, 0 for none.
+    interrupt_signal: *const fn (context: *anyopaque) u8,
     /// Connects a stream socket to the unix socket at `path` (the user's D-Bus socket). The
     /// handle is close-on-exec and is read and written like a pipe's.
     socket_connect: *const fn (context: *anyopaque, path: [:0]const u8) Error!Handle,
@@ -1339,7 +1347,10 @@ pub const Host = struct {
         for (0..constants.wait_interrupts_max + 1) |_| {
             const waited = host.vtable.wait_any(host.context, pids, timeout_ms);
             const reaped = waited catch |err| switch (err) {
-                error.Interrupted => continue,
+                // A SIGINT or SIGTERM the caller asked to catch is its to see, not to retry.
+                error.Interrupted => if (host.vtable.interrupt_signal(host.context) != 0) {
+                    return err;
+                } else continue,
                 else => return err,
             };
             if (reaped) |found| assert(found.index < pids.len);
@@ -1409,6 +1420,29 @@ pub const Host = struct {
         assert(@intFromPtr(host.vtable) != 0);
         host.vtable.ignore_broken_pipe(host.context, ignore);
         assert(host.vtable.last_errno(host.context) < 4096);
+    }
+
+    pub fn catch_interrupts(host: Host, catch_it: bool) void {
+        assert(@intFromPtr(host.vtable) != 0);
+        // No assertion on the signal here: one may land the instant the handler is in place,
+        // and that is an outside event, not a fault of the program.
+        host.vtable.catch_interrupts(host.context, catch_it);
+        assert(host.vtable.last_errno(host.context) < 4096);
+    }
+
+    /// Whether a SIGINT or SIGTERM arrived since `catch_interrupts(true)`.
+    pub fn interrupt_pending(host: Host) bool {
+        return host.interrupt_signal() != 0;
+    }
+
+    /// The signal that arrived first since `catch_interrupts(true)`: 0 for none, else SIGINT's
+    /// or SIGTERM's number.
+    pub fn interrupt_signal(host: Host) u8 {
+        assert(@intFromPtr(host.vtable) != 0);
+        assert(@intFromPtr(host.context) != 0);
+        const number = host.vtable.interrupt_signal(host.context);
+        assert(interrupt_known(number));
+        return number;
     }
 
     /// Forks a child with no namespace of its own, which runs `entry` (the exec joiner); with
@@ -1602,4 +1636,12 @@ test "PathZ refuses empty, over-long and NUL-containing paths" {
     try std.testing.expectEqual(@as(usize, constants.path_bytes_max), accepted.len);
     const too_long = repeat('/', constants.path_bytes_max + 1);
     try std.testing.expectError(error.PathTooLong, path_z.init(too_long));
+}
+
+/// Whether `number` is what `interrupt_signal` may return: none, SIGINT or SIGTERM.
+fn interrupt_known(number: u8) bool {
+    return switch (number) {
+        0, constants.signal_interrupt, constants.signal_term => true,
+        else => false,
+    };
 }

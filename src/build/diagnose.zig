@@ -754,6 +754,18 @@ pub fn base_not_locked(diag: *Diag, step: ?[]const u8, reference: []const u8, lo
     assert(diag.code.? == .E0804);
 }
 
+/// A second fix on `E0804` when the unlocked base is the name of a step of the same file: a
+/// bare `build` is an image reference, and a step's output is written `step:build`.
+pub fn step_name_hint(diag: *Diag, name: []const u8) void {
+    assert(diag.code.? == .E0804);
+    assert(name.len > 0);
+    var echo: Echo = undefined;
+    const shown = text_util.sanitise(&echo, name);
+    const sentence = "to use the output of the step of that name, write .base like this";
+    diag.fix_with(sentence, ".base = \"step:{s}\"", .{shown});
+    assert(diag.code.? == .E0804);
+}
+
 /// `E0422` or `E0423`: a build result record that cannot be used: it does not hash to its name
 /// or does not parse (`newer` false: damaged), or a newer zbx wrote it (`newer` true).
 pub fn result_unusable(diag: *Diag, digest: Digest, newer: bool) void {
@@ -851,6 +863,76 @@ pub fn assembly_refused(
     }
     diag.context("add", "{d}", .{index + 1});
     assert(diag.code.? == .E0807);
+}
+
+/// `E0807` for a copy step whose selection or merge could not be made (not an I/O failure).
+pub fn copy_refused(
+    diag: *Diag,
+    failure: *const assemble_mod.Failure,
+    step: []const u8,
+    to: []const u8,
+) void {
+    assert(diag.code == null);
+    assert(failure.* != .io);
+    assert(failure.* != .damaged);
+    var step_echo: Echo = undefined;
+    var to_echo: Echo = undefined;
+    const step_shown = text_util.sanitise(&step_echo, step);
+    const to_shown = text_util.sanitise(&to_echo, to);
+    diag.raise(.E0807);
+    diag.while_("copying files in step \"{s}\"", .{step_shown});
+    switch (failure.*) {
+        .too_deep => diag.cause("the copy to {s} would be deeper than {d} directories", .{
+            to_shown, constants.store_depth_max,
+        }),
+        .too_large, .too_common, .conflict => {
+            diag.cause("the tree the copy to {s} makes is too large to assemble", .{to_shown});
+        },
+        .io, .damaged => unreachable,
+    }
+    diag.fix(.{ .sentence = "copy fewer or smaller directories, or a shorter destination" });
+    diag.context("step", "{s}", .{step_shown});
+    assert(diag.code.? == .E0807);
+}
+
+/// `E0803` for a copy whose `.src` matches nothing in a `step:` source.
+pub fn copy_nothing(diag: *Diag, step: []const u8, pattern: []const u8, from: []const u8) void {
+    assert(diag.code == null);
+    assert(pattern.len > 0);
+    var step_echo: Echo = undefined;
+    var pattern_echo: Echo = undefined;
+    var from_echo: Echo = undefined;
+    const step_shown = text_util.sanitise(&step_echo, step);
+    const pattern_shown = text_util.sanitise(&pattern_echo, pattern);
+    const from_shown = text_util.sanitise(&from_echo, from);
+    diag.raise(.E0803);
+    diag.while_("copying files in step \"{s}\"", .{step_shown});
+    diag.cause("\"{s}\" matches nothing in \"{s}\"", .{ pattern_shown, from_shown });
+    diag.fix(.{ .sentence = "name a path the source has, or fix the glob" });
+    diag.context("step", "{s}", .{step_shown});
+    diag.context("src", "{s}", .{pattern_shown});
+    assert(diag.code.? == .E0803);
+}
+
+/// `E0803` for a bind whose `.source` matches nothing in the `step:` output it names.
+pub fn bind_nothing(diag: *Diag, step: []const u8, source: []const u8, from: []const u8) void {
+    assert(diag.code == null);
+    assert(source.len > 0);
+    var step_echo: Echo = undefined;
+    var source_echo: Echo = undefined;
+    var from_echo: Echo = undefined;
+    const step_shown = text_util.sanitise(&step_echo, step);
+    const source_shown = text_util.sanitise(&source_echo, source);
+    const from_shown = text_util.sanitise(&from_echo, from);
+    diag.raise(.E0803);
+    diag.while_("mounting a bind for step \"{s}\"", .{step_shown});
+    diag.cause("the bind source \"{s}\" matches nothing in \"{s}\"", .{
+        source_shown, from_shown,
+    });
+    diag.fix(.{ .sentence = "name a path the step's output has, or fix the glob" });
+    diag.context("step", "{s}", .{step_shown});
+    diag.context("source", "{s}", .{source_shown});
+    assert(diag.code.? == .E0803);
 }
 
 fn conflict_refused(
@@ -1104,8 +1186,51 @@ pub fn user_not_found(diag: *Diag, where: []const u8, name: []const u8) void {
     assert(diag.code.? == .E0817);
 }
 
+/// `E0818`: the paths the globs of one import (a step's inputs, or one copy entry's source)
+/// matched are more than `build_glob_matches_max`, or their names more than
+/// `build_glob_pool_bytes_max`. `input` is the glob being matched.
+pub fn glob_pool_full(diag: *Diag, input: []const u8) void {
+    assert(diag.code == null);
+    assert(input.len > 0);
+    var echo: Echo = undefined;
+    const shown = text_util.sanitise(&echo, input);
+    diag.raise(.E0818);
+    diag.while_("matching a glob", .{});
+    diag.cause("\"{s}\" matched more paths than one import holds ({d} paths, {d} bytes)", .{
+        shown,
+        constants.build_glob_matches_max,
+        constants.build_glob_pool_bytes_max,
+    });
+    diag.context("input", "{s}", .{shown});
+    diag.context("limit", "{d} paths", .{constants.build_glob_matches_max});
+    diag.fix(.{
+        .sentence = "match a directory instead of the files in it, narrow the glob, or " ++
+            ".exclude what you do not need",
+    });
+    assert(diag.code.? == .E0818);
+}
+
+/// `E0808`: a SIGINT or SIGTERM (`signal`, its number) stopped the build. Said once the
+/// scheduler has been told; the running steps are then aborted and their roots removed.
+pub fn build_interrupted(diag: *Diag, signal: u8) void {
+    assert(diag.code == null);
+    const name = switch (signal) {
+        constants.signal_interrupt => "SIGINT",
+        constants.signal_term => "SIGTERM",
+        else => unreachable, // The host catches only these two.
+    };
+    diag.raise(.E0808);
+    diag.cause("stopped by {s}; the unfinished steps' work was released", .{
+        name,
+    });
+    diag.fix(.{ .sentence = "run zbx build again; the steps that finished are cache hits" });
+    assert(diag.code.? == .E0808);
+}
+
+pub const cache_label = "steps with cache mounts: ";
+
 /// `W0802`: the build has steps with `.caches`. `names` is their names in the build's order,
-/// already quoted and joined by `, `; `count` is how many there are.
+/// joined by `, ` (`network_names` makes it); `count` is how many there are.
 pub fn cache_steps(diag: *Diag, names: []const u8, count: u32) void {
     assert(diag.code == null);
     assert(count > 0);
@@ -1113,7 +1238,7 @@ pub fn cache_steps(diag: *Diag, names: []const u8, count: u32) void {
     diag.raise(.W0802);
     diag.while_("planning the build", .{});
     diag.cause("their output can depend on what a cache held, not only on the inputs", .{});
-    diag.cause("steps with cache mounts: {s}", .{names});
+    diag.cause(cache_label ++ "{s}", .{names});
     diag.context("steps", "{d}", .{count});
     diag.fix(.{
         .sentence = "keep each cache to what the command verifies or rebuilds, and do not " ++
@@ -1234,4 +1359,44 @@ test "network_names joins the names and cuts what does not fit with an ellipsis"
     try std.testing.expectEqualStrings("abcd...", short_first);
     const same = network_names(&small, &.{ "abcde", "f" }); // kept == out.len - 3 == 5.
     try std.testing.expectEqualStrings("abcde...", same);
+}
+
+test "a bare step name as a base gets a second fix that writes step:<name>" {
+    // Goal: `.base = "build"` (an image reference) is refused with the way to spell the step.
+    // Method: raise E0804, add the hint, and read the fixes back: the pull first, the hint last.
+    var diag: Diag = undefined;
+    diag.reset();
+    base_not_locked(&diag, "pack", "build", false);
+    step_name_hint(&diag, "build");
+    try std.testing.expectEqual(@as(u32, 2), diag.fixes.count);
+    const second = diag.fixes.items[1].command.slice();
+    const first = diag.fixes.items[0].command.slice();
+    try std.testing.expectEqualStrings(".base = \"step:build\"", second);
+    try std.testing.expect(std.mem.indexOf(u8, first, "zbx pull") != null);
+}
+
+var hint_test_file: BuildFile = undefined;
+
+test "the step-name hint's example is a .base line the build file parser takes" {
+    // Goal: a user who pastes the printed fix gets a file that parses, not a second refusal.
+    // Method: print the hint for step "build", put its command in place of a step's `.base`
+    // field, and parse the file: it parses, and the step's base reads `step:build`.
+    var diag: Diag = undefined;
+    diag.reset();
+    base_not_locked(&diag, "pack", "build", false);
+    step_name_hint(&diag, "build");
+    const example = diag.fixes.items[1].command.slice();
+    var buffer: [512]u8 = undefined;
+    const text = try std.fmt.bufPrint(&buffer, "{s}{s}{s}", .{
+        ".{ .version = 1, .image = .{}, .steps = .{ " ++
+            ".{ .name = \"build\", .base = \"alpine:3\", .run = .{\"true\"} }, " ++
+            ".{ .name = \"pack\", ",
+        example,
+        ", .run = .{\"true\"} } } }\n",
+    });
+    const file = &hint_test_file;
+    var problem: file_mod.Problem = undefined;
+    const parsed = file_mod.parse(text, file, &problem);
+    try std.testing.expectEqual(file_mod.ParseResult.parsed, parsed);
+    try std.testing.expectEqualStrings("step:build", file.text(file.steps[1].base));
 }

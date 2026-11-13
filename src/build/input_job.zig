@@ -11,12 +11,15 @@ const constants = @import("../constants.zig");
 const doctor = @import("../doctor.zig");
 const host_mod = @import("../host.zig");
 const Diag = @import("../diag/diag.zig").Diag;
+const fs_mod = @import("../store/fs.zig");
 const layout = @import("../store/layout.zig");
 const namespace = @import("../store/namespace.zig");
 const store_diagnose = @import("../store/diagnose.zig");
 const digest_mod = @import("../store/digest.zig");
 const load_mod = @import("load.zig");
 const input_tree = @import("input_tree.zig");
+const roots = @import("../store/roots.zig");
+const step_mod = @import("step.zig");
 const inputs_mod = @import("inputs.zig");
 const diagnose = @import("diagnose.zig");
 
@@ -34,6 +37,8 @@ pub const Request = struct {
     store: *Store,
     loaded: *const load_mod.Workspace,
     step: u8,
+    /// A copy entry of the step (an index into its entries): import its `.src`, not `.inputs`.
+    entry: ?u32 = null,
     ws: *input_tree.Workspace,
     problem: *inputs_mod.Problem,
 };
@@ -122,16 +127,65 @@ fn imported(request: *const Request, diag: *Diag) ?Digest {
         return null;
     };
     defer fs.close(project);
-    const import_request: input_tree.Request = .{
+    var import_request: input_tree.Request = .{
         .store = request.store,
         .project = project,
         .file = &loaded.file,
         .step = request.step,
     };
-    return input_tree.import(import_request, request.ws, request.problem, diag) catch |err| {
+    if (request.entry) |at| {
+        const file = &loaded.file;
+        const step = &file.steps[request.step];
+        const entry = file.copy_entries(step)[at];
+        import_request.inputs = file.texts(entry.src);
+        import_request.exclude = .{ file.exclude, step.exclude, entry.exclude };
+    }
+    const imported_digest = input_tree.import(import_request, request.ws, request.problem, diag);
+    const digest = imported_digest catch |err| {
         if (err == error.Refused) {
             diagnose.input_problem(diag, loaded.project.text(), &loaded.file, request.problem);
         }
         return null;
     };
+    // The tree is read again after this child has gone (a copy's selection, a command step's
+    // worker): a root keeps a concurrent `store gc` from removing it in between.
+    const name = request.loaded.file.text(request.loaded.file.steps[request.step].name);
+    if (!root_tree(request.store, digest, name, diag)) return null;
+    return digest;
+}
+
+/// Roots a tree a step reads later as a build's output is rooted (`step.output_root_prefix`
+/// plus the step's name), so the build's `unroot` drops it once it is used. A root that was
+/// already there (the user's, or an earlier build's) is left as it was. False with `diag` raised
+/// on a write error.
+pub fn root_tree(store: *Store, digest: Digest, name: []const u8, diag: *Diag) bool {
+    assert(diag.code == null);
+    assert(name.len <= constants.build_step_name_bytes_max);
+    var root: roots.Root = undefined;
+    var errno: u16 = 0;
+    if (roots.load(store, digest, &root, &errno)) |_| {
+        return true; // A record is already there; keep it as it is.
+    } else |err| {
+        // Only "not there" leads to a new record; any other answer leaves the tree as it is.
+        if (err != error.NotFound) return true;
+    }
+    const label_max = step_mod.output_root_prefix.len + constants.build_step_name_bytes_max;
+    var label: [label_max]u8 = undefined;
+    const labelled = std.fmt.bufPrint(&label, step_mod.output_root_prefix ++ "{s}", .{
+        name,
+    }) catch unreachable; // The buffer holds the prefix and the longest step name.
+    root.digest = digest;
+    root.kind = .import;
+    root.time = store.host.time_now();
+    root.files = 0;
+    root.bytes = 0;
+    root.set_source(labelled);
+    root.parent = null;
+    var failure: fs_mod.Failure = undefined;
+    roots.save(store, &root, &failure) catch {
+        const operation = "writing the root record of a step's tree";
+        store_diagnose.write_failed(diag, store, operation, failure.err, failure.errno);
+        return false;
+    };
+    return true;
 }

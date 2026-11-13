@@ -389,6 +389,8 @@ pub const child_exit_setup_failed: u8 = 125;
 pub const errno_io: u16 = 5;
 /// SIGKILL, the same number on x86_64 and aarch64.
 pub const signal_kill: u8 = 9;
+/// SIGINT (Ctrl-C), the same number on x86_64 and aarch64.
+pub const signal_interrupt: u8 = 2;
 pub const signal_term: u8 = 15;
 /// SIGWINCH (the terminal's window changed size), 28 on x86_64 and aarch64. `exec` with a
 /// pseudo-terminal passes the new size on; nothing forwards it to a container.
@@ -951,9 +953,10 @@ pub const build_step_inputs_max: u32 = 64;
 /// Each needed step is a read-only mount at `/in/<name>`; with `/src` and `/out` that is two
 /// fewer than a run's mounts (`mounts_max`).
 pub const build_step_needs_max: u32 = 6;
-/// The steps one step can come after: its needs, its base, and the `from` of each copy and bind.
+/// The steps one step can come after: its needs, its base, the `from` of each copy and bind, and
+/// the step before it that holds each of its caches (`compose.cache_edges`).
 pub const build_step_edges_max: u32 = build_step_needs_max + 1 + build_copy_entries_max +
-    build_step_binds_max;
+    build_step_binds_max + build_step_caches_max;
 pub const build_step_argv_max: u32 = 64;
 pub const build_step_env_max: u32 = 32;
 /// M9 additions to a step (docs/briefs/M9-dockerfile-import.md, "Builder additions"): cache
@@ -961,11 +964,17 @@ pub const build_step_env_max: u32 = 32;
 /// the run's mounts: needs + binds + caches + 2 <= 8, so an importer keeps them to 6 or refuses.
 pub const build_step_caches_max: u32 = 4;
 pub const build_step_binds_max: u32 = 4;
+/// The trees a build's roots are counted for at once (`compose.zig`): every running step's input
+/// tree and binds, and one copy step's sources and selections, which it holds until it is done.
+pub const build_root_holds_max: u32 = build_parallel_max * (1 + build_step_binds_max) +
+    2 * build_copy_entries_max;
 pub const build_copy_entries_max: u32 = 64;
 /// The lines of one `.exclude` list (`.dockerignore` syntax).
 pub const build_exclude_lines_max: u32 = 256;
 /// The sources of one copy entry.
 pub const build_copy_sources_max: u32 = build_step_inputs_max;
+/// A build's file, step and copy exclude lines, read as one list (later lines win).
+pub const build_exclude_chain_max: u32 = 3 * build_exclude_lines_max;
 /// What one whole file holds of the M9 lists, so that no step carries an array of its own. A
 /// step's own bound above still holds; these are the totals the file's arrays are sized to
 /// (one copy step per instruction needs about one entry a step, and a few lists each).
@@ -978,6 +987,11 @@ pub const build_file_list_texts_max: u32 = 8192;
 pub const build_pattern_bytes_max: u32 = 1024;
 /// The path a glob is matched against, and its parts (`a/b/c` is three).
 pub const build_glob_parts_max: u32 = 64;
+/// Paths that the globs of one build match, kept at once while a step's inputs are imported
+/// (supervisor decision, 2026-11-12), and the bytes of their names. Matching more is E0818. A
+/// matched directory counts once; the average path is at most 64 bytes.
+pub const build_glob_matches_max: u32 = 65536;
+pub const build_glob_pool_bytes_max: u32 = 4 * 1024 * 1024;
 /// Steps that run at once: fixed at 4 (a cut from the brief, which also bounds it by the online
 /// CPUs; nothing checks the CPUs yet, see docs/demos/m7.md).
 pub const build_parallel_max: u32 = 4;
@@ -1089,6 +1103,9 @@ comptime {
     assert(build_step_caches_max + 2 <= mounts_max);
     // A pattern is a string; a file's excludes are lines that fit the pool.
     assert(build_pattern_bytes_max <= build_string_bytes_max);
+    // One matched path fits the pool, and the pool holds an average path of 64 bytes each.
+    assert(path_bytes_max <= build_glob_pool_bytes_max);
+    assert(build_glob_pool_bytes_max / build_glob_matches_max >= 64);
     assert(build_exclude_lines_max * build_pattern_bytes_max <= build_pool_bytes);
     assert(build_glob_parts_max * 2 <= build_pattern_bytes_max);
     // Step indexes are `u16`.
