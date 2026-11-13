@@ -1150,7 +1150,7 @@ test "a copy step leaves no root of its project source behind" {
     try copy_project_loaded();
     try testing.expect(try context.begin(0) == .hit);
     try testing.expect(diag.code == null);
-    try testing.expectEqual(@as(u32, 0), support.count_files(&files, root_path ++ "/roots"));
+    try testing.expectEqual(@as(u32, 0), build_roots(&scratch_roots));
 }
 
 test "a copy source's root that cannot be written is one diagnostic, not a crash" {
@@ -1196,6 +1196,7 @@ test "steps that share a cache id come one after another, each after the nearest
     try testing.expect(plan.valid());
 }
 
+var scratch_roots: [8]roots.Root = undefined;
 var gc_workspace: gc.Workspace = undefined;
 var gc_tables: [16 * 1024 * 1024]u8 align(8) = @splat(0);
 
@@ -1210,7 +1211,21 @@ fn removable_trees() u64 {
     return result.counts.trees;
 }
 
-/// What the store looks like in the middle of a build: the roots there are, and how many more
+/// The roots a build made (`build:<step>`), newest first, in `out`; the other roots (the pulled
+/// image's) are not the build's.
+fn build_roots(out: []roots.Root) u32 {
+    var found: [8]roots.Root = undefined;
+    const listed = roots.list(&store, &import_workspace.arena, &found) catch unreachable; // Lists.
+    var count: u32 = 0;
+    for (found[0..listed.count]) |root| {
+        if (!std.mem.startsWith(u8, root.source_text(), "build:")) continue;
+        out[count] = root;
+        count += 1;
+    }
+    return count;
+}
+
+/// What the store looks like in the middle of a build: the roots it made, and how many more
 /// trees a `store gc` would take if those roots were gone.
 const RootsSeen = struct {
     roots: u32 = 0,
@@ -1224,13 +1239,10 @@ const RootsSeen = struct {
     }
 
     fn measure(seen: *RootsSeen) void {
-        seen.roots = support.count_files(&files, root_path ++ "/roots");
+        var made: [8]roots.Root = undefined;
+        seen.roots = build_roots(&made);
         seen.removable_with = removable_trees();
-        var found: [4]roots.Root = undefined;
-        const arena = &import_workspace.arena;
-        const listed = roots.list(&store, arena, &found) catch unreachable; // Lists.
-        assert(listed.count == seen.roots);
-        for (found[0..listed.count]) |root| roots.remove(&store, root.digest) catch unreachable;
+        for (made[0..seen.roots]) |root| roots.remove(&store, root.digest) catch unreachable;
         seen.removable_without = removable_trees();
         seen.fired = true;
     }
@@ -1264,7 +1276,7 @@ test "a copy that selects nothing leaves no root behind" {
     files.put_file("/p/b.txt", 0o644, "b\n");
     try testing.expectError(error.Failed, context.begin(0));
     try testing.expect(diag.code != null);
-    try testing.expectEqual(@as(u32, 0), support.count_files(&files, root_path ++ "/roots"));
+    try testing.expectEqual(@as(u32, 0), build_roots(&scratch_roots));
 }
 
 test "a command step's input tree is a root while its worker runs, and gone after" {
@@ -1281,18 +1293,20 @@ test "a command step's input tree is a root while its worker runs, and gone afte
     try testing.expect(diag.code == null);
 }
 
-test "a command step's input root is dropped when its worker is aborted or settled" {
+test "a command step's input root is dropped when its worker is aborted or fails" {
     // Goal: the exit paths of that root. Method: begin, abort: no root; begin, settle with a
-    // failure status: no root.
+    // failing worker: no root.
     try command_project_loaded();
     try testing.expect(try context.begin(0) == .running);
-    try testing.expectEqual(@as(u32, 1), support.count_files(&files, root_path ++ "/roots"));
+    try testing.expectEqual(@as(u32, 1), build_roots(&scratch_roots));
     compose.Context.abort_step(@ptrCast(&context));
-    try testing.expectEqual(@as(u32, 0), support.count_files(&files, root_path ++ "/roots"));
+    try testing.expectEqual(@as(u32, 0), build_roots(&scratch_roots));
     try testing.expect(try context.begin(0) == .running);
-    try testing.expectEqual(@as(u32, 1), support.count_files(&files, root_path ++ "/roots"));
-    _ = settle(&composed.slots[0], .{ .exited = 1 });
-    try testing.expectEqual(@as(u32, 0), support.count_files(&files, root_path ++ "/roots"));
+    try testing.expectEqual(@as(u32, 1), build_roots(&scratch_roots));
+    // The worker the sim forked is replaced by one that ends at once with no answer.
+    const slot = worker_ended(0, 7, &.{});
+    try testing.expect(!settle(slot, .{ .exited = 1 }).ok);
+    try testing.expectEqual(@as(u32, 0), build_roots(&scratch_roots));
 }
 
 fn command_project_loaded() !void {
