@@ -514,11 +514,18 @@ fn resolve_cdi(
     }
     if (count == 0) return true;
     if (container.cdi) |given| {
-        handle.cdi = given;
-        return true;
+        // A set the caller resolved gets the host check the discovery gives its own: the kind of
+        // each mount source is looked up, and a missing node or source is refused here.
+        storage.* = given.*;
+        if (!cdi_discover.host_has(host, storage, asked[0..count], diag)) return false;
+    } else {
+        var scratch: cdi_discover.Scratch = undefined;
+        if (!cdi_discover.resolve(host, asked[0..count], &scratch, storage, diag)) {
+            return false;
+        }
     }
-    var scratch: cdi_discover.Scratch = undefined;
-    if (!cdi_discover.resolve(host, asked[0..count], &scratch, storage, diag)) {
+    if (container.read_only and storage.mounts_count > 0) {
+        cdi_diagnose.read_only_mounts(diag, asked[0]);
         return false;
     }
     handle.cdi = storage;

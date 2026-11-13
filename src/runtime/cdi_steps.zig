@@ -182,6 +182,7 @@ pub fn run_ldconfig(host: Host, plan: *const Plan, override: *u16) Error!void {
             .path = path,
             .argv = @ptrCast(&argv),
             .envp = @ptrCast(&plan.envp),
+            .timeout_seconds = constants.cdi_ldconfig_seconds_max,
         };
         const result = host.run_helper(request, &output) catch |err| {
             last = err;

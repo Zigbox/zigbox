@@ -245,6 +245,8 @@ pub fn check_cdi_applied(streams: Streams, status: u8) Error!void {
     if (status != 0) return error.ExitCodeWrong;
     if (!has_line(streams.stdout, "OPENED-READ")) return error.CdiEditWrong;
     if (!has_line(streams.stdout, "FAKE=all")) return error.CdiEditWrong;
+    if (!has_line(streams.stdout, "vendor")) return error.CdiEditWrong; // The bound directory.
+    if (!has_line(streams.stdout, "BIND-RO")) return error.CdiEditWrong; // Read-only, as a volume.
     if (std.mem.indexOf(u8, streams.stderr, "ZBX-E") != null) return error.NoteMissing;
 }
 
@@ -470,13 +472,15 @@ test "cdi: a device applies its edits, and an unknown name is E0230 listing the 
     // Goal: the check passes only when the node opened, the variable is set and no error was said;
     // the refusal only for a one-line E0230 that lists the names.
     const applied = Streams{
-        .stdout = "OPENED-READ\nFAKE=all\n",
+        .stdout = "OPENED-READ\nFAKE=all\nvendor\nBIND-RO\n",
         .stderr = "warning[ZBX-W0209]: groups\n",
     };
     try check_cdi_applied(applied, 0);
     try testing.expectError(error.ExitCodeWrong, check_cdi_applied(applied, 1));
-    const no_env = Streams{ .stdout = "OPENED-READ\n", .stderr = applied.stderr };
+    const no_env = Streams{ .stdout = "OPENED-READ\nvendor\nBIND-RO\n", .stderr = applied.stderr };
     try testing.expectError(error.CdiEditWrong, check_cdi_applied(no_env, 0));
+    const no_bind = Streams{ .stdout = "OPENED-READ\nFAKE=all\n", .stderr = applied.stderr };
+    try testing.expectError(error.CdiEditWrong, check_cdi_applied(no_bind, 0));
     const failed = Streams{ .stdout = applied.stdout, .stderr = "error[ZBX-E0226]: x\n" };
     try testing.expectError(error.NoteMissing, check_cdi_applied(failed, 0));
     const unknown = "error[ZBX-E0230]: no such device\n  known  vendor.example/gpu=0\n";

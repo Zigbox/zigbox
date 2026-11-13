@@ -1055,6 +1055,7 @@ pub const Plan = struct {
         if (plan.has_user) plan.push(.rearm_death_signal, empty_text, empty_text, 0);
         plan.push(.set_no_new_privs, empty_text, empty_text, 0);
         plan.push(.install_seccomp, empty_text, empty_text, 0);
+        plan.push_cdi_ldconfig();
         plan.push(.exec, empty_text, empty_text, 0);
         assert(plan.steps[plan.count - 1].kind == .exec);
         // The parent's tail remains.
@@ -1077,13 +1078,20 @@ pub const Plan = struct {
         plan.push(.stage_cdi_mounts, plan.cdi_rootfs, empty_text, 0);
     }
 
-    /// The CDI mounts moved to their paths in the new root, and then the library cache, which
-    /// reads the directories the mounts brought.
+    /// The library cache, which reads the directories the mounts brought. It runs the image's
+    /// own program, so it comes last, after the descriptors are sealed, the capabilities
+    /// dropped and the seccomp filter installed: it gets the sandbox the command gets.
+    fn push_cdi_ldconfig(plan: *Plan) void {
+        assert(plan.count < constants.plan_steps_max);
+        assert(plan.cdi_dirs <= constants.cdi_run_dirs_max);
+        if (plan.cdi_dirs > 0) plan.push(.run_ldconfig, empty_text, empty_text, 0);
+    }
+
+    /// The CDI mounts moved to their paths in the new root.
     fn push_cdi_moves(plan: *Plan) void {
         assert(plan.count < constants.plan_steps_max);
         assert(plan.cdi_dirs <= constants.cdi_run_dirs_max);
         if (plan.cdi_mounts > 0) plan.push(.move_cdi_mounts, empty_text, empty_text, 0);
-        if (plan.cdi_dirs > 0) plan.push(.run_ldconfig, empty_text, empty_text, 0);
     }
 
     /// Each volume's `data` made, a hidden directory in the container's /dev, the volume bound

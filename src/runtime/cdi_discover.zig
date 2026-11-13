@@ -1,6 +1,8 @@
 //! Finds the CDI specs of the host and resolves the devices a run asked for (M10 slice 2).
-//! Directories: `/etc/cdi`, `/var/run/cdi` and `$XDG_CONFIG_HOME/cdi`, each read in name order,
-//! at most `cdi_spec_files_max` files in all. What the specs name is then looked at on the host:
+//! Directories, the first that has a device deciding it (as in the reference implementation,
+//! where a later directory in `/etc/cdi`, `/var/run/cdi` order overrides an earlier one):
+//! `$XDG_CONFIG_HOME/cdi` (`$HOME/.config/cdi` when it is unset), `/var/run/cdi`, `/etc/cdi`,
+//! each read in name order, at most `cdi_dir_entries_max` spec files in all (more is refused). What the specs name is then looked at on the host:
 //! a mount's source must be there (E0226) and a node must be one the caller can open (E0225).
 
 const std = @import("std");
@@ -16,17 +18,22 @@ const Diag = @import("../diag/diag.zig").Diag;
 const Host = host_mod.Host;
 
 /// What resolving needs while it runs and the run does not keep: far too big for a stack, so the
-/// caller gives it a place (the run's handle).
+/// caller gives it a place (the run's handle, or the resolving function's own frame for a
+/// caller that has the room).
 pub const Scratch = struct {
     parsed: cdi.Parsed,
     resolver: cdi.Resolver,
     listing: host_mod.DirListing,
     content: [constants.cdi_spec_bytes_max + 1]u8,
     files: u32,
+    /// The directory that had more spec files than the bound (set with `too_many_files`).
+    overflow: [constants.cdi_path_bytes_max + 1]u8,
+    overflow_len: u32,
 };
 
-const fixed_directories = [_][:0]const u8{ "/etc/cdi", "/var/run/cdi" };
+const fixed_directories = [_][:0]const u8{ "/var/run/cdi", "/etc/cdi" };
 const config_suffix = "/cdi";
+const config_default = "/.config";
 
 /// Resolves `asked` (qualified names) into `out`. On a refusal the diagnostic is raised and the
 /// result is false.
@@ -41,15 +48,14 @@ pub fn resolve(
     assert(asked.len <= constants.run_devices_max);
     scratch.resolver.init(asked, &scratch.parsed, out);
     scratch.files = 0;
+    scratch.overflow_len = 0;
     var refusal: ?cdi.Refusal = null;
+    var path: [constants.cdi_path_bytes_max + 1]u8 = undefined;
+    if (config_directory(host, &path)) |directory| {
+        refusal = read_directory(host, directory, scratch);
+    }
     for (fixed_directories) |directory| {
         if (refusal == null) refusal = read_directory(host, directory, scratch);
-    }
-    if (refusal == null) {
-        var path: [constants.cdi_path_bytes_max + 1]u8 = undefined;
-        if (config_directory(host, &path)) |directory| {
-            refusal = read_directory(host, directory, scratch);
-        }
     }
     if (refusal == null) refusal = scratch.resolver.finish();
     if (refusal) |found| return refuse(asked, scratch, found, diag);
@@ -57,14 +63,26 @@ pub fn resolve(
 }
 
 fn config_directory(host: Host, buffer: *[constants.cdi_path_bytes_max + 1]u8) ?[:0]const u8 {
-    const home = host.environment("XDG_CONFIG_HOME", constants.cdi_path_bytes_max - 8) orelse
-        return null;
-    if (home.len == 0 or home[0] != '/') return null;
-    @memcpy(buffer[0..home.len], home);
-    @memcpy(buffer[home.len..][0..config_suffix.len], config_suffix);
-    const total = home.len + config_suffix.len;
+    const room = constants.cdi_path_bytes_max - config_default.len - config_suffix.len;
+    var total: usize = 0;
+    const config = host.environment("XDG_CONFIG_HOME", room);
+    if (config != null and config.?.len > 0 and config.?[0] == '/') {
+        total = append(buffer, total, config.?);
+    } else {
+        const home = host.environment("HOME", room) orelse return null;
+        if (home.len == 0 or home[0] != '/') return null;
+        total = append(buffer, total, home);
+        total = append(buffer, total, config_default);
+    }
+    total = append(buffer, total, config_suffix);
     buffer[total] = 0;
     return buffer[0..total :0];
+}
+
+fn append(buffer: *[constants.cdi_path_bytes_max + 1]u8, at: usize, text: []const u8) usize {
+    assert(at + text.len <= constants.cdi_path_bytes_max);
+    @memcpy(buffer[at..][0..text.len], text);
+    return at + text.len;
 }
 
 fn is_spec_name(name: []const u8) bool {
@@ -79,24 +97,37 @@ fn name_less(_: void, left: []const u8, right: []const u8) bool {
     return std.mem.lessThan(u8, left, right);
 }
 
-/// Reads the spec files of one directory, in name order. A directory that is not there is not
-/// a problem; a refusal is from a device the run asked for.
+/// Reads the spec files of one directory, in name order (all of them are listed and sorted
+/// before one is read, so the order does not depend on the file system). A directory that is not
+/// there is not a problem; a refusal is from a device the run asked for, or `too_many_files`
+/// when the specs of all directories pass `cdi_dir_entries_max`, or the listing was cut short.
 fn read_directory(host: Host, directory: [:0]const u8, scratch: *Scratch) ?cdi.Refusal {
     host.list_directory(directory, &scratch.listing) catch return null;
-    var names: [constants.cdi_spec_files_max][]const u8 = undefined;
+    var names: [constants.cdi_dir_entries_max][]const u8 = undefined;
     var count: usize = 0;
     var at: usize = 0;
-    while (at < scratch.listing.len and count < names.len) {
+    var over = scratch.listing.truncated;
+    while (at < scratch.listing.len) {
         const name = std.mem.span(@as([*:0]const u8, @ptrCast(&scratch.listing.bytes[at])));
         at += name.len + 1;
         if (!is_spec_name(name)) continue;
+        if (count == names.len or scratch.files + count == names.len) {
+            over = true;
+            break;
+        }
         names[count] = name;
         count += 1;
     }
+    if (over) {
+        const length = @min(directory.len, scratch.overflow.len - 1);
+        @memcpy(scratch.overflow[0..length], directory[0..length]);
+        scratch.overflow_len = @intCast(length);
+        return .too_many_files;
+    }
     std.mem.sort([]const u8, names[0..count], {}, name_less);
     for (names[0..count]) |name| {
-        if (scratch.files == constants.cdi_spec_files_max) return null;
         scratch.files += 1;
+        assert(scratch.files <= constants.cdi_dir_entries_max);
         if (read_file(host, directory, name, scratch)) |refusal| return refusal;
     }
     return null;
@@ -137,17 +168,29 @@ fn refuse(asked: []const []const u8, scratch: *Scratch, refusal: cdi.Refusal, di
             cdi_diagnose.unsupported(diag, asked[found.index], found.edit, name);
         },
         .too_big => |index| cdi_diagnose.too_big(diag, asked[index]),
+        .too_many_files => cdi_diagnose.too_many_files(diag, scratch.overflow[0..scratch.overflow_len]),
     }
     return false;
 }
 
 /// Every mount's source is there (its kind noted) and every node can be opened.
 fn looked_at(host: Host, scratch: *Scratch, out: *cdi.Resolved, diag: *Diag) bool {
-    const asked_name = first_asked(&scratch.resolver);
+    return host_has(host, out, scratch.resolver.asked, diag);
+}
+
+/// What the host must have for a resolved set: each mount's source (its kind noted in
+/// `mount_is_dir`) and each node. Also the check for a set a caller resolved itself.
+pub fn host_has(
+    host: Host,
+    out: *cdi.Resolved,
+    asked: []const []const u8,
+    diag: *Diag,
+) bool {
+    assert(asked.len > 0);
     for (out.mounts[0..out.mounts_count], 0..) |item, index| {
         const source = out.text(item.host);
         const stat = host.stat(source) catch {
-            cdi_diagnose.host_lacks(diag, .stale, source, asked_name);
+            cdi_diagnose.host_lacks(diag, .stale, source, owner_of(asked, out.mount_owner[index]));
             return false;
         };
         out.mount_is_dir[index] = stat.mode & 0o170000 == 0o040000;
@@ -162,7 +205,9 @@ fn looked_at(host: Host, scratch: *Scratch, out: *cdi.Resolved, diag: *Diag) boo
     return true;
 }
 
-fn first_asked(resolver: *const cdi.Resolver) []const u8 {
-    assert(resolver.asked.len > 0);
-    return resolver.asked[0];
+/// The asked device that owns a mount; a given set, which has no asked list of its own, is
+/// named by the first.
+fn owner_of(asked: []const []const u8, owner: u8) []const u8 {
+    assert(asked.len > 0);
+    return asked[if (owner < asked.len) owner else 0];
 }

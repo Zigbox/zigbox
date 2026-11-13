@@ -1802,6 +1802,15 @@ fn program_child(
 }
 
 fn helper_child(request: host.ExecRequest, output: i32) noreturn {
+    if (request.timeout_seconds > 0) {
+        // The timer survives the exec; SIGALRM's default action ends the helper.
+        const limit: linux.itimerspec = .{
+            .it_interval = .{ .sec = 0, .nsec = 0 },
+            .it_value = .{ .sec = request.timeout_seconds, .nsec = 0 },
+        };
+        const set = linux.setitimer(@backingInt(linux.ITIMER.REAL), &limit, null);
+        if (linux.errno(set) != .SUCCESS) linux.exit_group(127);
+    }
     _ = linux.dup2(output, linux.STDOUT_FILENO);
     _ = linux.dup2(output, linux.STDERR_FILENO);
     _ = linux.execve(request.path.ptr, request.argv, request.envp);

@@ -88,6 +88,11 @@ pub fn unsupported(diag: *Diag, device: []const u8, edit: cdi.Unsupported, name:
     }
     diag.context("device", "{s}", .{named});
     diag.context("edit", "{s}", .{edit.sentence()});
+    if (edit == .read_only_mounts) {
+        diag.fix(.{ .sentence = "run without --read-only, or pass the node as a path:", .command = "zbx run --device /dev/nvidia0 <image>", .template = true });
+        assert(diag.code.? == .E0227);
+        return;
+    }
     diag.fix(.{
         .sentence = "ask a device that needs only device nodes, mounts, environment " ++
             "variables and nvidia-cdi-hook update-ldcache, or pass the node as a path:",
@@ -140,4 +145,25 @@ pub fn no_ldconfig(diag: *Diag) void {
     diag.fix(.{ .sentence = "nothing to do for an image that finds them; a musl image such " ++
         "as Alpine cannot load glibc driver libraries, use a glibc image" });
     assert(diag.code.? == .W0208);
+}
+
+/// ZBX-E0226 for CDI directories that hold more spec files than a run reads.
+pub fn too_many_files(diag: *Diag, directory: []const u8) void {
+    assert(diag.code == null);
+    var storage: [constants.arg_echo_bytes_max]u8 = undefined;
+    const named = echo_of(&storage, directory);
+    diag.raise(.E0226);
+    diag.while_("reading the CDI specs in {s}", .{directories});
+    diag.cause("{s} brings the CDI spec files past {d}, the most a run reads", .{
+        named,
+        constants.cdi_dir_entries_max,
+    });
+    diag.context("directory", "{s}", .{named});
+    diag.fix(.{ .sentence = "move the specs this host does not use out of the CDI directories" });
+    assert(diag.code.? == .E0226);
+}
+
+/// ZBX-E0227: `--read-only` with a CDI device whose spec has mounts.
+pub fn read_only_mounts(diag: *Diag, device: []const u8) void {
+    unsupported(diag, device, .read_only_mounts, "");
 }

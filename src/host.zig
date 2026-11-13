@@ -327,6 +327,8 @@ pub const ExecRequest = struct {
     path: [:0]const u8,
     argv: CStrings,
     envp: CStrings,
+    /// Seconds the helper may run before it is killed (SIGALRM); zero is no limit.
+    timeout_seconds: u32 = 0,
 };
 
 /// What a helper program (newuidmap, newgidmap) did: how it ended, and the first bytes it wrote.

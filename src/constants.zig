@@ -249,6 +249,8 @@ pub const device_path_bytes_max: u32 = 48;
 pub const cdi_spec_bytes_max: u32 = file_bytes_max - 1;
 /// Spec files read from the three directories together, and entries looked at in one directory.
 pub const cdi_spec_files_max: u32 = 16;
+/// Seconds the image's `ldconfig` may run in the container before it is killed.
+pub const cdi_ldconfig_seconds_max: u32 = 10;
 pub const cdi_dir_entries_max: u32 = 64;
 /// What one parsed spec holds: devices, and over all its edits the nodes, mounts, variables and
 /// library directories. A spec with more is refused (E0226), not cut.

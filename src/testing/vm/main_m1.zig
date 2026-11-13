@@ -348,19 +348,23 @@ fn extra_cdi(session: *Session, out: *Io.Writer, timer: *H.Timer) !void {
     try out.print("\ndemo-m1: EXTRA: --device vendor.example/gpu=0, from /etc/cdi\n", .{});
     const spec = "{\"cdiVersion\":\"0.6.0\",\"kind\":\"vendor.example/gpu\",\"devices\":[" ++
         "{\"name\":\"0\",\"containerEdits\":{\"deviceNodes\":" ++
-        "[{\"path\":\"/dev/zbx-render\"}]}}]," ++
+        "[{\"path\":\"/dev/zbx-render\"}],\"mounts\":[{\"hostPath\":\"/opt/zbx-fake-lib\"," ++
+        "\"containerPath\":\"/opt/zbx-fake-lib\",\"options\":[\"ro\",\"bind\"]}]}}],"
+        ++
         "\"containerEdits\":{\"env\":[\"FAKE=all\"]," ++
         "\"hooks\":[{\"hookName\":\"createContainer\"," ++
         "\"path\":\"/usr/bin/nvidia-cdi-hook\",\"args\":[\"nvidia-cdi-hook\",\"update-ldcache\"," ++
         "\"--folder\",\"/usr/lib\"]}]}}";
     const setup = "groupadd -f render && usermod -aG render demo && " ++
         "mknod /dev/zbx-render c 1 3 && chgrp render /dev/zbx-render && " ++
-        "chmod 0660 /dev/zbx-render && mkdir -p /etc/cdi && " ++
+        "chmod 0660 /dev/zbx-render && mkdir -p /etc/cdi /opt/zbx-fake-lib && " ++
+        "echo vendor > /opt/zbx-fake-lib/libfake.so && " ++
         "printf '%s' '" ++ spec ++ "' > /etc/cdi/zbx-fake.json";
     const prepared = try session.run(setup, limits.command_timeout_kvm_s);
     try H.show(out, "write the spec, make the node", prepared);
     if (prepared.status != 0) return error.DeviceSetupFailed;
-    const inside = "'echo FAKE=$FAKE; : </dev/zbx-render && echo OPENED-READ'";
+    const inside = "'echo FAKE=$FAKE; : </dev/zbx-render && echo OPENED-READ; " ++
+        "cat /opt/zbx-fake-lib/libfake.so; touch /opt/zbx-fake-lib/x 2>/dev/null || echo BIND-RO'";
     const asked = run_prefix ++ " --name cdi1 --device vendor.example/gpu=0 -- sh -c " ++ inside;
     const applied = try H.run_split(session, asked);
     try H.show_split(out, asked, applied);
@@ -373,7 +377,7 @@ fn extra_cdi(session: *Session, out: *Io.Writer, timer: *H.Timer) !void {
     checks_m1.check_cdi_unknown(refused.streams, refused.status) catch |err| {
         return fail_step(out, "EXTRA cdi", "an unknown name is E0230 with the known names", err);
     };
-    const cleanup = "rm -f /dev/zbx-render /etc/cdi/zbx-fake.json; gpasswd -d demo render; true";
+    const cleanup = "rm -rf /dev/zbx-render /etc/cdi/zbx-fake.json /opt/zbx-fake-lib; gpasswd -d demo render; true";
     _ = try session.run(cleanup, limits.command_timeout_kvm_s);
     try timer.lap(out, "cdi");
 }

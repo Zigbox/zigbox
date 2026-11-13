@@ -38,9 +38,12 @@ pub const Unsupported = enum {
     other,
     /// Two mounts at one container path from different host paths.
     mount_conflict,
+    /// Mounts, in a run whose root is read-only (`--read-only`): there is no place to make
+    /// their targets. Raised by the run, not by a spec's parse.
+    read_only_mounts,
 
     pub fn sentence(edit: Unsupported) []const u8 {
-        assert(@backingInt(edit) <= @backingInt(Unsupported.mount_conflict));
+        assert(@backingInt(edit) <= @backingInt(Unsupported.read_only_mounts));
         return switch (edit) {
             .none => "none",
             .hook => "a hook other than nvidia-cdi-hook update-ldcache",
@@ -50,6 +53,7 @@ pub const Unsupported = enum {
             .node_kind => "a device node that is not a character device at its own path",
             .other => "an edit Zigbox does not know",
             .mount_conflict => "two mounts at one path from different host paths",
+            .read_only_mounts => "mounts, which a read-only root (--read-only) cannot take",
         };
     }
 };
@@ -551,6 +555,8 @@ fn parse_nodes(reader: *Reader, edits: *Edits) Refused!void {
         if (token == .array_end) return;
         if (token != .object_begin) return reader.refuse(.wrong_type, .device_nodes);
         var path: ?Text = null;
+        // A `hostPath` that comes before `path` is kept, and compared once the object is read.
+        var early_host: ?Text = null;
         while (try object_key(reader, .device_nodes)) |key| {
             if (std.mem.eql(u8, key, "path")) {
                 const text = try reader.string(.device_nodes);
@@ -560,8 +566,10 @@ fn parse_nodes(reader: *Reader, edits: *Edits) Refused!void {
                 path = try reader.keep(text, .device_nodes);
             } else if (std.mem.eql(u8, key, "hostPath")) {
                 const text = try reader.string(.device_nodes);
-                const own = path != null and std.mem.eql(u8, parsed.slice(path.?), text);
-                if (!own) try note_unsupported(reader, edits, .node_kind, null);
+                if (path) |known| {
+                    const own = std.mem.eql(u8, parsed.slice(known), text);
+                    if (!own) try note_unsupported(reader, edits, .node_kind, null);
+                } else early_host = try reader.keep(text, .device_nodes);
             } else if (std.mem.eql(u8, key, "type")) {
                 const text = try reader.string(.device_nodes);
                 const character = text.len == 0 or std.mem.eql(u8, text, "c");
@@ -569,6 +577,10 @@ fn parse_nodes(reader: *Reader, edits: *Edits) Refused!void {
             } else try reader.skip(.device_nodes);
         }
         const found = path orelse return reader.refuse(.missing, .device_nodes);
+        if (early_host) |host_text| {
+            const own = std.mem.eql(u8, parsed.slice(host_text), parsed.slice(found));
+            if (!own) try note_unsupported(reader, edits, .node_kind, null);
+        }
         if (parsed.nodes_count == constants.cdi_nodes_max) {
             return reader.refuse(.too_many, .device_nodes);
         }
@@ -720,6 +732,9 @@ fn judge_hook(reader: *Reader, edits: *Edits, hook: *const HookFacts) Refused!vo
 pub const Resolved = struct {
     nodes_count: u32,
     nodes: [constants.cdi_run_nodes_max]Text,
+    /// The asked device (an index into the asked list) that first needed each mount, so that a
+    /// refusal names that one.
+    mount_owner: [constants.cdi_run_mounts_max]u8,
     mounts_count: u32,
     mounts: [constants.cdi_run_mounts_max]Mount,
     /// Whether each mount's source is a directory; set by the run, which looks at the host.
@@ -733,6 +748,7 @@ pub const Resolved = struct {
 
     pub fn reset(resolved: *Resolved) void {
         resolved.nodes_count = 0;
+        @memset(&resolved.mount_owner, 0);
         resolved.mounts_count = 0;
         resolved.env_count = 0;
         resolved.dirs_count = 0;
@@ -769,6 +785,8 @@ pub const Refusal = union(enum) {
     unsupported: struct { index: u32, edit: Unsupported, name: [48]u8, name_len: u8 },
     /// What the devices ask for together is over a bound of `Resolved`.
     too_big: u32,
+    /// The spec directories hold more files than a run reads (`cdi_dir_entries_max`).
+    too_many_files,
 };
 
 /// Resolves the devices a run asked for, one spec file at a time: `add_file` for each file found,
@@ -934,7 +952,7 @@ pub const Resolver = struct {
         for (parsed.mounts[edits.mounts_at..][0..edits.mounts_count]) |mount| {
             const host = parsed.slice(mount.host);
             const container = parsed.slice(mount.container);
-            const added = resolver.add_mount(host, container);
+            const added = resolver.add_mount(host, container, index);
             switch (added) {
                 .added, .same => {},
                 .conflict => return conflict_of(index, container),
@@ -965,7 +983,7 @@ pub const Resolver = struct {
 
     const Added = enum { added, same, conflict, full };
 
-    fn add_mount(resolver: *Resolver, host: []const u8, container: []const u8) Added {
+    fn add_mount(resolver: *Resolver, host: []const u8, container: []const u8, owner: u32) Added {
         assert(path_valid(container));
         assert(resolver.out.mounts_count <= constants.cdi_run_mounts_max);
         const out = resolver.out;
@@ -978,6 +996,7 @@ pub const Resolver = struct {
         const kept_container = out.keep(container) orelse return .full;
         out.mounts[out.mounts_count] = .{ .host = kept_host, .container = kept_container };
         out.mount_is_dir[out.mounts_count] = false;
+        out.mount_owner[out.mounts_count] = @intCast(owner);
         out.mounts_count += 1;
         return .added;
     }
