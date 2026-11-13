@@ -39,13 +39,13 @@ run:
   zbx run --rootfs <dir> [--name <name>] -- <command> [args...]
   <image>         a pulled image by name (alpine:3.20, name@sha256:...): it runs what the
                   image says (entrypoint, command, environment, directory, user); words
-                  after -- replace its command. A tag is looked up in zbx.lock, which is
-                  made if the project has none, and refused if it and the store disagree
+                  after -- replace its command. A tag is looked up in zbx.lock (made if
+                  absent), and refused if it and the store disagree
   <digest>        a tree of the store (or a unique prefix of 12 or more hex digits), run on
                   an overlay: its writes go to the container's own layer, never the store
   --rootfs <dir>  or a directory to use as the container's root, read and written in place
   --name <name>   the container's name and hostname (default: zbx- and six hex digits)
-  --memory <size> memory limit, binary units: 128m, 1g (needs the systemd user manager)
+  --memory <size> memory limit: 128m, 1g (needs the systemd user manager)
   --pids <n>      limit on processes and threads, as in 64
   --cpus <n>      limit on CPU time, in CPUs: 0.5 is half of one
   --read-only     mount the root read-only, with a tmpfs at /tmp and /run
@@ -53,34 +53,34 @@ run:
                   or user (the network through pasta, as the user: apt install passt)
   --publish <h:c> forward TCP port h of this machine to port c of the container (repeatable;
                   implies --net user)
-  --listen <addr:port>  make a TCP listener on the container's loopback (only 127.0.0.1;
-                  --net none only) and hand it to the caller with --listen-send
+  --listen <addr:port>  a TCP listener on the container's loopback (127.0.0.1 only;
+                  --net none only), handed to the caller with --listen-send
   --listen-send <fd>  the inherited Unix socket the listener is sent over (SCM_RIGHTS)
   -e <name>[=<value>]  set a variable in the container, over the image's (repeatable): with
                   =<value> that value, without it zbx's own (an error if unset there).
-                  A value is never stored or printed; zbx ps and a bundle show the name
+                  A value is never stored or printed; only the name is shown
   -d, --detach    start the container and return; zbx ps and zbx stop find it again
   --timeout <ms>  stop the container when it has run this long (SIGTERM, then SIGKILL)
   --grace <ms>    time between SIGTERM and SIGKILL (default 10000)
   --state <name>:<path>[:ro]   mount the state volume <name> at <path> (repeatable, up to
-                  8); the first use makes it, empty. One run writes a volume at a time;
-                  with :ro it is mounted read-only and shared with other readers
-  --tmpfs <path>[:<size>]   an empty tmpfs at <path>, gone at exit (repeatable; 64m without a
-                  size; k, m or g). Its pages count against --memory
+                  8); made empty on first use; one writer at a time, or :ro for readers
+  --tmpfs <path>[:<size>]   an empty tmpfs at <path>, gone at exit (repeatable; 64m if no
+                  size; k, m or g); its pages count against --memory
   --bind <host>:<path>   the host's directory or file at <path>, always read-only; a
                   <host> that does not exist is an error, never made (repeatable)
   --device /dev/<path>|<vendor/class>=<name>   bind a host device node, or a CDI device from
                   /etc/cdi, /var/run/cdi or $XDG_CONFIG_HOME/cdi, at its path (repeatable,
                   up to 16); groups carry over
   --gpu all|dri   the render nodes and /dev/kfd you can open; all: NVIDIA CDI devices if any
+                  (zbx doctor lists them)
   --mount <host>:<path>  the project's directory or file at <path>, writable (repeatable).
-                  <host> may be relative; with every symbolic link followed it must be the
-                  project directory (the one with zbx.lock, else the working directory) or
-                  inside it. The container must run as root, which is you: see --user
+                  <host> may be relative; it must be, or be inside, the project directory
+                  (the one with zbx.lock, else the working directory), links followed.
+                  The container must run as root, which is you: see --user
   --secret <host-file>:<path>   a copy of one host file at <path>, read-only, mode 0400,
-                  owned by the container's root. Its contents are never stored or
-                  printed, and the mount point is left out of zbx commit (repeatable).
-                  Up to 8 of --tmpfs, --bind, --mount and --secret; no two on one path
+                  owned by the container's root; never stored or printed, and left out
+                  of zbx commit (repeatable). Up to 8 of --tmpfs, --bind, --mount and
+                  --secret; no two on one path
   --user <user>[:<group>]   run the command as this user of the image (a name from its
                   /etc/passwd and /etc/group, or a number), over the image's own; --user 0
                   makes a non-root image fit --mount
