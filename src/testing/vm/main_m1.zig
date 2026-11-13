@@ -406,7 +406,8 @@ fn extra_gpu(session: *Session, out: *Io.Writer, timer: *H.Timer) !void {
     checks_m1.check_gpu_doctor(listed.streams) catch |err| {
         return fail_step(out, "EXTRA gpu", "doctor lists the spec and the node", err);
     };
-    const probe = try session.run("ls /dev/dri 2>/dev/null | grep -c renderD; true", limits.command_timeout_kvm_s);
+    const count = "ls /dev/dri 2>/dev/null | grep -c renderD; true";
+    const probe = try session.run(count, limits.command_timeout_kvm_s);
     const has_render = !std.mem.eql(u8, std.mem.trim(u8, probe.output, " \r\n"), "0");
     try out.print("demo-m1: the guest has a render node: {}\n", .{has_render});
     if (has_render) {

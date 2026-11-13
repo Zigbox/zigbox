@@ -532,15 +532,22 @@ test "gpu: doctor lists the spec, --gpu all with nothing is E0228, --gpu dri sho
     const good = "gpu  ok  spec /etc/cdi/a.json  zigbox.test/gpu, 1 devices\n" ++
         "gpu  ok  device zigbox.test/gpu=0  every node can be opened by you\n";
     try check_gpu_doctor(.{ .stdout = good, .stderr = "" });
-    try testing.expectError(error.GpuWrong, check_gpu_doctor(.{ .stdout = "ok  kernel\n", .stderr = "" }));
-    const gap = good ++ "gpu  gap node /dev/x  mode 0660\n";
-    try testing.expectError(error.GpuWrong, check_gpu_doctor(.{ .stdout = gap, .stderr = "" }));
-    const none = "error[ZBX-E0228]: --gpu found nothing; run zbx doctor\n";
-    try check_gpu_none(.{ .stdout = "", .stderr = none }, 125);
-    try testing.expectError(error.ExitCodeWrong, check_gpu_none(.{ .stdout = "", .stderr = none }, 1));
-    try testing.expectError(error.NoteMissing, check_gpu_none(.{ .stdout = "", .stderr = "x" }, 125));
-    try check_gpu_dri(.{ .stdout = "renderD128\n", .stderr = "" }, 0);
-    try testing.expectError(error.GpuWrong, check_gpu_dri(.{ .stdout = "card0\nrenderD128\n", .stderr = "" }, 0));
+    const absent = Streams{ .stdout = "ok  kernel\n", .stderr = "" };
+    try testing.expectError(error.GpuWrong, check_gpu_doctor(absent));
+    const gap = Streams{ .stdout = good ++ "gpu  gap node /dev/x  mode 0660\n", .stderr = "" };
+    try testing.expectError(error.GpuWrong, check_gpu_doctor(gap));
+    const none = Streams{
+        .stdout = "",
+        .stderr = "error[ZBX-E0228]: --gpu found nothing; run zbx doctor\n",
+    };
+    try check_gpu_none(none, 125);
+    try testing.expectError(error.ExitCodeWrong, check_gpu_none(none, 1));
+    const bare = Streams{ .stdout = "", .stderr = "x" };
+    try testing.expectError(error.NoteMissing, check_gpu_none(bare, 125));
+    const dri = Streams{ .stdout = "renderD128\n", .stderr = "" };
+    try check_gpu_dri(dri, 0);
+    const card = Streams{ .stdout = "card0\nrenderD128\n", .stderr = "" };
+    try testing.expectError(error.GpuWrong, check_gpu_dri(card, 0));
     try testing.expectError(error.GpuWrong, check_gpu_dri(.{ .stdout = "", .stderr = "" }, 0));
-    try testing.expectError(error.ExitCodeWrong, check_gpu_dri(.{ .stdout = "renderD128\n", .stderr = "" }, 125));
+    try testing.expectError(error.ExitCodeWrong, check_gpu_dri(dri, 125));
 }
