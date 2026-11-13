@@ -64,6 +64,10 @@ pub const Spec = struct {
     /// More files for the same simulated host, for tests that run more than the doctor (a
     /// container run needs its rootfs). Empty for every fixture the doctor's snapshots use.
     extra_files: []const File = &.{},
+    /// Files a directory listing shows (the doctor lists /etc/cdi and /dev/dri); their content is
+    /// written into the simulated world, and a node among them also needs an `extra_files` entry
+    /// for its mode and group.
+    written: []const File = &.{},
 };
 
 pub const default_status =
@@ -81,6 +85,7 @@ pub const Fixture = struct {
     seccomp: host.Error!u32,
     probes: sim.Probes,
     pasta_version: ?[]const u8,
+    written: []const File,
 
     /// Points `host_sim` at this fixture.
     pub fn apply(fixture: *const Fixture, target: *sim.HostSim) void {
@@ -94,6 +99,11 @@ pub const Fixture = struct {
         target.probes = fixture.probes;
         target.environment_variables = fixture.environment;
         if (fixture.pasta_version) |line| target.world.pasta_version_line = line;
+        for (fixture.written) |file| {
+            const slash = std.mem.lastIndexOfScalar(u8, file.path, '/').?;
+            if (slash > 0) target.world.add_node(file.path[0..slash], .dir);
+            std.debug.assert(target.world.write_file(file.path, file.content) == null);
+        }
         const model = &target.world.bus.model;
         switch (fixture.bus) {
             .present, .no_environment => {},
@@ -184,6 +194,7 @@ pub fn build(comptime spec: Spec) Fixture {
         .seccomp = spec.seccomp,
         .probes = spec.probes,
         .pasta_version = spec.pasta_version,
+        .written = spec.written,
     };
 }
 
@@ -334,7 +345,46 @@ pub const all = [_]Fixture{
         .pasta = .{ .mode = 0o100755 },
         .pasta_version = "pasta 2023_12_30.f091893\n",
     }),
+    // M10 slice 3: the doctor's GPU section. A CDI spec the host has, its node openable.
+    build(.{
+        .name = "gpu_cdi_spec",
+        .extra_files = &.{.{ .path = "/dev/fake0", .content = "", .mode = 0o020666 }},
+        .written = &.{.{ .path = "/etc/cdi/zigbox-test.json", .content = test_spec }},
+    }),
+    // A spec that cannot be used, and a second that can, whose node this user cannot open.
+    build(.{
+        .name = "gpu_cdi_refused",
+        .extra_files = &.{.{ .path = "/dev/fake0", .content = "", .mode = 0o020660, .gid = 44 }},
+        .written = &.{
+            .{ .path = "/etc/cdi/a-broken.json", .content = "{\"cdiVersion\": " },
+            .{ .path = "/etc/cdi/zigbox-test.json", .content = test_spec },
+        },
+    }),
+    // The NVIDIA driver is loaded and no spec was ever generated.
+    build(.{
+        .name = "gpu_driver_no_spec",
+        .extra_files = &.{.{ .path = "/dev/nvidia0", .content = "", .mode = 0o020666 }},
+        .written = &.{.{ .path = "/proc/driver/nvidia/version", .content = nvidia_version }},
+    }),
+    // An AMD host: a render node whose group the user is not in, and /dev/kfd that is open.
+    build(.{
+        .name = "gpu_render_closed",
+        .extra_files = &.{
+            .{ .path = "/dev/dri/renderD128", .content = "", .mode = 0o020660, .gid = 110 },
+            .{ .path = "/dev/kfd", .content = "", .mode = 0o020666, .gid = 110 },
+        },
+        .written = &.{.{ .path = "/dev/dri/renderD128", .content = "" }},
+    }),
 };
+
+const test_spec =
+    \\{"cdiVersion":"0.6.0","kind":"zigbox.test/gpu","devices":[
+    \\ {"name":"0","containerEdits":{"deviceNodes":[{"path":"/dev/fake0"}]}}]}
+;
+
+const nvidia_version =
+    "NVRM version: NVIDIA UNIX x86_64 Kernel Module  550.54.15  Thu Feb 22 01:44:30 UTC 2024\n" ++
+    "GCC version:  gcc version 13.2.0 (Ubuntu 13.2.0-23ubuntu4)\n";
 
 /// The fixture called `name`, or null.
 pub fn find(name: []const u8) ?*const Fixture {

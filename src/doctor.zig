@@ -1695,7 +1695,9 @@ pub fn run(
     diag: *Diag,
 ) error{OutputFailed}!void {
     inspect(host, facts, report);
-    if (format == .json) return write_json(host, report, diag);
+    var gpu: doctor_gpu.Section = undefined;
+    doctor_gpu.gather(host, &gpu);
+    if (format == .json) return write_json(host, report, &gpu, diag);
 
     var buffer: [constants.output_bytes_max]u8 = undefined;
     const output = render(report, host.color_enabled(.stdout), &buffer);
@@ -1705,8 +1707,24 @@ pub fn run(
         return error.OutputFailed;
     };
     assert(output.len <= buffer.len);
+    try write_gpu_text(host, &gpu, diag);
 }
 
+/// The GPU lines after the report; nothing when the host has nothing GPU-shaped.
+fn write_gpu_text(
+    host: Host,
+    gpu: *const doctor_gpu.Section,
+    diag: *Diag,
+) error{OutputFailed}!void {
+    if (gpu.count == 0) return;
+    var buffer: [constants.output_bytes_max]u8 = undefined;
+    var writer = std.Io.Writer.fixed(&buffer);
+    doctor_gpu.write_text(gpu, &writer);
+    try write_piece(host, writer.buffered(), diag);
+}
+
+const doctor_gpu = @import("doctor_gpu.zig");
+const test_util = @import("test_util.zig");
 const render_diag = @import("diag/render.zig");
 const json_string = @import("bundle.zig").write_json_string;
 
@@ -1714,7 +1732,12 @@ const json_string = @import("bundle.zig").write_json_string;
 /// and the line the text report shows, and for a FAIL or a warn its code and its diagnostic, the
 /// same object `--output json` writes on stderr for a failure. Written in pieces, one check at
 /// a time, because the diagnostics together can be larger than one message.
-pub fn write_json(host: Host, report: *const Report, diag: *Diag) error{OutputFailed}!void {
+pub fn write_json(
+    host: Host,
+    report: *const Report,
+    gpu: *const doctor_gpu.Section,
+    diag: *Diag,
+) error{OutputFailed}!void {
     report.validate();
     var ok = true;
     for (&report.checks) |*check| ok = ok and check.status != .fail;
@@ -1726,7 +1749,13 @@ pub fn write_json(host: Host, report: *const Report, diag: *Diag) error{OutputFa
     for (&report.checks, 0..) |*check, index| {
         try write_check_json(host, check, index > 0, diag);
     }
-    try write_piece(host, "]}\n", diag);
+    if (gpu.count == 0) return write_piece(host, "]}\n", diag);
+    var buffer: [constants.output_bytes_max]u8 = undefined;
+    var writer = std.Io.Writer.fixed(&buffer);
+    writer.writeAll("],\"gpu\":[") catch unreachable; // Short text in a message.
+    doctor_gpu.write_json(gpu, &writer);
+    writer.writeAll("]}\n") catch unreachable; // Same.
+    try write_piece(host, writer.buffered(), diag);
 }
 
 fn write_piece(host: Host, text: []const u8, diag: *Diag) error{OutputFailed}!void {
@@ -1930,7 +1959,9 @@ test "the healthy fixtures pass and warn does not change the exit code" {
         "pasta_missing",                  "restricted_but_working",
         "pasta_old",                      "subid_by_uid",
         "no_passwd_entry",                "kernel_exactly_minimum",
-        "kernel_newer_major_lower_minor",
+        "kernel_newer_major_lower_minor", "gpu_cdi_spec",
+        "gpu_cdi_refused",                "gpu_driver_no_spec",
+        "gpu_render_closed",
     };
     var target: HostSim = undefined;
     for (fixtures.all) |fixture| {
@@ -2212,4 +2243,37 @@ test "the overlay line says whether an id-mapped mount of the project is allowed
     const failing = overlay_detail(&target, &report);
     try testing.expect(std.mem.indexOf(u8, failing, "id-mapped") == null);
     try testing.expectEqual(Status.fail, report.checks[@backingInt(CheckId.overlay)].status);
+}
+
+const gpu_fixture_names = [_][]const u8{
+    "gpu_cdi_spec", "gpu_cdi_refused", "gpu_driver_no_spec", "gpu_render_closed",
+};
+
+test "snapshot: the GPU section in text and in the zbx.doctor/1 document" {
+    // Goal: the GPU section's text and JSON are pinned over fixture hosts, and a gap does not
+    // change the exit code. Method: run `doctor` and `doctor --output json` on each GPU fixture
+    // and compare with src/testdata/doctor/NAME.txt and NAME.json.txt.
+    @setEvalBranchQuota(100_000);
+    var target: HostSim = undefined;
+    inline for (gpu_fixture_names) |name| {
+        const fixture = fixtures.find(name).?;
+        target.init(7, fixture.files);
+        fixture.apply(&target);
+        try testing.expectEqual(constants.exit_ok, cli.run(target.interface(), &.{"doctor"}));
+        const text = target.stdout();
+        try testing.expect(std.mem.indexOf(u8, text, "\ngpu  ") != null);
+        target.init(7, fixture.files);
+        fixture.apply(&target);
+        try testing.expectEqual(
+            constants.exit_ok,
+            cli.run(target.interface(), &.{ "doctor", "--output", "json" }),
+        );
+        const json = target.stdout();
+        try testing.expect(std.mem.indexOf(u8, json, "],\"gpu\":[") != null);
+        try testing.expect(try test_util.json_is_valid(std.mem.trimEnd(u8, json, "\n")));
+        try testing.expectEqualStrings(
+            @embedFile("testdata/doctor/" ++ name ++ ".json.txt"),
+            json,
+        );
+    }
 }

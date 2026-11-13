@@ -38,7 +38,7 @@ const render_names = [_][]const u8{
 /// The files of a simulated host: the run's own, the nodes `host` has, and the spec.
 const Files = struct {
     items: [sim_run.files.len + 8]host_sim.File,
-    count: usize,
+    count: u32,
 
     fn add(files: *Files, file: host_sim.File) void {
         files.items[files.count] = file;
@@ -82,7 +82,8 @@ fn run_gpu(sim: *HostSim, word: [:0]const u8) u8 {
 fn bound(sim: *HostSim, path: []const u8) bool {
     const table = &sim.world.tables[sim.world.processes[1].table];
     var target: [128]u8 = undefined;
-    const made = std.fmt.bufPrint(&target, "{s}{s}", .{ rootfs, path }) catch unreachable;
+    const made = std.fmt.bufPrint(&target, "{s}{s}", .{ rootfs, path }) catch
+        unreachable; // A short root and a device path fit 128 bytes.
     return table.find(made) != null;
 }
 

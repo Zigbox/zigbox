@@ -513,7 +513,8 @@ pub fn listen_unavailable(diag: *Diag) void {
 /// container runs in a Linux guest that Apple's virtualization gives no GPU compute.
 pub fn devices_unavailable(diag: *Diag, option: []const u8) void {
     assert(diag.code == null);
-    assert(std.mem.eql(u8, option, "--gpu") or std.mem.eql(u8, option, "--device"));
+    const known = std.mem.eql(u8, option, "--gpu") or std.mem.eql(u8, option, "--device");
+    assert(known);
     diag.raise(.E0229);
     diag.while_("checking {s}", .{option});
     diag.cause("{s} is not available on macOS: zbx runs the container in a Linux virtual " ++

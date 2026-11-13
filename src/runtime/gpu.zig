@@ -121,7 +121,8 @@ pub fn look_dri(host: Host, out: *Dri) void {
 fn look_node(host: Host, name: []const u8, out: *Dri) void {
     var path: [constants.device_path_bytes_max + 1]u8 = undefined;
     const prefix = dri_directory ++ "/";
-    if (prefix.len + name.len > constants.device_path_bytes_max) return; // Not a path --device takes.
+    // Not a path that --device takes.
+    if (prefix.len + name.len > constants.device_path_bytes_max) return;
     @memcpy(path[0..prefix.len], prefix);
     @memcpy(path[prefix.len..][0..name.len], name);
     const node = path[0 .. prefix.len + name.len];
@@ -236,7 +237,9 @@ pub fn expand(
             if (!out.add_node(dri.path(index))) return .too_many;
         }
     }
-    assert(out.count > 0 or asked.len == 0);
+    assert(out.count <= out.items.len);
+    const empty_ok = out.count > 0 or asked.len == 0;
+    assert(empty_ok);
     return .given;
 }
 
@@ -328,7 +331,8 @@ test "expand: the bound is the run's device limit, at it and one past" {
     var texts: [constants.run_devices_max + 1][constants.device_path_bytes_max]u8 = undefined;
     var paths: [constants.run_devices_max + 1][]const u8 = undefined;
     for (&texts, &paths, 0..) |*text, *path, at| {
-        const made = std.fmt.bufPrint(text, "/dev/dri/renderD{d}", .{128 + at}) catch unreachable;
+        const made = std.fmt.bufPrint(text, "/dev/dri/renderD{d}", .{128 + at}) catch
+            unreachable; // "/dev/dri/renderD{d}" for at < 17 fits 48 bytes.
         path.* = made; // "/dev/dri/renderD144" fits 48 bytes.
     }
     const exact = dri_of(paths[0..constants.run_devices_max], 0);
