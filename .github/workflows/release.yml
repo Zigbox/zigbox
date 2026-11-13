@@ -849,6 +849,10 @@ jobs:
           /usr/bin/security unlock-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN"
           /usr/bin/security import "$SECRETS_DIR/wrapped.p12" -k "$KEYCHAIN" -P "$WRAP_PASSWORD" -x -T /usr/bin/codesign
           /usr/bin/security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "$KEYCHAIN_PASSWORD" "$KEYCHAIN" > /dev/null
+          # codesign refuses an identity whose certificate is not trusted for code signing
+          # (CSSMERR_TP_NOT_TRUSTED), so the throwaway certificate is trusted, in the user
+          # domain and for this temporary keychain only.
+          /usr/bin/security add-trusted-cert -r trustRoot -p codeSign -k "$KEYCHAIN" "$SECRETS_DIR/cert.pem"
           /usr/bin/security find-identity -p codesigning "$KEYCHAIN"
           # codesign finds an untrusted self-signed identity by its certificate hash, not by name.
           # The hash is public certificate data, not a secret.
