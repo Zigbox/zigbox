@@ -376,18 +376,27 @@ fn await_release(child: *const Context) Error!void {
     assert(byte[0] == go_ahead);
 }
 
-/// Tries each candidate path in turn, as a shell does for a name without a slash. A file that
-/// is missing moves on to the next candidate; a file that is there but cannot be run is
-/// reported over a missing one, since it is the more telling failure.
-/// The command's environment with `LD_LIBRARY_PATH` for the CDI directories, unless the
-/// environment has one already (the user's own wins). `plan.envp` has the room for it: the
-/// environment's bound leaves one entry free (`plan.build_exec_image` asserts it).
-fn library_path_env(plan: *const Plan) @TypeOf(plan.envp) {
+/// The command's environment with the CDI directories on `LD_LIBRARY_PATH`: ahead of a value the
+/// environment has already (the user's own directories stay, after the vendor's), or as a new
+/// entry. `line` holds the joined entry; `plan.envp` has the room for a new one (the
+/// environment's bound leaves one entry free, `plan.build_exec_image` asserts it).
+fn library_path_env(plan: *const Plan, line: *[library_line_bytes]u8) @TypeOf(plan.envp) {
     var envp = plan.envp;
     var count: usize = 0;
     const key = "LD_LIBRARY_PATH=";
+    const own = std.mem.span(plan.text(plan.ld_library_path).ptr);
+    assert(std.mem.startsWith(u8, own, key));
     while (envp[count]) |variable| : (count += 1) {
-        if (std.mem.startsWith(u8, std.mem.span(variable), key)) return envp;
+        const text = std.mem.span(variable);
+        if (!std.mem.startsWith(u8, text, key)) continue;
+        const present = text[key.len..];
+        if (own.len + 1 + present.len >= line.len) return envp; // Too long to join: theirs.
+        @memcpy(line[0..own.len], own);
+        line[own.len] = ':';
+        @memcpy(line[own.len + 1 ..][0..present.len], present);
+        line[own.len + 1 + present.len] = 0;
+        envp[count] = @ptrCast(line);
+        return envp;
     }
     assert(count + 1 < envp.len);
     envp[count] = plan.text(plan.ld_library_path).ptr;
@@ -395,14 +404,21 @@ fn library_path_env(plan: *const Plan) @TypeOf(plan.envp) {
     return envp;
 }
 
+const library_line_bytes = constants.cdi_run_dirs_max * (constants.cdi_path_bytes_max + 1) +
+    constants.env_value_bytes_max + 80;
+
+/// Tries each candidate path in turn, as a shell does for a name without a slash. A file that
+/// is missing moves on to the next candidate; a file that is there but cannot be run is
+/// reported over a missing one, since it is the more telling failure.
 fn exec(child: *const Context, state: *State) Error!void {
     const plan = child.plan;
     assert(plan.candidates_count > 0);
     assert(plan.argv[0] != null);
     const argv: host_mod.CStrings = @ptrCast(&plan.argv);
     var with_library_path: @TypeOf(plan.envp) = undefined;
+    var library_line: [library_line_bytes]u8 = undefined;
     const envp: host_mod.CStrings = if (state.ld_failed and plan.ld_library_path.len > 0) blk: {
-        with_library_path = library_path_env(plan);
+        with_library_path = library_path_env(plan, &library_line);
         break :blk @ptrCast(&with_library_path);
     } else @ptrCast(&plan.envp);
     var missing: ?Error = null;

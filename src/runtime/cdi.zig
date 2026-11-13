@@ -766,7 +766,7 @@ pub const Resolved = struct {
             resolved.dirs_count == 0;
     }
 
-    fn keep(resolved: *Resolved, bytes: []const u8) ?Text {
+    pub fn keep(resolved: *Resolved, bytes: []const u8) ?Text {
         const room = constants.cdi_run_strings_bytes_max - resolved.strings_len;
         if (bytes.len + 1 > room) return null;
         const at = resolved.strings_len;

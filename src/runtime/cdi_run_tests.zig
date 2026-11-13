@@ -5,6 +5,10 @@
 const std = @import("std");
 const host_sim = @import("../host_sim.zig");
 const sim_run = @import("sim_run.zig");
+const host_mod = @import("../host.zig");
+const cdi = @import("cdi.zig");
+const run_lib = @import("run.zig");
+const Diag = @import("../diag/diag.zig").Diag;
 
 const HostSim = host_sim.HostSim;
 const testing = std.testing;
@@ -51,4 +55,127 @@ test "a CDI name is kept in the record, and ps shows it as asked, without a node
     const out = sim.stdout();
     const shown = "\"devices\":[{\"asked\":\"vendor.example/gpu=0\"}]";
     try testing.expect(std.mem.indexOf(u8, out, shown) != null);
+}
+
+const library_spec =
+    \\{"cdiVersion":"0.6.0","kind":"vendor.example/gpu","devices":[
+    \\ {"name":"0","containerEdits":{"deviceNodes":[{"path":"/dev/fake0"}],"mounts":[
+    \\  {"hostPath":"/srv/data","containerPath":"/opt/vendor/lib"},
+    \\  {"hostPath":"/srv/note","containerPath":"/opt/vendor/note.conf"}],
+    \\  "hooks":[{"hookName":"createContainer","path":"/usr/bin/nvidia-cdi-hook",
+    \\   "args":["nvidia-cdi-hook","update-ldcache","--folder","/opt/vendor/lib"]}]}}]}
+;
+
+fn setup_with(sim: *HostSim, content: []const u8) void {
+    setup(sim);
+    sim_run.add_mount_sources(sim);
+    std.debug.assert(sim.world.write_file("/etc/cdi/example.json", content) == null);
+}
+
+const library_run = [_][:0]const u8{
+    "zbx",      "run",                  "--rootfs", sim_run.rootfs_path, "--name", "c-2",
+    "--device", "vendor.example/gpu=0", "--",       "/bin/sh",
+};
+
+test "mounts are staged and moved to their paths, and a missing ldconfig puts the directory on the path" {
+    // Goal: the library half of a CDI device. Method: a directory and a file mount, and the
+    // update-ldcache hook; the simulator has no ldconfig, so the fallback is taken. The mounts
+    // are in the new root at their paths and the hidden stage names are gone; the command
+    // has LD_LIBRARY_PATH with the directory, and W0208 is said once.
+    const sim = sim_get();
+    defer testing.allocator.destroy(sim);
+    setup_with(sim, library_spec);
+    const code = sim_run.run_cli(sim, &library_run);
+    if (code != 0) std.debug.print("{s}\n", .{sim.stderr()});
+    try testing.expectEqual(@as(u8, 0), code);
+    const child = &sim.world.processes[1];
+    const table = &sim.world.tables[child.table];
+    const directory = table.find("/opt/vendor/lib").?;
+    try testing.expectEqual(@as(?host_mod.MountKind, .bind_tree), table.mounts[directory].kind);
+    try testing.expect(table.mounts[directory].read_only);
+    const file = table.find("/opt/vendor/note.conf").?;
+    try testing.expectEqual(@as(?host_mod.MountKind, .bind_file), table.mounts[file].kind);
+    try testing.expect(table.find("/dev/.zbx-cdi-0") == null);
+    try testing.expect(table.find("/dev/.zbx-cdi-1") == null);
+    try testing.expect(std.mem.indexOf(u8, child.envp(), "LD_LIBRARY_PATH=/opt/vendor/lib") != null);
+    try testing.expectEqual(@as(usize, 1), std.mem.count(u8, sim.stderr(), "ZBX-W0208"));
+}
+
+test "the CDI directories come before the library path the image or the user has" {
+    // Goal: the fallback keeps the user's directories, after the vendor's. Method: the same run
+    // with -e LD_LIBRARY_PATH.
+    const sim = sim_get();
+    defer testing.allocator.destroy(sim);
+    setup_with(sim, library_spec);
+    const run = [_][:0]const u8{
+        "zbx",      "run",                    "-e",                 "LD_LIBRARY_PATH=/opt/app/lib",
+        "--rootfs", sim_run.rootfs_path,      "--name",             "c-3",
+        "--device", "vendor.example/gpu=0",   "--",                 "/bin/sh",
+    };
+    try testing.expectEqual(@as(u8, 0), sim_run.run_cli(sim, &run));
+    const envp = sim.world.processes[1].envp();
+    const want = "LD_LIBRARY_PATH=/opt/vendor/lib:/opt/app/lib";
+    try testing.expect(std.mem.indexOf(u8, envp, want) != null);
+}
+
+test "--read-only with a device that has mounts is refused with one line; nodes alone are fine" {
+    // Goal: a read-only root has no place to make the mount targets, so the run says so before
+    // anything starts. Method: the library spec, then the node-only spec of `setup`.
+    const sim = sim_get();
+    defer testing.allocator.destroy(sim);
+    setup_with(sim, library_spec);
+    const run = [_][:0]const u8{
+        "zbx",      "run",                  "--read-only", "--rootfs", sim_run.rootfs_path,
+        "--name",   "c-4",                  "--device",    "vendor.example/gpu=0",
+        "--",       "/bin/sh",
+    };
+    try testing.expectEqual(@as(u8, 125), sim_run.run_cli(sim, &run));
+    try testing.expect(std.mem.startsWith(u8, sim.stderr(), "error[ZBX-E0227]: "));
+    try testing.expect(std.mem.indexOf(u8, sim.stderr(), "--read-only") != null);
+    try testing.expect(!sim.world.processes[1].execd);
+    std.debug.assert(sim.world.write_file("/etc/cdi/example.json", spec) == null);
+    try testing.expectEqual(@as(u8, 0), sim_run.run_cli(sim, &run));
+}
+
+test "a resolved set given to the library gets the host check: kinds noted, absent nodes refused" {
+    // Goal: `Spec.cdi` skips discovery, not the look at the host. Method: a set with a directory
+    // mount starts (the target is a tree bind, not a file), and a set with a node the host lacks
+    // is refused with E0225 before anything starts.
+    const sim = sim_get();
+    defer testing.allocator.destroy(sim);
+    setup_with(sim, spec);
+    const handle = try std.heap.page_allocator.create(run_lib.Handle);
+    defer std.heap.page_allocator.destroy(handle);
+    const given = try testing.allocator.create(cdi.Resolved);
+    defer testing.allocator.destroy(given);
+    given.reset();
+    given.mounts[0] = .{ .host = given.keep("/srv/data").?, .container = given.keep("/opt/v").? };
+    given.mount_is_dir[0] = false; // Wrong on purpose: the run must correct it.
+    given.mounts_count = 1;
+    var diag: Diag = undefined;
+    diag.reset();
+    const run: run_lib.Spec = .{
+        .rootfs = sim_run.rootfs_path,
+        .name = "g-1",
+        .command = &.{"/bin/sh"},
+        .devices = &.{.{ .path = "vendor.example/gpu=0" }},
+        .cdi = given,
+    };
+    try run_lib.start(sim.interface(), &run, .{}, handle, &diag);
+    handle.session.release_output();
+    const table = &sim.world.tables[sim.world.processes[1].table];
+    const at = table.find("/opt/v").?;
+    try testing.expectEqual(@as(?host_mod.MountKind, .bind_tree), table.mounts[at].kind);
+    // A node the host lacks.
+    const sim_two = sim_get();
+    defer testing.allocator.destroy(sim_two);
+    setup_with(sim_two, spec);
+    given.reset();
+    given.nodes[0] = given.keep("/dev/absent0").?;
+    given.nodes_count = 1;
+    diag.reset();
+    const result = run_lib.start(sim_two.interface(), &run, .{}, handle, &diag);
+    try testing.expectError(error.StartFailed, result);
+    try testing.expectEqual(@as(?@TypeOf(diag.code.?), .E0225), diag.code);
+    try testing.expect(!sim_two.world.processes[1].execd);
 }

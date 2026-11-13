@@ -158,7 +158,7 @@ pub fn too_many_files(diag: *Diag, directory: []const u8) void {
         named,
         constants.cdi_dir_entries_max,
     });
-    diag.context("directory", "{s}", .{named});
+    diag.context("dir", "{s}", .{named});
     diag.fix(.{ .sentence = "move the specs this host does not use out of the CDI directories" });
     assert(diag.code.? == .E0226);
 }

@@ -217,6 +217,7 @@ fn check_valid(random: std.Random) []const u8 {
                 assert(found.edit != .none);
             },
             .too_big => assert(false), // The generator makes far less than the bounds.
+            .too_many_files => assert(false), // Only discovery refuses so.
         }
         if (all_there) assert(made.refused_edit);
     } else {
@@ -260,6 +261,7 @@ fn check_hostile(random: std.Random, content: []const u8) void {
             .unknown => |index| assert(index < asked.len),
             .unsupported => |found| assert(found.edit != .none),
             .too_big => |index| assert(index < asked.len),
+            .too_many_files => assert(false), // Only discovery refuses so.
         }
     }
     const size = random.uintLessThan(usize, 600);
