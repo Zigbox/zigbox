@@ -14,7 +14,7 @@ const architectures = [_]pkg.Architecture{ .x86_64, .aarch64 };
 /// A tiny package of the second caller's own: one binary and one unit file.
 fn tiny(architecture: pkg.Architecture, files: []const pkg.File) pkg.Package {
     std.debug.assert(files.len > 0);
-    std.debug.assert(@intFromEnum(architecture) < architectures.len);
+    std.debug.assert(@backingInt(architecture) < architectures.len);
     return .{
         .name = "zigcube-agent",
         .version = "0.1.0",
@@ -59,7 +59,8 @@ fn build_tree(memory: std.mem.Allocator, files: []const pkg.File) ![]pkg.TreeFil
     try place(memory, &out, "apt/", try pkg.apt.write(memory, &debs, null));
     for (architectures, 0..) |architecture, index| {
         const prefix = try std.fmt.allocPrint(memory, "rpm/{s}/", .{architecture.rpm_name()});
-        try place(memory, &out, prefix, try pkg.dnf.write(memory, architecture, rpms[index..][0..1]));
+        const tree = try pkg.dnf.write(memory, architecture, rpms[index..][0..1]);
+        try place(memory, &out, prefix, tree);
     }
     std.debug.assert(out.items.len > debs.len + rpms.len);
     return out.items;

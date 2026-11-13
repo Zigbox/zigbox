@@ -137,13 +137,17 @@ test "a worker's exec into a container that already ended, or without the state,
     const container_pid = try supervisor_starts(&sim, 33);
     var diag: Diag = undefined;
     diag.reset();
+    // The supervisor's own children (the container's) are not the worker's to reap.
+    const supervisor_children = sim.world.unreaped_children();
     sim.environment_variables = &stranger_env;
     try testing.expectError(error.StartFailed, worker_execs(&sim, &.{"/bin/sh"}, &diag));
     try testing.expectEqual(codes.Code.E0402, diag.code.?);
+    try testing.expectEqual(supervisor_children, sim.world.unreaped_children());
     sim.environment_variables = &worker_env;
     try testing.expect(sim.world.kill(container_pid, constants.signal_kill) == null);
+    const after_kill = sim.world.unreaped_children();
     diag.reset();
     try testing.expectError(error.StartFailed, worker_execs(&sim, &.{"/bin/sh"}, &diag));
     try testing.expectEqual(codes.Code.E0220, diag.code.?);
-    try testing.expectEqual(@as(u32, 0), sim.world.unreaped_children());
+    try testing.expectEqual(after_kill, sim.world.unreaped_children());
 }
