@@ -12,23 +12,34 @@ Inputs are the release `zbx` binaries (`zig build release`), `build.zig.zon`'s v
 
 ## The owner's part
 
-Once, set up the key (next section). For each release: cut the tag from a gated commit (see
-AGENTS.md, "Releases"), create the GitHub release for it, and approve the `release` run of
-`.github/workflows/release.yml`. The workflow does the rest and attaches `zigbox-repos.tar.gz` to
-the release. 0.4.0 gets no archive ([decision](../decisions/2026-11-11-no-package-archive-for-0.4.0.md)).
+A release is automated ([spec and setup guide](automation.md),
+[decision](../decisions/2026-11-12-release-draft-first-hosted-mac.md)). The owner sets up the
+secrets, the App and the environments once (the guide's "Setup guide"). For each release the
+supervisor merges the release PR (version in `build.zig.zon`, notes in `docs/releases/<v>.md`,
+gates quoted). When `ci` is green on that commit, `.github/workflows/release.yml` runs: it checks
+everything that can refuse, makes a **draft** release (no tag yet), and waits for the owner's one
+approval of the `release` environment. Nobody tags by hand. After the approval:
 
-The workflow runs on a push of a `v*` tag, and on `workflow_dispatch` with a `tag` input to sign
-an existing release again. Start a manual run from the tag itself (Run workflow, "Use workflow
-from": the tag): the `release` environment only deploys tags, and the run refuses a `tag` input
-that is not the ref it started from, or is not `vX.Y.Z` (a pre-release suffix such as `-rc.1` is accepted, and signs as usual). The run fails before signing when the
-GitHub release does not exist yet; create it and re-run.
+- `linux` signs the apt and dnf trees and attaches `zigbox-repos.tar.gz` (the rest of this file);
+- `mac`, on a GitHub-hosted macOS runner, builds `zbx` for arm64 and x86_64, joins them with
+  `lipo`, signs the result with the Developer ID certificate in a temporary keychain, notarizes
+  it, and attaches `zbx-<v>-macos-universal.zip`, its `.sha256` and the formula to the draft;
+- `prepare` checks the draft's four assets and the tap diff; `publish` publishes the draft, which
+  creates the tag at the release commit;
+- `tap` and `site` (environment `release-publish`, `main` only, no reviewers) commit the formula
+  to `Zigbox/homebrew-tap` and run the zigbox.org deploy, waiting for it;
+- `verify`, on `macos-15` and `macos-15-intel`, checks the public zip and runs
+  `brew install zigbox/tap/zigbox`, `zbx --version` and `brew test zigbox`.
 
-Before approving a `release` run, open the run and check that its commit is the release-gated
-commit on `main` (the tag points at it, and `release.yml` and `release-sign.sh` are as reviewed):
-the workflow and script that run are the ones at the tag, so an approval hands the key to
-whatever that commit holds. Set up, once, on the repository: a tag ruleset that restricts who can
-create `v*` tags, and on the `release` environment "Prevent self-review", the two secrets as
-environment secrets (not repository secrets) and a deployment policy that admits tags only.
+A failure before `publish` leaves a draft and nothing public; the formula and the site name the
+release only after it is public. If a job fails, re-run the failed jobs, or start `release` by
+hand (`workflow_dispatch`, from `main`, with the `version` input); every job is safe to repeat.
+
+The workflow runs from `main` (the `release` environment deploys `main` only). Before approving,
+open the run and check that its commit is the release-gated commit on `main`: the workflow and
+script that run are the ones at that commit, so an approval hands the key to whatever it holds. Set
+up, once: on the `release` environment "Prevent self-review", the secrets as environment secrets
+(not repository secrets) and a deployment policy that admits `main` only.
 
 ## The release key
 
@@ -124,26 +135,23 @@ If the subkey leaks, revoke it with the primary key and set a new one the same w
 7. Writes `zigbox-repos.tar.gz`: `apt`, `rpm` and the two keyring files, and nothing else (not
    `to-sign/`, not the test key files).
 
-The `sign` job then attaches the archive to the release. The release has no other assets from the
+The `linux` job then attaches the archive to the release. The release has no other assets from the
 workflow: the release binaries are not attached by it.
 
 Each `zig build packages` run deletes `apt/`, `rpm/` and `to-sign/` under the output directory
 first, so the files of an earlier run never stay beside this one's.
 
-### Dispatching the site deploy
+### The site deploy
 
-The site's deploy (`.github/workflows/deploy.yml` in `Zigbox/zigbox.github.io`, every six hours or
-on `workflow_dispatch`) copies the newest release's asset to `https://zigbox.org/apt`, `/rpm` and
-the two keyring files byte for byte
+The site's deploy (`.github/workflows/deploy.yml` in `Zigbox/zigbox.github.io`) copies the newest
+release's asset to `https://zigbox.org/apt`, `/rpm` and the two keyring files byte for byte
 ([decision](../decisions/2026-11-10-packages-on-zigbox-org.md)). It refuses an asset that holds
 anything else (links, dot files, `.html`, `to-sign/`, the test key) or lacks `InRelease`,
 `Release.gpg` or a `repomd.xml.asc`, and after deploying it fetches every file back and fails
-unless zigbox.org serves the same bytes.
-
-This workflow does not yet send it `repository_dispatch` of type `site`, because this repository
-holds no token that can write to `Zigbox/zigbox.github.io` (`GITHUB_TOKEN` cannot). Until the
-owner adds one, run the deploy by hand after a release, or wait up to six hours. Then check a
-client with `apt update` and `dnf makecache` against zigbox.org.
+unless zigbox.org serves the same bytes. The release's `publish` job sends it `repository_dispatch`
+of type `site` with the release App's token (`GITHUB_TOKEN` cannot write to that repository), finds
+the run that started and fails unless it succeeded. The deploy also runs every six hours on its own.
+After a release, check a client with `apt update` and `dnf makecache` against zigbox.org.
 
 The `Release` file has a fixed `Date` and no `Valid-Until`, and `repomd.xml` a fixed `revision`
 (reproducibility): a client cannot tell an old signed `InRelease` from a new one, so there is no
@@ -151,10 +159,33 @@ replay or freeze protection.
 
 ## Doing it by hand
 
-Only to debug a release. With the subkey in your own keyring, `.github/release-sign.sh` is the
-same procedure; `zig build packages` prints the `gpg` command for each file it needs signed
-(rounds 1 and 2 above). `gpg --batch -o` will not overwrite a file, so use an empty signatures
-directory every time.
+The fallback, when the automation is down or to debug a release. For the Linux packages, with the
+subkey in your own keyring, `.github/release-sign.sh` is the same procedure; `zig build packages`
+prints the `gpg` command for each file it needs signed (rounds 1 and 2 above). `gpg --batch -o`
+will not overwrite a file, so use an empty signatures directory every time. The tag is made by
+publishing the draft release in `release.yml`, never by hand; only with the owner's written
+go-ahead in `docs/decisions/` create the tag and release with `gh release create` from the gated
+commit, run `release.yml` by `workflow_dispatch`, and start the site deploy with `gh workflow run deploy.yml --repo
+Zigbox/zigbox.github.io`.
+
+For the Mac zip, on a Mac with the Developer ID certificate in the login keychain and a notary
+profile there (`xcrun notarytool store-credentials zbx-notary`), from a logged-in graphical
+session: `SDK="$(xcrun --show-sdk-path)"; zig build mac-release --sysroot "$SDK" -Dsdk -Dnotarize`
+(`--sysroot` and `-Dsdk`, because both architectures are cross-built and a cross-built target
+finds no SDK by itself; no `-Dkeychain`: it uses the login keychain; it builds both architectures and joins
+them with `lipo`). Attach
+`zig-out/mac-release/zbx-<v>-macos-universal.zip` to the release and commit `zig-out/mac-release/zigbox.rb`
+to `Formula/zigbox.rb` of `Zigbox/homebrew-tap` by hand. `-Dkeychain=FILE` points `codesign` and
+`notarytool` at another keychain file, as the workflow does with its temporary one.
+
+## Testing the automation
+
+`test` (Linux, throwaway key), `mac-test` (`macos-15`, a throwaway self-signed identity in a
+temporary keychain, no notarization, no upload, no secret; builds the universal zip) and
+`draft-test` (a throwaway prerelease draft: upload, download, publish, tag, then deleted) run on
+pull requests that touch the release files and on pushes to `release-test/**`; `mac-test` never
+runs for a pull request from a fork. The jobs that need the owner's secrets (real signing,
+`publish`, `tap`, `site`) are tried only by the `v0.5.1-rc.1` dry run ([spec](automation.md)).
 
 ## CI and the test keys
 

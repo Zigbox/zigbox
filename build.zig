@@ -904,14 +904,37 @@ fn add_demo_mac(b: *std.Build, vm_module: *std.Build.Module) void {
     step.dependOn(&run.step);
 }
 
-/// `zig build mac-release`: the ReleaseSafe macOS `zbx`, signed with the hardened runtime and the
-/// virtualization entitlement, zipped, and (with `-Dnotarize`) notarized; see src/mac_release.zig.
-/// `-Dsign-identity=-` signs ad hoc, for trying it; the defaults are the owner's.
-fn add_mac_release(
+/// The ReleaseSafe macOS `zbx` for one architecture (`aarch64` or `x86_64`).
+fn mac_release_binary(
     b: *std.Build,
     options: *std.Build.Step.Options,
-    target: std.Build.ResolvedTarget,
-) void {
+    image: VmImage,
+    architecture: []const u8,
+    sdk: bool,
+) *std.Build.Step.Compile {
+    const query = b.fmt("{s}-macos", .{architecture});
+    const module = b.createModule(.{
+        .root_source_file = b.path("src/macos_main.zig"),
+        .target = b.resolveTargetQuery(std.Target.Query.parse(.{ .arch_os_abi = query }) catch
+            @panic("mac-release: the target query is a constant and parses")),
+        .optimize = .ReleaseSafe,
+        .imports = &.{.{ .name = "build_options", .module = options.createModule() }},
+    });
+    link_macos(module, image);
+    if (sdk) {
+        // A cross-built target gets no automatic SDK, so the frameworks and libobjc are not found
+        // without these. The compiler puts `--sysroot` in front of both paths.
+        module.addFrameworkPath(.{ .cwd_relative = "/System/Library/Frameworks" });
+        module.addLibraryPath(.{ .cwd_relative = "/usr/lib" });
+    }
+    return b.addExecutable(.{ .name = "zbx", .root_module = module, .use_llvm = true });
+}
+
+/// `zig build mac-release`: the universal ReleaseSafe macOS `zbx`, signed with the hardened runtime
+/// and the virtualization entitlement, zipped, and (with `-Dnotarize`)
+/// notarized; see src/mac_release.zig.
+/// `-Dsign-identity=-` signs ad hoc, for trying it; the defaults are the owner's.
+fn add_mac_release(b: *std.Build, options: *std.Build.Step.Options) void {
     const release = @import("src/mac_release.zig");
     const identity_help = "mac-release: the codesign identity (- is ad hoc); default " ++
         release.default_identity;
@@ -921,17 +944,19 @@ fn add_mac_release(
         release.default_profile;
     const profile = b.option([]const u8, "notary-profile", profile_help) orelse
         release.default_profile;
+    const keychain_help = "mac-release: the keychain file codesign and notarytool use; " ++
+        "default the login keychain";
+    const keychain = b.option([]const u8, "keychain", keychain_help) orelse "";
     const notarize_help = "mac-release: submit the archive to Apple's notary service";
     const notarize = b.option(bool, "notarize", notarize_help) orelse false;
+    const sdk_help = "mac-release: search the SDK given as --sysroot for the frameworks and " ++
+        "libobjc; needed because a cross-built target finds none by itself";
+    const sdk = b.option(bool, "sdk", sdk_help) orelse false;
     const image = add_vm_image(b, options);
-    const module = b.createModule(.{
-        .root_source_file = b.path("src/macos_main.zig"),
-        .target = target,
-        .optimize = .ReleaseSafe,
-        .imports = &.{.{ .name = "build_options", .module = options.createModule() }},
-    });
-    link_macos(module, image);
-    const exe = b.addExecutable(.{ .name = "zbx", .root_module = module, .use_llvm = true });
+    // One binary per architecture, each cross-built whatever the host is, then combined by
+    // `lipo` in the tool: the release is universal. The VM image inside is the same for both.
+    const arm64 = mac_release_binary(b, options, image, "aarch64", sdk);
+    const x86_64 = mac_release_binary(b, options, image, "x86_64", sdk);
     const tool = b.addExecutable(.{
         .name = "mac_release",
         .root_module = b.createModule(.{
@@ -942,13 +967,16 @@ fn add_mac_release(
     });
     const run = b.addRunArtifact(tool);
     run.setCwd(b.path("."));
-    run.addArg("--binary");
-    run.addArtifactArg(exe);
+    run.addArg("--binary-arm64");
+    run.addArtifactArg(arm64);
+    run.addArg("--binary-x86_64");
+    run.addArtifactArg(x86_64);
     run.addArgs(&.{ "--entitlements", "vm/zbx.entitlements" });
     run.addArgs(&.{ "--formula", "packaging/homebrew/zigbox.rb" });
     run.addArgs(&.{ "--out", "zig-out/mac-release" });
     run.addArgs(&.{ "--version", @import("build.zig.zon").version });
     run.addArgs(&.{ "--identity", identity, "--profile", profile });
+    if (keychain.len > 0) run.addArgs(&.{ "--keychain", keychain });
     if (notarize) run.addArg("--notarize");
     const step = b.step("mac-release", "Sign, zip and optionally notarize the macOS zbx");
     step.dependOn(&run.step);
@@ -970,7 +998,7 @@ fn add_macos_install(
     });
     link_macos(module, image);
     const exe = b.addExecutable(.{ .name = "zbx", .root_module = module, .use_llvm = true });
-    add_mac_release(b, options, target);
+    add_mac_release(b, options);
     add_demo_mac(b, vm_module);
     const copy = b.addSystemCommand(&.{"cp"});
     copy.addArtifactArg(exe);

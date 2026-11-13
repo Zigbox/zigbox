@@ -1,29 +1,51 @@
-# Zigbox release: signs the apt and dnf repositories with the release signing subkey and attaches
-# zigbox-repos.tar.gz to the tag's GitHub release (docs/decisions/2026-11-11-ci-signs-packages-
-# with-a-subkey.md; runbook docs/releases/packaging.md). Every action is pinned to a full commit
-# SHA (the tag is in the comment), as in ci.yml. The signing logic is .github/release-sign.sh;
-# the `test` job runs the same file with a throwaway key, never in the `release` environment.
+# Zigbox release, one run from the merged release commit to the verified install
+# (docs/releases/automation.md; decision docs/decisions/2026-11-12-release-draft-first-hosted-mac.md).
+# Every action is pinned to a full commit SHA (the tag is in the comment), as in ci.yml.
+#
+# The order is: draft first, publish last. When `ci` is green on a merged release commit (the one
+# that added docs/releases/<version>.md), `plan` decides, and:
+#
+#   plan, mac-check, preflight   everything that can refuse, before anything is written
+#   draft                        a DRAFT GitHub release (no tag exists yet)
+#   linux, mac                   sign and attach to the draft; the owner's ONE approval (`release`)
+#   prepare                      check the assets and the tap diff; still nothing is public
+#   publish                      the draft becomes the release, and that makes the tag
+#   tap, site, verify            the formula, the zigbox.org deploy, an install on two Macs
+#
+# A failure before `publish` leaves a draft and nothing else: no tag, no formula, no site change.
+# Every job is idempotent: a re-run of a failed run, or a manual run with the version, from main,
+# finishes a half-done release (a draft is reused; a published release goes on to tap and site).
+#
+# The signing logic is .github/release-sign.sh. `test`, `mac-test` and `draft-test` try the same
+# steps on a scratch branch or a pull request with throwaway keys and no secret.
 name: release
 
 on:
-  # A release tag: the `release` environment (owner approval, tag-only deployments) gates the job.
-  push:
-    tags: ['v*']
-    # A scratch branch runs the `test` job alone, to try this workflow before a pull request.
-    branches: ['release-test/**']
-  # Sign an existing release again. `tag` is a tag, and the run must be started from that tag.
+  # The release path: `ci` finished on a push to main.
+  workflow_run:
+    workflows: [ci]
+    types: [completed]
+    branches: [main]
+  # Finish a release by hand: the version, from main (Use workflow from: main).
   workflow_dispatch:
     inputs:
-      tag:
-        description: 'The release tag to sign, such as v0.5.0 (a tag only)'
+      version:
+        description: 'The version to release or to finish, such as 0.5.1 (run from main)'
         required: true
         type: string
-  # The `test` job on a change to anything the release reads. No secret is available here.
+  # A scratch branch runs `test`, `mac-test` and `draft-test`, to try this file before a pull
+  # request. No secret is available to them.
+  push:
+    branches: ['release-test/**']
+  # `test` and `mac-test` on a change to anything the release reads.
   pull_request:
     paths:
       - '.github/workflows/release.yml'
       - '.github/release-sign.sh'
       - '.github/release-sign-test.sh'
+      - '.github/actions/**'
+      - 'src/mac_release.zig'
+      - 'packaging/homebrew/**'
       - 'src/package.zig'
       - 'src/package_*.zig'
       - 'src/package/**'
@@ -34,12 +56,742 @@ on:
 permissions:
   contents: read
 
+# One release run per commit: a run for a later commit of main must never replace a waiting run
+# for the release commit, and the automatic run and a manual dispatch from the same commit
+# (`github.sha`) take turns. A dispatch that finishes an older release from a later main commit
+# is in another group; `plan` and `find-draft` fail closed if two drafts of one tag exist.
+concurrency:
+  group: release-${{ github.event.workflow_run.head_sha || github.sha }}
+  cancel-in-progress: false
+
 jobs:
+  # What can be decided without writing anything: is this a release commit, is it green, what
+  # state is the tag in. Quiet stops (exit 0, with a notice) are for commits that are not
+  # releases; everything else that is wrong fails here, before any approval.
+  plan:
+    name: plan the release
+    # Only a push to main of this repository: a pull request from a fork whose branch is named
+    # `main` also reports head_branch `main`, and its commit must never be released.
+    if: >-
+      ${{ (github.event_name == 'workflow_run'
+      && github.event.workflow_run.conclusion == 'success'
+      && github.event.workflow_run.event == 'push'
+      && github.event.workflow_run.head_repository.full_name == github.repository)
+      || (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main') }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      actions: read
+    outputs:
+      go: ${{ steps.plan.outputs.go }}
+      version: ${{ steps.plan.outputs.version }}
+      tag: ${{ steps.plan.outputs.tag }}
+      sha: ${{ steps.plan.outputs.sha }}
+      published: ${{ steps.plan.outputs.published }}
+      prerelease: ${{ steps.plan.outputs.prerelease }}
+    env:
+      GH_TOKEN: ${{ github.token }}
+      EVENT: ${{ github.event_name }}
+      HEAD_SHA: ${{ github.event.workflow_run.head_sha }}
+      INPUT_VERSION: ${{ inputs.version }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.event.workflow_run.head_sha || github.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: ./.github/actions/setup-gh
+      - name: Plan
+        id: plan
+        run: |
+          set -euo pipefail
+          re='^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.]+)?$'
+          fail() { echo "::error::release: $1"; exit 1; }
+          stop() { echo "::notice::release: $1"; echo "go=false" >> "$GITHUB_OUTPUT"; exit 0; }
+          zon_version() {
+            git show "$1:build.zig.zon" | sed -n 's/^ *\.version = "\([^"]*\)",.*/\1/p' | head -n 1
+          }
+          if [ "$EVENT" = workflow_dispatch ]; then
+            version="$INPUT_VERSION"
+            [[ "$version" =~ $re ]] || fail "'$version' is not a version such as 0.5.1"
+            # The release commit is the one that ADDED the notes (an edit of them does not count).
+            sha=$(git log --diff-filter=A --format=%H origin/main -- "docs/releases/$version.md" | tail -n 1)
+            [ -n "$sha" ] || fail "no commit of main added docs/releases/$version.md"
+            [ "$(zon_version "$sha")" = "$version" ] || fail "build.zig.zon at $sha is not $version"
+            git merge-base --is-ancestor "$sha" origin/main || fail "$sha is not on main"
+          else
+            sha="$HEAD_SHA"
+            version=$(zon_version "$sha")
+            [[ "$version" =~ $re ]] || fail "build.zig.zon has no version such as 0.5.1 (read '$version')"
+            git cat-file -e "$sha:docs/releases/$version.md" 2> /dev/null ||
+              stop "no docs/releases/$version.md at $sha, so $version is not a release"
+            added=$(git diff --name-only --diff-filter=A "$sha^" "$sha")
+            grep -qxF "docs/releases/$version.md" <<< "$added" ||
+              stop "$sha did not add docs/releases/$version.md, so it is not the release commit of $version; to finish that release, run this workflow with the version"
+          fi
+          tag="v$version"
+          conclusion=$(gh api -X GET "repos/$GITHUB_REPOSITORY/actions/workflows/ci.yml/runs" \
+            -f head_sha="$sha" -f event=push --jq \
+            '.workflow_runs | sort_by(.created_at) | last | .conclusion // "none"')
+          echo "release: ci at $sha: $conclusion"
+          [ "$conclusion" = success ] || fail "ci is not green on $sha ($conclusion)"
+          # A tag at another commit is never touched. An annotated tag is followed to its commit.
+          err="$RUNNER_TEMP/tagcheck"
+          status=0
+          ref=$(gh api "repos/$GITHUB_REPOSITORY/git/ref/tags/$tag" --jq '.object.type + " " + .object.sha' 2> "$err") || status=$?
+          if [ "$status" = 0 ]; then
+            read -r type object <<< "$ref"
+            if [ "$type" = tag ]; then
+              object=$(gh api "repos/$GITHUB_REPOSITORY/git/tags/$object" --jq .object.sha)
+            fi
+            [ "$object" = "$sha" ] || fail "the tag $tag exists at $object, not at $sha; nothing is released"
+            echo "release: the tag $tag is at $sha"
+          else
+            grep -q 'HTTP 404' "$err" || fail "could not look up $tag: $(head -c 200 "$err")"
+          fi
+          # A published release has a tag; a draft has none, and the tags endpoint never shows it.
+          published=false
+          status=0
+          gh api "repos/$GITHUB_REPOSITORY/releases/tags/$tag" --jq .id > /dev/null 2> "$err" || status=$?
+          if [ "$status" = 0 ]; then
+            published=true
+          else
+            grep -q 'HTTP 404' "$err" || fail "could not look up the release $tag: $(head -c 200 "$err")"
+          fi
+          prerelease=false
+          if [[ "$version" == *-* ]]; then prerelease=true; fi
+          {
+            echo "go=true"
+            echo "version=$version"
+            echo "tag=$tag"
+            echo "sha=$sha"
+            echo "published=$published"
+            echo "prerelease=$prerelease"
+          } >> "$GITHUB_OUTPUT"
+          echo "release: $tag at $sha (published: $published, prerelease: $prerelease)"
+
+  # Replaces the wait for mac.yml: the macOS build and every gate, on a GitHub-hosted Mac, at the
+  # release commit. (The VM demos need Virtualization.framework, which hosted runners lack.)
+  mac-check:
+    name: macOS gates (hosted)
+    needs: plan
+    if: ${{ needs.plan.outputs.go == 'true' && needs.plan.outputs.published != 'true' }}
+    runs-on: macos-15
+    timeout-minutes: 60
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ needs.plan.outputs.sha }}
+          persist-credentials: false
+      - uses: ./.github/actions/setup-zig-macos
+      - name: The VM kernel
+        run: test -f .zig-cache/zbx-vm/kernel/Image || zig build vm-kernel-fetch
+      - name: Every gate
+        run: zig build check --summary all
+
+  # Everything the owner's secrets are for, tried before the owner is asked for anything: the
+  # App's token for the tap and the site, a read of the tap's formula, the site's deploy workflow.
+  preflight:
+    name: the tap and the site are reachable
+    needs: plan
+    if: ${{ needs.plan.outputs.go == 'true' }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    # The App's key is a secret of this environment, deployable from `main` only (no reviewers).
+    environment: release-publish
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ needs.plan.outputs.sha }}
+          persist-credentials: false
+      - uses: ./.github/actions/setup-gh
+      # The App is installed on the tap and the site only, never on this repository.
+      - name: Mint the App token
+        id: app
+        uses: actions/create-github-app-token@64ab729a6294000f5aa4a4bc0b73d1f32bc45510 # v3.3.0
+        with:
+          app-id: ${{ vars.RELEASE_APP_ID }}
+          private-key: ${{ secrets.RELEASE_APP_PRIVATE_KEY }}
+          owner: Zigbox
+          repositories: |
+            homebrew-tap
+            zigbox.github.io
+          permission-contents: write
+          permission-actions: read
+      - name: Read the tap and the site's deploy workflow
+        env:
+          GH_TOKEN: ${{ steps.app.outputs.token }}
+        run: |
+          set -euo pipefail
+          gh api "repos/Zigbox/homebrew-tap/contents/Formula/zigbox.rb?ref=main" --jq .path
+          gh api "repos/Zigbox/zigbox.github.io/actions/workflows/deploy.yml" --jq .state
+
+  # The draft: notes from docs/releases/<version>.md, targeting the release commit. A draft makes
+  # no tag. An existing draft is reused (its notes refreshed), so a re-run finishes the release.
+  draft:
+    name: draft the release
+    needs: [plan, mac-check, preflight]
+    if: ${{ needs.plan.outputs.go == 'true' && needs.plan.outputs.published != 'true' }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+      TAG: ${{ needs.plan.outputs.tag }}
+      VERSION: ${{ needs.plan.outputs.version }}
+      SHA: ${{ needs.plan.outputs.sha }}
+      PRERELEASE: ${{ needs.plan.outputs.prerelease }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ needs.plan.outputs.sha }}
+          persist-credentials: false
+      - uses: ./.github/actions/setup-gh
+      - uses: ./.github/actions/find-draft
+        id: found
+        with:
+          tag: ${{ needs.plan.outputs.tag }}
+          sha: ${{ needs.plan.outputs.sha }}
+      - name: Create the draft, or refresh the notes of the one that exists
+        env:
+          ID: ${{ steps.found.outputs.id }}
+        run: |
+          set -euo pipefail
+          notes="docs/releases/$VERSION.md"
+          if [ -n "$ID" ]; then
+            gh api -X PATCH "repos/$GITHUB_REPOSITORY/releases/$ID" -f name="zigbox $VERSION" \
+              -F body=@"$notes" -F prerelease="$PRERELEASE" > /dev/null
+            echo "draft: refreshed the notes of release $ID"
+            exit 0
+          fi
+          flags=()
+          if [ "$PRERELEASE" = true ]; then flags+=(--prerelease); fi
+          gh release create "$TAG" --repo "$GITHUB_REPOSITORY" --draft --target "$SHA" \
+            --title "zigbox $VERSION" --notes-file "$notes" "${flags[@]}"
+          echo "draft: created the draft $TAG at $SHA"
+
+  linux:
+    name: sign and attach (apt and rpm)
+    needs: [plan, draft]
+    if: ${{ needs.plan.outputs.go == 'true' && needs.plan.outputs.published != 'true' }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    # The signing key is a secret of this environment: the owner approves each run (once, for
+    # this job and `mac` together), and only `main` may deploy to it.
+    environment: release
+    permissions:
+      contents: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ needs.plan.outputs.sha }}
+          # Nothing here pushes; the token must not sit in .git/config for the build to read.
+          persist-credentials: false
+      # No toolchain cache here: the toolchain runs while the subkey is unlocked, so it is
+      # downloaded and checked against its SHA-256 on every run.
+      - uses: ./.github/actions/setup-zig
+        with:
+          cache: 'false'
+      - uses: ./.github/actions/setup-gh
+      - name: Install rpm
+        run: |
+          sudo apt-get update -q
+          sudo apt-get install -y -q rpm
+      - uses: ./.github/actions/find-draft
+        with:
+          tag: ${{ needs.plan.outputs.tag }}
+          sha: ${{ needs.plan.outputs.sha }}
+          require: 'true'
+      # The key and passphrase reach this one step through the environment and the script
+      # reads them from there; nothing here prints them or takes them as an argument.
+      - name: Sign
+        env:
+          ZIGBOX_SIGNING_KEY: ${{ secrets.ZIGBOX_SIGNING_KEY }}
+          ZIGBOX_SIGNING_PASSPHRASE: ${{ secrets.ZIGBOX_SIGNING_PASSPHRASE }}
+          # Pinned here, in reviewed code, not read from the environment: users trust this
+          # fingerprint (docs/releases/packaging.md, "The release key").
+          ZIGBOX_SIGNING_FPR: 09991DC39816D3C914E2A22C5AB00BC328B7DBB7
+        run: .github/release-sign.sh "$RUNNER_TEMP/out"
+      - name: The archive holds what packaging.md says and nothing secret
+        run: |
+          tar -tzf "$RUNNER_TEMP/out/zigbox-repos.tar.gz" > "$RUNNER_TEMP/list"
+          grep -q '^apt/dists/stable/InRelease$' "$RUNNER_TEMP/list"
+          grep -q '^zigbox-archive-keyring.gpg$' "$RUNNER_TEMP/list"
+          ! grep -Evq '^(apt/|rpm/|zigbox-archive-keyring\.(asc|gpg)$)' "$RUNNER_TEMP/list" || exit 1
+          ! grep -Eq '(^|/)\.' "$RUNNER_TEMP/list" || exit 1
+          ! grep -Eq 'to-sign|test-key|passphrase|secret' "$RUNNER_TEMP/list" || exit 1
+      - name: Attach the archive to the draft
+        env:
+          TAG: ${{ needs.plan.outputs.tag }}
+        run: |
+          "$GH" release upload "$TAG" "$RUNNER_TEMP/out/zigbox-repos.tar.gz" --clobber --repo "$GITHUB_REPOSITORY"
+
+  # The Developer ID signature and the notarization, on a GitHub-hosted Mac (a fresh virtual
+  # machine for this job alone), in the same `release` environment as `linux`. The certificate
+  # and the notary key reach a temporary keychain under $RUNNER_TEMP that is deleted in the last
+  # step, whatever happened. No secret is printed or passed as a command-line argument; the only
+  # passwords on argv are random values made in the job.
+  mac:
+    name: sign and notarize (macOS)
+    needs: [plan, draft]
+    if: ${{ needs.plan.outputs.go == 'true' && needs.plan.outputs.published != 'true' }}
+    runs-on: macos-15
+    timeout-minutes: 60
+    environment: release
+    defaults:
+      run:
+        # By absolute path: a bare `bash` is found through PATH.
+        shell: /bin/bash --noprofile --norc -euo pipefail {0}
+    permissions:
+      contents: write
+    env:
+      TAG: ${{ needs.plan.outputs.tag }}
+      VERSION: ${{ needs.plan.outputs.version }}
+    steps:
+      # The runner context is not available in a job's `env:`, so the paths are set here.
+      - name: Paths of the temporary keychain and its work directory
+        run: |
+          echo "KEYCHAIN=$RUNNER_TEMP/zbx-release.keychain-db" >> "$GITHUB_ENV"
+          echo "SECRETS_DIR=$RUNNER_TEMP/zbx-release-secrets" >> "$GITHUB_ENV"
+          echo "ZIG_GLOBAL_CACHE_DIR=$RUNNER_TEMP/zig-global" >> "$GITHUB_ENV"
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ needs.plan.outputs.sha }}
+          persist-credentials: false
+      # No toolchain cache: the toolchain runs while the key is unlocked (as on Linux).
+      - uses: ./.github/actions/setup-zig-macos
+      - uses: ./.github/actions/setup-gh
+      # Before the keychain exists: this step downloads, and the build needs the file.
+      - name: The VM kernel
+        run: test -f .zig-cache/zbx-vm/kernel/Image || zig build vm-kernel-fetch
+      - uses: ./.github/actions/find-draft
+        env:
+          GH_TOKEN: ${{ github.token }}
+        with:
+          tag: ${{ needs.plan.outputs.tag }}
+          sha: ${{ needs.plan.outputs.sha }}
+          require: 'true'
+      # Secrets come in through `env:` and are written only to mode-600 files that are deleted
+      # in this step. `security import` takes the .p12 password only on argv, so the .p12 is
+      # first re-wrapped under a random password made here; MAC_CERT_PASSWORD reaches only
+      # openssl, through its environment. The keychain is passed to codesign and notarytool by
+      # path; the next step also puts it on the user search list (mac-test showed codesign needs
+      # that), and the cleanup restores the list this step found.
+      - name: Temporary keychain with the Developer ID certificate and the notary key
+        env:
+          MAC_CERT_P12: ${{ secrets.MAC_CERT_P12 }}
+          MAC_CERT_PASSWORD: ${{ secrets.MAC_CERT_PASSWORD }}
+          MAC_NOTARY_KEY: ${{ secrets.MAC_NOTARY_KEY }}
+          MAC_NOTARY_KEY_ID: ${{ vars.MAC_NOTARY_KEY_ID }}
+          MAC_NOTARY_ISSUER_ID: ${{ vars.MAC_NOTARY_ISSUER_ID }}
+        run: |
+          set -euo pipefail
+          umask 077
+          # Only system tools, by a PATH nobody else can write: a program found through a
+          # Homebrew directory would receive the secrets in this step's environment.
+          export PATH=/usr/bin:/bin:/usr/sbin:/sbin
+          mkdir "$SECRETS_DIR"
+          KEYCHAIN_PASSWORD=$(/usr/bin/openssl rand -hex 24)
+          WRAP_PASSWORD=$(/usr/bin/openssl rand -hex 24)
+          export WRAP_PASSWORD
+          /usr/bin/security create-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN"
+          /usr/bin/security set-keychain-settings -t 3600 "$KEYCHAIN"
+          /usr/bin/security unlock-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN"
+          printf '%s' "$MAC_CERT_P12" | /usr/bin/openssl base64 -d -A -out "$SECRETS_DIR/cert.p12"
+          unset MAC_CERT_P12
+          /usr/bin/openssl pkcs12 -in "$SECRETS_DIR/cert.p12" -passin env:MAC_CERT_PASSWORD -nodes |
+            /usr/bin/openssl pkcs12 -export -passout env:WRAP_PASSWORD -out "$SECRETS_DIR/wrapped.p12"
+          unset MAC_CERT_PASSWORD
+          /bin/rm -f "$SECRETS_DIR/cert.p12"
+          /usr/bin/security import "$SECRETS_DIR/wrapped.p12" -k "$KEYCHAIN" -P "$WRAP_PASSWORD" -x -T /usr/bin/codesign
+          /bin/rm -f "$SECRETS_DIR/wrapped.p12"
+          # Lets codesign use the key from a session with no GUI (else errSecInternalComponent).
+          /usr/bin/security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "$KEYCHAIN_PASSWORD" "$KEYCHAIN" > /dev/null
+          # `find-identity` exits 0 with no valid identity (e.g. the Developer ID intermediate
+          # is missing), so the count is checked. Signing is by this hash, not by name.
+          found=$(/usr/bin/security find-identity -v -p codesigning "$KEYCHAIN")
+          valid=$(printf '%s\n' "$found" | sed -n 's/^ *\([0-9]*\) valid identities found$/\1/p')
+          if [ "$valid" != "1" ]; then
+            echo "::error::mac: the release keychain has '$valid' valid signing identities, not 1 (is the Developer ID intermediate certificate in the .p12?)"
+            exit 1
+          fi
+          # The hash is public certificate data, not a secret.
+          hash=$(printf '%s\n' "$found" | sed -n 's/^ *1) \([0-9A-F]\{40\}\) .*/\1/p')
+          [ -n "$hash" ] || { echo "::error::mac: no certificate hash in the find-identity output"; exit 1; }
+          echo "SIGN_IDENTITY=$hash" >> "$GITHUB_ENV"
+          printf '%s\n' "$MAC_NOTARY_KEY" > "$SECRETS_DIR/notary.p8"
+          unset MAC_NOTARY_KEY
+          /usr/bin/xcrun --no-cache notarytool store-credentials zbx-notary --key "$SECRETS_DIR/notary.p8" \
+            --key-id "$MAC_NOTARY_KEY_ID" --issuer "$MAC_NOTARY_ISSUER_ID" --keychain "$KEYCHAIN" > /dev/null
+          /bin/rm -f "$SECRETS_DIR/notary.p8"
+      # Builds both slices, joins them with lipo, signs, notarizes, zips; checks the signature
+      # and that the archive's code is the signed code.
+      - name: Sign and notarize
+        # An explicit -target gets no SDK by itself: --sysroot names it, -Dsdk searches it for the
+        # frameworks and libobjc.
+        run: |
+          # codesign resolves the identity's certificate chain through the user search list, so
+          # the temporary keychain joins it for this step. The list found is saved (the paths are
+          # not secrets) and the cleanup step restores it, whatever happens. This job is a
+          # one-job virtual machine that no pull request shares.
+          /usr/bin/security list-keychains -d user | /usr/bin/sed 's/^ *"\(.*\)"$/\1/' > "$RUNNER_TEMP/keychain-list"
+          existing=()
+          while IFS= read -r line; do existing+=("$line"); done < "$RUNNER_TEMP/keychain-list"
+          /usr/bin/security list-keychains -d user -s "$KEYCHAIN" ${existing[@]+"${existing[@]}"}
+          SDK="$(/usr/bin/xcrun --show-sdk-path)"
+          zig build mac-release --sysroot "$SDK" -Dsdk \
+            -Dnotarize -Dsign-identity="$SIGN_IDENTITY" -Dkeychain="$KEYCHAIN"
+      - name: The zip is the one that was hashed
+        run: |
+          cd zig-out/mac-release
+          /usr/bin/shasum -a 256 -c "zbx-$VERSION-macos-universal.zip.sha256"
+      - uses: ./.github/actions/mac-check-zip
+        with:
+          zip: zig-out/mac-release/zbx-${{ needs.plan.outputs.version }}-macos-universal.zip
+          version: ${{ needs.plan.outputs.version }}
+          gatekeeper: 'true'
+      - name: Attach the zip and the formula to the draft
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          out=zig-out/mac-release
+          "$GH" release upload "$TAG" "$out/zbx-$VERSION-macos-universal.zip" \
+            "$out/zbx-$VERSION-macos-universal.zip.sha256" "$out/zigbox.rb" \
+            --clobber --repo "$GITHUB_REPOSITORY"
+      # Whatever happened: nothing of ours is left on the runner.
+      - name: Delete the keychain and everything this job wrote under the runner's temp
+        if: ${{ always() }}
+        run: |
+          # Puts back the search list the build step found (nothing to do if it never got that far).
+          if [ -f "$RUNNER_TEMP/keychain-list" ]; then
+            saved=()
+            while IFS= read -r line; do saved+=("$line"); done < "$RUNNER_TEMP/keychain-list"
+            /usr/bin/security list-keychains -d user -s ${saved[@]+"${saved[@]}"} || true
+          fi
+          /usr/bin/security delete-keychain "$KEYCHAIN" || true
+          /bin/rm -rf "$KEYCHAIN" "$RUNNER_TEMP/keychain-list" "$SECRETS_DIR" "$RUNNER_TEMP/gh-pinned" "$RUNNER_TEMP"/zig-aarch64-macos-* "$RUNNER_TEMP/zig-global"
+
+  # The last stop before the release is public: the draft holds exactly the four assets, each
+  # checked, and the tap's formula differs from the new one only where it may. Writes nothing.
+  prepare:
+    name: check the draft before publishing
+    needs: [plan, linux, mac]
+    if: ${{ needs.plan.outputs.go == 'true' && needs.plan.outputs.published != 'true' }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    environment: release-publish
+    permissions:
+      contents: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+      TAG: ${{ needs.plan.outputs.tag }}
+      VERSION: ${{ needs.plan.outputs.version }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ needs.plan.outputs.sha }}
+          persist-credentials: false
+      - uses: ./.github/actions/setup-gh
+      - uses: ./.github/actions/find-draft
+        with:
+          tag: ${{ needs.plan.outputs.tag }}
+          sha: ${{ needs.plan.outputs.sha }}
+          require: 'true'
+      - name: Download the draft's assets and check them
+        run: |
+          set -euo pipefail
+          mkdir "$RUNNER_TEMP/assets"
+          cd "$RUNNER_TEMP/assets"
+          "$GH" release download "$TAG" --repo "$GITHUB_REPOSITORY"
+          zip="zbx-$VERSION-macos-universal.zip"
+          want=$(printf '%s\n' "$zip" "$zip.sha256" zigbox.rb zigbox-repos.tar.gz | sort)
+          have=$(/bin/ls -A | sort)
+          if [ "$want" != "$have" ]; then
+            echo "release: the draft's assets are not exactly:" >&2
+            printf '%s\n' "$want" >&2
+            echo "but:" >&2
+            printf '%s\n' "$have" >&2
+            exit 1
+          fi
+          sha256sum -c "$zip.sha256"
+          zip_sha=$(cut -d ' ' -f 1 "$zip.sha256")
+          formula_sha=$(sed -n 's/^ *sha256 "\([0-9a-f]\{64\}\)"$/\1/p' zigbox.rb)
+          [ "$zip_sha" = "$formula_sha" ] || { echo "release: the formula's sha256 is not the zip's" >&2; exit 1; }
+          grep -qxF "  url \"https://github.com/$GITHUB_REPOSITORY/releases/download/$TAG/$zip\"" zigbox.rb ||
+            { echo "release: the formula's url is not this release's zip" >&2; exit 1; }
+          grep -qxF "  version \"$VERSION\"" zigbox.rb ||
+            { echo "release: the formula's version is not $VERSION" >&2; exit 1; }
+          [ "$(unzip -Z1 "$zip")" = zbx ] || { echo "release: the zip holds more than zbx" >&2; exit 1; }
+          tar -tzf zigbox-repos.tar.gz > list
+          grep -q '^apt/dists/stable/InRelease$' list
+          grep -q '^zigbox-archive-keyring.gpg$' list
+          ! grep -Evq '^(apt/|rpm/|zigbox-archive-keyring\.(asc|gpg)$)' list || exit 1
+          ! grep -Eq '(^|/)\.' list || exit 1
+          ! grep -Eq 'to-sign|test-key|passphrase|secret' list || exit 1
+          echo "prepare: the draft's four assets are as they should be"
+      - name: Mint the App token
+        id: app
+        uses: actions/create-github-app-token@64ab729a6294000f5aa4a4bc0b73d1f32bc45510 # v3.3.0
+        with:
+          app-id: ${{ vars.RELEASE_APP_ID }}
+          private-key: ${{ secrets.RELEASE_APP_PRIVATE_KEY }}
+          owner: Zigbox
+          repositories: |
+            homebrew-tap
+            zigbox.github.io
+          permission-contents: write
+          permission-actions: read
+      # The diff against the tap is checked now, while a refusal still leaves only a draft.
+      - name: The tap's formula differs only where it may
+        uses: ./.github/actions/tap-formula
+        env:
+          GH_TOKEN: ${{ steps.app.outputs.token }}
+        with:
+          formula: ${{ runner.temp }}/assets/zigbox.rb
+
+  # The one step that makes a release public, and so makes the tag (at the release commit, by
+  # the draft's target). GITHUB_TOKEN with contents: write is enough; no App is involved.
+  publish:
+    name: publish the release
+    needs: [plan, prepare]
+    if: ${{ needs.plan.outputs.go == 'true' && needs.plan.outputs.published != 'true' }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+      TAG: ${{ needs.plan.outputs.tag }}
+      SHA: ${{ needs.plan.outputs.sha }}
+      PRERELEASE: ${{ needs.plan.outputs.prerelease }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ needs.plan.outputs.sha }}
+          persist-credentials: false
+      - uses: ./.github/actions/setup-gh
+      - uses: ./.github/actions/find-draft
+        id: found
+        with:
+          tag: ${{ needs.plan.outputs.tag }}
+          sha: ${{ needs.plan.outputs.sha }}
+          require: 'true'
+      - name: Publish the draft
+        env:
+          ID: ${{ steps.found.outputs.id }}
+        run: |
+          set -euo pipefail
+          latest=true
+          if [ "$PRERELEASE" = true ]; then latest=false; fi
+          # The approval can wait for hours: the tag must still be absent now, because publishing
+          # under a tag that someone made meanwhile would pair it with assets built from $SHA.
+          # A 404 is the one answer that lets this go on; any other failure also refuses.
+          if err=$(gh api "repos/$GITHUB_REPOSITORY/git/ref/tags/$TAG" 2>&1 > /dev/null); then
+            echo "release: the tag $TAG exists now; refusing to publish under it" >&2
+            exit 1
+          fi
+          case "$err" in
+            *"HTTP 404"*) ;;
+            *) echo "release: could not check that $TAG is absent: ${err%%$'\n'*}" >&2; exit 1 ;;
+          esac
+          # tag_name is passed again: without it the draft publishes under its placeholder
+          # "untagged-..." name and no tag is made (found by draft-test).
+          gh api -X PATCH "repos/$GITHUB_REPOSITORY/releases/$ID" -F draft=false \
+            -f tag_name="$TAG" -f target_commitish="$SHA" \
+            -F prerelease="$PRERELEASE" -f make_latest="$latest" > /dev/null
+          type=$(gh api "repos/$GITHUB_REPOSITORY/git/ref/tags/$TAG" --jq .object.type)
+          object=$(gh api "repos/$GITHUB_REPOSITORY/git/ref/tags/$TAG" --jq .object.sha)
+          if [ "$type" = tag ]; then
+            object=$(gh api "repos/$GITHUB_REPOSITORY/git/tags/$object" --jq .object.sha)
+          fi
+          [ "$object" = "$SHA" ] || { echo "release: the new tag $TAG is at $object, not $SHA" >&2; exit 1; }
+          echo "publish: $TAG is public, at $SHA"
+
+  # The tap, from the App's token. The formula is the one on the published release, so a re-run,
+  # or a run that finds the release already public, does the same thing. A contents-API call, not
+  # a git push: no credential goes through git or onto a command line.
+  tap:
+    name: commit the formula to the tap
+    needs: [plan, publish]
+    if: >-
+      ${{ always() && needs.plan.outputs.go == 'true'
+      && (needs.publish.result == 'success'
+      || (needs.publish.result == 'skipped' && needs.plan.outputs.published == 'true')) }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    environment: release-publish
+    permissions:
+      contents: read
+    env:
+      TAG: ${{ needs.plan.outputs.tag }}
+      VERSION: ${{ needs.plan.outputs.version }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ needs.plan.outputs.sha }}
+          persist-credentials: false
+      - uses: ./.github/actions/setup-gh
+      - name: Download the published formula and zip, and check the hash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          mkdir "$RUNNER_TEMP/assets"
+          cd "$RUNNER_TEMP/assets"
+          zip="zbx-$VERSION-macos-universal.zip"
+          "$GH" release download "$TAG" --repo "$GITHUB_REPOSITORY" --pattern "$zip" --pattern zigbox.rb
+          sha=$(sed -n 's/^ *sha256 "\([0-9a-f]\{64\}\)"$/\1/p' zigbox.rb)
+          [ -n "$sha" ] || { echo "release: the formula has no sha256" >&2; exit 1; }
+          echo "$sha  $zip" | sha256sum -c -
+      - name: Mint the App token
+        id: app
+        uses: actions/create-github-app-token@64ab729a6294000f5aa4a4bc0b73d1f32bc45510 # v3.3.0
+        with:
+          app-id: ${{ vars.RELEASE_APP_ID }}
+          private-key: ${{ secrets.RELEASE_APP_PRIVATE_KEY }}
+          owner: Zigbox
+          repositories: homebrew-tap
+          permission-contents: write
+      - name: The tap's formula differs only where it may
+        id: diff
+        uses: ./.github/actions/tap-formula
+        env:
+          GH_TOKEN: ${{ steps.app.outputs.token }}
+        with:
+          formula: ${{ runner.temp }}/assets/zigbox.rb
+      - name: Commit the formula
+        if: ${{ steps.diff.outputs.changed == 'true' }}
+        env:
+          GH_TOKEN: ${{ steps.app.outputs.token }}
+          BLOB: ${{ steps.diff.outputs.blob }}
+        run: |
+          set -euo pipefail
+          content=$(base64 -w 0 "$RUNNER_TEMP/assets/zigbox.rb")
+          gh api -X PUT "repos/Zigbox/homebrew-tap/contents/Formula/zigbox.rb" \
+            -f message="zigbox $VERSION" -f content="$content" -f sha="$BLOB" -f branch=main > /dev/null
+          echo "tap: committed Formula/zigbox.rb for $VERSION"
+
+  # The deploy fetches every apt and rpm file back from zigbox.org and compares bytes, so a
+  # green run is the check. Its run is the first `repository_dispatch` run created after the
+  # dispatch; both waits are bounded.
+  site:
+    name: deploy zigbox.org
+    needs: [plan, tap]
+    if: ${{ always() && needs.tap.result == 'success' }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    environment: release-publish
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ needs.plan.outputs.sha }}
+          persist-credentials: false
+      - uses: ./.github/actions/setup-gh
+      - name: Mint the App token
+        id: app
+        uses: actions/create-github-app-token@64ab729a6294000f5aa4a4bc0b73d1f32bc45510 # v3.3.0
+        with:
+          app-id: ${{ vars.RELEASE_APP_ID }}
+          private-key: ${{ secrets.RELEASE_APP_PRIVATE_KEY }}
+          owner: Zigbox
+          repositories: zigbox.github.io
+          permission-contents: write
+          permission-actions: read
+      - name: Dispatch the site deploy and wait for it
+        env:
+          GH_TOKEN: ${{ steps.app.outputs.token }}
+        run: |
+          set -euo pipefail
+          site=Zigbox/zigbox.github.io
+          since=$(date -u -d '30 seconds ago' +%Y-%m-%dT%H:%M:%SZ)
+          gh api -X POST "repos/$site/dispatches" -f event_type=site
+          run_id=""
+          for _ in $(seq 1 60); do
+            run_id=$(gh api -X GET "repos/$site/actions/workflows/deploy.yml/runs" -f event=repository_dispatch \
+              --jq "[.workflow_runs[] | select(.created_at >= \"$since\")] | sort_by(.created_at) | first | .id // empty")
+            [ -n "$run_id" ] && break
+            sleep 10
+          done
+          [ -n "$run_id" ] || { echo "release: the site deploy did not start within 10 minutes" >&2; exit 1; }
+          echo "site: waiting for https://github.com/$site/actions/runs/$run_id"
+          for _ in $(seq 1 90); do
+            result=$(gh api "repos/$site/actions/runs/$run_id" --jq '"\(.status) \(.conclusion // "")"')
+            case "$result" in
+              "completed success") echo "site: deployed"; exit 0 ;;
+              completed*) echo "release: the site deploy ended: $result" >&2; exit 1 ;;
+            esac
+            sleep 20
+          done
+          echo "release: the site deploy did not finish within 30 minutes" >&2
+          exit 1
+
+  # What a user does: take the public zip and check it (Apple silicon and Intel), then, on Apple
+  # silicon, install from the tap and run it. No secret, no environment.
+  verify:
+    name: install and run (${{ matrix.os }})
+    needs: [plan, site]
+    if: ${{ always() && needs.site.result == 'success' }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-15, macos-15-intel]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    permissions:
+      contents: read
+    env:
+      TAG: ${{ needs.plan.outputs.tag }}
+      VERSION: ${{ needs.plan.outputs.version }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ needs.plan.outputs.sha }}
+          persist-credentials: false
+      - name: Download the published zip
+        shell: /bin/bash --noprofile --norc -euo pipefail {0}
+        run: |
+          mkdir "$RUNNER_TEMP/public"
+          cd "$RUNNER_TEMP/public"
+          base="https://github.com/$GITHUB_REPOSITORY/releases/download/$TAG"
+          zip="zbx-$VERSION-macos-universal.zip"
+          /usr/bin/curl -fsSL --retry 3 -O "$base/$zip" -O "$base/$zip.sha256"
+          /usr/bin/shasum -a 256 -c "$zip.sha256"
+      - uses: ./.github/actions/mac-check-zip
+        with:
+          zip: ${{ runner.temp }}/public/zbx-${{ needs.plan.outputs.version }}-macos-universal.zip
+          version: ${{ needs.plan.outputs.version }}
+          gatekeeper: 'true'
+      # The formula needs Apple silicon (depends_on arch: :arm64), so an Intel Mac checks the zip
+      # above and nothing more.
+      - name: brew install, zbx --version and brew test
+        if: ${{ runner.arch == 'ARM64' }}
+        run: |
+          set -euo pipefail
+          brew update
+          brew install zigbox/tap/zigbox || brew upgrade zigbox/tap/zigbox
+          out=$(zbx --version)
+          echo "$out"
+          case "$out" in
+            *"zbx $VERSION"*) ;;
+            *) echo "release: zbx --version does not say $VERSION" >&2; exit 1 ;;
+          esac
+          brew test zigbox/tap/zigbox
+
   # The whole signing script with a throwaway key: import from stdin, round 1 and 2, the check,
   # every gpg --verify and rpm -Kv, the archive. It attaches nothing and dispatches nothing.
   test:
     name: test the signing script (throwaway key)
-    if: ${{ github.ref_type != 'tag' && github.event_name != 'workflow_dispatch' }}
+    if: ${{ github.event_name == 'push' || github.event_name == 'pull_request' }}
     runs-on: ubuntu-24.04
     timeout-minutes: 30
     steps:
@@ -64,83 +816,178 @@ jobs:
           grep -q '^apt/dists/stable/InRelease$' "$RUNNER_TEMP/list"
           grep -q '^zigbox-archive-keyring.gpg$' "$RUNNER_TEMP/list"
           # Only apt/, rpm/ and the two keyring files (packaging.md, step 7), no dot files.
-          ! grep -Evq '^(apt/|rpm/|zigbox-archive-keyring\.(asc|gpg)$)' "$RUNNER_TEMP/list"
-          ! grep -Eq '(^|/)\.' "$RUNNER_TEMP/list"
-          ! grep -Eq 'to-sign|test-key|passphrase|secret' "$RUNNER_TEMP/list"
+          ! grep -Evq '^(apt/|rpm/|zigbox-archive-keyring\.(asc|gpg)$)' "$RUNNER_TEMP/list" || exit 1
+          ! grep -Eq '(^|/)\.' "$RUNNER_TEMP/list" || exit 1
+          ! grep -Eq 'to-sign|test-key|passphrase|secret' "$RUNNER_TEMP/list" || exit 1
 
-  sign:
-    name: sign and attach
-    if: ${{ github.ref_type == 'tag' }}
-    runs-on: ubuntu-24.04
+  # The `mac` job's keychain steps with a throwaway self-signed identity made here: builds the
+  # universal zip, signs it with that, notarizes nothing, uploads nothing; no secret is available.
+  mac-test:
+    name: test the Mac signing steps (throwaway identity)
+    if: ${{ github.event_name == 'push' || github.event_name == 'pull_request' }}
+    runs-on: macos-15
     timeout-minutes: 45
-    # The signing key is a secret of this environment: the owner approves each run, and only
-    # tags may deploy to it. Nothing else in this file can read it.
-    environment: release
-    permissions:
-      contents: write
+    defaults:
+      run:
+        shell: /bin/bash --noprofile --norc -euo pipefail {0}
     concurrency:
-      group: release-${{ github.ref_name }}
-      cancel-in-progress: false
-    env:
-      TAG: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name }}
+      group: release-mac-test-${{ github.ref }}
+      cancel-in-progress: true
     steps:
-      # Before the checkout and before anything reads a secret. The tag comes in through the
-      # environment, never spliced into the script.
-      - name: Refuse anything but a release tag
+      # The runner context is not available in a job's `env:`, so the paths are set here.
+      - name: Paths of the temporary keychain and its work directory
         run: |
-          if ! [[ "$TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.]+)?$ ]]; then
-            echo "release: '$TAG' is not a release tag such as v0.5.0" >&2
-            exit 1
-          fi
-          if [ "$TAG" != "$GITHUB_REF_NAME" ]; then
-            echo "release: start the run from the tag $TAG (Use workflow from: the tag), not from $GITHUB_REF_NAME" >&2
-            exit 1
-          fi
+          echo "KEYCHAIN=$RUNNER_TEMP/zbx-release-test.keychain-db" >> "$GITHUB_ENV"
+          echo "SECRETS_DIR=$RUNNER_TEMP/zbx-release-test-secrets" >> "$GITHUB_ENV"
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          ref: refs/tags/${{ env.TAG }}
-          # Nothing here pushes; the token must not sit in .git/config for the build to read.
           persist-credentials: false
-      # No toolchain cache here: the toolchain runs while the subkey is unlocked, so it is
-      # downloaded and checked against its SHA-256 on every run.
-      - uses: ./.github/actions/setup-zig
+      - uses: ./.github/actions/setup-zig-macos
+      - name: The VM kernel
+        run: test -f .zig-cache/zbx-vm/kernel/Image || zig build vm-kernel-fetch
+      - name: Temporary keychain with a throwaway self-signed identity
+        run: |
+          set -euo pipefail
+          umask 077
+          export PATH=/usr/bin:/bin:/usr/sbin:/sbin
+          mkdir "$SECRETS_DIR"
+          KEYCHAIN_PASSWORD=$(/usr/bin/openssl rand -hex 24)
+          WRAP_PASSWORD=$(/usr/bin/openssl rand -hex 24)
+          export WRAP_PASSWORD
+          cat > "$SECRETS_DIR/openssl.cnf" <<'CNF'
+          [req]
+          distinguished_name = dn
+          prompt = no
+          x509_extensions = ext
+          [dn]
+          CN = zbx-release-test
+          [ext]
+          basicConstraints = critical,CA:false
+          keyUsage = critical,digitalSignature
+          extendedKeyUsage = critical,codeSigning
+          CNF
+          /usr/bin/openssl req -x509 -newkey rsa:2048 -nodes -days 1 -config "$SECRETS_DIR/openssl.cnf" \
+            -keyout "$SECRETS_DIR/key.pem" -out "$SECRETS_DIR/cert.pem"
+          /usr/bin/openssl pkcs12 -export -inkey "$SECRETS_DIR/key.pem" -in "$SECRETS_DIR/cert.pem" \
+            -passout env:WRAP_PASSWORD -out "$SECRETS_DIR/wrapped.p12"
+          /usr/bin/security create-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN"
+          /usr/bin/security set-keychain-settings -t 3600 "$KEYCHAIN"
+          /usr/bin/security unlock-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN"
+          /usr/bin/security import "$SECRETS_DIR/wrapped.p12" -k "$KEYCHAIN" -P "$WRAP_PASSWORD" -x -T /usr/bin/codesign
+          /usr/bin/security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "$KEYCHAIN_PASSWORD" "$KEYCHAIN" > /dev/null
+          # codesign refuses an identity whose certificate is not trusted for code signing
+          # (CSSMERR_TP_NOT_TRUSTED), so the throwaway certificate is trusted for code signing.
+          # The user domain would wait for a password prompt nobody can answer, so this is the
+          # admin domain, which the GitHub-hosted runner's passwordless sudo allows; the runner
+          # is a one-job virtual machine and the certificate lives one day. A prompt fails the
+          # step after a minute instead of hanging it.
+          /usr/bin/perl -e 'alarm 60; exec @ARGV' /usr/bin/sudo -n /usr/bin/security \
+            add-trusted-cert -d -r trustRoot -p codeSign -k "$KEYCHAIN" "$SECRETS_DIR/cert.pem"
+          /usr/bin/security find-identity -p codesigning "$KEYCHAIN"
+          # codesign finds an untrusted self-signed identity by its certificate hash, not by name.
+          # The hash is public certificate data, not a secret.
+          fingerprint=$(/usr/bin/openssl x509 -in "$SECRETS_DIR/cert.pem" -noout -fingerprint -sha1)
+          echo "TEST_IDENTITY=$(echo "${fingerprint#*=}" | /usr/bin/tr -d ':')" >> "$GITHUB_ENV"
+          /bin/rm -rf "$SECRETS_DIR"
+      - name: Build the universal zip and sign it with it (no notarization, no upload)
+        run: |
+          # codesign finds the identity only when its keychain is on the search list; this is the
+          # same step as in `mac`. The cleanup step restores the list found here.
+          /usr/bin/security list-keychains -d user | /usr/bin/sed 's/^ *"\(.*\)"$/\1/' > "$RUNNER_TEMP/keychain-list"
+          existing=()
+          while IFS= read -r line; do existing+=("$line"); done < "$RUNNER_TEMP/keychain-list"
+          /usr/bin/security list-keychains -d user -s "$KEYCHAIN" ${existing[@]+"${existing[@]}"}
+          SDK="$(/usr/bin/xcrun --show-sdk-path)"
+          zig build mac-release --sysroot "$SDK" -Dsdk \
+            -Dsign-identity="$TEST_IDENTITY" -Dkeychain="$KEYCHAIN"
+      - name: The zip is the one that was hashed
+        id: zip
+        run: |
+          cd zig-out/mac-release
+          /usr/bin/shasum -a 256 -c zbx-*-macos-universal.zip.sha256
+          version=$(sed -n 's/^ *\.version = "\([^"]*\)",.*/\1/p' ../../build.zig.zon | head -n 1)
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+      - uses: ./.github/actions/mac-check-zip
         with:
-          cache: 'false'
-      - name: Install rpm
+          zip: zig-out/mac-release/zbx-${{ steps.zip.outputs.version }}-macos-universal.zip
+          version: ${{ steps.zip.outputs.version }}
+          gatekeeper: 'false'
+      - name: Delete the keychain and everything this job wrote under the runner's temp
+        if: ${{ always() }}
         run: |
-          sudo apt-get update -q
-          sudo apt-get install -y -q rpm
-      - name: The release exists
-        env:
-          GH_TOKEN: ${{ github.token }}
+          # Puts back the search list the build step found (nothing to do if it never got that far).
+          if [ -f "$RUNNER_TEMP/keychain-list" ]; then
+            saved=()
+            while IFS= read -r line; do saved+=("$line"); done < "$RUNNER_TEMP/keychain-list"
+            /usr/bin/security list-keychains -d user -s ${saved[@]+"${saved[@]}"} || true
+          fi
+          /usr/bin/security delete-keychain "$KEYCHAIN" || true
+          /bin/rm -rf "$KEYCHAIN" "$RUNNER_TEMP/keychain-list" "$SECRETS_DIR" "$RUNNER_TEMP"/zig-aarch64-macos-* "$RUNNER_TEMP/zig-global"
+
+  # Tries, on a scratch branch only, what the release depends on and the docs do not promise:
+  # that gh uploads to, downloads from, edits and publishes a DRAFT by its tag, that a draft makes
+  # no tag and publishing makes one at the target. It makes a prerelease of a throwaway version
+  # and deletes it, with its tag, at the end. No secret is used.
+  draft-test:
+    name: test the draft steps (throwaway release)
+    if: ${{ github.event_name == 'push' }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+      TAG: v0.0.0-draftcheck.${{ github.run_id }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: ./.github/actions/setup-gh
+      - name: Draft, upload, download, edit
         run: |
-          gh release view "$TAG" --repo "$GITHUB_REPOSITORY" > /dev/null || {
-            echo "release: no GitHub release for $TAG; create it, then re-run from the tag" >&2
+          set -euo pipefail
+          "$GH" release create "$TAG" --repo "$GITHUB_REPOSITORY" --draft --prerelease --target "$GITHUB_SHA" \
+            --title "draft check" --notes "draft check"
+          if gh api "repos/$GITHUB_REPOSITORY/git/ref/tags/$TAG" > /dev/null 2>&1; then
+            echo "draft-test: a draft made a tag" >&2
             exit 1
-          }
-      # The key and passphrase reach this one step through the environment and the script
-      # reads them from there; nothing here prints them or takes them as an argument.
-      - name: Sign
+          fi
+          echo hello > "$RUNNER_TEMP/f.txt"
+          "$GH" release upload "$TAG" "$RUNNER_TEMP/f.txt" --clobber --repo "$GITHUB_REPOSITORY"
+          "$GH" release upload "$TAG" "$RUNNER_TEMP/f.txt" --clobber --repo "$GITHUB_REPOSITORY"
+          mkdir "$RUNNER_TEMP/dl"
+          "$GH" release download "$TAG" --repo "$GITHUB_REPOSITORY" --dir "$RUNNER_TEMP/dl"
+          cmp "$RUNNER_TEMP/f.txt" "$RUNNER_TEMP/dl/f.txt"
+          "$GH" release view "$TAG" --repo "$GITHUB_REPOSITORY" --json isDraft --jq .isDraft | grep -qx true
+      - uses: ./.github/actions/find-draft
+        id: found
+        with:
+          tag: ${{ env.TAG }}
+          sha: ${{ github.sha }}
+          require: 'true'
+      - name: Refresh the notes, then publish; the tag appears at the target
         env:
-          ZIGBOX_SIGNING_KEY: ${{ secrets.ZIGBOX_SIGNING_KEY }}
-          ZIGBOX_SIGNING_PASSPHRASE: ${{ secrets.ZIGBOX_SIGNING_PASSPHRASE }}
-          # Pinned here, in reviewed code, not read from the environment: users trust this
-          # fingerprint (docs/releases/packaging.md, "The release key").
-          ZIGBOX_SIGNING_FPR: 09991DC39816D3C914E2A22C5AB00BC328B7DBB7
-        run: .github/release-sign.sh "$RUNNER_TEMP/out"
-      - name: The archive holds what packaging.md says and nothing secret
+          ID: ${{ steps.found.outputs.id }}
         run: |
-          tar -tzf "$RUNNER_TEMP/out/zigbox-repos.tar.gz" > "$RUNNER_TEMP/list"
-          grep -q '^apt/dists/stable/InRelease$' "$RUNNER_TEMP/list"
-          grep -q '^zigbox-archive-keyring.gpg$' "$RUNNER_TEMP/list"
-          ! grep -Evq '^(apt/|rpm/|zigbox-archive-keyring\.(asc|gpg)$)' "$RUNNER_TEMP/list"
-          ! grep -Eq '(^|/)\.' "$RUNNER_TEMP/list"
-          ! grep -Eq 'to-sign|test-key|passphrase|secret' "$RUNNER_TEMP/list"
-      - name: Attach the archive to the release
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: gh release upload "$TAG" "$RUNNER_TEMP/out/zigbox-repos.tar.gz" --clobber --repo "$GITHUB_REPOSITORY"
-      # The deploy of zigbox.org (Zigbox/zigbox.github.io) picks the asset up on its own
-      # schedule, every six hours. A `repository_dispatch` of type `site` would need a token
-      # that can write to that repository, and this repository has none: see
-      # docs/releases/packaging.md, "Dispatching the site deploy".
+          set -euo pipefail
+          echo "second notes" > "$RUNNER_TEMP/notes.md"
+          gh api -X PATCH "repos/$GITHUB_REPOSITORY/releases/$ID" -f name="draft check" \
+            -F body=@"$RUNNER_TEMP/notes.md" -F prerelease=true > /dev/null
+          gh api -X PATCH "repos/$GITHUB_REPOSITORY/releases/$ID" -F draft=false \
+            -f tag_name="$TAG" -f target_commitish="$GITHUB_SHA" \
+            -F prerelease=true -f make_latest=false > /dev/null
+          object=$(gh api "repos/$GITHUB_REPOSITORY/git/ref/tags/$TAG" --jq .object.sha)
+          [ "$object" = "$GITHUB_SHA" ] || { echo "draft-test: the tag is at $object" >&2; exit 1; }
+          gh api "repos/$GITHUB_REPOSITORY/releases/tags/$TAG" --jq .draft | grep -qx false
+          echo "draft-test: draft, upload, download, edit and publish all work"
+      - name: Delete the throwaway release and its tag
+        if: ${{ always() }}
+        run: |
+          # By id, not by tag: a draft has no tag to find it by. The name "draft check" is only
+          # ever made by this job, so a release it leaked in an earlier run goes too.
+          ids=$(gh api --paginate "repos/$GITHUB_REPOSITORY/releases?per_page=100" | jq -r --arg tag "$TAG" \
+            '.[] | select(.name == "draft check" and (.tag_name == $tag or (.tag_name | startswith("untagged-")))) | .id')
+          for id in $ids; do
+            gh api -X DELETE "repos/$GITHUB_REPOSITORY/releases/$id"
+          done
+          gh api -X DELETE "repos/$GITHUB_REPOSITORY/git/refs/tags/$TAG" || true

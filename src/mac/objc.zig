@@ -18,9 +18,14 @@ const assert = std.debug.assert;
 const builtin = @import("builtin");
 
 comptime {
-    // The runtime and blocks ABI declared below are the arm64 Apple ones.
+    // The runtime and blocks ABI declared below are the Apple ones for arm64 and x86-64. `send`
+    // casts plain `objc_msgSend`, which is right for scalar and pointer returns on both; a struct
+    // return would need `objc_msgSend_stret` on x86-64, so `send` refuses one.
     assert(builtin.os.tag == .macos);
-    assert(builtin.cpu.arch == .aarch64);
+    switch (builtin.cpu.arch) {
+        .aarch64, .x86_64 => {},
+        else => @compileError("objc.zig supports arm64 and x86-64 macOS only"),
+    }
 }
 
 pub const Id = ?*anyopaque;
@@ -60,6 +65,7 @@ pub const error_domain_bytes_max: u32 = 64;
 /// types are the C types of the method's parameters (`u64` for an NSUInteger, `bool` for BOOL,
 /// `Id` for an object, `?*anyopaque` for a pointer).
 pub fn send(comptime Return: type, target: Id, selector: [:0]const u8, arguments: anytype) Return {
+    comptime assert(@typeInfo(Return) != .@"struct"); // x86-64 would need objc_msgSend_stret.
     assert(target != null); // A message to nil is a bug in the caller; ObjC would hide it.
     const sel = sel_registerName(selector.ptr);
     const address = @intFromPtr(&objc_msgSend);
