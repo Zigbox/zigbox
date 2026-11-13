@@ -159,6 +159,8 @@ pub const HostReal = struct {
         .remove_file = remove_file,
         .list_directory = list_directory,
         .ignore_broken_pipe = ignore_broken_pipe,
+        .catch_interrupts = catch_interrupts,
+        .interrupt_pending = interrupt_pending,
         .socket_connect = socket_connect,
         .read_timeout = read_timeout,
         .begin_step = begin_step,
@@ -1286,6 +1288,34 @@ pub const HostReal = struct {
         try result;
     }
 
+    /// Set by the handler below; read by `interrupt_pending`. One flag for the process, as the
+    /// signals are.
+    var interrupt_flag: std.atomic.Value(bool) = .init(false);
+
+    fn on_interrupt(which: linux.SIG) callconv(.c) void {
+        _ = which;
+        interrupt_flag.store(true, .release);
+    }
+
+    fn catch_interrupts(context: *anyopaque, catch_it: bool) void {
+        _ = from_context(context);
+        const action: linux.Sigaction = .{
+            .handler = .{ .handler = if (catch_it) on_interrupt else linux.SIG.DFL },
+            .mask = linux.sigemptyset(),
+            .flags = 0, // No SA_RESTART: a blocked wait returns, so the caller sees the flag.
+        };
+        if (catch_it) interrupt_flag.store(false, .release);
+        for ([_]linux.SIG{ .INT, .TERM }) |which| {
+            const result = linux.sigaction(which, &action, null);
+            assert(linux.errno(result) == .SUCCESS); // Valid signals and a valid handler.
+        }
+    }
+
+    fn interrupt_pending(context: *anyopaque) bool {
+        _ = from_context(context);
+        return interrupt_flag.load(.acquire);
+    }
+
     fn ignore_broken_pipe(context: *anyopaque, ignore: bool) void {
         _ = from_context(context);
         const handler = if (ignore) linux.SIG.IGN else linux.SIG.DFL;
@@ -1725,6 +1755,22 @@ test "real host reads a file, reports a missing one, and closes every handle" {
         subject.read_file("/proc/zigbox-does-not-exist", &buffer),
     );
     try std.testing.expectEqual(@as(u32, 0), real.open_count);
+}
+
+test "a caught SIGINT and SIGTERM set the flag instead of ending the process" {
+    // Goal: the signals a build catches (REVIEW.md: every exit path) reach the flag, and
+    // handlers are put back after. Method: catch, send each signal to this thread (so the
+    // handler has run when the call returns), read the flag, restore the default.
+    var real: HostReal = .{};
+    const subject = real.interface();
+    for ([_]linux.SIG{ .INT, .TERM }) |which| {
+        subject.catch_interrupts(true);
+        try std.testing.expect(!subject.interrupt_pending());
+        const sent = linux.tgkill(linux.getpid(), linux.gettid(), which);
+        try std.testing.expectEqual(linux.E.SUCCESS, linux.errno(sent));
+        try std.testing.expect(subject.interrupt_pending());
+        subject.catch_interrupts(false);
+    }
 }
 
 test "real host refuses a file larger than the buffer instead of truncating" {

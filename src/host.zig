@@ -607,6 +607,12 @@ pub const VTable = struct {
     ) Error!void,
     /// Makes a write to a pipe with no reader fail with `EPIPE` instead of killing the process.
     ignore_broken_pipe: *const fn (context: *anyopaque, ignore: bool) void,
+    /// With `catch_it`, SIGINT and SIGTERM stop ending the process and set a flag that
+    /// `interrupt_pending` reads, and a blocked wait returns `Interrupted` (no restart); without,
+    /// they act as they did. A command that holds state to release (a build's roots) polls it.
+    catch_interrupts: *const fn (context: *anyopaque, catch_it: bool) void,
+    /// Whether a SIGINT or SIGTERM arrived since `catch_interrupts(true)`.
+    interrupt_pending: *const fn (context: *anyopaque) bool,
     /// Connects a stream socket to the unix socket at `path` (the user's D-Bus socket). The
     /// handle is close-on-exec and is read and written like a pipe's.
     socket_connect: *const fn (context: *anyopaque, path: [:0]const u8) Error!Handle,
@@ -1334,7 +1340,10 @@ pub const Host = struct {
         for (0..constants.wait_interrupts_max + 1) |_| {
             const waited = host.vtable.wait_any(host.context, pids, timeout_ms);
             const reaped = waited catch |err| switch (err) {
-                error.Interrupted => continue,
+                // A SIGINT or SIGTERM the caller asked to catch is its to see, not to retry.
+                error.Interrupted => if (host.vtable.interrupt_pending(host.context)) {
+                    return err;
+                } else continue,
                 else => return err,
             };
             if (reaped) |found| assert(found.index < pids.len);
@@ -1404,6 +1413,15 @@ pub const Host = struct {
         assert(@intFromPtr(host.vtable) != 0);
         host.vtable.ignore_broken_pipe(host.context, ignore);
         assert(host.vtable.last_errno(host.context) < 4096);
+    }
+
+    pub fn catch_interrupts(host: Host, catch_it: bool) void {
+        assert(@intFromPtr(host.vtable) != 0);
+        host.vtable.catch_interrupts(host.context, catch_it);
+    }
+
+    pub fn interrupt_pending(host: Host) bool {
+        return host.vtable.interrupt_pending(host.context);
     }
 
     /// Forks a child with no namespace of its own, which runs `entry` (the exec joiner); with

@@ -66,6 +66,7 @@ fn start() void {
     const parsed = file_mod.parse(file_tests.example, &loaded.file, &problem);
     testing.expectEqual(file_mod.ParseResult.parsed, parsed) catch unreachable; // The brief's file.
     for (&composed.slots) |*slot| slot.active = false;
+    composed.holds_count = 0;
     composed.outputs = @splat(Digest.of("unset"));
     context = .{
         .host = sim.interface(),
@@ -120,7 +121,15 @@ fn worker_ended(at: usize, pid: host_mod.Pid, bytes: []const u8) *compose.Slot {
     if (bytes.len > 0) host.write_handle_all(report.write, bytes) catch unreachable; // Room.
     host.close(report.write);
     const slot = &composed.slots[at];
-    slot.* = .{ .active = true, .index = 0, .pid = pid, .report = report, .key = composed.key };
+    slot.* = .{
+        .active = true,
+        .index = 0,
+        .pid = pid,
+        .report = report,
+        .key = composed.key,
+        .binds = undefined,
+        .binds_count = 0,
+    };
     return slot;
 }
 
@@ -1309,6 +1318,114 @@ test "a command step's input root is dropped when its worker is aborted or fails
     const slot = worker_ended(0, 7, &.{});
     try testing.expect(!settle(slot, .{ .exited = 1 }).ok);
     try testing.expectEqual(@as(u32, 0), build_roots(&scratch_roots));
+}
+
+/// Step "a" is the sample tree (not run); step "b" has the project's `a.txt` as input, binds
+/// `/etc` of "a" and runs a command, so beginning it starts a worker.
+fn bind_project_loaded() !void {
+    registry_started(&registry.fixture.oci.amd64.digest);
+    var buffer: [768]u8 = undefined;
+    const text = try std.fmt.bufPrint(&buffer, "{s}{s}{s}{s}{s}", .{
+        ".{ .version = 1, .image = .{}, .steps = .{ .{ .name = \"a\", .base = \"",
+        locked_reference,
+        "\", .run = .{\"true\"} }, .{ .name = \"b\", .base = \"",
+        locked_reference,
+        "\", .inputs = .{\"a.txt\"}, .run = .{\"true\"}, " ++
+            ".binds = .{ .{ .from = \"step:a\", .source = \"/etc\", .to = \"/t\" } } } } }\n",
+    });
+    var problem: file_mod.Problem = undefined;
+    const parsed = file_mod.parse(text, &loaded.file, &problem);
+    try testing.expectEqual(file_mod.ParseResult.parsed, parsed);
+    files.put_dir("/p", 0o755);
+    files.put_file("/p/a.txt", 0o644, "a\n");
+    set_path(&loaded.project, "/p");
+    set_path(&loaded.path, "/p/zbx.build.zon");
+    composed.outputs[0] = made_output();
+}
+
+test "a bind's selection tree is a root while its worker runs, and gone after" {
+    // Goal: the tree a bind mounts cannot be removed by a `store gc` between its selection and
+    // the worker's use. Method: begin step "b" (it starts a worker): the bind's selection is a
+    // root of the build, and a gc plan keeps it; abort the worker, as a failed build does, and
+    // then begin and settle a failing one: no root of the build is left either time.
+    try bind_project_loaded();
+    try testing.expect(try context.begin(1) == .running);
+    const bound = composed.slots[0].binds[0];
+    var record: roots.Root = undefined;
+    var errno: u16 = 0;
+    try roots.load(&store, bound, &record, &errno);
+    try testing.expect(std.mem.startsWith(u8, record.source_text(), "build:"));
+    var seen: RootsSeen = .{};
+    seen.measure();
+    try testing.expect(seen.removable_without > seen.removable_with);
+    for (composed.slots) |slot| try testing.expect(slot.active == (slot.binds_count == 1));
+    compose.Context.abort_step(@ptrCast(&context));
+    try testing.expectEqual(@as(u32, 0), build_roots(&scratch_roots));
+    try testing.expect(try context.begin(1) == .running);
+    const slot = worker_ended(0, 7, &.{});
+    slot.index = 1;
+    slot.binds_count = 1;
+    slot.binds[0] = composed.bind_keys[0].source;
+    try testing.expect(!settle(slot, .{ .exited = 1 }).ok);
+    try testing.expectEqual(@as(u32, 0), build_roots(&scratch_roots));
+}
+
+test "a tree two users hold keeps its root until the last one is done" {
+    // Goal: one root record exists per digest, so the first user to finish must not drop it under
+    // the others (steps with the same bind selection, or the same inputs). Method: two steps'
+    // workers hold the same bind selection; one is aborted by settling: the root stays; the
+    // other goes: no root.
+    try bind_project_loaded();
+    try testing.expect(try context.begin(1) == .running);
+    try testing.expect(try context.begin(1) == .running);
+    try testing.expectEqual(@as(u32, 2), composed.holds_count);
+    // The first worker ends (a fresh slot stands for it: the sim's own child is not run here).
+    const gone = worker_ended(0, 7, &.{});
+    gone.index = 1;
+    gone.binds_count = 1;
+    gone.binds[0] = composed.bind_keys[0].source;
+    _ = settle(gone, .{ .exited = 1 });
+    try testing.expectEqual(@as(u32, 2), build_roots(&scratch_roots));
+    compose.Context.abort_step(@ptrCast(&context));
+    try testing.expectEqual(@as(u32, 0), build_roots(&scratch_roots));
+    try testing.expectEqual(@as(u32, 0), composed.holds_count);
+}
+
+test "a SIGINT or SIGTERM during a build is one diagnostic, and no root outlives it" {
+    // Goal: a signal ends a build through the abort path, so its roots are removed (a process
+    // the signal killed would leave them to `store gc` forever). Method: a step's worker runs;
+    // the wait is interrupted and the signal is pending: the wait fails with E0419 whose cause
+    // names the signal; abort leaves no root. A step begun after the signal is refused the
+    // same way, before it imports anything.
+    try command_project_loaded();
+    sim.interface().catch_interrupts(true);
+    try testing.expect(try context.begin(0) == .running);
+    try testing.expectEqual(@as(u32, 1), build_roots(&scratch_roots));
+    sim.wait_interrupted = true;
+    try testing.expectError(error.Failed, context.wait());
+    try testing.expectEqual(codes.Code.E0419, diag.code.?);
+    compose.Context.abort_step(@ptrCast(&context));
+    try testing.expectEqual(@as(u32, 0), build_roots(&scratch_roots));
+    diag.reset();
+    try testing.expect(sim.interface().interrupt_pending());
+    try testing.expectError(error.Failed, context.begin(0));
+    try testing.expectEqual(codes.Code.E0419, diag.code.?);
+    try testing.expectEqual(@as(u32, 0), build_roots(&scratch_roots));
+}
+
+test "a user that no longer fits the settings is E0807, not a crash" {
+    // Goal: the numeric `uid:gid` is written beside the name in a store that only grows, so a
+    // config that fills the budget cannot take it; that is the user's input, so one coded
+    // refusal. Method: set the name `root`, mark the settings block full, then resolve it.
+    start();
+    composed.record.tree = made_output();
+    composed.record.config.clear();
+    _ = composed.record.config.settings.set(.user, "root") orelse unreachable; // Empty store.
+    const settings = &composed.record.config.settings;
+    settings.used = @intCast(settings.bytes.len); // Every word's bytes taken: no room for more.
+    try testing.expectEqualStrings("root", composed.record.config.settings.get(.user));
+    try testing.expectError(error.Failed, context.numeric_user());
+    try testing.expectEqual(codes.Code.E0807, diag.code.?);
 }
 
 fn command_project_loaded() !void {

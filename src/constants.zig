@@ -906,6 +906,10 @@ pub const build_step_env_max: u32 = 32;
 /// the run's mounts: needs + binds + caches + 2 <= 8, so an importer keeps them to 6 or refuses.
 pub const build_step_caches_max: u32 = 4;
 pub const build_step_binds_max: u32 = 4;
+/// The trees a build's roots are counted for at once (`compose.zig`): every running step's input
+/// tree and binds, and one copy step's sources and selections, which it holds until it is done.
+pub const build_root_holds_max: u32 = build_parallel_max * (1 + build_step_binds_max) +
+    2 * build_copy_entries_max;
 pub const build_copy_entries_max: u32 = 64;
 /// The lines of one `.exclude` list (`.dockerignore` syntax).
 pub const build_exclude_lines_max: u32 = 256;

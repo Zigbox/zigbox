@@ -277,6 +277,12 @@ pub const HostSim = struct {
     groups_count: u32,
     environment_variables: []const EnvironmentVariable,
     step_fault_fired: bool,
+    /// Whether `catch_interrupts(true)` is in force, and whether a test has sent the signal: a
+    /// scripted SIGINT that arrives while the code under test waits (`wait_interrupted`).
+    interrupts_caught: bool,
+    interrupt_arrived: bool,
+    /// When set, the next `wait_any` fails with `Interrupted` and raises `interrupt_arrived`.
+    wait_interrupted: bool,
     /// What the next `wait_any` reaps; null: the simulator has no children and it fails with
     /// an I/O error. Taken by the call that uses it. A test scripts a worker's end with it.
     reaped_next: ?host.Reaped,
@@ -314,6 +320,9 @@ pub const HostSim = struct {
         sim.no_color_value = false;
         sim.hard_errors_injected = 0;
         sim.interrupts_injected = 0;
+        sim.interrupts_caught = false;
+        sim.interrupt_arrived = false;
+        sim.wait_interrupted = false;
         sim.open_files = @splat(null);
         sim.call_count = 0;
         sim.stdout_len = 0;
@@ -438,6 +447,8 @@ pub const HostSim = struct {
         .remove_file = remove_file,
         .list_directory = list_directory,
         .ignore_broken_pipe = ignore_broken_pipe,
+        .catch_interrupts = catch_interrupts,
+        .interrupt_pending = interrupt_pending,
         .socket_connect = socket_connect,
         .read_timeout = read_timeout,
         .begin_step = begin_step,
@@ -1219,6 +1230,11 @@ pub const HostSim = struct {
         const sim = from_context(context);
         _ = timeout_ms;
         try sim.begin_call();
+        if (sim.wait_interrupted) {
+            sim.wait_interrupted = false;
+            sim.interrupt_arrived = true;
+            return error.Interrupted;
+        }
         const reaped = sim.reaped_next orelse return sim.model_error(constants.errno_io);
         assert(reaped.index < pids.len);
         sim.reaped_next = null;
@@ -1271,6 +1287,17 @@ pub const HostSim = struct {
         const sim = from_context(context);
         try sim.begin_call();
         if (sim.world.list_written(path, listing)) |errno| return sim.model_error(errno);
+    }
+
+    fn catch_interrupts(context: *anyopaque, catch_it: bool) void {
+        const sim = from_context(context);
+        sim.interrupts_caught = catch_it;
+        sim.interrupt_arrived = false;
+    }
+
+    fn interrupt_pending(context: *anyopaque) bool {
+        const sim = from_context(context);
+        return sim.interrupts_caught and sim.interrupt_arrived;
     }
 
     fn ignore_broken_pipe(context: *anyopaque, ignore: bool) void {

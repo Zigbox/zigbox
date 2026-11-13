@@ -106,8 +106,15 @@ pub const Workspace = struct {
     copy_keys: [constants.build_copy_entries_max]key_mod.Copy,
     cache_mounts: [constants.build_step_caches_max]key_mod.CacheMount,
     bind_keys: [constants.build_step_binds_max]key_mod.Bind,
+    /// How many users of each tree this build rooted are still at work (`hold`, `unroot`): one
+    /// root record exists per digest, so the first user to finish must not drop it under the
+    /// others. Entries are packed at the front.
+    holds: [constants.build_root_holds_max]Hold,
+    holds_count: u32,
     copy_patterns: [constants.build_copy_sources_max][]const u8,
 };
+
+const Hold = struct { digest: Digest, users: u32 };
 
 /// The timings slot of the image step.
 const image_slot = constants.build_steps_max;
@@ -184,6 +191,11 @@ pub fn run_steps(
         .records_max = constants.trust_records_max,
     };
     for (&ws.slots) |*slot| slot.active = false;
+    ws.holds_count = 0;
+    // A Ctrl-C or a SIGTERM must reach `abort_step` and the roots' removal, which a process
+    // killed by the signal never runs; the scheduler sees it in `begin` and `wait`.
+    host.catch_interrupts(true);
+    defer host.catch_interrupts(false);
     try context.sweep();
     if (options.clear_caches) try context.clear_caches();
     try context.header();
@@ -271,6 +283,9 @@ pub const Slot = struct {
     pid: host_mod.Pid,
     report: host_mod.Pipe,
     key: key_mod.Key,
+    /// The trees the step's binds select, rooted until the step settles or is aborted.
+    binds: [constants.build_step_binds_max]Digest,
+    binds_count: u8,
 };
 
 /// What the worker needs: it runs on a copy of this process's memory.
@@ -285,6 +300,8 @@ const Job = struct {
 /// encoded diagnostic, each behind a tag byte. The exit code is 0 only with an answer.
 fn worker_entry(raw: *anyopaque) u8 {
     const job: *Job = @ptrCast(@alignCast(raw));
+    // The parent's handlers are not the worker's: a signal ends the worker as it always did.
+    job.host.catch_interrupts(false);
     // A killed build takes its workers with it, as it took its one step before.
     job.host.die_with_parent() catch return 1;
     var diag: Diag = undefined;
@@ -437,6 +454,7 @@ pub const Context = struct {
         const ws = context.ws;
         const file = &loaded.file;
         assert(index < file.steps_count);
+        try context.check_interrupt();
         const step = &file.steps[index];
         const name = file.text(step.name);
         // A literal naming only the fields without defaults: the M9 fields then take theirs by
@@ -461,12 +479,17 @@ pub const Context = struct {
         else
             try context.import_inputs(index, null);
         ws.step_inputs[index] = spec.input_tree;
+        if (!step.copy.given) context.hold(spec.input_tree);
         // The import rooted the input tree for the worker; it is dropped on a hit, on an error,
         // and when the worker's step settles or is aborted.
-        errdefer if (!step.copy.given) context.unroot(spec.input_tree);
+        var handed_over = false;
+        defer if (!handed_over and !step.copy.given) context.unroot(spec.input_tree);
         fill_lists(file, step, ws, &spec);
         spec.needs = fill_needs(loaded, index, ws);
         if (!step.copy.given) try context.resolve_binds(index, &spec);
+        // The binds' selections are rooted too; they go as the input tree goes, and a worker
+        // that starts takes them over (`fork_worker`).
+        defer if (!handed_over) for (spec.binds) |bind| context.unroot(bind.source);
         if (step.copy.given) return context.begin_copy(index, &spec);
         key_mod.compute(&spec, &ws.key) catch {
             diagnose.step_env_refused(context.diag, name, loaded.shown(), step.env.count, "");
@@ -478,7 +501,6 @@ pub const Context = struct {
         };
         switch (found) {
             .hit => |output| {
-                context.unroot(spec.input_tree);
                 ws.outputs[index] = output;
                 try context.report(index, true, output);
                 return .hit;
@@ -491,6 +513,7 @@ pub const Context = struct {
             try context.check_base(file.text(step.base), &spec);
         }
         try context.fork_worker(index, &spec);
+        handed_over = true; // The slot holds the roots now; `settle` or `abort_step` drops them.
         return .running;
     }
 
@@ -568,7 +591,20 @@ pub const Context = struct {
             .pid = pid,
             .report = pipe,
             .key = ws.key,
+            .binds = undefined,
+            .binds_count = @intCast(spec.binds.len),
         };
+        for (spec.binds, 0..) |bind, at| slot.binds[at] = bind.source;
+    }
+
+    /// Fails the build with one line when a SIGINT or SIGTERM arrived: the scheduler then aborts
+    /// the running steps, and every root this build made is removed on the way out.
+    fn check_interrupt(context: *Context) Error!void {
+        if (!context.host.interrupt_pending()) return;
+        store_diagnose.worker_ended(context.diag, .{
+            .report = "the build was stopped by SIGINT or SIGTERM",
+        });
+        return error.Failed;
     }
 
     /// Waits for the first worker to end and settles its step.
@@ -586,6 +622,7 @@ pub const Context = struct {
         }
         assert(count > 0);
         const reaped = host.wait_any(pids[0..count], 0) catch |err| {
+            if (err == error.Interrupted) try context.check_interrupt();
             store_diagnose.worker_ended(context.diag, .{ .step = .{
                 .name = "waiting for a build step",
                 .err = err,
@@ -608,6 +645,7 @@ pub const Context = struct {
             _ = host.wait_for(slot.pid) catch {};
             host.close(slot.report.read);
             context.unroot(context.ws.step_inputs[slot.index]);
+            context.unroot_binds(slot);
             slot.active = false;
             ended += 1;
         }
@@ -623,6 +661,7 @@ pub const Context = struct {
         slot.active = false;
         defer host.close(slot.report.read);
         defer context.unroot(ws.step_inputs[slot.index]);
+        defer context.unroot_binds(slot);
         var bytes: [failure_bytes_max]u8 = undefined;
         var length: usize = 0;
         while (length < bytes.len) {
@@ -904,6 +943,7 @@ pub const Context = struct {
         // Between this write and the cache entry the selection is nothing's output: a root keeps
         // a `store gc` from taking it.
         if (!input_job.root_tree(store, selected, name, context.diag)) return error.Failed;
+        context.hold(selected);
         return selected;
     }
 
@@ -925,7 +965,10 @@ pub const Context = struct {
             assert(target != index);
             const source = file.text(found.source);
             const output = ws.outputs[target];
-            const selected = try context.bind_select(index, output, source, file.text(from));
+            const selected = context.bind_select(index, output, source, file.text(from)) catch |err| {
+                for (ws.bind_keys[0..at]) |done| context.unroot(done.source);
+                return err;
+            };
             ws.bind_keys[at] = .{ .to = file.text(found.to), .source = selected };
         }
         spec.binds = ws.bind_keys[0..binds.len];
@@ -950,7 +993,7 @@ pub const Context = struct {
         ws.copy_patterns[0] = source;
         const patterns = ws.copy_patterns[0..1];
         const name = context.loaded.file.text(context.loaded.file.steps[index].name);
-        return copy_mod.select(assembling, &ws.copying, output, patterns, "/") catch |err| {
+        const selected = copy_mod.select(assembling, &ws.copying, output, patterns, "/") catch |err| {
             switch (err) {
                 error.PoolFull => diagnose.glob_pool_full(context.diag, source),
                 error.NoMatch => diagnose.bind_nothing(context.diag, name, source, from),
@@ -958,6 +1001,12 @@ pub const Context = struct {
             }
             return error.Failed;
         };
+        // The selection is nothing's output and no cache entry names it: until the worker has
+        // mounted it, a root is all that keeps a `store gc` from taking it (N8). The root is
+        // written before the shared lock is let go.
+        if (!input_job.root_tree(store, selected, name, context.diag)) return error.Failed;
+        context.hold(selected);
+        return selected;
     }
 
     fn assembly_failed(context: *Context, name: []const u8, to: []const u8) void {
@@ -1012,6 +1061,7 @@ pub const Context = struct {
     /// failure to drop it is no failure of the build: the next `store gc` shows the root and the
     /// user may remove it.
     fn unroot(context: *Context, output: Digest) void {
+        if (context.release(output)) return;
         const store = context.store;
         var root: roots.Root = undefined;
         var errno: u16 = 0;
@@ -1019,6 +1069,40 @@ pub const Context = struct {
         if (!std.mem.startsWith(u8, root.source_text(), step_mod.output_root_prefix)) return;
         if (root.time < context.started_s) return;
         roots.remove(store, output) catch {};
+    }
+
+    /// Counts one more user of a tree this build has rooted (or found rooted).
+    fn hold(context: *Context, digest: Digest) void {
+        const ws = context.ws;
+        for (ws.holds[0..ws.holds_count]) |*entry| {
+            if (!entry.digest.eql(digest)) continue;
+            entry.users += 1;
+            return;
+        }
+        // The bound is the most trees a build has in use at once (constants.zig).
+        assert(ws.holds_count < ws.holds.len);
+        ws.holds[ws.holds_count] = .{ .digest = digest, .users = 1 };
+        ws.holds_count += 1;
+    }
+
+    /// One user of the tree is done. True when others still hold it, so its root stays; a tree
+    /// nobody counted (an output, a project source a copy step imported) is dropped as before.
+    fn release(context: *Context, digest: Digest) bool {
+        const ws = context.ws;
+        for (ws.holds[0..ws.holds_count], 0..) |*entry, at| {
+            if (!entry.digest.eql(digest)) continue;
+            assert(entry.users > 0);
+            entry.users -= 1;
+            if (entry.users > 0) return true;
+            ws.holds_count -= 1;
+            ws.holds[at] = ws.holds[ws.holds_count];
+            return false;
+        }
+        return false;
+    }
+
+    fn unroot_binds(context: *Context, slot: *const Slot) void {
+        for (slot.binds[0..slot.binds_count]) |digest| context.unroot(digest);
     }
 
     fn cache_failed(context: *Context, failure: *const cache.Failure) Error {
@@ -1250,8 +1334,12 @@ pub const Context = struct {
         const numbers = std.fmt.bufPrint(&buffer, "{d}:{d}", .{
             found.user.uid, found.user.gid,
         }) catch unreachable; // Two 32-bit numbers and a colon.
-        const set = settings.set(.user, numbers);
-        assert(set != null); // Shorter than the name it replaces or the bound allows both.
+        // The settings store only grows: the name stays in it beside the numbers, so a base
+        // image whose config fills the budget refuses here, as the same field does when composed.
+        if (settings.set(.user, numbers) == null) {
+            diagnose.config_too_large(context.diag, .user);
+            return error.Failed;
+        }
     }
 
     /// The provenance record of the result just saved (the store lock is held).
