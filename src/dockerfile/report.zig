@@ -17,8 +17,10 @@ pub const Step = struct {
     name_len: u8,
     line: u32,
     kind: Kind,
-    /// The table phrase that matched (`apk add`), `--network all`, or null for no network.
+    /// Why the step has the network: the table phrase that matched (`apk add`) when
+    /// `matched`, else the rule that gave it (`--network all`); null for no network.
     network: ?[]const u8,
+    matched: bool,
     cache: bool,
     bind: bool,
 
@@ -107,7 +109,11 @@ pub fn render_text(report: *const Report, output: []const u8, writer: *Writer) !
         try writer.print("{s}  {s}:{d}  {t}", .{
             step.name_text(), report.dockerfile, step.line, step.kind,
         });
-        if (step.network) |phrase| try writer.print("  net (matched \"{s}\")", .{phrase});
+        if (step.network) |why| {
+            if (step.matched) {
+                try writer.print("  net (matched \"{s}\")", .{why});
+            } else try writer.print("  net ({s})", .{why});
+        }
         if (step.cache) try writer.writeAll("  cache");
         if (step.bind) try writer.writeAll("  bind");
         try writer.writeAll("\n");
@@ -141,7 +147,9 @@ pub fn render_json(report: *const Report, output: []const u8, writer: *Writer) !
         if (step.network) |phrase| {
             try std.json.Stringify.encodeJsonString(phrase, .{}, writer);
         } else try writer.writeAll("null");
-        try writer.print(",\"cache\":{},\"bind\":{}}}", .{ step.cache, step.bind });
+        try writer.print(",\"matched\":{},\"cache\":{},\"bind\":{}}}", .{
+            step.matched, step.cache, step.bind,
+        });
     }
     try writer.writeAll("],\"dropped\":[");
     for (report.dropped_slice(), 0..) |*dropped, index| {
@@ -168,7 +176,7 @@ test "the report shows each step's line and flags, then what was dropped" {
     report.steps_count = 1;
     report.steps[0] = .{
         .name = undefined, .name_len = 7, .line = 11, .kind = .run,
-        .network = "apk add", .cache = true, .bind = false,
+        .network = "apk add", .matched = true, .cache = true, .bind = false,
     };
     @memcpy(report.steps[0].name[0..7], "tools-1");
     report.drop(9, "EXPOSE", "label org.zigbox.import.expose");

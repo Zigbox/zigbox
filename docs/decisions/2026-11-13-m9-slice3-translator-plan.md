@@ -68,6 +68,8 @@ Exceeding any of them is E0815.
 - Builder gaps to name in the report: copy `.chown`/`.chmod` and image sources are still E0802 at
   build time (slice 2 cut).
 
+Bounds: accepted as proposed, see `2026-11-13-m9-import-bounds.md`.
+
 ## Resolver
 
 `translate` takes a resolver (context plus `resolve(ref) -> {env, workdir}`); the CLI's resolver
@@ -90,3 +92,30 @@ finds the reference in the lock, else pulls it (`pull.pull`) and `lock.put`s it
 
 - Zig 0.17 rejects `"x" ** n`; use `const s: [n]u8 = @splat('x');`.
 - `std.testing.expectError` needs an error union; for a plain error value use `expectEqual`.
+
+## Status at handoff (first implementer, 2026-11-13)
+
+Committed and unit-tested: `lines.zig`, `words.zig`, `refusal.zig`, `network.zig`, `report.zig`.
+Committed but not yet compiled (no root imports it): `translate.zig`, the API, workspace,
+`Translator` helpers (draft writer, `reach`, `absolute`, `note`, `.dockerignore` to `.exclude`),
+header, `finish` (draft -> `file.parse` -> problem mapped to E0815/E0811 with the Dockerfile
+line -> `render.render_noted` -> re-parse and `render.equal`) and `--hermetic` (E0814).
+
+Not written yet, in order:
+
+1. `stages.zig`: `split(t)` (pass 1: global `ARG`s, `FROM` expansion and `--platform`, names,
+   uses bits from `FROM`/`COPY --from`/`--mount from`), `reach(t) u32` (target or last stage,
+   sets `reached`, `ws.report.target` and `stages_count`), `translate_stage(t)` (start state
+   from parent/image/scratch, args reset, dispatch to config/steps), `image(t)` (the `.image`
+   section from the target's state).
+2. `config.zig` and `steps.zig` per the mapping above; each step records `ws.notes[i]`
+   (`translate.note`), `ws.draft_lines[i]` (count `\n` in `t.draft.buffered()` before writing
+   the step) and `ws.report.steps[i]`.
+3. `render.render_noted(file, *const Notes, writer)` in `src/build/render.zig`, with
+   `pub const Notes = struct { header: []const u8, steps: []const []const u8 }`; each note
+   written as `        // <note>` before its step; `render` unchanged.
+4. Tests through a table resolver, fixtures under `src/build/dockerfile_fixtures/`, then the
+   wiring checklist, the CLI, the fuzzer and the cuts in `docs/demos/m9.md`.
+
+`translate.zig` must be checked against the real APIs on first compile: `file_mod.Problem`
+fields, `glob.line_fault`, `constants.path_bytes_max`, `words.Out` field names and `mark`.
