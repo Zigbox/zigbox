@@ -55,6 +55,14 @@ the signing subkey expires after a year and is renewed):
 09991DC39816D3C914E2A22C5AB00BC328B7DBB7
 ```
 
+The public key itself is checked in as `docs/releases/zigbox-release-key.asc` (the owner commits
+`gpg --export -a 09991DC39816D3C914E2A22C5AB00BC328B7DBB7`, and commits a new export after every
+renewal or revocation). The `prepare` job (`.github/release-prepare-check.sh`) verifies
+`SHA256SUMS.asc` against that file, never against the keyring inside the draft's archive, so a
+revoked subkey stays refused. `prepare` also refuses a draft whose apt `Release` has fewer than 14
+days of `Valid-Until` left; after a late re-run of `mac`, re-run `linux` too.
+`.github/release-prepare-test.sh` runs the check with tampered drafts in the `test` job.
+
 ## One-off key setup
 
 Use a machine you trust; `$KEY` is the primary key's fingerprint. Quote the subkey as
@@ -211,8 +219,9 @@ write `SHA256SUMS` over everything the directory holds again, or add `-Dsums-nam
 to write a separate file and leave the signed one alone. Sign `SHA256SUMS` after this last step.
 
 `SHA256SUMS` is meant to be signed: a detached `SHA256SUMS.asc` by the release subkey, made after
-every asset is in the directory. In `release-sign.sh` that is one line beside the others:
-`sign_with -ab -o "$output/SHA256SUMS.asc" "$output/SHA256SUMS"`, checked with `check_gpg`.
+every asset is in the directory. `release-sign.sh` signs it with
+`sign_with --detach-sign --armor -o zig-out/release-assets/SHA256SUMS.asc zig-out/release-assets/SHA256SUMS`,
+checks it with `check_gpg`, then copies the whole `zig-out/release-assets` tree to `$output/assets`.
 `package-refresh.sh` re-signs `SHA256SUMS` itself because the archive's line changes, and only after checking the old signature.
 
 ## Keeping apt fresh

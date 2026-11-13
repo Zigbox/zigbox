@@ -515,7 +515,7 @@ jobs:
             /usr/bin/security list-keychains -d user -s ${saved[@]+"${saved[@]}"} || true
           fi
           /usr/bin/security delete-keychain "$KEYCHAIN" || true
-          /bin/rm -rf "$KEYCHAIN" "$RUNNER_TEMP/keychain-list" "$RUNNER_TEMP/keychain-list.tmp" "$SECRETS_DIR" "$RUNNER_TEMP/gh-pinned" "$RUNNER_TEMP"/zig-aarch64-macos-* "$RUNNER_TEMP/zig-global"
+          /bin/rm -rf "$KEYCHAIN" "$RUNNER_TEMP/keychain-list" "$RUNNER_TEMP/keychain-list.tmp" "$SECRETS_DIR" "$RUNNER_TEMP/gh-pinned" "$RUNNER_TEMP"/zig-aarch64-macos-* "$RUNNER_TEMP/zig-global" "$RUNNER_TEMP/macos-assets"
 
   # The last stop before the release is public: the draft holds exactly the assets (the Linux
   # ones, the sums, the signature, the Mac zip and the formula), each checked, and
@@ -550,66 +550,10 @@ jobs:
           mkdir "$RUNNER_TEMP/assets"
           cd "$RUNNER_TEMP/assets"
           "$GH" release download "$TAG" --repo "$GITHUB_REPOSITORY"
-          zip="zbx-$VERSION-macos-universal.zip"
-          fail() { echo "release: $*" >&2; exit 1; }
-          # SHA256SUMS names the Linux assets: the two tarballs, the SBOM, the archive, and one
-          # deb and one rpm per architecture. Its names, in sha256sum -c format, say the rest.
-          [ -s SHA256SUMS ] || fail "the draft has no SHA256SUMS"
-          awk 'NF != 2 || length($1) != 64 { bad = 1 } END { exit bad }' SHA256SUMS ||
-            fail "SHA256SUMS is not in sha256sum format"
-          linux=$(awk '{ print $2 }' SHA256SUMS | sort)
-          fixed=$(printf '%s\n' "zbx-$VERSION-linux-x86_64.tar.gz" "zbx-$VERSION-linux-aarch64.tar.gz" \
-            "zbx-$VERSION.cdx.json" zigbox-repos.tar.gz | sort)
-          [ "$(comm -23 <(printf '%s\n' "$fixed") <(printf '%s\n' "$linux"))" = "" ] ||
-            fail "SHA256SUMS lacks one of: ${fixed//$'\n'/ }"
-          rest=$(comm -13 <(printf '%s\n' "$fixed") <(printf '%s\n' "$linux"))
-          debs=$(grep -c '\.deb$' <<< "$rest" || true)
-          rpms=$(grep -c '\.rpm$' <<< "$rest" || true)
-          if [ "$debs" != 2 ] || [ "$rpms" != 2 ] || [ "$(grep -c . <<< "$rest")" != 4 ]; then
-            fail "SHA256SUMS does not name exactly two debs and two rpms besides the fixed assets: $rest"
-          fi
-          want=$(printf '%s\n' "$linux" SHA256SUMS SHA256SUMS.asc SHA256SUMS.macos \
-            "$zip" "$zip.sha256" zigbox.rb | sort)
-          have=$(/bin/ls -A | sort)
-          if [ "$want" != "$have" ]; then
-            echo "release: the draft's assets are not exactly:" >&2
-            printf '%s\n' "$want" >&2
-            echo "but:" >&2
-            printf '%s\n' "$have" >&2
-            exit 1
-          fi
-          # The Linux sums match every file, and the Mac sums name the zip and nothing else.
-          sha256sum -c SHA256SUMS
-          sha256sum -c SHA256SUMS.macos
-          [ "$(awk '{ print $2 }' SHA256SUMS.macos)" = "$zip" ] || fail "SHA256SUMS.macos does not name exactly $zip"
-          # SHA256SUMS.asc: good, by a subkey (not the primary) of the pinned primary key. The
-          # public key is the one the archive carries; the pinned fingerprint is what vouches for it.
-          mkdir -m 0700 verify-home
-          tar -xzf zigbox-repos.tar.gz -C verify-home zigbox-archive-keyring.gpg
-          GNUPGHOME=$PWD/verify-home gpg --batch --no-tty --import verify-home/zigbox-archive-keyring.gpg 2> /dev/null
-          status=$(GNUPGHOME=$PWD/verify-home gpg --batch --no-tty --status-fd 1 --verify SHA256SUMS.asc SHA256SUMS 2> /dev/null) ||
-            fail "gpg refused SHA256SUMS.asc"
-          grep -q '^\[GNUPG:\] GOODSIG ' <<< "$status" || fail "no good signature on SHA256SUMS"
-          fields=$(awk '$2 == "VALIDSIG" { print $3, $NF }' <<< "$status")
-          [ "${fields#* }" = "$ZIGBOX_SIGNING_FPR" ] || fail "SHA256SUMS.asc is not by a subkey of the pinned release key"
-          [ "${fields% *}" != "$ZIGBOX_SIGNING_FPR" ] || fail "SHA256SUMS.asc is signed by the primary key, not a subkey"
-          rm -rf verify-home
-          sha256sum -c "$zip.sha256"
-          zip_sha=$(cut -d ' ' -f 1 "$zip.sha256")
-          formula_sha=$(sed -n 's/^ *sha256 "\([0-9a-f]\{64\}\)"$/\1/p' zigbox.rb)
-          [ "$zip_sha" = "$formula_sha" ] || { echo "release: the formula's sha256 is not the zip's" >&2; exit 1; }
-          grep -qxF "  url \"https://github.com/$GITHUB_REPOSITORY/releases/download/$TAG/$zip\"" zigbox.rb ||
-            { echo "release: the formula's url is not this release's zip" >&2; exit 1; }
-          grep -qxF "  version \"$VERSION\"" zigbox.rb ||
-            { echo "release: the formula's version is not $VERSION" >&2; exit 1; }
-          [ "$(unzip -Z1 "$zip")" = zbx ] || { echo "release: the zip holds more than zbx" >&2; exit 1; }
-          tar -tzf zigbox-repos.tar.gz > list
-          grep -q '^apt/dists/stable/InRelease$' list
-          grep -q '^zigbox-archive-keyring.gpg$' list
-          ! grep -Evq '^(apt/|rpm/|zigbox-archive-keyring\.(asc|gpg)$)' list || exit 1
-          ! grep -Eq '(^|/)\.' list || exit 1
-          ! grep -Eq 'to-sign|test-key|passphrase|secret' list || exit 1
-          echo "prepare: the draft's assets, sums and signature are as they should be"
+          cd "$GITHUB_WORKSPACE"
+          # The public key is the repository's (the release commit's), never the draft's.
+          .github/release-prepare-check.sh "$RUNNER_TEMP/assets" "$VERSION" "$TAG" \
+            "$GITHUB_REPOSITORY" docs/releases/zigbox-release-key.asc
       - name: Mint the App token
         id: app
         uses: actions/create-github-app-token@64ab729a6294000f5aa4a4bc0b73d1f32bc45510 # v3.3.0
@@ -880,9 +824,11 @@ jobs:
           sudo apt-get update -q
           sudo apt-get install -y -q rpm shellcheck
       - name: ShellCheck
-        run: shellcheck .github/release-sign.sh .github/release-sign-test.sh .github/package-refresh.sh .github/package-refresh-test.sh
+        run: shellcheck .github/release-sign.sh .github/release-sign-test.sh .github/release-prepare-check.sh .github/release-prepare-test.sh .github/package-refresh.sh .github/package-refresh-test.sh
       - name: Sign with a throwaway key
         run: .github/release-sign-test.sh "$RUNNER_TEMP/out"
+      - name: The draft check passes the honest draft and refuses tampered ones
+        run: .github/release-prepare-test.sh "$RUNNER_TEMP/out"
       - name: Refresh and refuse with a throwaway key
         run: .github/package-refresh-test.sh "$RUNNER_TEMP/refresh"
       - name: The archive holds what packaging.md says and nothing secret
