@@ -144,8 +144,9 @@ const two_device_spec =
 ;
 
 test "the read-only refusal names the device that has the mounts" {
-    // Goal (verbose output has the device in its context): with two devices where only the second owns a mount, E0227 names the second, not the
-    // first (which would work under --read-only). Method: ask for nic, then 0.
+    // Goal: with two devices where only the second owns a mount, E0227 names the second, not
+    // the first (which would work under --read-only). Method: ask for nic, then 0; the
+    // device is in the verbose output's context.
     const sim = sim_get();
     defer testing.allocator.destroy(sim);
     setup_with(sim, two_device_spec);
