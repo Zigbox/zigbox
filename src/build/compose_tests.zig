@@ -1112,3 +1112,31 @@ test "steps that share a cache id come one after another, each after the nearest
     try testing.expectEqualSlices(u8, &.{2}, plan.needs_of(3));
     try testing.expect(plan.valid());
 }
+
+const RootsSeen = struct {
+    roots: u32 = 0,
+    fired: bool = false,
+
+    fn look(raw: *anyopaque) void {
+        const seen: *RootsSeen = @ptrCast(@alignCast(raw));
+        seen.roots = support.count_files(&files, root_path ++ "/roots");
+        seen.fired = true;
+    }
+};
+
+test "KNOWN GAP: a copy's selection tree has no root between its write and the cache entry" {
+    // Goal: pin down the window the M9 slice-2 handoffs name. The selection tree is written by
+    // `copy_select`, laid over the base by `copy_assemble`, and only the output is recorded; a
+    // `store gc` between the write and the entry (it takes the lock exclusively, and the build
+    // holds it shared only per call) may remove the selection. Method: stop the build at the
+    // cache entry's write (the first rename into the build cache) and count the roots: the
+    // source's root is already dropped, and the selection has none, so there are none. When the
+    // gap is closed (root the selection under `build:<step>`, drop it after `copy_assemble`),
+    // this count is one and this test is to be turned round, not deleted.
+    try copy_project_loaded();
+    var seen: RootsSeen = .{};
+    files.hook = .{ .rename_to_contains = "/build/cache", .context = &seen, .call = RootsSeen.look };
+    try testing.expect(try context.begin(0) == .hit);
+    try testing.expect(seen.fired);
+    try testing.expectEqual(@as(u32, 0), seen.roots);
+}
