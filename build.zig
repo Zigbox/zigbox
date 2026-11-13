@@ -624,13 +624,7 @@ fn add_demo_step(
             }),
         });
         harness.dependOn(&vm.step);
-        // The top-20 run tells a seccomp refusal from another EPERM by the allowlist itself.
-        if (std.mem.eql(u8, demo.step, "demo-m10")) add_gpu_fixtures(b, vm.root_module);
-        if (is_top20) {
-            vm.root_module.addAnonymousImport("seccomp_policy", .{
-                .root_source_file = b.path("src/runtime/policy/seccomp.zon"),
-            });
-        }
+        add_harness_imports(b, demo.step, vm.root_module);
         const run = b.addRunArtifact(vm);
         run.setCwd(b.path("."));
         run.addArgs(&.{ "--accel", @tagName(accel) });
@@ -655,6 +649,17 @@ fn add_demo_step(
         const step = b.step(demo.step, demo.help);
         step.dependOn(&run.step);
     }
+}
+
+/// What one demo's harness embeds beyond the VM module.
+fn add_harness_imports(b: *std.Build, step: []const u8, module: *std.Build.Module) void {
+    // The top-20 run tells a seccomp refusal from another EPERM by the allowlist itself.
+    if (std.mem.eql(u8, step, "top20")) {
+        module.addAnonymousImport("seccomp_policy", .{
+            .root_source_file = b.path("src/runtime/policy/seccomp.zon"),
+        });
+    }
+    if (std.mem.eql(u8, step, "demo-m10")) add_gpu_fixtures(b, module);
 }
 
 /// demo-m10's fake driver library (soname `libzbxgpu.so.1`) and the program that needs it, built

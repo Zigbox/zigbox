@@ -43,7 +43,8 @@ pub fn bad_path(diag: *Diag, value: []const u8, problem: devices.ListProblem) vo
 pub fn too_many_gpu_nodes(diag: *Diag, count: u32, keyword: []const u8) void {
     assert(diag.code == null);
     assert(count <= constants.run_devices_max + 1);
-    assert(std.mem.eql(u8, keyword, "all") or std.mem.eql(u8, keyword, "dri"));
+    const keyword_known = std.mem.eql(u8, keyword, "all") or std.mem.eql(u8, keyword, "dri");
+    assert(keyword_known);
     diag.raise(.E0225);
     diag.while_("giving the GPUs to the container", .{});
     diag.cause("--gpu {s} found {d} render nodes or more that, with the other devices asked " ++
