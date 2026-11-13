@@ -189,6 +189,7 @@ pub fn start(
         .namespaces = all_namespaces,
         .terminal = spec.terminal,
         .cgroup = handle.scope.len > 0,
+        .keep_groups = record.devices_len > 0,
     };
     if (exec_plan.check_input(&input)) |problem| {
         refuse_input(handle, problem, diag);

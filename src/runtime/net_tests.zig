@@ -42,7 +42,16 @@ fn user_spec(name: []const u8) run.Spec {
 }
 
 /// Storage for a handle: far too big for a test's stack.
-var handle: run.Handle = undefined;
+var handle_storage: ?*run.Handle = null;
+
+/// The handle lives on the heap: as a static it is 400 KiB of the test binary's bss, which is
+/// close to the 2 GiB link bound.
+fn handle_get() *run.Handle {
+    if (handle_storage == null) {
+        handle_storage = std.heap.page_allocator.create(run.Handle) catch @panic("out of memory");
+    }
+    return handle_storage.?;
+}
 
 test "--net user: pasta joins the container's namespaces, configured before the child runs" {
     // Goal: the success path. Method: a run with --publish; pasta's argv is exactly the settled
@@ -107,7 +116,7 @@ test "ports are released on every exit path the simulator can show" {
             .timeout_ms = if (path == .timeout) 1000 else 0,
             .grace_ms = 500,
         };
-        try run.start(sim.interface(), &user_spec("web-1"), options, &handle, &diag);
+        try run.start(sim.interface(), &user_spec("web-1"), options, handle_get(), &diag);
         try testing.expectEqual(@as(u32, 1), sim.world.ports_listening());
         const container = sim.world.processes[1].pid;
         switch (path) {
@@ -122,9 +131,9 @@ test "ports are released on every exit path the simulator can show" {
                 continue; // zbx is gone: nobody waits, closes or cleans up after it.
             },
         }
-        const reason = run.wait(&handle);
+        const reason = run.wait(handle_get());
         try testing.expect(reason.code() != null);
-        if (path == .timeout) try testing.expect(run.timed_out(&handle));
+        if (path == .timeout) try testing.expect(run.timed_out(handle_get()));
         try no_leak(&sim, &before);
     }
 }
@@ -138,8 +147,8 @@ test "a pasta too old to notice its namespace go is still ended by zbx" {
     sim.world.pasta_stays = true;
     var diag: Diag = undefined;
     diag.reset();
-    try run.start(sim.interface(), &user_spec("web-1"), .{}, &handle, &diag);
-    _ = run.wait(&handle);
+    try run.start(sim.interface(), &user_spec("web-1"), .{}, handle_get(), &diag);
+    _ = run.wait(handle_get());
     try testing.expectEqual(@as(u32, 0), sim.world.ports_listening());
     try testing.expectEqual(@as(u8, 9), pasta_of(&sim).exit.?.signaled);
     try no_leak(&sim, &before);

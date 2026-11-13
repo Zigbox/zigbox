@@ -16,6 +16,7 @@ const errors = @import("../diag/errors.zig");
 const Diag = @import("../diag/diag.zig").Diag;
 const client = @import("../dbus/client.zig");
 const codes = @import("../diag/codes.zig");
+const cdi_steps = @import("cdi_steps.zig");
 const pasta_mod = @import("pasta.zig");
 const plan_mod = @import("plan.zig");
 const mounts_diagnose = @import("mounts_diagnose.zig");
@@ -182,6 +183,15 @@ pub fn step_failed(
     assert(diag.code == null);
     assert(failure.step < plan.count);
     const step = &plan.steps[failure.step];
+    if (plan_mod.is_cdi(step.kind)) {
+        // The child put the failing item's index above the errno (`cdi_steps.errno_with_index`).
+        var decoded = failure;
+        decoded.errno = cdi_steps.errno_of(failure.errno);
+        if (decoded.errno == 0) decoded.errno = constants.errno_io;
+        const item = cdi_steps.index_of(failure.errno);
+        cdi_failed(host, diag, plan, step, info, decoded, item, details);
+        return;
+    }
     var buffer: [160]u8 = undefined;
     const operation = plan_mod.describe(step, &buffer);
     if (plan_mod.is_state(step.kind)) {
@@ -210,6 +220,34 @@ pub fn step_failed(
     step_context(diag, plan, failure.step);
     assert(diag.code != null);
     assert(diag.causes.count > 0);
+}
+
+/// A failed step of a CDI device: the generic diagnostic of the step, and the item it failed on.
+fn cdi_failed(
+    host: Host,
+    diag: *Diag,
+    plan: *const Plan,
+    step: *const plan_mod.Step,
+    info: RunInfo,
+    failure: Failure,
+    item: u32,
+    details: Details,
+) void {
+    assert(plan_mod.is_cdi(step.kind));
+    const resolved = plan.cdi.?;
+    step_kind_failed(host, diag, plan, step, info, failure, details);
+    starting(diag, info);
+    step_context(diag, plan, failure.step);
+    const mounts = step.kind != .bind_cdi_nodes;
+    assert(item < if (mounts) resolved.mounts_count else resolved.nodes_count);
+    if (mounts) {
+        const mount = resolved.mounts[item];
+        diag.context("mount", "{s}", .{resolved.text(mount.host)});
+        diag.context("onto", "{s}", .{resolved.text(mount.container)});
+    } else {
+        diag.context("node", "{s}", .{resolved.text(resolved.nodes[item])});
+    }
+    assert(diag.code != null);
 }
 
 /// The diagnostic of a failed step that is neither a state mount nor a bind mount, by its kind.

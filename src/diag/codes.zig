@@ -73,6 +73,9 @@ pub const Code = enum(u8) {
     E0223,
     E0224,
     E0225,
+    E0226,
+    E0227,
+    E0230,
     W0201,
     W0202,
     W0203,
@@ -80,6 +83,7 @@ pub const Code = enum(u8) {
     W0205,
     W0206,
     W0207,
+    W0208,
     W0209,
     E0301,
     E0302,
@@ -1081,6 +1085,66 @@ pub const registry = [_]Entry{
         ,
     },
     .{
+        .code = .E0226,
+        .severity = .@"error",
+        .blame = .environment,
+        .summary = "can't use a CDI spec",
+        .explanation =
+        \\--device vendor.com/class=name asks for a device that a CDI spec describes.
+        \\zbx reads the JSON specs in $XDG_CONFIG_HOME/cdi (or ~/.config/cdi),
+        \\/var/run/cdi and /etc/cdi, in that order; the first directory that has a
+        \\device wins. The specs are cdiVersion 0.3.0 to 0.9.x, each at most 64 KiB,
+        \\at most 64 files in all. zbx refuses one it cannot use: unreadable, not
+        \\valid JSON, over a bound of the parser, with a field of the wrong type or
+        \\a missing one, or in YAML, which zbx does not read. It also refuses a spec
+        \\that names a mount source or a device node this host does not have, or one
+        \\you cannot open.
+        \\
+        \\The cause names the file and the field. Write the spec again for this host:
+        \\nvidia-ctk cdi generate --format=json --output=/etc/cdi/nvidia.json
+        \\A spec is read again each time a container starts, so a fixed file works at
+        \\the next start.
+        ,
+    },
+    .{
+        .code = .E0227,
+        .severity = .@"error",
+        .blame = .user,
+        .summary = "a CDI device needs an edit or a combination zbx does not apply",
+        .explanation =
+        \\zbx applies the parts of a CDI device it can honour without a privileged
+        \\helper: character device nodes, bind mounts, environment variables, and the
+        \\hook "nvidia-cdi-hook update-ldcache", which it does itself. A device whose
+        \\spec has anything else is refused by name rather than started without it:
+        \\another hook, intelRdt, additionalGids, a mount that is not a bind, a node
+        \\that is not a character device at its own path, or two mounts at one path
+        \\from different host paths. zbx never runs a hook from a spec.
+        \\
+        \\With --read-only, a device whose spec has mounts is refused too: the mount
+        \\targets cannot be made in a read-only root. The spec is fine; drop
+        \\--read-only, or ask for the nodes alone.
+        \\
+        \\The cause names the device and the edit. Ask for the nodes as paths
+        \\(--device /dev/nvidia0) if the workload needs only those.
+        ,
+    },
+    .{
+        .code = .E0230,
+        .severity = .@"error",
+        .blame = .user,
+        .summary = "no CDI spec has that device",
+        .explanation =
+        \\The name given to --device (vendor.com/class=name) is in none of the specs
+        \\in $XDG_CONFIG_HOME/cdi (or ~/.config/cdi), /var/run/cdi and /etc/cdi. The
+        \\cause lists the names the specs do have (the first 16).
+        \\"vendor.com/class=all" means every device of that vendor's spec, or a
+        \\device the spec calls "all".
+        \\
+        \\Without any spec, generate one: nvidia-ctk cdi generate --format=json
+        \\--output=/etc/cdi/nvidia.json. A spec that could not be read is E0226.
+        ,
+    },
+    .{
         .code = .W0201,
         .severity = .warning,
         .blame = .environment,
@@ -1185,6 +1249,21 @@ pub const registry = [_]Entry{
         \\(<state>/zbx/logs/<name>.exec): the command and how it ended, never the
         \\environment, so that "zbx bundle" can show them. This exec's entry could not
         \\be written; the cause says why. The command itself ran as reported.
+        ,
+    },
+    .{
+        .code = .W0208,
+        .severity = .warning,
+        .blame = .environment,
+        .summary = "driver libraries found through LD_LIBRARY_PATH",
+        .explanation =
+        \\A CDI device (an NVIDIA GPU) mounts the host's driver libraries and asks for
+        \\the library cache to be updated ("nvidia-cdi-hook update-ldcache"). zbx
+        \\runs the image's own ldconfig for it. An image without ldconfig, or one
+        \\whose ldconfig fails or runs past its 10 seconds (and is killed), has no
+        \\cache updated: zbx puts the libraries' directories on LD_LIBRARY_PATH
+        \\instead and says so once per run. A musl image such as Alpine cannot
+        \\load glibc driver libraries either way; use a glibc image.
         ,
     },
     .{
@@ -4288,7 +4367,8 @@ pub fn can_end_run(code: Code) bool {
         .E0817, .W0802 => false,
         .E0901, .E0902, .E0908, .E0909, .E0910, .E0911, .W0901, .W0902, .W0903 => false,
         .E1006, .E1007 => false,
-        .E0220, .E0221, .E0222, .E0223, .E0224, .E0225, .W0207, .W0209 => false,
+        .E0220, .E0221, .E0222, .E0223, .E0224, .E0225, .E0226, .E0227, .E0230 => false,
+        .W0207, .W0208, .W0209 => false,
         else => true,
     };
 }
