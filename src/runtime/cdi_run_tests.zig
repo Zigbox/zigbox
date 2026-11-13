@@ -190,7 +190,8 @@ test "/var/run/cdi wins over /etc/cdi for the same device" {
     sim.world.add_node("/var/run/cdi", .dir);
     const other =
         \\{"cdiVersion":"0.6.0","kind":"vendor.example/gpu","devices":[
-        \\ {"name":"0","containerEdits":{"env":["WON=var-run"],"deviceNodes":[{"path":"/dev/fake0"}]}}]}
+        \\ {"name":"0","containerEdits":{"env":["WON=var-run"],
+        \\  "deviceNodes":[{"path":"/dev/fake0"}]}}]}
     ;
     std.debug.assert(sim.world.write_file("/var/run/cdi/example.json", other) == null);
     const code = sim_run.run_cli(sim, &library_run_plain);
@@ -212,7 +213,9 @@ test "a directory with more than 64 spec files is refused with one line" {
     setup(sim);
     var name: [32]u8 = undefined;
     for (0..65) |at| {
-        const path = std.fmt.bufPrint(&name, "/etc/cdi/s{d:0>3}.json", .{at}) catch unreachable;
+        const format = "/etc/cdi/s{d:0>3}.json";
+        // 32 bytes hold the longest name.
+        const path = std.fmt.bufPrint(&name, format, .{at}) catch unreachable;
         std.debug.assert(sim.world.write_file(path, spec) == null);
     }
     try testing.expectEqual(@as(u8, 125), sim_run.run_cli(sim, &library_run_plain));
