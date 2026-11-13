@@ -1,0 +1,8 @@
+error[ZBX-E0230]: no CDI spec has that device
+  while  looking for the CDI device vendor.example/gpu=0
+  cause  no spec in $XDG_CONFIG_HOME/cdi (or ~/.config/cdi), /var/run/cdi,
+         /etc/cdi has it
+  device vendor.example/gpu=0
+  fix    write the host's CDI spec first:   nvidia-ctk cdi generate --format=json --output=/etc/cdi/nvidia.json
+  more   zbx explain E0230
+  docs   https://zigbox.github.io/zigbox/errors/E0230.html

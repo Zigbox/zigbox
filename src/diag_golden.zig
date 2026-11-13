@@ -124,6 +124,56 @@ fn prepare_container(sim: *HostSim) void {
     sim_run.init(sim, 1);
 }
 
+const cdi_args = [_][:0]const u8{
+    "run", "--rootfs", "/srv/alpine", "--device", "vendor.example/gpu=0", "--", "sh",
+};
+
+const gpu_args = [_][:0]const u8{
+    "run", "--rootfs", "/srv/alpine", "--gpu", "all", "--", "sh",
+};
+
+/// A host with a device node and one CDI spec in /etc/cdi.
+const cdi_files = sim_run.files ++ [_]@import("host_sim.zig").File{
+    .{ .path = "/dev/fake0", .content = "", .mode = 0o020666 },
+};
+
+/// A spec with a device (one node) and the library-cache hook.
+const cdi_spec =
+    \\{"cdiVersion":"0.6.0","kind":"vendor.example/gpu","devices":[
+    \\ {"name":"0","containerEdits":{"deviceNodes":[{"path":"/dev/fake0"}]}}],
+    \\ "containerEdits":{"hooks":[{"hookName":"createContainer",
+    \\ "path":"/usr/bin/nvidia-cdi-hook","args":["nvidia-cdi-hook","update-ldcache",
+    \\ "--folder","/usr/lib"]}]}}
+;
+
+/// The same spec with a hook Zigbox does not run.
+const cdi_hook_spec =
+    \\{"cdiVersion":"0.6.0","kind":"vendor.example/gpu","devices":[
+    \\ {"name":"0","containerEdits":{"deviceNodes":[{"path":"/dev/fake0"}]}}],
+    \\ "containerEdits":{"hooks":[{"hookName":"createContainer",
+    \\ "path":"/usr/bin/setup","args":["setup","--all"]}]}}
+;
+
+fn prepare_cdi_spec(sim: *HostSim, spec: []const u8) void {
+    sim_run.start(sim, 1, &cdi_files);
+    sim.world.add_node("/dev/fake0", .file);
+    sim.world.add_node("/etc/cdi", .dir);
+    assert(sim.world.write_file("/etc/cdi/example.json", spec) == null);
+}
+
+fn prepare_cdi(sim: *HostSim) void {
+    prepare_cdi_spec(sim, cdi_spec);
+}
+
+fn prepare_cdi_hook(sim: *HostSim) void {
+    prepare_cdi_spec(sim, cdi_hook_spec);
+}
+
+/// A spec that is not JSON the parser takes.
+fn prepare_cdi_bad(sim: *HostSim) void {
+    prepare_cdi_spec(sim, "{\"cdiVersion\":");
+}
+
 /// A channel whose read end is closed: `--listen-send 1001` names its write end, a Unix socket
 /// that is open (so the run starts) and has no one to take the listener (EPIPE on the send).
 fn prepare_send_peer_gone(sim: *HostSim) void {
@@ -190,7 +240,18 @@ fn prepare_records_unreadable(sim: *HostSim) void {
 }
 
 /// One container, started and left running, for the commands that look at containers.
-var golden_handle: run.Handle = undefined;
+var golden_handle_storage: ?*run.Handle = null;
+
+/// The handle lives on the heap: as a static it is 400 KiB of the test binary's bss, which is
+/// close to the 2 GiB link bound.
+fn golden_get() *run.Handle {
+    if (golden_handle_storage == null) {
+        golden_handle_storage = std.heap.page_allocator.create(run.Handle) catch {
+            @panic("out of memory");
+        };
+    }
+    return golden_handle_storage.?;
+}
 /// The container above is running and its scope's keeper still holds its pipe, which is the
 /// state of a running container; the case that looked at it ends it before the check for leaks.
 var golden_started = false;
@@ -205,7 +266,7 @@ fn prepare_running(sim: *HostSim) void {
         .name = "web-1",
         .command = &.{"/bin/sh"},
     };
-    run.start(sim.interface(), &container, .{ .detached = true }, &golden_handle, &diag) catch {
+    run.start(sim.interface(), &container, .{ .detached = true }, golden_get(), &diag) catch {
         unreachable; // The simulated host starts a container.
     };
     golden_started = true;
@@ -909,6 +970,7 @@ fn exec_step_of(kind: exec_plan.Kind, terminal: bool) u32 {
         .namespaces = 0x3f,
         .terminal = terminal,
         .cgroup = true,
+        .keep_groups = false,
     };
     plan.build(&input);
     for (plan.steps[0..plan.count], 0..) |step, index| {
@@ -983,6 +1045,37 @@ const exec_cases = [_]Case{
         .args = &device_args,
         .prepare = prepare_container,
         .exit = 125,
+    },
+    .{
+        .code = .E0226,
+        .args = &cdi_args,
+        .prepare = prepare_cdi_bad,
+        .exit = 125,
+    },
+    .{
+        .code = .E0227,
+        .args = &cdi_args,
+        .prepare = prepare_cdi_hook,
+        .exit = 125,
+    },
+    .{
+        .code = .E0228,
+        .args = &gpu_args,
+        .prepare = prepare_container,
+        .exit = 125,
+    },
+    .{
+        .code = .E0230,
+        .args = &cdi_args,
+        .prepare = prepare_container,
+        .exit = 125,
+    },
+    .{
+        .code = .W0208,
+        .args = &cdi_args,
+        .prepare = prepare_cdi,
+        .warning = true,
+        .exit = 0,
     },
     .{
         .code = .W0209,
@@ -2352,8 +2445,8 @@ fn run_style(sim: *HostSim, case: *const Case, style: Style) !u8 {
     var iterator: SliceIterator = .{ .items = items[0..count] };
     const code = cli.run_from_iterator(sim.interface(), &iterator);
     if (golden_started) {
-        golden_handle.session.release_keeper();
-        golden_handle.session.release_output();
+        golden_get().session.release_keeper();
+        golden_get().session.release_output();
         golden_started = false;
     }
     if (golden_lock) |fd| {

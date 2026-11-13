@@ -15,9 +15,9 @@ passphrase=test-only-passphrase
 gpg_home() { GNUPGHOME=$home gpg --batch --no-tty --pinentry-mode loopback \
   --passphrase "$passphrase" "$@" 2> /dev/null; }
 
-gpg_home --quick-generate-key "Zigbox release test <test@invalid>" rsa4096 cert 1d
+gpg_home --quick-generate-key "Zigbox release test <test@invalid>" rsa4096 cert 90d
 primary=$(GNUPGHOME=$home gpg --batch --list-keys --with-colons | awk -F: '$1 == "fpr" { print $10; exit }')
-gpg_home --quick-add-key "$primary" rsa4096 sign 1d
+gpg_home --quick-add-key "$primary" rsa4096 sign 60d
 subkey=$(GNUPGHOME=$home gpg --batch --list-keys --with-colons |
   awk -F: '$1 == "sub" { s = 1; next } $1 == "fpr" && s { print $10; exit }')
 
@@ -35,6 +35,20 @@ grep -q 'holds the secret primary key' <<< "$refusal" || {
   echo "release-sign-test: wrong refusal for a full secret export: $refusal" >&2
   exit 1
 }
+
+# A signing subkey that expires within 28 days (21 of Valid-Until, 7 to renew) must be refused,
+# with the same line package-refresh.sh gives.
+gpg_home --quick-set-expire "$primary" 10d "$subkey"
+ZIGBOX_SIGNING_KEY=$(gpg_home --armor --export-secret-subkeys "${subkey}!")
+if refusal=$("$(dirname "$0")/release-sign.sh" "$output/refused" 2>&1); then
+  echo "release-sign-test: a subkey expiring in 10 days was accepted" >&2
+  exit 1
+fi
+grep -q 'signing subkey expires within 28 days' <<< "$refusal" || {
+  echo "release-sign-test: wrong refusal for a short-lived subkey: $refusal" >&2
+  exit 1
+}
+gpg_home --quick-set-expire "$primary" 60d "$subkey"
 
 ZIGBOX_SIGNING_KEY=$(gpg_home --armor --export-secret-subkeys "${subkey}!")
 export ZIGBOX_SIGNING_KEY

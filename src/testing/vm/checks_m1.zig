@@ -25,6 +25,10 @@ pub const Error = error{
     /// M10 slice 1: a device a member could open was not opened, or one a non-member could not
     /// open was.
     DeviceAccessWrong,
+    /// M10 slice 2: a CDI device did not bring its node or its environment variable.
+    CdiEditWrong,
+    /// M10 slice 3: doctor's GPU section or a `--gpu` run is not what the host has.
+    GpuWrong,
 };
 
 fn has_line(text: []const u8, wanted: []const u8) bool {
@@ -235,6 +239,62 @@ pub fn check_device_refused(streams: Streams, status: u8) Error!void {
     if (status != 125) return error.ExitCodeWrong;
 }
 
+/// M10 slice 2: a CDI device (`vendor.example/gpu=0`) from a spec in /etc/cdi brings its node and
+/// its variable into a run of a member of the node's group: the step prints `OPENED-READ` and
+/// `FAKE=all`, and nothing on stderr is an error. W0208 must not appear: Alpine ships an
+/// `ldconfig` stub that succeeds, so the library cache step passes under the filter.
+pub fn check_cdi_applied(streams: Streams, status: u8) Error!void {
+    if (status != 0) return error.ExitCodeWrong;
+    if (!has_line(streams.stdout, "OPENED-READ")) return error.CdiEditWrong;
+    if (!has_line(streams.stdout, "FAKE=all")) return error.CdiEditWrong;
+    if (!has_line(streams.stdout, "vendor")) return error.CdiEditWrong; // The bound directory.
+    if (!has_line(streams.stdout, "BIND-RO")) return error.CdiEditWrong; // Read-only, as a volume.
+    if (std.mem.indexOf(u8, streams.stderr, "ZBX-E") != null) return error.NoteMissing;
+    // The guest's ldconfig is known to work: W0208 means the late step failed under the filter.
+    if (std.mem.indexOf(u8, streams.stderr, "ZBX-W0208") != null) return error.CdiEditWrong;
+}
+
+/// A name no spec has: E0230 in one line that lists the names the specs do have, exit 125.
+pub fn check_cdi_unknown(streams: Streams, status: u8) Error!void {
+    const header = "error[ZBX-E0230]: ";
+    if (!std.mem.startsWith(u8, streams.stderr, header)) return error.NoteMissing;
+    const known = "vendor.example/gpu=0";
+    if (std.mem.indexOf(u8, streams.stderr, known) == null) return error.NoteMissing;
+    if (std.mem.indexOf(u8, streams.stderr, "errno") != null) return error.NoteMissing;
+    if (std.mem.trim(u8, streams.stdout, " \r\n").len != 0) return error.StdoutNotEmpty;
+    if (status != 125) return error.ExitCodeWrong;
+}
+
+/// M10 slice 3: `zbx doctor` on a host with the spec `zigbox.test/gpu` whose one node the user
+/// can open: the section lists the spec and the device, says the node is openable, and no
+/// line of the section is a gap.
+pub fn check_gpu_doctor(streams: Streams) Error!void {
+    const out = streams.stdout;
+    if (!has_line_starting(out, "gpu  ok  spec ")) return error.GpuWrong;
+    if (std.mem.indexOf(u8, out, "zigbox.test/gpu=0") == null) return error.GpuWrong;
+    if (!has_line_starting(out, "gpu  ok  device zigbox.test/gpu=0")) return error.GpuWrong;
+    if (has_line_starting(out, "gpu  gap")) return error.GpuWrong;
+}
+
+/// `--gpu all` on a host with no `nvidia.com` spec and no render node: E0228 in one line that
+/// names `zbx doctor`, exit 125, nothing on stdout.
+pub fn check_gpu_none(streams: Streams, status: u8) Error!void {
+    if (!std.mem.startsWith(u8, streams.stderr, "error[ZBX-E0228]: ")) return error.NoteMissing;
+    if (std.mem.indexOf(u8, streams.stderr, "zbx doctor") == null) return error.NoteMissing;
+    if (std.mem.indexOf(u8, streams.stderr, "errno") != null) return error.NoteMissing;
+    if (std.mem.trim(u8, streams.stdout, " \r\n").len != 0) return error.StdoutNotEmpty;
+    if (status != 125) return error.ExitCodeWrong;
+}
+
+/// `--gpu dri` on a host with a render node: the run succeeds and `ls /dev/dri` in it shows
+/// a `renderD` node and no `card` node.
+pub fn check_gpu_dri(streams: Streams, status: u8) Error!void {
+    if (status != 0) return error.ExitCodeWrong;
+    if (std.mem.indexOf(u8, streams.stdout, "renderD") == null) return error.GpuWrong;
+    if (std.mem.indexOf(u8, streams.stdout, "card") != null) return error.GpuWrong;
+    if (std.mem.indexOf(u8, streams.stderr, "ZBX-E") != null) return error.NoteMissing;
+}
+
 /// The bundle step prints `BUNDLE:<path>`, the `tar -tzf` listing, `LISTED-END`, then
 /// `LEAKS:<n>` (planted secrets found in the extracted bundle) and `REDACTED:<n>` (markers).
 pub fn check_bundle_has_no_secret(output: []const u8) Error!void {
@@ -440,4 +500,54 @@ test "devices: opened for a member, refused to anyone else" {
     try testing.expectError(error.ExitCodeWrong, check_device_refused(quiet, 1));
     const bare = Streams{ .stdout = "", .stderr = "x" };
     try testing.expectError(error.NoteMissing, check_device_refused(bare, 125));
+}
+
+test "cdi: a device applies its edits, and an unknown name is E0230 listing the known" {
+    // Goal: the check passes only when the node opened, the variable is set and no error was said;
+    // the refusal only for a one-line E0230 that lists the names.
+    const applied = Streams{
+        .stdout = "OPENED-READ\nFAKE=all\nvendor\nBIND-RO\n",
+        .stderr = "warning[ZBX-W0209]: groups\n",
+    };
+    try check_cdi_applied(applied, 0);
+    try testing.expectError(error.ExitCodeWrong, check_cdi_applied(applied, 1));
+    const no_env = Streams{ .stdout = "OPENED-READ\nvendor\nBIND-RO\n", .stderr = applied.stderr };
+    try testing.expectError(error.CdiEditWrong, check_cdi_applied(no_env, 0));
+    const no_bind = Streams{ .stdout = "OPENED-READ\nFAKE=all\n", .stderr = applied.stderr };
+    try testing.expectError(error.CdiEditWrong, check_cdi_applied(no_bind, 0));
+    const failed = Streams{ .stdout = applied.stdout, .stderr = "error[ZBX-E0226]: x\n" };
+    try testing.expectError(error.NoteMissing, check_cdi_applied(failed, 0));
+    const late = Streams{ .stdout = applied.stdout, .stderr = "warning[ZBX-W0208]: x\n" };
+    try testing.expectError(error.CdiEditWrong, check_cdi_applied(late, 0));
+    const unknown = "error[ZBX-E0230]: no such device\n  known  vendor.example/gpu=0\n";
+    try check_cdi_unknown(.{ .stdout = "", .stderr = unknown }, 125);
+    const quiet = Streams{ .stdout = "", .stderr = unknown };
+    try testing.expectError(error.ExitCodeWrong, check_cdi_unknown(quiet, 1));
+    const bare = Streams{ .stdout = "", .stderr = "x" };
+    try testing.expectError(error.NoteMissing, check_cdi_unknown(bare, 125));
+}
+
+test "gpu: doctor lists the spec, --gpu all with nothing is E0228, --gpu dri shows the node" {
+    // Goal: each check fails on the wrong text, so it proves something.
+    const good = "gpu  ok  spec /etc/cdi/a.json  zigbox.test/gpu, 1 devices\n" ++
+        "gpu  ok  device zigbox.test/gpu=0  every node can be opened by you\n";
+    try check_gpu_doctor(.{ .stdout = good, .stderr = "" });
+    const absent = Streams{ .stdout = "ok  kernel\n", .stderr = "" };
+    try testing.expectError(error.GpuWrong, check_gpu_doctor(absent));
+    const gap = Streams{ .stdout = good ++ "gpu  gap node /dev/x  mode 0660\n", .stderr = "" };
+    try testing.expectError(error.GpuWrong, check_gpu_doctor(gap));
+    const none = Streams{
+        .stdout = "",
+        .stderr = "error[ZBX-E0228]: --gpu found nothing; run zbx doctor\n",
+    };
+    try check_gpu_none(none, 125);
+    try testing.expectError(error.ExitCodeWrong, check_gpu_none(none, 1));
+    const bare = Streams{ .stdout = "", .stderr = "x" };
+    try testing.expectError(error.NoteMissing, check_gpu_none(bare, 125));
+    const dri = Streams{ .stdout = "renderD128\n", .stderr = "" };
+    try check_gpu_dri(dri, 0);
+    const card = Streams{ .stdout = "card0\nrenderD128\n", .stderr = "" };
+    try testing.expectError(error.GpuWrong, check_gpu_dri(card, 0));
+    try testing.expectError(error.GpuWrong, check_gpu_dri(.{ .stdout = "", .stderr = "" }, 0));
+    try testing.expectError(error.ExitCodeWrong, check_gpu_dri(dri, 125));
 }

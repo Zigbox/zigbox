@@ -116,7 +116,7 @@ directories named like a version are looked at, and only the files directly in t
 `zig build mac-release` builds the ReleaseSafe macOS `zbx` (the VM image inside), signs it with
 the hardened runtime, a secure timestamp and `vm/zbx.entitlements`, runs `codesign --verify
 --strict` and `codesign -d --entitlements -`, zips the binary alone (`ditto`) into
-`zbx-<version>-macos-arm64.zip`, checks that the zip holds the same code (CDHash) as the binary,
+`zbx-<version>-macos-universal.zip` (since the 2026-11-12 rework; both architectures, joined with `lipo`), checks that the zip holds the same code (CDHash) as the binary,
 writes `<zip>.sha256` and the Homebrew formula (`packaging/homebrew/zigbox.rb` with the version,
 the URL and the hash filled in) into `zig-out/mac-release/`, which it empties first. Options:
 `-Dsign-identity=<name>` (default the owner's Developer ID Application identity; `-` signs ad

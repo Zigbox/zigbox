@@ -44,9 +44,19 @@ const rows = [_]Row{
         .paths = &.{"src/testing/vm/main_m8_packages.zig"},
         .true_outputs = &.{ "code", "demo_m8_packages" },
     },
-    // The release workflow and its signing script run on a tag and in their own test job: no demo.
+    // The release workflow, its own actions and its signing script run after a push to main and
+    // in their own test jobs: no demo.
     .{
         .paths = &.{ ".github/workflows/release.yml", ".github/release-sign.sh" },
+        .true_outputs = &.{"code"},
+    },
+    .{
+        .paths = &.{
+            ".github/actions/setup-gh/action.yml",
+            ".github/actions/find-draft/action.yml",
+            ".github/actions/tap-formula/action.yml",
+            ".github/actions/mac-check-zip/action.yml",
+        },
         .true_outputs = &.{"code"},
     },
     .{

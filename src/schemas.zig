@@ -260,6 +260,11 @@ const doctor_schema =
 ++ diagnostic_properties ++
     \\,"schema":{"const":"zbx.doctor/1"},"ok":{"type":"boolean",
     \\"description":"no check failed; a warning does not change it"},
+    \\"gpu":{"type":"array",
+    \\"description":"only when there is a CDI spec, NVIDIA driver, render node or /dev/kfd",
+    \\"items":{"type":"object","required":["kind","ok","subject","detail"],
+    \\"properties":{"kind":{"enum":["spec","device","driver","node","fix"]},
+    \\"ok":{"type":"boolean"},"subject":{"type":"string"},"detail":{"type":"string"}}}},
     \\"checks":{"type":"array","description":"every check, in the order of the text report",
     \\"items":{"type":"object","required":["id","status","detail"],
     \\"properties":{"id":{"enum":["kernel","userns","cgroup","overlay","subid","seccomp","net"]},

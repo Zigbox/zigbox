@@ -8,6 +8,7 @@ const std = @import("std");
 const assert = std.debug.assert;
 const constants = @import("constants.zig");
 const host_mod = @import("host.zig");
+const devices_mod = @import("runtime/devices.zig");
 const diagnose = @import("runtime/diagnose.zig");
 const lifecycle = @import("runtime/lifecycle.zig");
 const records = @import("runtime/records.zig");
@@ -262,7 +263,8 @@ fn entry_json(writer: *std.Io.Writer, entry: *const lifecycle.Entry) std.Io.Writ
 
 /// `"devices":[{"asked":"/dev/dri/renderD128","path":"/dev/dri/renderD128"}]` for a run with
 /// `--device`s; nothing for one without. `asked` is what was typed and `path` where it is in the
-/// container; they are the same until a later slice resolves a name to a node.
+/// container, for a host path only: a CDI name (`vendor/class=name`) is resolved at each start, so
+/// it has `asked` alone.
 fn devices_json(writer: *std.Io.Writer, record: *const records.Parsed) std.Io.Writer.Error!void {
     assert(record.devices_len <= record.devices.len);
     assert(record.devices_len <= constants.record_bytes_max);
@@ -275,8 +277,11 @@ fn devices_json(writer: *std.Io.Writer, record: *const records.Parsed) std.Io.Wr
         first = false;
         try writer.writeAll("{\"asked\":");
         try json_string(writer, path);
-        try writer.writeAll(",\"path\":");
-        try json_string(writer, path);
+        // A CDI name is resolved at every start, so the record has no node for it.
+        if (devices_mod.is_path(path)) {
+            try writer.writeAll(",\"path\":");
+            try json_string(writer, path);
+        }
         try writer.writeByte('}');
     }
     try writer.writeAll("]");

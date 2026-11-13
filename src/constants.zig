@@ -164,7 +164,8 @@ pub const errors_page_bytes_max: u32 = 64 * 1024;
 /// One row of the index (link, summary, blame), and the stylesheet and head every page carries.
 /// `errors_site.zig` asserts at compile time that the registry's rows fit in a page, so the next
 /// milestone's codes fail the build there, not in the tool's run.
-pub const errors_index_row_bytes_max: u32 = 256;
+/// The longest row today is 164 bytes; 256 stopped fitting at 233 codes.
+pub const errors_index_row_bytes_max: u32 = 192;
 pub const errors_index_head_bytes_max: u32 = 6 * 1024;
 
 // Host simulator.
@@ -241,6 +242,61 @@ pub const run_devices_max: u32 = 16;
 /// A device's path, as typed and as the record keeps it: `/dev/` and at most this many bytes
 /// in all (`/dev/dri/renderD128` is 18).
 pub const device_path_bytes_max: u32 = 48;
+/// CDI specs (M10 slice 2, docs/briefs/M10-gpu.md). A spec file is read whole, up to this many
+/// bytes (`nvidia-ctk cdi generate` writes about 10 KB per GPU); a bigger one is refused. One
+/// byte less than `file_bytes_max`: `Host.read_file` takes a buffer of at most that, and the
+/// reader needs the one more byte to see a file that is too big.
+pub const cdi_spec_bytes_max: u32 = file_bytes_max - 1;
+/// Spec files read from the three directories together, and entries looked at in one directory.
+pub const cdi_spec_files_max: u32 = 16;
+/// Seconds the image's `ldconfig` may run in the container before it is killed.
+pub const cdi_ldconfig_seconds_max: u32 = 10;
+pub const cdi_dir_entries_max: u32 = 64;
+/// What one parsed spec holds: devices, and over all its edits the nodes, mounts, variables and
+/// library directories. A spec with more is refused (E0226), not cut.
+pub const cdi_devices_max: u32 = 64;
+pub const cdi_nodes_max: u32 = 128;
+pub const cdi_mounts_max: u32 = 256;
+pub const cdi_env_max: u32 = 128;
+pub const cdi_ldcache_dirs_max: u32 = 32;
+/// The text of one parsed spec (names, paths, variables), and one string of it.
+pub const cdi_strings_bytes_max: u32 = 96 * 1024;
+pub const cdi_string_bytes_max: u32 = 1024;
+/// Nesting of JSON arrays and objects; a spec is five deep, the bound leaves room for what is
+/// skipped.
+pub const cdi_depth_max: u32 = 12;
+/// Memory for the JSON scanner's nesting stack and any escaped strings.
+pub const cdi_scratch_bytes_max: u32 = 32 * 1024;
+/// A qualified name as asked and as the record keeps it, `vendor.tld/class=name`: the kind (at
+/// most `cdi_kind_bytes_max`), `=`, and a device name (at most `cdi_device_name_bytes_max`).
+/// NVIDIA's `nvidia.com/gpu=GPU-<uuid>` is 55 bytes.
+pub const cdi_kind_bytes_max: u32 = 48;
+pub const cdi_device_name_bytes_max: u32 = 63;
+pub const cdi_name_bytes_max: u32 = 128;
+/// All the devices of one run, as the run record keeps them: names and paths with a space after
+/// each. Smaller than `run_devices_max * (cdi_name_bytes_max + 1)`: the record has no room for it.
+pub const run_devices_text_bytes_max: u32 = 896;
+/// A path in a spec: where a mount lands in the container, or where it comes from.
+pub const cdi_path_bytes_max: u32 = 256;
+/// The doctor's GPU section (M10 slice 3): items shown (specs, devices, nodes, fixes), the bytes
+/// of an item's subject and detail. Items past the bound are counted, not shown.
+pub const doctor_gpu_items_max: u32 = 24;
+pub const doctor_gpu_subject_bytes_max: u32 = 80;
+pub const doctor_gpu_detail_bytes_max: u32 = 160;
+comptime {
+    // JSON escapes a quote or a backslash into two bytes; an item adds about 100 bytes of frame.
+    const item = 2 * (doctor_gpu_subject_bytes_max + doctor_gpu_detail_bytes_max) + 100;
+    assert(doctor_gpu_items_max * item + 64 <= output_bytes_max);
+}
+/// What one run takes from the specs, merged: nodes, mounts, variables, library directories, and
+/// the text they are kept in. Over any of these the run is refused (E0226).
+pub const cdi_run_nodes_max: u32 = 32;
+pub const cdi_run_mounts_max: u32 = 128;
+pub const cdi_run_env_max: u32 = 16;
+pub const cdi_run_dirs_max: u32 = 16;
+pub const cdi_run_strings_bytes_max: u32 = 48 * 1024;
+/// The device names E0230 lists.
+pub const cdi_names_listed_max: u32 = 16;
 /// The symlinks in the container's `/dev`: fd, stdin, stdout, stderr and ptmx.
 pub const container_links_count: u32 = 5;
 /// The generated `/etc/hosts` and `/etc/resolv.conf` of a container (M5): the most one of them
@@ -253,7 +309,7 @@ pub const etc_stage_hosts = ".zbx-hosts";
 pub const etc_stage_resolv = ".zbx-resolv";
 pub const etc_stage_hostname = ".zbx-hostname";
 /// Steps in a plan. The plan's own comptime check proves the count it builds is below this.
-pub const plan_steps_max: u32 = 224;
+pub const plan_steps_max: u32 = 232;
 
 // User-mode networking through pasta (M5 slice 3; docs/demos/m5.md settles each fact below
 // against the pasta that Ubuntu 24.04 ships, 0.0~git20240220.1e6f92b).
@@ -1226,6 +1282,8 @@ comptime {
     assert(path_bytes_max > 0);
     assert(path_bytes_max < std.math.maxInt(u16));
     assert(file_bytes_max > 0);
+    // The reader takes one byte more than the bound, to see "too big".
+    assert(cdi_spec_bytes_max < file_bytes_max);
     assert(file_bytes_max <= std.math.maxInt(u32) / 2); // Offsets and lengths fit in u32.
     assert(read_calls_max > file_bytes_max);
     assert(write_calls_max > output_bytes_max);
@@ -1476,8 +1534,8 @@ comptime {
     assert(state_walk_links_max > 0);
     assert(state_holders_max > 0);
     // A plan with every volume: each has seven steps, eight when read-only; and every other
-    // mount, at most six (plan.zig).
-    assert(80 + state_volumes_max * 8 + mounts_max * 6 + 2 * run_devices_max <= plan_steps_max);
+    // mount, at most six, and the CDI devices at most four (`plan.cdi_steps_count_max`).
+    assert(80 + state_volumes_max * 8 + mounts_max * 6 + 2 * run_devices_max + 4 <= plan_steps_max);
     assert(plan_steps_max <= std.math.maxInt(u8));
     // The stage names end in one digit; a mount's value and options fit their buffers.
     assert(mounts_max <= 10);
@@ -1641,6 +1699,18 @@ pub const armor_line_bytes: u32 = 64;
 /// `SOURCE_DATE_EPOCH` for every package: the same instant as a build step's, so the package of a
 /// commit and the store it was built beside agree.
 pub const package_source_date_epoch: u64 = build_source_date_epoch;
+/// The apt `Release` of a signed release carries `Date` = the signing time and `Valid-Until` =
+/// `Date` plus this: a client refuses metadata after it, so a replayed or frozen `InRelease` is
+/// detected. The refresh job re-signs weekly (docs/releases/packaging.md), three times over.
+pub const apt_valid_seconds: u64 = 21 * 24 * 60 * 60;
+/// A signing time outside these (2020-01-01 to 2100-01-01, UTC) is a mistaken argument.
+pub const apt_signed_at_min: u64 = 1_577_836_800;
+pub const apt_signed_at_max: u64 = 4_102_444_800;
+/// The most files a release's asset directory holds (tarballs, packages, archive, SBOM, sums).
+pub const release_assets_max: u32 = 64;
+/// The largest release asset `SHA256SUMS` hashes: a tarball, a package, the repository archive or
+/// the Mac zip.
+pub const release_asset_bytes_max: u32 = 128 * 1024 * 1024;
 /// The `Maintainer` of the `zigbox` packages. A supervisor assumption the owner may change
 /// (docs/decisions/2026-11-08-package-bounds.md).
 pub const package_maintainer = "Zigbox project <packages@zigbox.org>";
@@ -1658,6 +1728,8 @@ comptime {
     assert(package_files_max <= rpm_header_entries_max);
     assert(package_recommends_max < rpm_header_entries_max);
     assert(repo_packages_max * 2 <= repo_files_max);
+    assert(apt_signed_at_min > package_source_date_epoch);
+    assert(apt_signed_at_max + apt_valid_seconds < (1 << 40));
 }
 
 // ---- Keys (M8 trust) ----

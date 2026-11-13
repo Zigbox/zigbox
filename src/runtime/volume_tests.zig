@@ -27,7 +27,16 @@ const pg_lock = root ++ "/pgdata/lock";
 const target = "/var/lib/postgresql/data";
 
 var files: SimFs = undefined;
-var handle: run.Handle = undefined;
+var handle_storage: ?*run.Handle = null;
+
+/// The handle lives on the heap: as a static it is 400 KiB of the test binary's bss, which is
+/// close to the 2 GiB link bound.
+fn handle_get() *run.Handle {
+    if (handle_storage == null) {
+        handle_storage = std.heap.page_allocator.create(run.Handle) catch @panic("out of memory");
+    }
+    return handle_storage.?;
+}
 
 fn setup(sim: *HostSim, seed: u64) void {
     sim_run.init(sim, seed);
@@ -225,23 +234,23 @@ test "the volume is held for the run's whole life, and let go after zbx stop and
     sim.world.command_runs_ms = 3_600_000;
     var diag: Diag = undefined;
     diag.reset();
-    try run.start(sim.interface(), &spec(&pg_mount), .{ .detached = true }, &handle, &diag);
+    try run.start(sim.interface(), &spec(&pg_mount), .{ .detached = true }, handle_get(), &diag);
     try expect_held(&sim, pg_lock);
     var ref: lifecycle.Ref = undefined;
     var state: lifecycle.State = undefined;
     try lifecycle.adopt(sim.interface(), "pg", &ref, &state);
     _ = try lifecycle.stop(&ref, 1000, lifecycle.kill_wait_ms);
     try expect_held(&sim, pg_lock); // Until the supervisor has reaped it.
-    _ = run.wait(&handle);
+    _ = run.wait(handle_get());
     try expect_free(&sim, pg_lock);
     // --timeout.
     setup(&sim, 6);
     sim.world.command_runs_ms = 3_600_000;
     diag.reset();
-    try run.start(sim.interface(), &spec(&pg_mount), .{ .timeout_ms = 1000 }, &handle, &diag);
+    try run.start(sim.interface(), &spec(&pg_mount), .{ .timeout_ms = 1000 }, handle_get(), &diag);
     try expect_held(&sim, pg_lock);
-    _ = run.wait(&handle);
-    try testing.expect(run.timed_out(&handle));
+    _ = run.wait(handle_get());
+    try testing.expect(run.timed_out(handle_get()));
     try expect_free(&sim, pg_lock);
     try testing.expectEqual(@as(u32, 0), sim.open_count());
 }
@@ -255,14 +264,14 @@ test "a killed zbx leaves no lock: the kernel closes its descriptors, the child 
     sim.world.command_runs_ms = 3_600_000;
     var diag: Diag = undefined;
     diag.reset();
-    try run.start(sim.interface(), &spec(&pg_mount), .{ .detached = true }, &handle, &diag);
+    try run.start(sim.interface(), &spec(&pg_mount), .{ .detached = true }, handle_get(), &diag);
     try expect_held(&sim, pg_lock);
     try testing.expect(sim.world.processes[1].die_with_parent);
     files.restart();
     try expect_free(&sim, pg_lock);
     // The lock file is left; it is only a file, and the next run takes it.
     try testing.expect(files.kind_of(pg_lock) != null);
-    handle.session.release_keeper();
+    handle_get().session.release_keeper();
 }
 
 test "a detached run's supervisor holds the volume and lets go when the container ends" {

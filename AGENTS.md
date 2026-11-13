@@ -35,7 +35,7 @@ Zigbox is a rootless, daemonless Linux container runtime, image store and builde
 - `zig build tidy` checks line length, function length and banned patterns.
 - `zig build fuzz -- <fuzzer> [seed] [iterations]` runs one seeded fuzzer; `zig build fuzz -- all [iterations]` runs every fuzzer once, each with a fresh seed.
 - `zig build trust-wasm` compiles the pure trust surface (`zigbox.trust`) for `wasm32-freestanding`, so a host, store, clock or I/O dependency in it fails the build; `zig build check` runs it.
-- `zig build packages` writes the deb, rpm, apt and dnf trees under `zig-out/packages/` (`-Dtest-key` signs with the fixed test key, `-Dsignatures=DIR` places the owner's signatures); `zig build packages-check` reads the tree back and checks every file against its metadata (runbook: `docs/releases/packaging.md`).
+- `zig build packages` writes the deb, rpm, apt and dnf trees under `zig-out/packages/` (`-Dtest-key` signs with the fixed test key, `-Dsignatures=DIR` places the owner's signatures); `zig build packages-check` reads the tree back and checks every file against its metadata (runbook: `docs/releases/packaging.md`). `-Dsigned-at=N` dates the apt `Release`; `zig build packages-redate` re-dates an existing tree; `zig build release-assets` writes the tarballs, SBOM and `SHA256SUMS` (`release-sums` hashes a directory again).
 - `zig build demo-mN` runs milestone N's demo inside the test VM (harness in `src/testing/vm/`, written in Zig).
 - `zig build check` runs every gate (build, test, tidy, release, errors-site-check, and `harness`, which compiles every VM demo without running it), then every fuzzer with a fresh seed (`zig build fuzz -- all`), then, when run as root, `zig build test` again as the user `tester` in a scratch worktree, because CI runs as an ordinary user. It ends in one line, `check: PASS <commit>` or `check: FAIL ...`; `-Dcheck-user=-` skips the non-root run. A failed fuzzer's seed is the last `fuzz:` line before the FAIL.
 
@@ -78,6 +78,10 @@ Every adversarial review of a pull request (a slice review, a re-review, either 
 - The project site (`site/index.html`, the `SITE` and `MILESTONES` data at the top of its script) shows the same status. Update it in the same push as the README: the milestone's `status`, its `slices` count, and, once a demo is green in CI, its `demo` lines taken from that run's recorded output with `recorded` linking to the run. Never show output that was not recorded as recorded. Pages deploys only from `main`.
 
 ## Releases (owner, 2026-11-04)
+
+The tag is made by publishing the draft release, in `.github/workflows/release.yml`, once `ci` is
+green on the merged release commit and every check has passed; never by hand unless the owner has
+written a go-ahead for that release in `docs/decisions/` (docs/releases/automation.md).
 
 A release tag is cut only from a commit that is all of:
 

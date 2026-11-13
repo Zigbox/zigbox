@@ -1,0 +1,8 @@
+error[ZBX-E0227]: a CDI device needs an edit or a combination zbx does not apply
+  while  applying the CDI device vendor.example/gpu=0
+  cause  its spec has a hook other than nvidia-cdi-hook update-ldcache
+  device vendor.example/gpu=0
+  edit   a hook other than nvidia-cdi-hook update-ldcache
+  fix    ask a device that needs only device nodes, mounts, environment variables and nvidia-cdi-hook update-ldcache, or pass the node as a path:   zbx run --device /dev/nvidia0 <image>
+  more   zbx explain E0227
+  docs   https://zigbox.github.io/zigbox/errors/E0227.html

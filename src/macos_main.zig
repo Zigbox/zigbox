@@ -204,6 +204,12 @@ fn forward_command(words: []const []const u8, invocation: *const Invocation, dia
         mac_diagnose.listen_unavailable(diag);
         return fail_in(diag, invocation, .container_run);
     }
+    if (forward_commands.runs_container(words)) {
+        if (device_option(words)) |option| {
+            mac_diagnose.devices_unavailable(diag, option);
+            return fail_in(diag, invocation, .container_run);
+        }
+    }
     const context: commands.Context = .{
         .paths = &paths,
         .json = invocation.json,
@@ -235,6 +241,23 @@ fn names_listen(words: []const []const u8) bool {
         if (std.mem.startsWith(u8, word, "--listen-send=")) return true;
     }
     return false;
+}
+
+/// The device option (`--device` or `--gpu`, with or without `=value`) the command line has
+/// before its "--", or null (M10).
+fn device_option(words: []const []const u8) ?[]const u8 {
+    assert(words.len <= constants.args_count_max);
+    assert(constants.args_count_max > 0);
+    const options = [_][]const u8{ "--device", "--gpu" };
+    for (words) |word| {
+        if (std.mem.eql(u8, word, "--")) return null;
+        for (options) |option| {
+            if (std.mem.eql(u8, word, option)) return option;
+            if (std.mem.startsWith(u8, word, option) and word.len > option.len and
+                word[option.len] == '=') return option;
+        }
+    }
+    return null;
 }
 
 fn fail(diag: *Diag, invocation: *const Invocation) u8 {

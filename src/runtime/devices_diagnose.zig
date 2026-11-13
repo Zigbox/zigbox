@@ -8,6 +8,7 @@ const constants = @import("../constants.zig");
 const text_util = @import("../text.zig");
 const Diag = @import("../diag/diag.zig").Diag;
 const devices = @import("devices.zig");
+const gpu = @import("gpu.zig");
 
 const example = "zbx run --device /dev/dri/renderD128 <image>";
 
@@ -85,4 +86,53 @@ pub fn groups_note(diag: *Diag) void {
         "'nogroup', and the host's file permissions still decide who may open each device", .{});
     diag.fix(.{ .sentence = "nothing to do; the groups work, only their names are not shown" });
     assert(diag.code.? == .W0209);
+}
+
+/// ZBX-E0228: `--gpu` found nothing to give. Names what was looked for, what was there and not
+/// usable, and sends the user to `zbx doctor` for each gap.
+pub fn no_gpu(diag: *Diag, nothing: gpu.Nothing) void {
+    assert(diag.code == null);
+    const word = nothing.ask.word();
+    diag.raise(.E0228);
+    diag.while_("looking for a GPU for --gpu {s}", .{word});
+    const looked = switch (nothing.ask) {
+        .all => "no nvidia.com/gpu device in the CDI specs ($XDG_CONFIG_HOME/cdi, " ++
+            "/var/run/cdi, /etc/cdi), and no render node (/dev/dri/renderD*) that you can " ++
+            "open (/dev/kfd alone is not enough)",
+        .dri => "no render node (/dev/dri/renderD*) that you can open (/dev/kfd alone is " ++
+            "not enough)",
+    };
+    diag.cause("{s}", .{looked});
+    if (nothing.unopenable > 0) {
+        diag.cause("{d} found, none openable by you: you are not in their group", .{
+            nothing.unopenable,
+        });
+    }
+    if (nothing.spec_trouble) {
+        diag.cause("a CDI spec could not be used, and it may be the one with the GPU", .{});
+    }
+    diag.context("gpu", "{s}", .{word});
+    diag.fix(.{
+        .sentence = "see what this host has, and the fix for each gap:",
+        .command = "zbx doctor",
+    });
+    assert(diag.code.? == .E0228);
+}
+
+/// ZBX-E0225: a `--gpu` value that is not `all` or `dri` (read from the command line).
+pub fn bad_gpu(diag: *Diag, value: []const u8) void {
+    assert(diag.code == null);
+    var storage: [constants.arg_echo_bytes_max]u8 = undefined;
+    const echo = echo_of(&storage, value);
+    diag.raise(.E0225);
+    diag.while_("reading the command line", .{});
+    diag.cause("--gpu '{s}': it is 'all' (every NVIDIA GPU, else the render nodes) or 'dri' " ++
+        "(the render nodes)", .{echo});
+    diag.context("arg", "{s}", .{echo});
+    diag.fix(.{
+        .sentence = "give all or dri:",
+        .command = "zbx run --gpu all <image>",
+        .template = true,
+    });
+    assert(diag.code.? == .E0225);
 }

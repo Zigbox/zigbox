@@ -11,6 +11,7 @@ const constants = @import("constants.zig");
 const host = @import("host.zig");
 const cli = @import("cli.zig");
 const doctor = @import("doctor.zig");
+const doctor_gpu = @import("doctor_gpu.zig");
 const fixtures = @import("doctor_fixtures.zig");
 const parse_fuzz = @import("fuzz_parse.zig");
 const diag_fuzz = @import("fuzz_diag.zig");
@@ -44,6 +45,7 @@ const pull_report_fuzz = @import("fuzz_pull_report.zig");
 const key_fuzz = @import("fuzz_key.zig");
 const openpgp_fuzz = @import("fuzz_openpgp.zig");
 const json_fuzz = @import("fuzz_json.zig");
+const cdi_fuzz = @import("fuzz_cdi.zig");
 const trust_fuzz = @import("fuzz_trust.zig");
 const provenance_fuzz = @import("fuzz_provenance.zig");
 const verified_fuzz = @import("fuzz_verified.zig");
@@ -98,6 +100,7 @@ const fuzzers = [_]Fuzzer{
     .{ .name = "key", .run_iteration = key_fuzz.fuzz_key },
     .{ .name = "openpgp", .run_iteration = openpgp_fuzz.fuzz_openpgp },
     .{ .name = "json", .run_iteration = json_fuzz.fuzz_json },
+    .{ .name = "cdi", .run_iteration = cdi_fuzz.fuzz_cdi },
     .{ .name = "trust", .run_iteration = trust_fuzz.fuzz_trust },
     .{ .name = "provenance", .run_iteration = provenance_fuzz.fuzz_provenance },
     .{ .name = "verified", .run_iteration = verified_fuzz.fuzz_verified },
@@ -910,6 +913,12 @@ fn fuzz_doctor(seed: u64) void {
     check_doctor_report(&report, &expected, &injected);
     var hard_total: u32 = 0;
     for (injected) |counts| hard_total += counts.hard;
+    // The GPU section reads after the checks and ignores what it cannot read, so a fault that
+    // lands in it is no failure of the report; it counts with the gather's.
+    var gpu: doctor_gpu.Section = undefined;
+    const hard_before = faulted.hard_errors_injected;
+    doctor_gpu.gather(faulted.interface(), &gpu);
+    hard_total += faulted.hard_errors_injected - hard_before;
     check_doctor_cli(&spec, &report, hard_total, random);
 }
 
@@ -1000,7 +1009,8 @@ fn check_doctor_cli(
             assert(std.mem.startsWith(u8, start, sim.stdout()) or
                 std.mem.startsWith(u8, sim.stdout(), start));
         } else {
-            assert(std.mem.startsWith(u8, doctor.render(report, false, &buffer), sim.stdout()));
+            const shown = report_part(sim.stdout());
+            assert(std.mem.startsWith(u8, doctor.render(report, false, &buffer), shown));
         }
         return;
     }
@@ -1010,7 +1020,7 @@ fn check_doctor_cli(
     if (json) {
         check_doctor_document(sim.stdout(), report, &blocks);
     } else {
-        assert(std.mem.eql(u8, sim.stdout(), doctor.render(report, false, &buffer)));
+        assert(std.mem.eql(u8, report_part(sim.stdout()), doctor.render(report, false, &buffer)));
         const fails = diag_fuzz.find_fail_lines(sim.stdout());
         assert(fails.unregistered == 0);
         assert(fails.count == blocks.count);
@@ -1027,6 +1037,12 @@ fn check_doctor_cli(
     if (json) assert(every_line_is_json(sim.stderr()));
 }
 
+/// The text report without the GPU lines the doctor adds after it (they are not checks).
+fn report_part(stdout: []const u8) []const u8 {
+    const at = std.mem.indexOf(u8, stdout, "\ngpu  ") orelse return stdout;
+    return stdout[0 .. at + 1];
+}
+
 /// True if the interrupts the simulator injected could have made a write give up
 /// (`Host.write_all` stops after `eintr_retries_max` in a row) and what reached the streams
 /// is less than the report says. A run with fewer interrupts than that has no such excuse.
@@ -1041,7 +1057,7 @@ fn doctor_output_cut_by_interrupts(
     if (diag_fuzz.find_diagnostics(sim.stderr()).count < failed) return true;
     if (json) return !std.mem.endsWith(u8, sim.stdout(), "]}\n");
     var buffer: [constants.output_bytes_max]u8 = undefined;
-    return !std.mem.eql(u8, sim.stdout(), doctor.render(report, false, &buffer));
+    return !std.mem.eql(u8, report_part(sim.stdout()), doctor.render(report, false, &buffer));
 }
 
 /// The `zbx.doctor/1` document says what the report says: every check with its status and

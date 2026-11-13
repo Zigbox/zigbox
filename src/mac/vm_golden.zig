@@ -125,7 +125,12 @@ fn port_unavailable(diag: *Diag) void {
     diagnose.port_unavailable(diag, 80, "127.0.0.1", "ACCES");
 }
 
+fn devices_unavailable(diag: *Diag) void {
+    diagnose.devices_unavailable(diag, "--gpu");
+}
+
 pub const cases = [_]Case{
+    .{ .code = .E0229, .build = &devices_unavailable },
     .{ .code = .E1001, .build = &entitlement },
     .{ .code = .E1002, .build = &start_failed },
     .{ .code = .E1003, .build = &no_answer },

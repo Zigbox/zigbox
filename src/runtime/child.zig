@@ -13,6 +13,7 @@ const capabilities = @import("capabilities.zig");
 const plan_mod = @import("plan.zig");
 const seccomp = @import("seccomp.zig");
 const sync = @import("sync.zig");
+const cdi_steps = @import("cdi_steps.zig");
 
 const Host = host_mod.Host;
 const Plan = plan_mod.Plan;
@@ -46,6 +47,9 @@ const State = struct {
     failed_etc: u8,
     /// The listener `make_listener` made, until `send_listener` has sent it and closed it.
     listener: ?host_mod.Handle,
+    /// The image's `ldconfig` did not run for the CDI libraries: `exec` hands the command
+    /// `Plan.ld_library_path` instead.
+    ld_failed: bool,
 };
 
 pub const go_ahead: u8 = 1;
@@ -61,7 +65,12 @@ pub fn entry(context: *anyopaque) u8 {
     host.close(child.ready.write);
     host.close(child.report.read);
     if (child.plan.has_listener) host.close(child.channel.read);
-    var state: State = .{ .errno_override = 0, .failed_etc = 0, .listener = null };
+    var state: State = .{
+        .errno_override = 0,
+        .failed_etc = 0,
+        .listener = null,
+        .ld_failed = false,
+    };
     for (child.plan.steps[0..child.plan.count], 0..) |*step, index| {
         if (plan_mod.side_of(step.kind) != .child) continue;
         if (skipped(step, &state)) continue;
@@ -79,6 +88,7 @@ pub fn entry(context: *anyopaque) u8 {
             };
             write_record(child, record);
             if (step.tolerant) {
+                if (step.kind == .run_ldconfig) state.ld_failed = true;
                 const group = plan_mod.group_of(step);
                 if (group > 0) state.failed_etc |= @as(u8, 1) << @intCast(group - 1);
                 continue;
@@ -134,9 +144,8 @@ fn run_step(child: *const Context, step: *const Step, state: *State) Error!void 
         .mount_shm => try mount(host, .shm_tmpfs, target, null),
         .mount_pts => try mount(host, .devpts, target, null),
         .bind_device => try mount(host, .bind_file, target, plan.text(step.source)),
-        .make_proc_dir, .make_dev_dir => try host.make_directory(target, true),
-        // The rootfs may already have them (Alpine has both): only a missing one is made.
-        .make_tmp_dir, .make_run_dir => try host.make_directory(target, true),
+        .make_proc_dir, .make_dev_dir, .make_tmp_dir => try make_dir(host, target),
+        .make_run_dir, .make_sys_dir, .make_etc_dir => try make_dir(host, target),
         .mount_tmp => try mount(host, .tmp_tmpfs, target, null),
         .mount_run => try mount(host, .run_tmpfs, target, null),
         .remount_readonly => try mount(host, .remount_readonly, target, null),
@@ -145,13 +154,11 @@ fn run_step(child: *const Context, step: *const Step, state: *State) Error!void 
         .set_no_new_privs => try host.no_new_privs(),
         .install_seccomp => try host.install_seccomp(&seccomp.program),
         .make_shm_dir, .make_pts_dir => try host.make_directory(target, false),
-        .make_sys_dir => try host.make_directory(target, true),
         .bind_sys => try mount(host, .bind_tree, target, plan.text(step.source)),
         .bring_up_loopback => try host.bring_up_loopback(),
         .make_listener => state.listener = try host.listen_loopback(plan.listen_port),
         .send_listener => try send_listener(child, state),
         .mount_sysfs => try mount(host, .sysfs, target, null),
-        .make_etc_dir => try host.make_directory(target, true),
         .create_etc_file => try host.create_file(target, true),
         .stage_etc_file => try host.write_file_mode(target, plan.text(step.source), 0o644),
         .bind_etc_file => try mount(host, .bind_file, target, plan.text(step.source)),
@@ -159,11 +166,13 @@ fn run_step(child: *const Context, step: *const Step, state: *State) Error!void 
         .unstage_etc_file => try unstage(host, target),
         .remount_sys => try mount(host, .remount_readonly_tree, target, null),
         .enter_workdir => try enter_workdir(host, target),
-        .set_user => try host.set_user(plan.user_uid, plan.user_gid, plan.device_count > 0),
+        .set_user => try host.set_user(plan.user_uid, plan.user_gid, plan.keep_groups),
         .rearm_death_signal => try rearm_death_signal(child),
         .create_device_file => try host.create_file(target, false),
         .create_user_device => try make_file_target(host, target),
         .bind_user_device => try mount(host, .bind_file, target, plan.text(step.source)),
+        .bind_cdi_nodes, .stage_cdi_mounts => try run_cdi_step(host, plan, step.kind, state),
+        .move_cdi_mounts, .run_ldconfig => try run_cdi_step(host, plan, step.kind, state),
         .link_dev => try host.symlink(plan.text(step.source), target),
         .enter_rootfs, .enter_new_root => try host.change_directory(target),
         .pivot_root => try host.pivot_root(target, plan.text(step.source)),
@@ -182,6 +191,26 @@ fn run_step(child: *const Context, step: *const Step, state: *State) Error!void 
         .start_pasta, .await_pasta => unreachable, // The parent's steps.
         .release_child, .await_report, .reap => unreachable, // The parent's steps.
         .receive_listener => unreachable, // The parent's step.
+    }
+}
+
+/// A directory the rootfs may already have (Alpine has /tmp and /run): only a missing one is made.
+fn make_dir(host: Host, target: [:0]const u8) Error!void {
+    assert(target.len > 0);
+    assert(target[0] == '/');
+    try host.make_directory(target, true);
+}
+
+/// One of a CDI device's steps; a failure inside a loop leaves its index in `errno_override`.
+fn run_cdi_step(host: Host, plan: *const Plan, kind: plan_mod.Kind, state: *State) Error!void {
+    assert(plan.cdi != null);
+    const override = &state.errno_override;
+    switch (kind) {
+        .bind_cdi_nodes => try cdi_steps.bind_nodes(host, plan, override),
+        .stage_cdi_mounts => try cdi_steps.stage_mounts(host, plan, override),
+        .move_cdi_mounts => try cdi_steps.move_mounts(host, plan, override),
+        .run_ldconfig => try cdi_steps.run_ldconfig(host, plan, override),
+        else => unreachable,
     }
 }
 
@@ -272,6 +301,8 @@ fn make_file_target(host: Host, target: [:0]const u8) host_mod.Error!void {
 
 /// Makes the directory and the ones above it that are missing, then goes there.
 fn enter_workdir(host: Host, path: [:0]const u8) host_mod.Error!void {
+    assert(path.len > 0);
+    assert(path[0] == '/');
     try make_parents(host, path);
     try host.change_directory(path);
 }
@@ -345,6 +376,43 @@ fn await_release(child: *const Context) Error!void {
     assert(byte[0] == go_ahead);
 }
 
+/// The command's environment with the CDI directories on `LD_LIBRARY_PATH`: ahead of a value the
+/// environment has already (the user's own directories stay, after the vendor's), or as a new
+/// entry. `line` holds the joined entry; `plan.envp` has the room for a new one (the
+/// environment's bound leaves one entry free, `plan.build_exec_image` asserts it).
+fn library_path_env(plan: *const Plan, line: *[library_line_bytes]u8) @TypeOf(plan.envp) {
+    var envp = plan.envp;
+    var count: usize = 0;
+    const key = "LD_LIBRARY_PATH=";
+    const own = std.mem.span(plan.text(plan.ld_library_path).ptr);
+    assert(std.mem.startsWith(u8, own, key));
+    while (envp[count]) |variable| : (count += 1) {
+        const text = std.mem.span(variable);
+        if (!std.mem.startsWith(u8, text, key)) continue;
+        const present = text[key.len..];
+        // An empty value joins as nothing: a trailing ':' would search the working directory.
+        if (present.len == 0) {
+            envp[count] = plan.text(plan.ld_library_path).ptr;
+            return envp;
+        }
+        // Each environment value is held to `env_value_bytes_max`, which `line` has room for.
+        assert(own.len + 1 + present.len < line.len);
+        @memcpy(line[0..own.len], own);
+        line[own.len] = ':';
+        @memcpy(line[own.len + 1 ..][0..present.len], present);
+        line[own.len + 1 + present.len] = 0;
+        envp[count] = @ptrCast(line);
+        return envp;
+    }
+    assert(count + 1 < envp.len);
+    envp[count] = plan.text(plan.ld_library_path).ptr;
+    envp[count + 1] = null;
+    return envp;
+}
+
+const library_line_bytes = constants.cdi_run_dirs_max * (constants.cdi_path_bytes_max + 1) +
+    constants.env_value_bytes_max + 80;
+
 /// Tries each candidate path in turn, as a shell does for a name without a slash. A file that
 /// is missing moves on to the next candidate; a file that is there but cannot be run is
 /// reported over a missing one, since it is the more telling failure.
@@ -353,7 +421,12 @@ fn exec(child: *const Context, state: *State) Error!void {
     assert(plan.candidates_count > 0);
     assert(plan.argv[0] != null);
     const argv: host_mod.CStrings = @ptrCast(&plan.argv);
-    const envp: host_mod.CStrings = @ptrCast(&plan.envp);
+    var with_library_path: @TypeOf(plan.envp) = undefined;
+    var library_line: [library_line_bytes]u8 = undefined;
+    const envp: host_mod.CStrings = if (state.ld_failed and plan.ld_library_path.len > 0) blk: {
+        with_library_path = library_path_env(plan, &library_line);
+        break :blk @ptrCast(&with_library_path);
+    } else @ptrCast(&plan.envp);
     var missing: ?Error = null;
     var missing_errno: u16 = 0;
     var denied: ?Error = null;

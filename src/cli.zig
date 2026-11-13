@@ -47,6 +47,7 @@ const mounts = @import("runtime/mounts.zig");
 const mounts_diagnose = @import("runtime/mounts_diagnose.zig");
 const devices = @import("runtime/devices.zig");
 const devices_diagnose = @import("runtime/devices_diagnose.zig");
+const gpu = @import("runtime/gpu.zig");
 const state_diagnose = @import("state/diagnose.zig");
 const digest_prefix = @import("store/digest.zig");
 const inspect_commands = @import("inspect_commands.zig");
@@ -133,8 +134,10 @@ const help_text =
     \\                  size; k, m or g). Its pages count against --memory
     \\  --bind <host>:<path>   the host's directory or file at <path>, always read-only; a
     \\                  <host> that does not exist is an error, never made (repeatable)
-    \\  --device /dev/<path>   bind a host device node into /dev, at the same path (repeatable,
-    \\                  up to 16). Your groups carry over, so a node your group can open works
+    \\  --device /dev/<path>|<vendor/class>=<name>   bind a host device node, or a CDI device from
+    \\                  /etc/cdi, /var/run/cdi or $XDG_CONFIG_HOME/cdi, at its path (repeatable,
+    \\                  up to 16); groups carry over
+    \\  --gpu all|dri   the render nodes and /dev/kfd you can open; all: NVIDIA CDI devices if any
     \\  --mount <host>:<path>  the project's directory or file at <path>, writable (repeatable).
     \\                  <host> may be relative; with every symbolic link followed it must be the
     \\                  project directory (the one with zbx.lock, else the working directory) or
@@ -472,13 +475,14 @@ const RunOption = enum {
     secret,
     mount,
     device,
+    gpu,
     user,
     tail,
     stream,
     workdir,
 
     fn flag(option: RunOption) []const u8 {
-        assert(@backingInt(option) <= 20);
+        assert(@backingInt(option) <= 21);
         assert(@tagName(option).len > 0);
         return switch (option) {
             .rootfs => "--rootfs",
@@ -498,6 +502,7 @@ const RunOption = enum {
             .secret => "--secret",
             .mount => "--mount",
             .device => "--device",
+            .gpu => "--gpu",
             .user => "--user",
             .tail => "--tail",
             .stream => "--stream",
@@ -696,7 +701,7 @@ const Token = union(enum) {
 /// `--rootfs`, `--rootfs=x` and the other value options of `run`, or null.
 fn run_option_of(argument: []const u8) ?Token {
     assert(argument.len <= constants.arg_bytes_max);
-    assert(std.enums.values(RunOption).len == 21);
+    assert(std.enums.values(RunOption).len == 22);
     inline for (comptime std.enums.values(RunOption)) |option| {
         const flag = comptime option.flag();
         if (std.mem.eql(u8, argument, flag)) return .{ .run_option_next = option };
@@ -1661,6 +1666,7 @@ fn take_run_option(
     if (option == .secret) return take_mount(diag, run_args, .secret, value);
     if (option == .mount) return take_mount(diag, run_args, .mount, value);
     if (option == .device) return take_device(diag, run_args, value);
+    if (option == .gpu) return take_gpu(diag, run_args, value);
     const slot = switch (option) {
         .rootfs => &run_args.rootfs,
         .name => &run_args.name,
@@ -1676,6 +1682,7 @@ fn take_run_option(
         .state => unreachable, // Repeatable: `take_state` above.
         .tmpfs, .bind, .secret, .mount => unreachable, // Repeatable: `take_mount` above.
         .device => unreachable, // Repeatable: `take_device` above.
+        .gpu => unreachable, // `take_gpu` above.
         .user => &run_args.user,
         .tail => &run_args.tail,
         .stream => &run_args.stream,
@@ -1985,6 +1992,21 @@ fn take_mount(
     }
     run_args.mounts[run_args.mounts_count] = mount;
     run_args.mounts_count += 1;
+}
+
+/// `--gpu all|dri`: kept as the keyword in the device list (`gpu.Ask.text`), so the record keeps
+/// what was asked; it becomes devices when the run starts.
+fn take_gpu(diag: *Diag, run_args: *RunArgs, value: []const u8) ParseError!void {
+    assert(diag.code == null);
+    const ask: gpu.Ask = if (std.mem.eql(u8, value, "all")) .all else if (std.mem.eql(
+        u8,
+        value,
+        "dri",
+    )) .dri else {
+        devices_diagnose.bad_gpu(diag, value);
+        return error.BadOptionValue;
+    };
+    return take_device(diag, run_args, ask.text());
 }
 
 /// One `--device`: its path is checked now (E0225), with the ones before it for a repeat.

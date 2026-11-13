@@ -508,3 +508,19 @@ pub fn listen_unavailable(diag: *Diag) void {
     diag.fix(.{ .sentence = "run the container on a Linux machine, where --listen works" });
     assert(diag.fixes.count == 1);
 }
+
+/// ZBX-E0229 on a Mac: `--device` and `--gpu` give the machine's own device nodes, and the
+/// container runs in a Linux guest that Apple's virtualization gives no GPU compute.
+pub fn devices_unavailable(diag: *Diag, option: []const u8) void {
+    assert(diag.code == null);
+    const known = std.mem.eql(u8, option, "--gpu") or std.mem.eql(u8, option, "--device");
+    assert(known);
+    diag.raise(.E0229);
+    diag.while_("checking {s}", .{option});
+    diag.cause("{s} is not available on macOS: zbx runs the container in a Linux virtual " ++
+        "machine, and Apple's virtualization gives a Linux guest no GPU compute", .{option});
+    diag.context("option", "{s}", .{option});
+    diag.fix(.{ .sentence = "run the container on a Linux machine with a GPU, or leave " ++
+        "the option out" });
+    assert(diag.fixes.count == 1);
+}

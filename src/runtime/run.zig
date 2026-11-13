@@ -63,7 +63,11 @@ const session_mod = @import("session.zig");
 const spec_mod = @import("spec.zig");
 const volumes_mod = @import("volumes.zig");
 const mounts_mod = @import("mounts.zig");
+const cdi_diagnose = @import("cdi_diagnose.zig");
+const cdi_discover = @import("cdi_discover.zig");
+const cdi_mod = @import("cdi.zig");
 const devices_mod = @import("devices.zig");
+const gpu_mod = @import("gpu.zig");
 const devices_diagnose = @import("devices_diagnose.zig");
 
 const Host = host_mod.Host;
@@ -270,8 +274,17 @@ pub const Handle = struct {
     resolution: mounts_mod.Resolution,
     /// The `--device`s (they point into the `Spec`), once the host has shown each.
     devices: []const devices_mod.Device,
+    /// What `devices` come to once `--gpu` is expanded (they point into `gpu_expanded`, or into
+    /// the `Spec` when nothing was expanded): what the plan binds. `devices` is what was asked.
+    effective: []const devices_mod.Device,
+    gpu_expanded: gpu_mod.Expanded,
     /// The devices' paths as the plan takes them.
     device_paths: [constants.run_devices_max][]const u8,
+    /// What the CDI devices among `devices` resolved to, null: none was asked. Only while
+    /// `start` runs: a run that resolved them itself keeps them on `start`'s stack, which the
+    /// forked child has a copy of (a handle is also a static in tests, and the bound on static
+    /// data is close).
+    cdi: ?*const cdi_mod.Resolved,
     /// The user the command runs as; null is root. Kept for the record and the exit report.
     user: ?spec_mod.User,
     /// What the tree is bound to, for the record.
@@ -343,6 +356,8 @@ pub fn inspect(handle: *const Handle) Status {
 /// Everything a run's handle holds before the first check: what the caller gave, and the state
 /// of a run that has not begun.
 fn init_handle(host: Host, container: *const Spec, options: StartOptions, handle: *Handle) void {
+    assert(container.devices.len <= constants.run_devices_max);
+    assert(@intFromPtr(handle) != 0);
     handle.host = host;
     handle.status = .starting;
     handle.warn = options.warn;
@@ -363,6 +378,8 @@ fn init_handle(host: Host, container: *const Spec, options: StartOptions, handle
     handle.volumes.count = 0;
     handle.mounts = &.{};
     handle.devices = &.{};
+    handle.effective = &.{};
+    handle.cdi = null;
     handle.user = container.user;
     handle.binding = container.binding;
     reset_log(handle, options);
@@ -385,6 +402,9 @@ pub fn start(
 ) Error!void {
     assert(diag.code == null);
     init_handle(host, container, options, handle);
+    var cdi_storage: cdi_mod.Resolved = undefined;
+    defer handle.cdi = null; // The stack the pointer is into is gone; the plan holds counts only.
+    defer handle.plan.cdi = null;
     try choose_name(host, container.name, handle, diag);
     try check_identity(container, diag);
     try check_command(container, diag);
@@ -393,7 +413,7 @@ pub fn start(
     try check_listen(container, diag);
     try check_network(host, container, handle, diag);
     try resolve_mounts(host, container, handle, diag);
-    try resolve_devices(host, container, handle, diag);
+    try resolve_devices(host, container, handle, &cdi_storage, diag);
 
     const choice = try choose_ids(host, container, handle, diag);
     // After the checks that need nothing from the host, and before anything is created: a run
@@ -452,7 +472,13 @@ fn resolve_mounts(host: Host, container: *const Spec, handle: *Handle, diag: *Di
 
 /// Looks at each `--device` on the host (`devices.resolve`) and refuses the first that cannot be
 /// bound (E0225). A run with devices keeps the user's groups, which a note says once (W0209).
-fn resolve_devices(host: Host, container: *const Spec, handle: *Handle, diag: *Diag) Error!void {
+fn resolve_devices(
+    host: Host,
+    container: *const Spec,
+    handle: *Handle,
+    storage: *cdi_mod.Resolved,
+    diag: *Diag,
+) Error!void {
     assert(handle.devices.len == 0);
     assert(handle.notes_count < handle.notes.len);
     if (container.devices.len == 0) return;
@@ -466,12 +492,97 @@ fn resolve_devices(host: Host, container: *const Spec, handle: *Handle, diag: *D
         devices_diagnose.refused(diag, path, refusal.problem);
         return error.StartFailed;
     }
-    handle.devices = container.devices;
+    if (!expand_gpu(host, container, handle, diag)) return error.StartFailed;
+    if (!resolve_cdi(host, container, handle, storage, diag)) return error.StartFailed;
+    handle.devices = container.devices; // What was asked: the record keeps it.
     var note: Diag = undefined;
     note.reset();
     devices_diagnose.groups_note(&note);
     handle.report(&note);
     assert(handle.devices.len <= constants.run_devices_max);
+}
+
+/// Turns `--gpu` keywords into devices (`gpu.expand`), into `handle.effective`. A run without a
+/// keyword looks at nothing more and keeps its devices as they were.
+fn expand_gpu(host: Host, container: *const Spec, handle: *Handle, diag: *Diag) bool {
+    assert(diag.code == null);
+    assert(handle.effective.len == 0);
+    var wants = false;
+    var wants_all = false;
+    for (container.devices) |device| {
+        const ask = gpu_mod.ask_of(device.path);
+        wants = wants or ask != null;
+        wants_all = wants_all or ask == .all;
+    }
+    if (!wants) {
+        handle.effective = container.devices;
+        return true;
+    }
+    var dri: gpu_mod.Dri = undefined;
+    gpu_mod.look_dri(host, &dri);
+    var nvidia = false;
+    var trouble = false;
+    // Only `all` looks at the specs: `dri` is the render nodes, with no vendor tooling. A
+    // resolution the caller gave replaces the host's specs, so there is nothing to probe.
+    if (wants_all and container.cdi == null) switch (gpu_mod.probe_nvidia(host, diag)) {
+        .offered => nvidia = true,
+        .absent => {},
+        .trouble => trouble = true,
+        .refused => return false,
+    };
+    const out = &handle.gpu_expanded;
+    switch (gpu_mod.expand(container.devices, nvidia, &dri, trouble, out)) {
+        .given => {},
+        .nothing => |nothing| {
+            devices_diagnose.no_gpu(diag, nothing);
+            return false;
+        },
+        .too_many => {
+            devices_diagnose.bad_path(diag, container.devices[0].path, .too_many);
+            return false;
+        },
+    }
+    handle.effective = out.slice();
+    return true;
+}
+
+/// The CDI devices among the asked ones: the caller's resolution if it gave one, else the specs
+/// of this host. The scratch of the resolving is on this function's stack and gone after it.
+fn resolve_cdi(
+    host: Host,
+    container: *const Spec,
+    handle: *Handle,
+    storage: *cdi_mod.Resolved,
+    diag: *Diag,
+) bool {
+    assert(handle.effective.len <= constants.run_devices_max);
+    assert(diag.code == null);
+    var asked: [constants.run_devices_max][]const u8 = undefined;
+    var count: usize = 0;
+    for (handle.effective) |device| {
+        if (devices_mod.is_path(device.path)) continue;
+        asked[count] = device.path;
+        count += 1;
+    }
+    if (count == 0) return true;
+    if (container.cdi) |given| {
+        // A set the caller resolved gets the host check the discovery gives its own: the kind of
+        // each mount source is looked up, and a missing node or source is refused here.
+        storage.* = given.*;
+        if (!cdi_discover.host_has(host, storage, asked[0..count], diag)) return false;
+    } else {
+        var scratch: cdi_discover.Scratch = undefined;
+        if (!cdi_discover.resolve(host, asked[0..count], &scratch, storage, diag)) {
+            return false;
+        }
+    }
+    if (container.read_only and storage.mounts_count > 0) {
+        const owner = storage.mount_owner[0];
+        cdi_diagnose.read_only_mounts(diag, asked[if (owner < count) owner else 0]);
+        return false;
+    }
+    handle.cdi = storage;
+    return true;
 }
 
 /// Builds the plan in place in the handle. The host's resolv.conf is read here, in the parent,
@@ -511,7 +622,9 @@ fn build_plan(
         } else null,
         .state = handle.volumes.input_slice(),
         .mounts = handle.resolution.inputs[0..handle.mounts.len],
-        .devices = devices_mod.plan_input(handle.devices, &handle.device_paths),
+        .devices = devices_mod.plan_input(handle.effective, &handle.device_paths),
+        .cdi = handle.cdi,
+        .keep_groups = handle.effective.len > 0,
         .hostname = container.hostname,
         .umask = container.umask,
     };
@@ -545,6 +658,8 @@ fn host_resolv_conf(
 
 /// What the diagnostics say about this run.
 fn run_info(handle: *const Handle) diagnose.RunInfo {
+    assert(handle.name_len > 0);
+    assert(handle.name_len <= constants.container_name_bytes_max);
     return .{
         .name = handle.name_slice(),
         .rootfs = handle.rootfs_slice(),
@@ -1424,6 +1539,13 @@ fn collect_notes(handle: *Handle) void {
     assert(handle.notes.len >= handle.notes_count + 1); // Room for the scope's.
     assert(handle.session.report.note_slice().len + handle.notes_count <= handle.notes.len);
     for (handle.session.report.note_slice()) |record| {
+        if (handle.plan.steps[record.step].kind == .run_ldconfig) {
+            var warning: Diag = undefined;
+            warning.reset();
+            cdi_diagnose.no_ldconfig(&warning);
+            handle.report(&warning);
+            continue;
+        }
         const note = &handle.notes[handle.notes_count];
         note.* = .{};
         var buffer: [160]u8 = undefined;

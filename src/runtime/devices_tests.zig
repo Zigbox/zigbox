@@ -9,6 +9,7 @@ const host_sim = @import("../host_sim.zig");
 const host_mod = @import("../host.zig");
 const plan_mod = @import("plan.zig");
 const records = @import("records.zig");
+const exec = @import("exec.zig");
 const run_lib = @import("run.zig");
 const Diag = @import("../diag/diag.zig").Diag;
 const SimFs = @import("../store/fs_sim.zig").SimFs;
@@ -220,5 +221,50 @@ test "a run with devices keeps its groups in both mapping modes, and one without
             const expected: u32 = if (with_devices or case.uid == 0) 0 else 1;
             try testing.expectEqual(expected, sim.world.setgroups_calls);
         }
+    }
+}
+
+test "exec into a container with devices keeps the user's groups, and without devices drops them" {
+    // Goal: `zbx exec` does for its command what the run did for the container's (the
+    // carry-over of slice 1). Method: start a container that lives, with and without a device,
+    // exec as user 1000, and count the simulator's setgroups calls; the user is checked so the
+    // count is of a step that ran. The test fails if `exec` passes a fixed `keep_groups`.
+    const files = with_files(&sim_run.files);
+    const disk = try std.heap.page_allocator.create(SimFs);
+    defer std.heap.page_allocator.destroy(disk);
+    const handle = try std.heap.page_allocator.create(run_lib.Handle);
+    defer std.heap.page_allocator.destroy(handle);
+    const exec_handle = try std.heap.page_allocator.create(exec.Handle);
+    defer std.heap.page_allocator.destroy(exec_handle);
+    var sim: HostSim = undefined;
+    for ([_]bool{ true, false }) |with_devices| {
+        setup(&sim, 6, &files);
+        disk.init(6);
+        disk.put_dir("/home", 0o755);
+        disk.put_dir("/home/alice", 0o755);
+        sim.log_fs = disk;
+        sim.world.command_runs_ms = 60_000;
+        var diag: Diag = undefined;
+        diag.reset();
+        const spec: run_lib.Spec = .{
+            .rootfs = rootfs,
+            .name = "web",
+            .command = &.{"/bin/sh"},
+            .devices = if (with_devices) &.{.{ .path = render }} else &.{},
+        };
+        try run_lib.start(sim.interface(), &spec, .{}, handle, &diag);
+        handle.session.release_output();
+        try testing.expectEqual(@as(u32, 0), sim.world.setgroups_calls);
+        const exec_spec: exec.Spec = .{
+            .name = "web",
+            .command = &.{"/bin/sh"},
+            .user = "1000:1000",
+        };
+        try exec.start(sim.interface(), &exec_spec, .{}, exec_handle, &diag);
+        const command = sim.world.find_process(exec_handle.pid.?).?;
+        try testing.expectEqual(@as(?[2]u32, .{ 1000, 1000 }), command.user_set);
+        const expected: u32 = if (with_devices) 0 else 1;
+        try testing.expectEqual(expected, sim.world.setgroups_calls);
+        _ = exec.wait(exec_handle);
     }
 }

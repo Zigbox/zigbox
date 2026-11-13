@@ -971,11 +971,28 @@ pub const HostReal = struct {
         };
         if (forked == 0) helper_child(request, ends[1]);
         _ = linux.close(ends[1]);
-        const length = drain_helper(ends[0], output);
+        const pid: i32 = @intCast(forked);
+        // One deadline covers the reads and the reap: the alarm inside the helper is its own
+        // program's to ignore, this is not.
+        const limit_ms = @as(u64, request.timeout_seconds) * 1000;
+        const deadline: u64 = if (limit_ms > 0) monotonic_now_ms() + limit_ms else 0;
+        const drained = drain_helper(ends[0], output, deadline);
         _ = linux.close(ends[0]);
-        const status = try wait_child(@intCast(forked));
-        assert(length <= output.len);
-        return .{ .status = status, .output_len = length };
+        var expired = drained.timed_out;
+        var reaped: ?host.ExitStatus = null;
+        if (!expired) {
+            reaped = try reap_helper(pid, deadline);
+            expired = reaped == null;
+        }
+        if (expired) {
+            // The helper's own process group, and the helper itself in case it left the group.
+            _ = linux.kill(-pid, linux.SIG.KILL);
+            _ = linux.kill(pid, linux.SIG.KILL);
+        }
+        const status = reaped orelse try wait_child(pid);
+        assert(drained.length <= output.len);
+        if (expired) assert(deadline > 0);
+        return .{ .status = status, .output_len = drained.length, .timed_out = expired };
     }
 
     fn block_signals(context: *anyopaque, block: bool) host.Error!void {
@@ -1953,26 +1970,84 @@ fn program_child(
 }
 
 fn helper_child(request: host.ExecRequest, output: i32) noreturn {
+    if (request.timeout_seconds > 0) {
+        // Its own process group, so the waiter's kill reaches what the program started too.
+        _ = linux.setpgid(0, 0);
+        // The timer survives the exec; SIGALRM's default action ends the helper.
+        const limit: linux.itimerspec = .{
+            .it_interval = .{ .sec = 0, .nsec = 0 },
+            .it_value = .{ .sec = request.timeout_seconds, .nsec = 0 },
+        };
+        const set = linux.setitimer(@backingInt(linux.ITIMER.REAL), &limit, null);
+        if (linux.errno(set) != .SUCCESS) linux.exit_group(127);
+    }
+    // Its input is /dev/null: it is in a background group and must neither stop on the terminal
+    // nor take input meant for the command.
+    const input = linux.open("/dev/null", .{ .ACCMODE = .RDONLY }, 0);
+    if (linux.errno(input) != .SUCCESS) linux.exit_group(127);
+    _ = linux.dup2(@intCast(input), linux.STDIN_FILENO);
     _ = linux.dup2(output, linux.STDOUT_FILENO);
     _ = linux.dup2(output, linux.STDERR_FILENO);
     _ = linux.execve(request.path.ptr, request.argv, request.envp);
     linux.exit_group(127);
 }
 
-/// Reads the helper's output to the end: the first bytes are kept, the rest dropped.
-fn drain_helper(descriptor: i32, output: []u8) u32 {
+const Drained = struct { length: u32, timed_out: bool };
+
+/// Reads the helper's output to the end: the first bytes are kept, the rest dropped. A nonzero
+/// `deadline` (monotonic milliseconds) bounds the whole read: a program that never closes the
+/// pipe, leaves a process holding it, or writes past the read bound ends as `timed_out`.
+fn drain_helper(descriptor: i32, output: []u8, deadline: u64) Drained {
     var kept: usize = 0;
-    var scratch: [64]u8 = undefined;
-    for (0..constants.helper_read_calls_max) |_| {
+    var scratch: [512]u8 = undefined;
+    // With a deadline, the deadline is the bound (checked at the top of every pass); without
+    // one the read count is.
+    var passes: u32 = 0;
+    while (deadline > 0 or passes < constants.helper_read_calls_max) : (passes +%= 1) {
+        if (deadline > 0) {
+            const now = monotonic_now_ms();
+            if (now >= deadline) return .{ .length = @intCast(kept), .timed_out = true };
+            var poll_set = [1]linux.pollfd{.{ .fd = descriptor, .events = linux.POLL.IN }};
+            const left: i32 = @intCast(@min(deadline - now, 1000));
+            const waited = linux.poll(&poll_set, 1, left);
+            if (linux.errno(waited) == .INTR) continue;
+            if (linux.errno(waited) != .SUCCESS) break;
+            if (waited == 0) continue; // The deadline check at the top decides.
+        }
         const room: []u8 = if (kept < output.len) output[kept..] else &scratch;
         const count = linux.read(descriptor, room.ptr, room.len);
         if (linux.errno(count) == .INTR) continue;
         if (linux.errno(count) != .SUCCESS) break;
-        if (count == 0) break;
+        if (count == 0) return .{ .length = @intCast(kept), .timed_out = false };
         if (kept < output.len) kept += count;
     }
-    return @intCast(kept);
+    // Only reachable without a deadline (or on a poll/read error): the output is simply cut.
+    return .{ .length = @intCast(kept), .timed_out = false };
 }
+
+/// Waits for the helper to end. Without a deadline it blocks; with one it looks every few
+/// milliseconds and returns null once the deadline has passed with the helper still running.
+fn reap_helper(pid: i32, deadline: u64) host.Error!?host.ExitStatus {
+    assert(pid > 0);
+    if (deadline == 0) return try wait_child(pid);
+    for (0..helper_reap_polls_max) |_| {
+        var status: i32 = 0;
+        const result = linux.wait4(pid, &status, linux.W.NOHANG, null);
+        if (linux.errno(result) != .INTR) {
+            try HostReal.check(result);
+            if (result == pid) return try decode_status(status);
+            assert(result == 0); // Still running.
+            if (monotonic_now_ms() >= deadline) return null;
+            var none: [0]linux.pollfd = .{};
+            _ = linux.poll(&none, 0, helper_reap_poll_ms); // Only a pause.
+        }
+    }
+    return null; // A deadline further away than an hour is not one this wait honours.
+}
+
+const helper_reap_poll_ms: i32 = 10;
+/// An hour of waits at the pause above; a deadline past it counts as expired.
+const helper_reap_polls_max: u32 = 360_000;
 
 /// The `SigIgn:` and `SigCgt:` lines of /proc/<pid>/status, as masks.
 fn parse_signal_masks(status: []const u8) ?host.SignalState {
@@ -2027,6 +2102,76 @@ test "signal masks are read from the status lines, and only when both are there"
     try std.testing.expect(parse_signal_masks("SigCgt:\t0\n") == null);
     try std.testing.expect(parse_signal_masks("SigIgn:\t0\nSigCgt:\tzz\n") == null);
     try std.testing.expect(parse_signal_masks("") == null);
+}
+
+test "a helper that hangs in any of four ways is killed at the deadline, and says so" {
+    // Goal: every shape of hang returns within the deadline (one second here), the helper dead
+    // by SIGKILL, and `timed_out` set so that no caller counts it a success. Method: scripts
+    // that ignore the alarm with the pipe held open, closed or redirected, that write past the
+    // read bound with SIGPIPE ignored, and a holder of the pipe that outlives the helper.
+    var real: HostReal = .{};
+    const envp = [_:null]?[*:0]const u8{null};
+    const scripts = [_][:0]const u8{
+        "trap '' ALRM; sleep 1000", // Ignores the alarm; the pipe stays open.
+        "trap '' ALRM; exec >/dev/null 2>&1; sleep 1000", // Pipe at EOF at once; still running.
+        "trap '' ALRM PIPE; while :; do echo x; done", // More writes than the read bound.
+    };
+    for (scripts) |script| {
+        const argv = [_:null]?[*:0]const u8{ "sh", "-c", script, null };
+        var output: [8]u8 = undefined;
+        const begun = monotonic_now_ms();
+        const result = try real.interface().run_helper(
+            .{ .path = "/bin/sh", .argv = &argv, .envp = &envp, .timeout_seconds = 1 },
+            &output,
+        );
+        try std.testing.expect(monotonic_now_ms() - begun < 5000);
+        try std.testing.expect(result.timed_out);
+        try std.testing.expectEqual(host.ExitStatus{ .signaled = 9 }, result.status);
+    }
+    // The helper exits 0 but a grandchild holds the pipe: killed at the deadline, and a failure.
+    const holder = [_:null]?[*:0]const u8{ "sh", "-c", "(sleep 1000 &) ; exit 0", null };
+    var output: [8]u8 = undefined;
+    const begun = monotonic_now_ms();
+    const result = try real.interface().run_helper(
+        .{ .path = "/bin/sh", .argv = &holder, .envp = &envp, .timeout_seconds = 1 },
+        &output,
+    );
+    try std.testing.expect(monotonic_now_ms() - begun < 5000);
+    try std.testing.expect(result.timed_out);
+}
+
+test "a helper that prints many lines slowly and exits 0 is not timed out" {
+    // Goal: a chatty ldconfig is no hang. 150 lines with short pauses, far more than the read
+    // bound, finish well inside the deadline: not killed, exit 0, first bytes kept.
+    var real: HostReal = .{};
+    const envp = [_:null]?[*:0]const u8{null};
+    const script =
+        "i=0; while [ $i -lt 150 ]; do echo \"warning $i\"; i=$((i+1)); sleep 0.005; done";
+    const argv = [_:null]?[*:0]const u8{ "sh", "-c", script, null };
+    var output: [16]u8 = undefined;
+    const result = try real.interface().run_helper(
+        .{ .path = "/bin/sh", .argv = &argv, .envp = &envp, .timeout_seconds = 20 },
+        &output,
+    );
+    try std.testing.expect(!result.timed_out);
+    try std.testing.expectEqual(host.ExitStatus{ .exited = 0 }, result.status);
+    try std.testing.expectEqualStrings("warning 0\nwarnin", output[0..result.output_len]);
+}
+
+test "a helper that ends in time is not timed out, and reads /dev/null for input" {
+    // Goal: the deadline is no cost to a helper that finishes; its stdin is /dev/null (cat sees
+    // the end at once instead of waiting for the terminal or the caller's input).
+    var real: HostReal = .{};
+    const envp = [_:null]?[*:0]const u8{null};
+    const argv = [_:null]?[*:0]const u8{ "sh", "-c", "cat; echo done", null };
+    var output: [16]u8 = undefined;
+    const result = try real.interface().run_helper(
+        .{ .path = "/bin/sh", .argv = &argv, .envp = &envp, .timeout_seconds = 5 },
+        &output,
+    );
+    try std.testing.expect(!result.timed_out);
+    try std.testing.expectEqual(host.ExitStatus{ .exited = 0 }, result.status);
+    try std.testing.expectEqualStrings("done\n", output[0..result.output_len]);
 }
 
 test "a real helper's status and output are captured, and the rest dropped" {

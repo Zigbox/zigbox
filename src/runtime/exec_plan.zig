@@ -131,6 +131,9 @@ pub const Input = struct {
     terminal: bool,
     /// The command is put in the container's cgroup.
     cgroup: bool,
+    /// The container was started with devices: the command keeps its user's supplementary groups
+    /// (`set_user` does not drop them), as the container's own command does (M10, ZBX-W0209).
+    keep_groups: bool,
 };
 
 pub const Plan = struct {
@@ -140,6 +143,7 @@ pub const Plan = struct {
     terminal: bool,
     cgroup: bool,
     has_user: bool,
+    keep_groups: bool,
     user_uid: u32,
     user_gid: u32,
     workdir: Text,
@@ -161,6 +165,7 @@ pub const Plan = struct {
         plan.namespaces = input.namespaces;
         plan.terminal = input.terminal;
         plan.cgroup = input.cgroup;
+        plan.keep_groups = input.keep_groups;
         plan.has_user = if (input.user) |user| user.uid != 0 or user.gid != 0 else false;
         plan.user_uid = if (input.user) |user| user.uid else 0;
         plan.user_gid = if (input.user) |user| user.gid else 0;
@@ -533,6 +538,7 @@ fn test_input(command: []const []const u8) Input {
         .namespaces = all_namespaces,
         .terminal = false,
         .cgroup = true,
+        .keep_groups = false,
     };
 }
 
