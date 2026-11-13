@@ -172,7 +172,8 @@ const help_text =
     \\           -- <command> [args...]
     \\  the command joins the container's namespaces and cgroup, with no more than its
     \\  capabilities, no_new_privs and seccomp filter. It has the container's
-    \\  environment, directory and user; -e, --user and --workdir change them for it only. With a terminal on zbx's input and output it gets a
+    \\  environment, directory and user; -e, --user and --workdir change them for it only.
+    \\  With a terminal on zbx's input and output it gets a
     \\  terminal of its own. It ends with the container. zbx ps does not list it; zbx bundle
     \\  of the container notes the recent execs (command and exit, never a value of -e)
     \\  --output json   ends with an exec_exit line on stderr (zbx schema exec)
@@ -281,7 +282,8 @@ const help_text =
     \\  zbx build --graph [-f <file>]
     \\  reads zbx.build.zon in the project directory (the one with zbx.lock, else the working
     \\  directory), or <file>, which must be inside it; checks it, its graph and its inputs, and
-    \\  prints the steps in build order, then the image, running nothing (--output json: nodes and edges, see zbx schema build-graph)
+    \\  prints the steps in build order, then the image, running nothing
+    \\  (--output json: nodes and edges, see zbx schema build-graph)
     \\  zbx build [-f <file>] [--clear-caches]
     \\  builds the steps, then the image: one row per step (hit or miss, time, net, cache)
     \\  and the result digest; --output json: one zbx.build/1
