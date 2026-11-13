@@ -4,6 +4,6 @@ error[ZBX-E0229]: devices are not available on this platform
          virtual machine, and Apple's virtualization gives a Linux guest no GPU
          compute
   option --gpu
-  fix    run the container on a Linux machine with a GPU, or leave the option out
+  fix    run the container on a Linux machine (with a GPU, for --gpu), or leave the option out
   more   zbx explain E0229
   docs   https://zigbox.github.io/zigbox/errors/E0229.html

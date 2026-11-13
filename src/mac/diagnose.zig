@@ -517,10 +517,15 @@ pub fn devices_unavailable(diag: *Diag, option: []const u8) void {
     assert(known);
     diag.raise(.E0229);
     diag.while_("checking {s}", .{option});
-    diag.cause("{s} is not available on macOS: zbx runs the container in a Linux virtual " ++
-        "machine, and Apple's virtualization gives a Linux guest no GPU compute", .{option});
+    if (std.mem.eql(u8, option, "--gpu")) {
+        diag.cause("--gpu is not available on macOS: zbx runs the container in a Linux virtual " ++
+            "machine, and Apple's virtualization gives a Linux guest no GPU compute", .{});
+    } else {
+        diag.cause("--device is not available on macOS: zbx runs the container in a Linux " ++
+            "virtual machine, which cannot see this Mac's device nodes", .{});
+    }
     diag.context("option", "{s}", .{option});
-    diag.fix(.{ .sentence = "run the container on a Linux machine with a GPU, or leave " ++
-        "the option out" });
+    diag.fix(.{ .sentence = "run the container on a Linux machine (with a GPU, for --gpu), or " ++
+        "leave the option out" });
     assert(diag.fixes.count == 1);
 }

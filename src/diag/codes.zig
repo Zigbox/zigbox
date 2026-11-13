@@ -1095,6 +1095,10 @@ pub const registry = [_]Entry{
         \\
         \\A run with devices keeps your supplementary groups, so a node that is 0660
         \\root:render opens for a member of "render".
+        \\
+        \\--gpu takes "all" or "dri" and nothing else; "--device gpu=all" is not an
+        \\alias for it. A --gpu dri that finds more render nodes than a run takes is
+        \\refused with this code too: name the nodes you want instead.
         ,
     },
     .{

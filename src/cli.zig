@@ -104,8 +104,8 @@ const help_text =
     \\  zbx run --rootfs <dir> [--name <name>] -- <command> [args...]
     \\  <image>         a pulled image by name (alpine:3.20, name@sha256:...): it runs what the
     \\                  image says (entrypoint, command, environment, directory, user); words
-    \\                  after -- replace its command. A tag is looked up in zbx.lock, which is
-    \\                  made if the project has none, and refused if it and the store disagree
+    \\                  after -- replace its command. A tag is looked up in zbx.lock (made if
+    \\                  absent), and refused if it and the store disagree
     \\  <digest>        a tree of the store (or a unique prefix of 12 or more hex digits), run on
     \\                  an overlay: its writes go to the container's own layer, never the store
     \\  --rootfs <dir>  or a directory to use as the container's root, read and written in place
@@ -123,7 +123,7 @@ const help_text =
     \\  --listen-send <fd>  the inherited Unix socket the listener goes over (SCM_RIGHTS)
     \\  -e <name>[=<value>]  set a variable in the container, over the image's (repeatable): with
     \\                  =<value> that value, without it zbx's own (an error if unset there).
-    \\                  A value is never stored or printed; zbx ps and a bundle show the name
+    \\                  A value is never stored or printed; only the name is shown
     \\  -d, --detach    start the container and return; zbx ps and zbx stop find it again
     \\  --timeout <ms>  stop the container after this long (SIGTERM, then SIGKILL)
     \\  --grace <ms>    time between SIGTERM and SIGKILL (default 10000)
@@ -138,6 +138,7 @@ const help_text =
     \\                  /etc/cdi, /var/run/cdi or $XDG_CONFIG_HOME/cdi (repeatable, up to
     \\                  16); groups carry over
     \\  --gpu all|dri   the render nodes and /dev/kfd you can open; all: NVIDIA CDI devices if any
+    \\                  (zbx doctor lists them)
     \\  --mount <host>:<path>  the project's directory or file at <path>, writable (repeatable).
     \\                  <host> may be relative; with symbolic links followed it must be the
     \\                  project directory (the one with zbx.lock, else the working directory) or
@@ -2004,11 +2005,23 @@ fn take_gpu(diag: *Diag, run_args: *RunArgs, value: []const u8) ParseError!void 
         devices_diagnose.bad_gpu(diag, value);
         return error.BadOptionValue;
     };
-    return take_device(diag, run_args, ask.text());
+    return add_device(diag, run_args, ask.text());
 }
 
-/// One `--device`: its path is checked now (E0225), with the ones before it for a repeat.
+/// One `--device`: its path is checked now (E0225), with the ones before it for a repeat. The
+/// keywords `--gpu` keeps in the list are not a `--device` value: `--device gpu=all` is refused
+/// as the name it is not, rather than taken as a second spelling of `--gpu all`.
 fn take_device(diag: *Diag, run_args: *RunArgs, value: []const u8) ParseError!void {
+    assert(diag.code == null);
+    if (gpu.ask_of(value) != null) {
+        const problem: devices.ListProblem = .{ .path = .{ .index = 0, .problem = .bad_name } };
+        devices_diagnose.bad_path(diag, value, problem);
+        return error.BadOptionValue;
+    }
+    return add_device(diag, run_args, value);
+}
+
+fn add_device(diag: *Diag, run_args: *RunArgs, value: []const u8) ParseError!void {
     assert(diag.code == null);
     assert(run_args.devices_count <= constants.run_devices_max);
     const count = run_args.devices_count;

@@ -1961,7 +1961,8 @@ test "the healthy fixtures pass and warn does not change the exit code" {
         "no_passwd_entry",                "kernel_exactly_minimum",
         "kernel_newer_major_lower_minor", "gpu_cdi_spec",
         "gpu_cdi_refused",                "gpu_driver_no_spec",
-        "gpu_render_closed",
+        "gpu_render_closed",              "gpu_cdi_yaml",
+        "gpu_cdi_stale",
     };
     var target: HostSim = undefined;
     for (fixtures.all) |fixture| {
@@ -2247,6 +2248,7 @@ test "the overlay line says whether an id-mapped mount of the project is allowed
 
 const gpu_fixture_names = [_][]const u8{
     "gpu_cdi_spec", "gpu_cdi_refused", "gpu_driver_no_spec", "gpu_render_closed",
+    "gpu_cdi_yaml", "gpu_cdi_stale",
 };
 
 test "snapshot: the GPU section in text and in the zbx.doctor/1 document" {

@@ -293,6 +293,7 @@ const roots = [_][]const u8{
     "src/testing/vm/main_m7.zig",
     "src/testing/vm/main_m8.zig",
     "src/testing/vm/main_m8b.zig",
+    "src/testing/vm/main_m10.zig",
     "src/testing/vm/main_z7.zig",
     "src/testing/vm/main_m8_packages.zig",
     "src/testing/vm/main_top20.zig",
@@ -326,6 +327,7 @@ const linux_only = [_][]const u8{
     "src/testing/vm/main_m7.zig",
     "src/testing/vm/main_m8.zig",
     "src/testing/vm/main_m8b.zig",
+    "src/testing/vm/main_m10.zig",
     "src/testing/vm/main_z7.zig",
     "src/testing/vm/main_m8_packages.zig",
     "src/testing/vm/main_top20.zig",
@@ -558,6 +560,11 @@ const demos = [_]struct { step: []const u8, root: []const u8, help: []const u8 }
         .help = "Run the M8b demo: --listen hands a loopback listener from the container out",
     },
     .{
+        .step = "demo-m10",
+        .root = "src/testing/vm/main_m10.zig",
+        .help = "Run the M10 demo: --device and --gpu with a fake vendor, doctor, refusals",
+    },
+    .{
         .step = "demo-z7",
         .root = "src/testing/vm/main_z7.zig",
         .help = "Run the Z7 check: a host port forwarded into the guest (docs/vm-module.md)",
@@ -617,12 +624,7 @@ fn add_demo_step(
             }),
         });
         harness.dependOn(&vm.step);
-        // The top-20 run tells a seccomp refusal from another EPERM by the allowlist itself.
-        if (is_top20) {
-            vm.root_module.addAnonymousImport("seccomp_policy", .{
-                .root_source_file = b.path("src/runtime/policy/seccomp.zon"),
-            });
-        }
+        add_harness_imports(b, demo.step, vm.root_module);
         const run = b.addRunArtifact(vm);
         run.setCwd(b.path("."));
         run.addArgs(&.{ "--accel", @tagName(accel) });
@@ -647,6 +649,51 @@ fn add_demo_step(
         const step = b.step(demo.step, demo.help);
         step.dependOn(&run.step);
     }
+}
+
+/// What one demo's harness embeds beyond the VM module.
+fn add_harness_imports(b: *std.Build, step: []const u8, module: *std.Build.Module) void {
+    // The top-20 run tells a seccomp refusal from another EPERM by the allowlist itself.
+    if (std.mem.eql(u8, step, "top20")) {
+        module.addAnonymousImport("seccomp_policy", .{
+            .root_source_file = b.path("src/runtime/policy/seccomp.zon"),
+        });
+    }
+    if (std.mem.eql(u8, step, "demo-m10")) add_gpu_fixtures(b, module);
+}
+
+/// demo-m10's fake driver library (soname `libzbxgpu.so.1`) and the program that needs it, built
+/// for the guest (x86_64, glibc's loader as the interpreter, no libc linked) and embedded in the
+/// harness, which serves them to the guest. The harness serves the x86_64 `zbx` too.
+fn add_gpu_fixtures(b: *std.Build, harness_module: *std.Build.Module) void {
+    const target = b.resolveTargetQuery(.{ .cpu_arch = .x86_64, .os_tag = .linux, .abi = .gnu });
+    const library = b.addLibrary(.{
+        .linkage = .dynamic,
+        .name = "zbxgpu",
+        .version = .{ .major = 1, .minor = 0, .patch = 0 },
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/testing/vm/m10_fixture/library.zig"),
+            .target = target,
+            .optimize = .ReleaseSmall,
+            .link_libc = false,
+        }),
+    });
+    const probe = b.addExecutable(.{
+        .name = "zbxgpu-probe",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/testing/vm/m10_fixture/probe.zig"),
+            .target = target,
+            .optimize = .ReleaseSmall,
+            .link_libc = false,
+        }),
+    });
+    probe.root_module.linkLibrary(library);
+    harness_module.addAnonymousImport("zbxgpu_library", .{
+        .root_source_file = library.getEmittedBin(),
+    });
+    harness_module.addAnonymousImport("zbxgpu_probe", .{
+        .root_source_file = probe.getEmittedBin(),
+    });
 }
 
 /// The commit whose zbx a demo's upgrade test starts from (`old_release.zon`), if it has one.

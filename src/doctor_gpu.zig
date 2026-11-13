@@ -52,6 +52,7 @@ pub const Section = struct {
     }
 };
 
+const group_name_bytes_max: u32 = 32;
 const spec_directories = [_][:0]const u8{ "/var/run/cdi", "/etc/cdi" };
 const generate = "nvidia-ctk cdi generate --format=json --output=/etc/cdi/nvidia.json";
 
@@ -71,9 +72,14 @@ pub fn gather(host: Host, section: *Section) void {
 const Gaps = struct {
     specs: u32 = 0,
     driver: bool = false,
-    /// A node the user cannot open, and its group.
+    /// A node the user cannot open, its group, and the group's name when /etc/group has one.
     closed_gid: ?u32 = null,
+    closed_name: text_util.Bounded(group_name_bytes_max) = .{},
     refused: bool = false,
+    /// A spec in YAML: the fix is to write it as JSON.
+    yaml: bool = false,
+    /// A spec names a file that is gone (a driver upgraded): the fix is to write it again.
+    stale: bool = false,
     nodes: u32 = 0,
 };
 
@@ -155,6 +161,12 @@ fn read_spec(
     var path: [constants.cdi_path_bytes_max + constants.dir_name_bytes_max + 2]u8 = undefined;
     const full = std.fmt.bufPrint(&path, "{s}/{s}", .{ directory, name }) catch return;
     gaps.specs += 1;
+    if (!std.mem.endsWith(u8, name, ".json")) {
+        // The run reads JSON only; its own refusal (E0226) says the same.
+        gaps.yaml = true;
+        refused_spec(section, gaps, full, "a YAML spec, which zbx does not read");
+        return;
+    }
     var content: [constants.cdi_spec_bytes_max + 1]u8 = undefined;
     const bytes = host.read_file(full, &content) catch |err| {
         const why = if (err == error.FileTooLarge) "is bigger than 64 KiB" else "cannot be read";
@@ -199,8 +211,18 @@ fn device_row(
         for (parsed.nodes[edits.nodes_at..][0..edits.nodes_count]) |node| {
             const path = parsed.slice(node.path);
             const problem = devices.look_path(host, path) orelse continue;
-            if (ok) note_node(&why, path, problem, gaps);
+            if (ok) note_node(host, &why, path, problem, gaps);
             ok = false;
+        }
+        for (parsed.mounts[edits.mounts_at..][0..edits.mounts_count]) |mount| {
+            const source = parsed.slice(mount.host);
+            _ = host.stat(source) catch {
+                // The spec names a file the host no longer has: a driver upgraded since it was
+                // written, which the run refuses (E0226) until the spec is written again.
+                if (ok) why.print("{s} is gone from this host; the spec is stale", .{source});
+                gaps.stale = true;
+                ok = false;
+            };
         }
     }
     const item = section.add(.device, ok) orelse return;
@@ -211,6 +233,7 @@ fn device_row(
 }
 
 fn note_node(
+    host: Host,
     why: *text_util.Bounded(constants.doctor_gpu_detail_bytes_max),
     path: []const u8,
     problem: devices.NodeProblem,
@@ -221,12 +244,48 @@ fn note_node(
         .unreadable => why.print("{s} could not be looked at", .{path}),
         .not_character => why.print("{s} is not a character device", .{path}),
         .cannot_open => |node| {
-            gaps.closed_gid = node.gid;
-            why.print("you cannot open {s}: mode {o:0>4}, group {d}, {s}", .{
-                path, node.mode & 0o7777, node.gid, membership(node),
+            note_closed(host, gaps, node.gid);
+            why.print("you cannot open {s}: mode {o:0>4}, group {s}, {s}", .{
+                path, node.mode & 0o7777, group_label(gaps).slice(), membership(node),
             });
         },
     }
+}
+
+/// Notes the group of a node the user cannot open, with its name from /etc/group.
+fn note_closed(host: Host, gaps: *Gaps, gid: u32) void {
+    if (gaps.closed_gid == gid) return;
+    gaps.closed_gid = gid;
+    gaps.closed_name = .{};
+    var content: [constants.file_bytes_max]u8 = undefined;
+    const bytes = host.read_file("/etc/group", &content) catch return;
+    const name = group_name(bytes, gid) orelse return;
+    gaps.closed_name.append_sanitised(name, group_name_bytes_max);
+}
+
+/// `render (44)` when the group has a name, else `44`.
+fn group_label(gaps: *const Gaps) text_util.Bounded(group_name_bytes_max + 16) {
+    var label: text_util.Bounded(group_name_bytes_max + 16) = .{};
+    const gid = gaps.closed_gid.?;
+    if (gaps.closed_name.len > 0) {
+        label.print("{s} ({d})", .{ gaps.closed_name.slice(), gid });
+    } else label.print("{d}", .{gid});
+    return label;
+}
+
+/// The name of group `gid` in the text of /etc/group (`name:password:gid:members` per line), or
+/// null. A line that does not have that shape is skipped.
+fn group_name(bytes: []const u8, gid: u32) ?[]const u8 {
+    var lines = std.mem.splitScalar(u8, bytes, '\n');
+    while (lines.next()) |line| {
+        var fields = std.mem.splitScalar(u8, line, ':');
+        const name = fields.next() orelse continue;
+        _ = fields.next() orelse continue;
+        const number = fields.next() orelse continue;
+        const parsed = std.fmt.parseInt(u32, number, 10) catch continue;
+        if (parsed == gid and name.len > 0) return name;
+    }
+    return null;
 }
 
 fn membership(node: host_mod.DeviceNode) []const u8 {
@@ -282,18 +341,30 @@ fn node_row(host: Host, path: []const u8, section: *Section, gaps: *Gaps) void {
     gaps.nodes += 1;
     const character = node.mode & 0o170000 == 0o020000;
     const open = character and node.can_open;
-    if (!open and character) gaps.closed_gid = node.gid;
+    if (!open and character) note_closed(host, gaps, node.gid);
     const item = section.add(.node, open) orelse return;
     item.subject.append_sanitised(path, constants.device_path_bytes_max);
-    item.detail.print("mode {o:0>4}, group {d}, {s}{s}", .{
+    var label: text_util.Bounded(group_name_bytes_max + 16) = .{};
+    if (!open and character) label = group_label(gaps) else label.print("{d}", .{node.gid});
+    item.detail.print("mode {o:0>4}, group {s}, {s}{s}", .{
         node.mode & 0o7777,
-        node.gid,
+        label.slice(),
         membership(node),
         if (open) "" else ", so you cannot open it",
     });
 }
 
 fn gather_fixes(section: *Section, gaps: *const Gaps) void {
+    if (gaps.yaml) {
+        const item = section.add(.fix, false) orelse return;
+        item.subject.print("a YAML spec", .{});
+        item.detail.print("write the spec as JSON, which zbx reads: {s}", .{generate});
+    }
+    if (gaps.stale) {
+        const item = section.add(.fix, false) orelse return;
+        item.subject.print("a spec names a file that is gone", .{});
+        item.detail.print("write the host's spec again (after a driver upgrade): {s}", .{generate});
+    }
     // A host with nothing GPU-shaped gets no section at all: its report is unchanged.
     if (gaps.driver and gaps.specs == 0) {
         const item = section.add(.fix, false) orelse return;
@@ -308,8 +379,15 @@ fn gather_fixes(section: *Section, gaps: *const Gaps) void {
     if (gaps.closed_gid) |gid| {
         const item = section.add(.fix, false) orelse return;
         item.subject.print("a node is closed to you", .{});
-        item.detail.print("ask whoever runs this host to put you in group {d} (render for " ++
-            "render nodes: sudo usermod -aG render $USER), then log in again", .{gid});
+        if (gaps.closed_name.len > 0) {
+            item.detail.print("ask whoever runs this host to put you in group {s}: sudo " ++
+                "usermod -aG {s} $USER, then log in again", .{
+                gaps.closed_name.slice(), gaps.closed_name.slice(),
+            });
+        } else {
+            item.detail.print("ask whoever runs this host to put you in group {d}, then log " ++
+                "in again", .{gid});
+        }
     }
 }
 

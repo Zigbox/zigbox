@@ -1025,6 +1025,7 @@ fn check_doctor_cli(
         assert(fails.unregistered == 0);
         assert(fails.count == blocks.count);
         assert(std.mem.eql(codes.Code, fails.in_order(), blocks.in_order()));
+        assert(every_gpu_line_is_whole(sim.stdout()));
     }
     var index: u32 = 0;
     for (&report.checks) |*check| {
@@ -1041,6 +1042,23 @@ fn check_doctor_cli(
 fn report_part(stdout: []const u8) []const u8 {
     const at = std.mem.indexOf(u8, stdout, "\ngpu  ") orelse return stdout;
     return stdout[0 .. at + 1];
+}
+
+/// Everything after the report is the GPU section: each line starts `gpu  ` and says `ok` or
+/// `gap` (a read that faulted may drop lines, never print half of one or a raw error).
+fn every_gpu_line_is_whole(stdout: []const u8) bool {
+    const rest = stdout[report_part(stdout).len..];
+    if (rest.len == 0) return true;
+    if (rest[rest.len - 1] != '\n') return false;
+    var lines = std.mem.splitScalar(u8, rest[0 .. rest.len - 1], '\n');
+    while (lines.next()) |line| {
+        if (!std.mem.startsWith(u8, line, "gpu  ")) return false;
+        const kind = line["gpu  ".len..];
+        if (!std.mem.startsWith(u8, kind, "ok ") and !std.mem.startsWith(u8, kind, "gap ")) {
+            return false;
+        }
+    }
+    return true;
 }
 
 /// True if the interrupts the simulator injected could have made a write give up
