@@ -860,6 +860,21 @@ jobs:
             echo "release: the temporary keychain is on the search list" >&2
             exit 1
           fi
+      - name: Diagnose how codesign finds the throwaway identity
+        run: |
+          export PATH=/usr/bin:/bin:/usr/sbin:/sbin
+          t="$RUNNER_TEMP/diag-bin"
+          cp /bin/echo "$t"
+          for id in "$TEST_IDENTITY" zbx-release-test; do
+            for kc in "--keychain $KEYCHAIN" ""; do
+              for ts in "--timestamp" "--timestamp=none"; do
+                echo "== id=$id keychain=[$kc] $ts"
+                # shellcheck disable=SC2086
+                codesign --force --options runtime $ts --sign "$id" $kc "$t" 2>&1 || true
+              done
+            done
+          done
+          /bin/rm -f "$t"
       - name: Build the universal zip and sign it with it (no notarization, no upload)
         run: |
           SDK="$(/usr/bin/xcrun --show-sdk-path)"
