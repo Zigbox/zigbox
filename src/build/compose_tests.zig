@@ -1078,6 +1078,39 @@ test "a copy step makes its output with no worker, and an unmatched file never m
     try testing.expect(!first.eql(composed.outputs[0]));
 }
 
+test "two project matches to a .to without a slash are E0803; \"*\" to a slash takes all" {
+    // Goal: Docker refuses several sources into one path (before 0.5.1 the last one won), and
+    // the fix the parse refusal of `.` gives (`.src = .{"*"}` to a `.to` ending in `/`) builds.
+    // Method: `*.txt` (two files) to `/opt/x` is refused naming the count; `*` to `/opt/` hits.
+    inline for (.{ .{ "*.txt", "/opt/x", false }, .{ "*", "/opt/", true } }) |case| {
+        registry_started(&registry.fixture.oci.amd64.digest);
+        var buffer: [512]u8 = undefined;
+        const text = try std.fmt.bufPrint(&buffer, "{s}{s}{s}", .{
+            ".{ .version = 1, .image = .{}, .steps = .{ .{ .name = \"put\", .base = \"",
+            locked_reference,
+            "\", .copy = .{ .{ .src = .{\"" ++ case[0] ++ "\"}, .to = \"" ++ case[1] ++
+                "\" } } } } }\n",
+        });
+        var problem: file_mod.Problem = undefined;
+        const parsed = file_mod.parse(text, &loaded.file, &problem);
+        try testing.expectEqual(file_mod.ParseResult.parsed, parsed);
+        files.put_dir("/p", 0o755);
+        files.put_file("/p/a.txt", 0o644, "a\n");
+        files.put_file("/p/b.txt", 0o644, "b\n");
+        set_path(&loaded.project, "/p");
+        set_path(&loaded.path, "/p/zbx.build.zon");
+        if (case[2]) {
+            try testing.expect(try context.begin(0) == .hit);
+            try testing.expect(diag.code == null);
+        } else {
+            try testing.expectError(error.Failed, context.begin(0));
+            try testing.expectEqual(codes.Code.E0803, diag.code.?);
+            const cause = diag.causes.slice()[diag.causes.count - 1].slice();
+            try testing.expect(std.mem.indexOf(u8, cause, "match 2 paths") != null);
+        }
+    }
+}
+
 test "a config user written as a name becomes its numbers, and an unknown name is E0817" {
     // Goal: the record of a result holds `uid:gid` only. Method: the sample tree's passwd names
     // root; `root` becomes `0:0`, a numeric user is left as written, `nobody` is refused.

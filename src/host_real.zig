@@ -250,10 +250,10 @@ pub const HostReal = struct {
         const mask: linux.STATX = .{ .TYPE = true, .MODE = true, .UID = true };
         var buffer: linux.Statx = undefined;
         try check(linux.statx(linux.AT.FDCWD, path.ptr, 0, mask, &buffer));
-        // The kernel must honour the mask for these fields; a clear bit would mean garbage.
-        assert(buffer.mask.TYPE);
-        assert(buffer.mask.MODE);
-        assert(buffer.mask.UID);
+        // A filesystem may leave a field out (a clear bit, the field garbage): that file is
+        // refused as unsupported, not asserted on, since the kernel's answer is input.
+        const complete = buffer.mask.TYPE and buffer.mask.MODE and buffer.mask.UID;
+        if (!complete) return error.Unsupported;
         return .{ .mode = buffer.mode, .uid = buffer.uid };
     }
 
@@ -263,8 +263,10 @@ pub const HostReal = struct {
         const mask: linux.STATX = .{ .TYPE = true, .MODE = true, .UID = true, .GID = true };
         var buffer: linux.Statx = undefined;
         try check(linux.statx(linux.AT.FDCWD, path.ptr, 0, mask, &buffer));
-        const complete = buffer.mask.TYPE and buffer.mask.MODE and buffer.mask.UID;
-        assert(complete);
+        // As in `stat`: a field the filesystem left out refuses the node, never asserts.
+        const complete = buffer.mask.TYPE and buffer.mask.MODE and buffer.mask.UID and
+            buffer.mask.GID;
+        if (!complete) return error.Unsupported;
         // The kernel's own answer, for the ids and the groups the process holds (zbx is never
         // setuid, so its real and effective ids are the same).
         const access = linux.access(path.ptr, linux.R_OK | linux.W_OK);

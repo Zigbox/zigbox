@@ -76,6 +76,9 @@ pub const Failure = union(enum) {
     too_large,
     /// More than `build_merge_common_max` directories in common at one level.
     too_common,
+    /// A part of the destination is longer than `store_name_bytes_max` (the build file refuses
+    /// a NUL, an empty, `.` or `..` part before this).
+    bad_name,
 };
 
 pub const Error = error{Failed};
@@ -257,8 +260,12 @@ fn wrap(context: Context, leaf: Digest, to: []const u8) Error!Digest {
     var parts = std.mem.splitScalar(u8, to[1..], '/');
     while (parts.next()) |part| {
         if (part.len == 0) continue;
-        if (count == ws.names.len or !tree.name_is_valid(part)) {
+        if (count == ws.names.len) {
             context.failure.* = .too_deep;
+            return error.Failed;
+        }
+        if (!tree.name_is_valid(part)) {
+            context.failure.* = .bad_name;
             return error.Failed;
         }
         ws.names[count] = part;

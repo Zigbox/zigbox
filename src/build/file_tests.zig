@@ -475,6 +475,22 @@ fn step_refused(comptime fields: []const u8, kind: ProblemKind) !void {
     try testing.expectEqual(kind, kind_of(m9_head ++ fields ++ " } } }"));
 }
 
+test "a project source with an empty or . part is refused, not asserted on" {
+    // Goal: every spelling the input tree would not read as plain parts is refused at parse
+    // (0.5.1: `COPY . /app` crashed on an assertion in `input_tree.collect`). Method: each
+    // spelling, plain and glob; then the same spellings from a step, which stay accepted.
+    const spellings = [_][]const u8{ ".", "./a.txt", "a/", "a//b", "a/./b", "./*.go", "src/" };
+    inline for (spellings) |spelling| {
+        const fields = ".copy = .{ .{ .src = .{\"" ++ spelling ++ "\"}, .to = \"/app/\" } }";
+        try step_refused(fields, .bad_project_source);
+    }
+    inline for ([_][]const u8{ ".", "/", "a/" }) |spelling| {
+        const fields = ".copy = .{ .{ .from = \"step:b\", .src = .{\"" ++ spelling ++
+            "\"}, .to = \"/app/\" } }";
+        try testing.expectEqual(ProblemKind.syntax, kind_of(m9_head ++ fields ++ " } } }"));
+    }
+}
+
 test "each M9 refusal names its kind" {
     // Goal: the negative space of the builder additions. Method: one step per refusal.
     const run = ".run = .{\"x\"}, ";

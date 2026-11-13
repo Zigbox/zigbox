@@ -5,7 +5,8 @@
 //!
 //! Docker's rules, as far as a tree can show them: a matched directory puts its contents into
 //! `to`; a matched file or link goes to `to/<name>` when `to` ends in `/`, and to `to` itself
-//! when it does not; a later match replaces an earlier one at the same path. Directories on the
+//! when it does not; more than one match with a `to` not ending in `/` is `ManyToOne`, as
+//! Docker refuses it; a later match replaces an earlier one at the same path. Directories on the
 //! way are made, 0755 0:0. Owners and modes are kept as the source tree has them.
 //!
 //! The walk of the source tree has an explicit stack and keeps only digests: a frame is resumed
@@ -25,7 +26,7 @@ const trees = @import("../store/trees.zig");
 
 const Digest = digest_mod.Digest;
 
-pub const Error = error{ Failed, PoolFull, NoMatch };
+pub const Error = error{ Failed, PoolFull, NoMatch, ManyToOne };
 
 /// One matched entry, its strings in `Workspace.bytes`.
 const Item = struct {
@@ -85,7 +86,8 @@ pub fn normalise(pattern: []const u8) []const u8 {
 }
 
 /// Lays what `patterns` match in `source` under `to`, in a tree of its own (its root is a plain
-/// directory). `NoMatch` if nothing matched; `PoolFull` has `ws.failed_pattern`.
+/// directory). `NoMatch` if nothing matched; `ManyToOne` if more than one did and `to` does not
+/// end in `/`; `PoolFull` has `ws.failed_pattern`.
 pub fn select(
     context: assemble.Context,
     ws: *Workspace,
@@ -102,6 +104,8 @@ pub fn select(
     try collect(context, ws, source, patterns);
     if (ws.items_count == 0) return error.NoMatch;
     assert(ws.items_count <= ws.items.len);
+    // Several matches to one path would leave only the last: Docker refuses it, and so do we.
+    if (ws.items_count > 1 and to[to.len - 1] != '/') return error.ManyToOne;
     const merging: assemble.Context = .{
         .store = context.store,
         .ws = &ws.assemble,
@@ -302,7 +306,7 @@ fn place(
         parent = if (slash == 0) "/" else trimmed[0..slash];
     }
     if (!tree.name_is_valid(name)) {
-        context.failure.* = .too_deep;
+        context.failure.* = .bad_name;
         return error.Failed;
     }
     var writer = tree.Writer.init(&ws.out);

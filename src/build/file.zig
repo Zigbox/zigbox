@@ -386,6 +386,9 @@ pub const ProblemKind = enum {
     bad_mode,
     /// A `.src` or `.exclude` entry is not a pattern (`word` is the entry).
     bad_pattern,
+    /// A copy's `.src` from the project has an empty or `.` part (`.`, `./a`, `a/`, `a//b`):
+    /// a project source is a plain relative path or a glob of one.
+    bad_project_source,
     /// A copy's or a bind's `.from` is not `step:<name>` or an image reference.
     bad_from,
     /// A bind's `.source` is not a path inside what it comes from.
@@ -862,7 +865,8 @@ fn parse_copy(parser: *Parser, entry: *CopyEntry, open: Token) Refused!void {
     try check_sources(parser, entry, open);
 }
 
-/// Each `.src` entry is a pattern with no `..` part, and rooted (`/`) only for a tree.
+/// Each `.src` entry is a pattern with no `..` part, and rooted (`/`) only for a tree; one
+/// from the project has no empty or `.` part either.
 fn check_sources(parser: *Parser, entry: *const CopyEntry, open: Token) Refused!void {
     assert(entry.src.given);
     if (entry.src.count == 0) return parser.fail(.empty_list, open, .copy, .src);
@@ -872,6 +876,11 @@ fn check_sources(parser: *Parser, entry: *const CopyEntry, open: Token) Refused!
         const bad = glob.valid(text) != null or has_parent_part(text) or
             (rooted and entry.from == null);
         if (bad) return parser.fail_value(.bad_pattern, source, .copy, .src);
+        // The input tree reads a project source as plain parts (`inputs.is_plain_relative`),
+        // so a spelling it would read otherwise is refused here, not asserted on there.
+        if (entry.from == null and has_dot_or_empty_part(text)) {
+            return parser.fail_value(.bad_project_source, source, .copy, .src);
+        }
     }
 }
 

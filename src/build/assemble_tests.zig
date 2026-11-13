@@ -203,6 +203,18 @@ test "directories in common are bounded: at the bound merges, past it is refused
     try testing.expect(failure == .too_common);
 }
 
+test "a destination name at the bound is laid, one byte past it is bad_name, not too_deep" {
+    // Goal: the reason a long name is refused is its length (0.5.1: it read as too deep).
+    // Method: an add to `/<255 bytes>` is laid; to `/<256 bytes>` fails with `bad_name`.
+    const context = start();
+    const leaf = try directory(&.{.{ .name = "f", .content = "f" }}, true);
+    const at_bound = "/" ++ @as([constants.store_name_bytes_max]u8, @splat('n'));
+    _ = try assemble.assemble(context, null, &.{.{ .source = leaf, .to = at_bound }});
+    const past = assemble.assemble(context, null, &.{.{ .source = leaf, .to = at_bound ++ "n" }});
+    try testing.expectError(error.Failed, past);
+    try testing.expect(failure == .bad_name);
+}
+
 test "a conflict reads as one E0807 line naming the path, the add and the kinds" {
     // Goal: the user-facing text. Method: raise the diagnostic for the /usr/bin/sh clash.
     const context = start();
