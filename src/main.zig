@@ -375,6 +375,7 @@ test {
     _ = @import("dockerfile/steps.zig");
     _ = @import("dockerfile/translate_tests.zig");
     _ = @import("import_diagnose.zig");
+    _ = @import("import_tests.zig");
 }
 
 test {
