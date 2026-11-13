@@ -525,7 +525,8 @@ fn expand_gpu(
     gpu_mod.look_dri(host, &dri);
     var nvidia = false;
     // A resolution the caller gave replaces the host's specs, so there is nothing to probe.
-    if (container.cdi == null) switch (gpu_mod.probe_nvidia(host, &handle.cdi_scratch, storage, diag)) {
+    const probe = gpu_mod.probe_nvidia;
+    if (container.cdi == null) switch (probe(host, &handle.cdi_scratch, storage, diag)) {
         .offered => nvidia = true,
         .absent => {},
         .refused => return false,
