@@ -293,6 +293,7 @@ const roots = [_][]const u8{
     "src/testing/vm/main_m7.zig",
     "src/testing/vm/main_m8.zig",
     "src/testing/vm/main_m8b.zig",
+    "src/testing/vm/main_m10.zig",
     "src/testing/vm/main_z7.zig",
     "src/testing/vm/main_m8_packages.zig",
     "src/testing/vm/main_top20.zig",
@@ -326,6 +327,7 @@ const linux_only = [_][]const u8{
     "src/testing/vm/main_m7.zig",
     "src/testing/vm/main_m8.zig",
     "src/testing/vm/main_m8b.zig",
+    "src/testing/vm/main_m10.zig",
     "src/testing/vm/main_z7.zig",
     "src/testing/vm/main_m8_packages.zig",
     "src/testing/vm/main_top20.zig",
@@ -556,6 +558,11 @@ const demos = [_]struct { step: []const u8, root: []const u8, help: []const u8 }
         .step = "demo-m8b",
         .root = "src/testing/vm/main_m8b.zig",
         .help = "Run the M8b demo: --listen hands a loopback listener from the container out",
+    },
+    .{
+        .step = "demo-m10",
+        .root = "src/testing/vm/main_m10.zig",
+        .help = "Run the M10 demo: --device and --gpu with a fake vendor, doctor, refusals",
     },
     .{
         .step = "demo-z7",
