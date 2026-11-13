@@ -69,7 +69,7 @@ pub const name_prefix = "build-";
 const name_hex_digits = 16;
 const env_count_max = constants.env_vars_count_max + constants.build_step_env_max +
     key_mod.fixed_env.len + 1;
-const mounts_count = constants.build_step_needs_max + 2;
+const mounts_count = constants.mounts_max;
 
 comptime {
     assert(mounts_count <= constants.mounts_max);
@@ -140,6 +140,10 @@ const Paths = struct {
     log: PathBuf,
     src: PathBuf,
     needs: [constants.build_step_needs_max]PathBuf,
+    /// The farms of the step's `.binds` trees, and the directory of each of its caches.
+    binds: [constants.build_step_binds_max]PathBuf,
+    caches_root: PathBuf,
+    caches: [constants.build_step_caches_max]PathBuf,
 
     fn name_slice(paths: *const Paths) []const u8 {
         assert(paths.name_len > 0);
@@ -271,6 +275,34 @@ fn name_paths(request: *const Request, store: *const Store, ws: *Workspace) Erro
             unreachable; // A need is a step's name, at most 32 bytes.
         assert(target.len > 4);
     }
+    for (spec.binds, 0..) |found, index| {
+        _ = materialize.farm_path(store, &paths.binds[index], found.source);
+    }
+    _ = store.path(&paths.caches_root, &.{ "/build/caches/", request.group });
+    for (spec.caches, 0..) |cache, index| {
+        var dir_name: [cache_dir_bytes_max]u8 = undefined;
+        const dir = cache_dir_name(&dir_name, cache.id);
+        paths.caches[index].set(&.{ paths.caches_root.text(), "/", dir }) catch unreachable;
+    }
+}
+
+const cache_dir_bytes_max = constants.build_label_key_bytes_max + 1;
+
+/// The directory name of a cache id: a `/` is `%` (an id has no `%`), and a name that starts with
+/// a `.` gets a `~` in front (an id has no `~`), so no id is `.` or `..` and two ids never meet.
+pub fn cache_dir_name(out: *[cache_dir_bytes_max]u8, id: []const u8) []const u8 {
+    assert(id.len > 0);
+    assert(id.len < out.len);
+    var length: usize = 0;
+    if (id[0] == '.') {
+        out[0] = '~';
+        length = 1;
+    }
+    for (id) |byte| {
+        out[length] = if (byte == '/') '%' else byte;
+        length += 1;
+    }
+    return out[0..length];
 }
 
 // ---- The container ------------------------------------------------------------------------------
@@ -293,6 +325,7 @@ fn start_and_wait(request: *const Request, ws: *Workspace, diag: *Diag) Error!ru
         .network = if (spec.network) .user else .none,
         .mounts = ws.mounts[0..mount_count],
         .project = paths.work_text(),
+        .caches_root = paths.caches_root.text(),
         .hostname = hostname,
         .umask = umask,
         .limits = .{
@@ -402,6 +435,14 @@ fn build_mounts(spec: *const key_mod.Spec, ws: *Workspace) u32 {
     }
     if (!spec.root_output) {
         ws.mounts[count] = bind(.mount, paths.out_text(), "/out");
+        count += 1;
+    }
+    for (spec.binds, 0..) |found, index| {
+        ws.mounts[count] = bind(.bind, paths.binds[index].text(), found.to);
+        count += 1;
+    }
+    for (spec.caches, 0..) |cache, index| {
+        ws.mounts[count] = bind(if (cache.ro) .bind else .cache, paths.caches[index].text(), cache.path);
         count += 1;
     }
     assert(count <= mounts_count);
@@ -657,6 +698,9 @@ fn prepare(store: *Store, job: *Job, diag: *Diag) Error!void {
     for (spec.needs) |need| {
         _ = materialize.ensure(store, ws, need.output, diag) catch return error.Failed;
     }
+    for (spec.binds) |found| {
+        _ = materialize.ensure(store, ws, found.source, diag) catch return error.Failed;
+    }
     const fs = store.fs;
     var dir: PathBuf = undefined;
     const steps = [_]struct { parts: []const []const u8, exist_ok: bool }{
@@ -675,6 +719,7 @@ fn prepare(store: *Store, job: *Job, diag: *Diag) Error!void {
     fs.make_directory(job.ws.paths.out_text(), false) catch |err| {
         return made_nothing(store, diag, err);
     };
+    try make_caches(store, job, diag);
     if (spec.user != null) {
         // A step that runs as someone else must be able to write its `/out`; the import
         // squashes the owners and the output's modes are what it makes of them.
@@ -689,6 +734,46 @@ fn prepare(store: *Store, job: *Job, diag: *Diag) Error!void {
             return made_nothing(store, diag, err);
         };
     }
+}
+
+/// The step's cache directories, kept between builds: made if they are not there, with the mode
+/// the entry asks for (only when first made), and given to the ids the entry names, else to the
+/// step's user, as the container sees them. A host with the one-id map leaves the owner as it is.
+fn make_caches(store: *Store, job: *Job, diag: *Diag) Error!void {
+    const spec = job.request.spec;
+    if (spec.caches.len == 0) return;
+    const fs = store.fs;
+    const paths = &job.ws.paths;
+    var dir: PathBuf = undefined;
+    fs.make_directory(store.path(&dir, &.{"/build/caches"}), true) catch |err| {
+        return made_caches_nothing(store, diag, err);
+    };
+    fs.make_directory(paths.caches_root.text(), true) catch |err| {
+        return made_caches_nothing(store, diag, err);
+    };
+    const user = job.ws.user;
+    for (spec.caches, 0..) |cache, index| {
+        const path = paths.caches[index].text();
+        const fresh = if (fs.lstat(path)) |_| false else |_| true;
+        fs.make_directory(path, true) catch |err| return made_caches_nothing(store, diag, err);
+        const attributes: fs_mod.PathAttributes = .{
+            .mode = if (fresh) cache.mode orelse 0o755 else null,
+            .uid = cache.uid orelse if (user) |found| found.uid else 0,
+            .gid = cache.gid orelse if (user) |found| found.gid else 0,
+            .mtime = 0,
+            .set_owner = !job.squash_owner,
+        };
+        fs.set_path_attributes(path, attributes) catch |err| {
+            return made_caches_nothing(store, diag, err);
+        };
+    }
+}
+
+fn made_caches_nothing(store: *const Store, diag: *Diag, err: fs_mod.Error) Error {
+    assert(diag.code == null);
+    const operation = "making a build step's cache directory";
+    store_diagnose.write_failed(diag, store, operation, err, store.fs.last_errno());
+    return error.Failed;
 }
 
 fn made_nothing(store: *const Store, diag: *Diag, err: fs_mod.Error) Error {

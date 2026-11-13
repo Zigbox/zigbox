@@ -26,6 +26,7 @@ const load_mod = @import("load.zig");
 const support = @import("../store/test_support.zig");
 const digest_mod = @import("../store/digest.zig");
 const cache = @import("cache.zig");
+const schedule = @import("schedule.zig");
 const verify = @import("../store/verify.zig");
 
 const testing = std.testing;
@@ -1081,4 +1082,32 @@ test "a copy source's root that cannot be written is one diagnostic, not a crash
     files.faults.fail_mutation = files.mutations;
     try testing.expectError(error.Failed, import_entry(0));
     try testing.expect(diag.code != null);
+}
+
+test "steps that share a cache id come one after another, each after the nearest holder" {
+    // Goal: `sharing=locked`. Method: four steps in file order, three holding the id `go` (one
+    // with a second id too) and one none; the plan gets an edge from each holder to the nearest
+    // holder before it, none from the step without caches, and stays a valid order.
+    const text =
+        ".{ .version = 1, .image = .{}, .steps = .{\n" ++
+        " .{ .name = \"a\", .base = \"b\", .run = .{\"x\"}, .caches = .{ .{ .id = \"go\", .path = \"/c\" } } },\n" ++
+        " .{ .name = \"m\", .base = \"b\", .run = .{\"x\"} },\n" ++
+        " .{ .name = \"b\", .base = \"b\", .run = .{\"x\"}, .caches = .{\n" ++
+        "   .{ .id = \"go\", .path = \"/c\" }, .{ .id = \"npm\", .path = \"/n\" } } },\n" ++
+        " .{ .name = \"c\", .base = \"b\", .run = .{\"x\"}, .caches = .{\n" ++
+        "   .{ .id = \"npm\", .path = \"/n\" }, .{ .id = \"go\", .path = \"/c\" } } },\n" ++
+        "} }\n";
+    var problem: file_mod.Problem = undefined;
+    const parsed = file_mod.parse(text, &loaded.file, &problem);
+    try testing.expectEqual(file_mod.ParseResult.parsed, parsed);
+    var plan: schedule.Plan = std.mem.zeroes(schedule.Plan);
+    plan.count = 4;
+    for (0..4) |at| plan.order[at] = @intCast(at);
+    compose.cache_edges(&loaded.file, &plan);
+    try testing.expectEqual(@as(usize, 0), plan.needs_of(0).len);
+    try testing.expectEqual(@as(usize, 0), plan.needs_of(1).len);
+    try testing.expectEqualSlices(u8, &.{0}, plan.needs_of(2));
+    // `c` holds `npm` (last held by `b`) and `go` (also `b`): one edge, not two.
+    try testing.expectEqualSlices(u8, &.{2}, plan.needs_of(3));
+    try testing.expect(plan.valid());
 }

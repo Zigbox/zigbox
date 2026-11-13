@@ -104,6 +104,8 @@ pub const Workspace = struct {
     copying: copy_mod.Workspace,
     user_ws: image_user.Workspace,
     copy_keys: [constants.build_copy_entries_max]key_mod.Copy,
+    cache_mounts: [constants.build_step_caches_max]key_mod.CacheMount,
+    bind_keys: [constants.build_step_binds_max]key_mod.Bind,
     copy_patterns: [constants.build_copy_sources_max][]const u8,
 };
 
@@ -218,7 +220,41 @@ fn make_plan(loaded: *const load_mod.Workspace, plan: *schedule.Plan) void {
         for (needs, 0..) |need, at| plan.needs[index][at] = need;
         plan.needs_count[index] = @intCast(needs.len);
     }
+    cache_edges(&loaded.file, plan);
     assert(plan.valid());
+}
+
+/// Steps that share a cache id run one at a time (`sharing=locked`): each step comes after the
+/// nearest step before it, in the plan's order, that holds one of its caches.
+pub fn cache_edges(file: *const file_mod.BuildFile, plan: *schedule.Plan) void {
+    for (plan.order[0..plan.count], 0..) |step, position| {
+        for (file.step_caches(&file.steps[step])) |held| {
+            const before = holder_before(file, plan, position, file.text(held.id)) orelse continue;
+            if (std.mem.indexOfScalar(u8, plan.needs_of(step), before) != null) continue;
+            const at = plan.needs_count[step];
+            assert(at < constants.build_step_edges_max); // One more per cache, and the bound has room.
+            plan.needs[step][at] = before;
+            plan.needs_count[step] = at + 1;
+        }
+    }
+}
+
+/// The step nearest before `position` in the plan's order that has a cache `id`, or null.
+fn holder_before(
+    file: *const file_mod.BuildFile,
+    plan: *const schedule.Plan,
+    position: usize,
+    id: []const u8,
+) ?u8 {
+    var at = position;
+    while (at > 0) {
+        at -= 1;
+        const step = plan.order[at];
+        for (file.step_caches(&file.steps[step])) |other| {
+            if (std.mem.eql(u8, file.text(other.id), id)) return step;
+        }
+    }
+    return null;
 }
 
 /// A miss that is running in a worker process.
@@ -1242,6 +1278,18 @@ fn fill_lists(
     for (step.env.slice(), 0..) |word, at| ws.env[at] = file.text(word);
     spec.argv = ws.argv[0..step.run.count];
     spec.env = ws.env[0..step.env.count];
+    for (file.step_caches(step), 0..) |wanted, at| {
+        ws.cache_mounts[at] = .{
+            .id = file.text(wanted.id),
+            .path = file.text(wanted.path),
+            .ro = wanted.ro,
+            // A mode was checked by the parser (`is_mode`): octal digits.
+            .mode = if (wanted.mode) |text| std.fmt.parseInt(u16, file.text(text), 8) catch null else null,
+            .uid = wanted.uid,
+            .gid = wanted.gid,
+        };
+    }
+    spec.caches = ws.cache_mounts[0..step.caches.count];
 }
 
 fn fill_needs(loaded: *const load_mod.Workspace, index: u8, ws: *Workspace) []const key_mod.Need {

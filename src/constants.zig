@@ -895,9 +895,10 @@ pub const build_step_inputs_max: u32 = 64;
 /// Each needed step is a read-only mount at `/in/<name>`; with `/src` and `/out` that is two
 /// fewer than a run's mounts (`mounts_max`).
 pub const build_step_needs_max: u32 = 6;
-/// The steps one step can come after: its needs, its base, and the `from` of each copy and bind.
+/// The steps one step can come after: its needs, its base, the `from` of each copy and bind, and
+/// the step before it that holds each of its caches (`compose.cache_edges`).
 pub const build_step_edges_max: u32 = build_step_needs_max + 1 + build_copy_entries_max +
-    build_step_binds_max;
+    build_step_binds_max + build_step_caches_max;
 pub const build_step_argv_max: u32 = 64;
 pub const build_step_env_max: u32 = 32;
 /// M9 additions to a step (docs/briefs/M9-dockerfile-import.md, "Builder additions"): cache

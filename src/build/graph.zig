@@ -141,7 +141,6 @@ pub fn unrunnable(file: *const BuildFile, graph: *const Graph) ?Unrunnable {
     for (file.steps_slice(), 0..) |*step, index| {
         const at: u8 = @intCast(index);
         if (copy_unrunnable(file, step)) |field| return .{ .step = at, .field = field };
-        if (step.caches.given) return .{ .step = at, .field = ".caches" };
         if (step.binds.given) return .{ .step = at, .field = ".binds" };
     }
     return null;
@@ -569,9 +568,7 @@ test "a build refuses what it cannot run yet, and a plain M7 file is runnable" {
         ".run = .{\"x\"} } } }";
     try testing.expectEqual(Result.ordered, try order_text(plain, &problem));
     try testing.expect(unrunnable(&test_file, &test_graph) == null);
-    const fields = [_][]const u8{
-        ".caches = .{}", ".binds = .{}",
-    };
+    const fields = [_][]const u8{".binds = .{}"};
     inline for (fields) |field| {
         const text = step_head ++ "}, .steps = .{ .{ .name = \"a\", .base = \"x\", " ++
             ".run = .{\"x\"}, " ++ field ++ " } } }";

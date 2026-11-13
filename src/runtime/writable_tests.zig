@@ -451,6 +451,7 @@ test "a cache mount is writable below the caches root for any user, and nowhere 
         .{ .kind = .cache, .source = root ++ "/deep", .target = "/cache", .size_bytes = 0 },
     };
     setup(&sim, 20);
+    sim.world.add_node(project ++ "/site/deep", .dir);
     var container: spec_mod.Spec = .{
         .rootfs = rootfs,
         .name = "w-1",
