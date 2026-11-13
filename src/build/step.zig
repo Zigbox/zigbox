@@ -19,6 +19,13 @@
 //!   attributes, a root labelled `build:<step>` until the parent writes the cache entry, which
 //!   then roots it (N8); a device, FIFO or socket is E0806),
 //!   and the work directory is removed. A non-zero end is E0805.
+//! - **M9 additions** (docs/briefs/M9-dockerfile-import.md): a step may run as `.user` (a name is
+//!   looked up in the base tree's /etc/passwd, E0817 if absent; its home is `HOME`) in `.workdir`.
+//!   A step with `.output = .root` has no `/src` and no `/out`: it runs in the base as the
+//!   container's root, and its output is the run's upper layer, committed before `run.discard`
+//!   removes the layers, so a later step can take it as its `step:` base. A `.copy` step runs no
+//!   container at all: `compose.zig` makes its output in the parent from the sources' selection
+//!   (`copy.zig`).
 
 const std = @import("std");
 const assert = std.debug.assert;

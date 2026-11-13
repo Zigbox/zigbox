@@ -734,6 +734,7 @@ pub const Context = struct {
             ws.copy_keys[at] = .{ .source = selected, .to = file.text(entry.to) };
         }
         spec.copies = ws.copy_keys[0..entries.len];
+        spec.root_output = true; // The output is the whole tree, as a root step's is.
         key_mod.compute(spec, &ws.key) catch {
             diagnose.step_env_refused(context.diag, spec.name, context.loaded.shown(), 0, "");
             return error.Failed;
