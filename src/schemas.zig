@@ -172,9 +172,10 @@ const ps_schema =
     \\"properties":{"host":{"type":"string"},"target":{"type":"string"}}}},
     \\"listen":{"type":"string","description":"M8b: --listen (127.0.0.1:PORT)"},
     \\"devices":{"type":"array","description":"M10: each --device; absent for a run with none",
-    \\"items":{"type":"object","required":["asked","path"],
+    \\"items":{"type":"object","required":["asked"],
     \\"properties":{"asked":{"type":"string","description":"as given"},
-    \\"path":{"type":"string","description":"where it is in the container"}}}},
+    \\"path":{"type":"string",
+    \\"description":"in the container; only for a host path (a CDI name resolves at start)"}}}},
     \\"user":{"type":["object","null"],"description":"M6b: the user the command ran as",
     \\"properties":{"uid":{"type":"integer"},"gid":{"type":"integer"}}}}}}}}
 ;
