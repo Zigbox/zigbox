@@ -483,13 +483,16 @@ pub const Context = struct {
         // The import rooted the input tree for the worker; it is dropped on a hit, on an error,
         // and when the worker's step settles or is aborted.
         var handed_over = false;
-        defer if (!handed_over and !step.copy.given) context.unroot(spec.input_tree);
+        defer if (!handed_over and !step.copy.given) context.drop(spec.input_tree);
         fill_lists(file, step, ws, &spec);
         spec.needs = fill_needs(loaded, index, ws);
         if (!step.copy.given) try context.resolve_binds(index, &spec);
         // The binds' selections are rooted too; they go as the input tree goes, and a worker
         // that starts takes them over (`fork_worker`).
-        defer if (!handed_over) for (spec.binds) |bind| context.unroot(bind.source);
+        defer if (!handed_over) for (spec.binds) |bind| context.drop(bind.source);
+        // An import can take seconds: a signal that came during it stops the step here, before
+        // a worker starts.
+        try context.check_interrupt();
         if (step.copy.given) return context.begin_copy(index, &spec);
         key_mod.compute(&spec, &ws.key) catch {
             diagnose.step_env_refused(context.diag, name, loaded.shown(), step.env.count, "");
@@ -597,14 +600,16 @@ pub const Context = struct {
         for (spec.binds, 0..) |bind, at| slot.binds[at] = bind.source;
     }
 
-    /// Fails the build with one line when a SIGINT or SIGTERM arrived: the scheduler then aborts
-    /// the running steps, and every root this build made is removed on the way out.
-    fn check_interrupt(context: *Context) Error!void {
-        assert(context.diag.code == null);
-        if (!context.host.interrupt_pending()) return;
-        store_diagnose.worker_ended(context.diag, .{
-            .report = "the build was stopped by SIGINT or SIGTERM",
-        });
+    /// Fails the build with E0808 when a SIGINT or SIGTERM arrived: the scheduler then aborts
+    /// the running steps, and every root this build made is removed on the way out. Called
+    /// before each step starts, after each import (the longest work done here) and around the
+    /// image's assembly; a wait sees the signal itself. A build that already failed keeps its
+    /// first diagnostic and stops all the same.
+    pub fn check_interrupt(context: *Context) Error!void {
+        const signal = context.host.interrupt_signal();
+        if (signal == 0) return;
+        if (context.diag.code == null) diagnose.build_interrupted(context.diag, signal);
+        assert(context.diag.code != null);
         return error.Failed;
     }
 
@@ -645,8 +650,8 @@ pub const Context = struct {
             host.signal(slot.pid, constants.signal_kill) catch {};
             _ = host.wait_for(slot.pid) catch {};
             host.close(slot.report.read);
-            context.unroot(context.ws.step_inputs[slot.index]);
-            context.unroot_binds(slot);
+            context.drop(context.ws.step_inputs[slot.index]);
+            context.drop_binds(slot);
             slot.active = false;
             ended += 1;
         }
@@ -661,8 +666,8 @@ pub const Context = struct {
         assert(slot.active);
         slot.active = false;
         defer host.close(slot.report.read);
-        defer context.unroot(ws.step_inputs[slot.index]);
-        defer context.unroot_binds(slot);
+        defer context.drop(ws.step_inputs[slot.index]);
+        defer context.drop_binds(slot);
         var bytes: [failure_bytes_max]u8 = undefined;
         var length: usize = 0;
         while (length < bytes.len) {
@@ -837,7 +842,7 @@ pub const Context = struct {
         assert(entries.len <= ws.copy_keys.len);
         // Each selection is rooted by `copy_select` and dropped when this step is done with it.
         var rooted: usize = 0;
-        defer for (ws.copy_keys[0..rooted]) |part| context.unroot(part.source);
+        defer for (ws.copy_keys[0..rooted]) |part| context.drop(part.source);
         for (entries, 0..) |entry, at| {
             const source = try context.copy_source(index, @intCast(at), &entry);
             if (at == 0) ws.step_inputs[index] = source;
@@ -849,6 +854,7 @@ pub const Context = struct {
             const selected = try context.copy_select(index, &entry, source);
             ws.copy_keys[at] = .{ .source = selected, .to = file.text(entry.to) };
             rooted += 1;
+            try context.check_interrupt(); // An entry's import and selection can take seconds.
         }
         spec.copies = ws.copy_keys[0..entries.len];
         spec.root_output = true; // The output is the whole tree, as a root step's is.
@@ -968,7 +974,7 @@ pub const Context = struct {
             const output = ws.outputs[target];
             const text = file.text(from);
             const selected = context.bind_select(index, output, source, text) catch |err| {
-                for (ws.bind_keys[0..at]) |done| context.unroot(done.source);
+                for (ws.bind_keys[0..at]) |done| context.drop(done.source);
                 return err;
             };
             ws.bind_keys[at] = .{ .to = file.text(found.to), .source = selected };
@@ -1058,20 +1064,26 @@ pub const Context = struct {
         return kept;
     }
 
-    /// The entry roots the output now: drops the root the step's import left (N8). Only a root
-    /// this build made goes: its source starts with `build:` and it was written at or after the
-    /// build's start; a root the user made earlier (the import left it as it was) stays. A
-    /// failure to drop it is no failure of the build: the next `store gc` shows the root and the
-    /// user may remove it.
+    /// The entry roots the output now: drops the root the step's import left (N8), for a tree
+    /// this step never counted (an output, a project source a copy step imported). A tree some
+    /// step holds (`hold`) keeps its root: its last holder drops it (`drop`).
     fn unroot(context: *Context, output: Digest) void {
-        if (context.release(output)) return;
+        if (context.held(output)) return;
+        context.remove_root(output);
+    }
+
+    /// Only a root this build made goes: its source starts with `build:` and it was written at
+    /// or after the build's start; a root the user made earlier (the import left it as it was)
+    /// stays. A failure to drop it is no failure of the build: the next `store gc` shows the
+    /// root and the user may remove it.
+    fn remove_root(context: *Context, digest: Digest) void {
         const store = context.store;
         var root: roots.Root = undefined;
         var errno: u16 = 0;
-        roots.load(store, output, &root, &errno) catch return;
+        roots.load(store, digest, &root, &errno) catch return;
         if (!std.mem.startsWith(u8, root.source_text(), step_mod.output_root_prefix)) return;
         if (root.time < context.started_s) return;
-        roots.remove(store, output) catch {};
+        roots.remove(store, digest) catch {};
     }
 
     /// Counts one more user of a tree this build has rooted (or found rooted).
@@ -1090,26 +1102,38 @@ pub const Context = struct {
         ws.holds_count += 1;
     }
 
-    /// One user of the tree is done. True when others still hold it, so its root stays; a tree
-    /// nobody counted (an output, a project source a copy step imported) is dropped as before.
-    fn release(context: *Context, digest: Digest) bool {
+    /// Whether some step holds the tree.
+    fn held(context: *const Context, digest: Digest) bool {
+        const ws = context.ws;
+        assert(ws.holds_count <= ws.holds.len);
+        for (ws.holds[0..ws.holds_count]) |entry| {
+            if (entry.digest.eql(digest)) return true;
+        }
+        return false;
+    }
+
+    /// One holder of the tree is done with it: the callers are those that counted it (`hold`).
+    /// The root goes with the last holder; a tree nobody holds (a slot a test made) is dropped
+    /// as `unroot` drops one.
+    fn drop(context: *Context, digest: Digest) void {
         const ws = context.ws;
         assert(ws.holds_count <= ws.holds.len);
         for (ws.holds[0..ws.holds_count], 0..) |*entry, at| {
             if (!entry.digest.eql(digest)) continue;
             assert(entry.users > 0);
             entry.users -= 1;
-            if (entry.users > 0) return true;
+            if (entry.users > 0) return;
             ws.holds_count -= 1;
             ws.holds[at] = ws.holds[ws.holds_count];
-            return false;
+            context.remove_root(digest);
+            return;
         }
-        return false;
+        context.remove_root(digest);
     }
 
-    fn unroot_binds(context: *Context, slot: *const Slot) void {
+    fn drop_binds(context: *Context, slot: *const Slot) void {
         assert(slot.binds_count <= slot.binds.len);
-        for (slot.binds[0..slot.binds_count]) |digest| context.unroot(digest);
+        for (slot.binds[0..slot.binds_count]) |digest| context.drop(digest);
     }
 
     fn cache_failed(context: *Context, failure: *const cache.Failure) Error {
@@ -1256,6 +1280,8 @@ pub const Context = struct {
     /// record. Runs after every step has an output, in this process, under one shared lock so
     /// that a gc cannot take the trees assembled before the cache entry roots them.
     pub fn build_image(context: *Context) Error!void {
+        // Every step is done; a signal that came meanwhile stops the build before its image.
+        try context.check_interrupt();
         const ws = context.ws;
         const file = &context.loaded.file;
         ws.timings[image_slot].start_ms = context.elapsed();
@@ -1309,6 +1335,9 @@ pub const Context = struct {
             },
         };
         ws.record.tree = tree;
+        // Assembly can take seconds: a signal during it means no result is saved, and the
+        // build does not exit 0. The assembled tree is in the cache, as a finished step's is.
+        try context.check_interrupt();
         try context.numeric_user();
         var saved: result_mod.Failure = undefined;
         const digest = result_mod.save(store, &ws.record, &ws.record_bytes, &saved) catch {

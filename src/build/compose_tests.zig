@@ -1113,6 +1113,10 @@ fn copy_project_loaded() !void {
 }
 
 fn import_entry(entry: ?u32) !Digest {
+    return import_step_entry(0, entry);
+}
+
+fn import_step_entry(step: u8, entry: ?u32) !Digest {
     var input: input_tree.Workspace = undefined;
     var problem: inputs_mod.Problem = undefined;
     const request: input_job.Request = .{
@@ -1120,7 +1124,7 @@ fn import_entry(entry: ?u32) !Digest {
         .facts = &facts,
         .store = &store,
         .loaded = &loaded,
-        .step = 0,
+        .step = step,
         .entry = entry,
         .ws = &input,
         .problem = &problem,
@@ -1394,7 +1398,7 @@ test "a tree two users hold keeps its root until the last one is done" {
 test "a SIGINT or SIGTERM during a build is one diagnostic, and no root outlives it" {
     // Goal: a signal ends a build through the abort path, so its roots are removed (a process
     // the signal killed would leave them to `store gc` forever). Method: a step's worker runs;
-    // the wait is interrupted and the signal is pending: the wait fails with E0419 whose cause
+    // the wait is interrupted and the signal is pending: the wait fails with E0808 whose cause
     // names the signal; abort leaves no root. A step begun after the signal is refused the
     // same way, before it imports anything.
     try command_project_loaded();
@@ -1403,14 +1407,103 @@ test "a SIGINT or SIGTERM during a build is one diagnostic, and no root outlives
     try testing.expectEqual(@as(u32, 1), build_roots(&scratch_roots));
     sim.wait_interrupted = true;
     try testing.expectError(error.Failed, context.wait());
-    try testing.expectEqual(codes.Code.E0419, diag.code.?);
+    try testing.expectEqual(codes.Code.E0808, diag.code.?);
+    try testing.expect(std.mem.indexOf(u8, diag.last_cause().?, "SIGINT") != null);
     compose.Context.abort_step(@ptrCast(&context));
     try testing.expectEqual(@as(u32, 0), build_roots(&scratch_roots));
     diag.reset();
     try testing.expect(sim.interface().interrupt_pending());
     try testing.expectError(error.Failed, context.begin(0));
-    try testing.expectEqual(codes.Code.E0419, diag.code.?);
+    try testing.expectEqual(codes.Code.E0808, diag.code.?);
     try testing.expectEqual(@as(u32, 0), build_roots(&scratch_roots));
+    sim.interface().catch_interrupts(false);
+}
+
+test "a signal the instant the handler is in is the interrupted outcome, not a crash" {
+    // Goal: a Ctrl-C right after `catch_interrupts(true)` is an ordinary path (it once tripped
+    // an assertion). Method: the sim sends SIGINT as the handler goes in; the next step is
+    // refused with E0808 before it imports anything, and a wait already pending ends at once.
+    try command_project_loaded();
+    sim.interrupt_on_catch = true;
+    sim.interface().catch_interrupts(true);
+    try testing.expect(sim.interface().interrupt_pending());
+    try testing.expectError(error.Failed, context.begin(0));
+    try testing.expectEqual(codes.Code.E0808, diag.code.?);
+    try testing.expectEqual(@as(u32, 0), build_roots(&scratch_roots));
+    try testing.expectError(error.Interrupted, sim.interface().wait_any(&.{7}, 0));
+    sim.interface().catch_interrupts(false);
+    try testing.expect(!sim.interface().interrupt_pending());
+}
+
+test "a signal that arrives while a step runs and before the wait ends the wait at once" {
+    // Goal: a signal pending when `wait` is called is seen there, not after the next worker
+    // exits. Method: begin a worker, then the signal (no scripted interrupt of the wait): wait
+    // is E0808 naming SIGTERM, and abort leaves no root.
+    try command_project_loaded();
+    sim.interface().catch_interrupts(true);
+    try testing.expect(try context.begin(0) == .running);
+    sim.interrupt_arrived = constants.signal_term;
+    try testing.expectError(error.Failed, context.wait());
+    try testing.expectEqual(codes.Code.E0808, diag.code.?);
+    try testing.expect(std.mem.indexOf(u8, diag.last_cause().?, "SIGTERM") != null);
+    compose.Context.abort_step(@ptrCast(&context));
+    try testing.expectEqual(@as(u32, 0), build_roots(&scratch_roots));
+    sim.interface().catch_interrupts(false);
+}
+
+test "a signal during the image's assembly fails the build, never a success" {
+    // Goal: once every step is done, a signal still stops the build: `build_image` does not
+    // assemble, save or print a digest. Method: the image step of a finished build with the
+    // signal pending: E0808, and nothing on stdout says `built`.
+    image_started("/etc");
+    sim.interface().catch_interrupts(true);
+    sim.interrupt_arrived = constants.signal_interrupt;
+    try testing.expectError(error.Failed, context.build_image());
+    try testing.expectEqual(codes.Code.E0808, diag.code.?);
+    try testing.expect(std.mem.indexOf(u8, sim.stdout(), "built") == null);
+    sim.interface().catch_interrupts(false);
+}
+
+test "a copy step importing the tree a running step holds leaves that step's root" {
+    // Goal: roots are released per holder: a copy step's project source, which it never
+    // counted, is not dropped from under a command step whose input is the same tree. Method:
+    // "compile" holds the tree of `a.txt` while its worker runs; "put" copies `a.txt`, so its
+    // source is the same digest; after "put" the root is still there; abort "compile": gone.
+    try shared_project_loaded();
+    try testing.expect(try context.begin(0) == .running);
+    try testing.expectEqual(@as(u32, 1), composed.holds_count);
+    const tree = composed.holds[0].digest;
+    try testing.expect(tree.eql(try import_step_entry(1, 0))); // The premise: one digest.
+    diag.reset();
+    try testing.expect(try context.begin(1) != .running);
+    try testing.expect(diag.code == null);
+    var record: roots.Root = undefined;
+    var errno: u16 = 0;
+    try roots.load(&store, tree, &record, &errno);
+    compose.Context.abort_step(@ptrCast(&context));
+    try testing.expectEqual(@as(u32, 0), build_roots(&scratch_roots));
+    try testing.expectEqual(@as(u32, 0), composed.holds_count);
+}
+
+/// Step "compile" runs a command with the project's `a.txt` as input; step "put" copies the
+/// same `a.txt` into its base.
+fn shared_project_loaded() !void {
+    registry_started(&registry.fixture.oci.amd64.digest);
+    var buffer: [768]u8 = undefined;
+    const text = try std.fmt.bufPrint(&buffer, "{s}{s}{s}{s}{s}", .{
+        ".{ .version = 1, .image = .{}, .steps = .{ .{ .name = \"compile\", .base = \"",
+        locked_reference,
+        "\", .inputs = .{\"a.txt\"}, .run = .{\"true\"} }, .{ .name = \"put\", .base = \"",
+        locked_reference,
+        "\", .copy = .{ .{ .src = .{\"a.txt\"}, .to = \"/opt/\" } } } } }\n",
+    });
+    var problem: file_mod.Problem = undefined;
+    const parsed = file_mod.parse(text, &loaded.file, &problem);
+    try testing.expectEqual(file_mod.ParseResult.parsed, parsed);
+    files.put_dir("/p", 0o755);
+    files.put_file("/p/a.txt", 0o644, "a\n");
+    set_path(&loaded.project, "/p");
+    set_path(&loaded.path, "/p/zbx.build.zon");
 }
 
 test "a user that no longer fits the settings is E0807, not a crash" {

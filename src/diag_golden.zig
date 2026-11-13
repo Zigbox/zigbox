@@ -747,6 +747,7 @@ const build_cases = [_]Case{
     .{ .code = .E0805, .args = &.{}, .direct = build_step_failed, .exit = 1 },
     .{ .code = .E0806, .args = &.{}, .direct = build_output_refused, .exit = 1 },
     .{ .code = .E0807, .args = &build_graph_args, .prepare = prepare_build_config, .exit = 1 },
+    .{ .code = .E0808, .args = &.{}, .direct = build_interrupted, .exit = 1 },
     .{ .code = .W0801, .args = &.{}, .direct = build_network_steps, .warning = true, .exit = 0 },
     .{ .code = .E0817, .args = &.{}, .direct = build_user_not_found, .exit = 1 },
     .{ .code = .E0818, .args = &.{}, .direct = build_glob_pool, .exit = 1 },
@@ -2480,6 +2481,10 @@ fn build_network_steps(diag: *Diag) void {
 
 fn build_user_not_found(diag: *Diag) void {
     build_diagnose.user_not_found(diag, "step \"a\"", "nobody2");
+}
+
+fn build_interrupted(diag: *Diag) void {
+    build_diagnose.build_interrupted(diag, constants.signal_interrupt);
 }
 
 fn build_glob_pool(diag: *Diag) void {

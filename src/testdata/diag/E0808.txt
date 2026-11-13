@@ -1,0 +1,4 @@
+error[ZBX-E0808]: the build was stopped by a signal
+  cause  the build was stopped by SIGINT; the work of its unfinished steps was released
+  more   zbx explain E0808 · rerun with --verbose for the full cause chain
+  docs   https://zigbox.github.io/zigbox/errors/E0808.html

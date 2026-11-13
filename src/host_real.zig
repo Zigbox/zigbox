@@ -160,7 +160,7 @@ pub const HostReal = struct {
         .list_directory = list_directory,
         .ignore_broken_pipe = ignore_broken_pipe,
         .catch_interrupts = catch_interrupts,
-        .interrupt_pending = interrupt_pending,
+        .interrupt_signal = interrupt_signal,
         .socket_connect = socket_connect,
         .read_timeout = read_timeout,
         .begin_step = begin_step,
@@ -1174,7 +1174,19 @@ pub const HostReal = struct {
             limit = timespec_of(timeout_ms);
             limit_ptr = &limit;
         }
-        const waited = linux.ppoll(&polls, @intCast(opened), limit_ptr, null);
+        // While interrupts are caught, a signal between the caller's look at the value and the
+        // wait must still end the wait: the signals are blocked, the value read, and `ppoll`
+        // unblocks them only for as long as it waits, so one cannot slip in between.
+        var previous: linux.sigset_t = undefined;
+        const caught = interrupt_saved;
+        if (caught) block_interrupts(&previous);
+        defer if (caught) {
+            const restored = linux.sigprocmask(linux.SIG.SETMASK, &previous, null);
+            assert(linux.errno(restored) == .SUCCESS); // The mask the kernel gave us.
+        };
+        if (caught and interrupt_number.load(.acquire) != 0) return error.Interrupted;
+        const mask: ?*const linux.sigset_t = if (caught) &previous else null;
+        const waited = linux.ppoll(&polls, @intCast(opened), limit_ptr, mask);
         try check(waited);
         if (waited == 0) return null;
         for (polls[0..opened], 0..) |entry, index| {
@@ -1288,35 +1300,68 @@ pub const HostReal = struct {
         try result;
     }
 
-    /// Set by the handler below; read by `interrupt_pending`. One flag for the process, as the
-    /// signals are.
-    var interrupt_flag: std.atomic.Value(bool) = .init(false);
+    /// The signal the handler below saw first (0: none yet); read by `interrupt_signal`. One
+    /// value for the process, as the signals are.
+    var interrupt_number: std.atomic.Value(u8) = .init(0);
+    /// What SIGINT and SIGTERM did before `catch_interrupts(true)`, put back by
+    /// `catch_interrupts(false)`; `interrupt_saved` says whether they were saved.
+    var interrupt_previous: [interrupt_signals.len]linux.Sigaction = undefined;
+    var interrupt_saved: bool = false;
+    const interrupt_signals = [_]linux.SIG{ .INT, .TERM };
 
     fn on_interrupt(which: linux.SIG) callconv(.c) void {
-        assert(@backingInt(which) != 0); // A real signal number, as the kernel delivers.
-        interrupt_flag.store(true, .release);
-        assert(interrupt_flag.load(.acquire));
+        const number = @backingInt(which);
+        assert(number != 0); // A real signal number, as the kernel delivers.
+        assert(number < 256);
+        // The first signal is the one reported; a second (a double Ctrl-C) changes nothing.
+        _ = interrupt_number.cmpxchgStrong(0, @intCast(number), .acq_rel, .acquire);
+        assert(interrupt_number.load(.acquire) != 0);
     }
 
+    /// Catching starts a fresh window and saves what each signal did; a signal the process
+    /// inherited as ignored (a background job of a script) stays ignored. Releasing puts the
+    /// saved dispositions back. A signal may arrive at any moment in between: it only sets the
+    /// value, which the caller reads when it next looks.
     fn catch_interrupts(context: *anyopaque, catch_it: bool) void {
         _ = from_context(context);
+        if (!catch_it) {
+            if (!interrupt_saved) return; // Nothing was changed (a worker of a sim, a test).
+            for (interrupt_signals, &interrupt_previous) |which, *previous| {
+                const result = linux.sigaction(which, previous, null);
+                assert(linux.errno(result) == .SUCCESS); // A disposition the kernel gave us.
+            }
+            interrupt_saved = false;
+            return;
+        }
+        assert(!interrupt_saved); // Windows do not nest.
+        interrupt_number.store(0, .release);
         const action: linux.Sigaction = .{
-            .handler = .{ .handler = if (catch_it) on_interrupt else linux.SIG.DFL },
+            .handler = .{ .handler = on_interrupt },
             .mask = linux.sigemptyset(),
-            .flags = 0, // No SA_RESTART: a blocked wait returns, so the caller sees the flag.
+            .flags = 0, // No SA_RESTART: a blocked wait returns, so the caller sees the value.
         };
-        if (catch_it) interrupt_flag.store(false, .release);
-        for ([_]linux.SIG{ .INT, .TERM }) |which| {
+        for (interrupt_signals, &interrupt_previous) |which, *previous| {
+            const queried = linux.sigaction(which, null, previous);
+            assert(linux.errno(queried) == .SUCCESS); // A valid signal.
+            if (previous.handler.handler == linux.SIG.IGN) continue;
             const result = linux.sigaction(which, &action, null);
             assert(linux.errno(result) == .SUCCESS); // Valid signals and a valid handler.
         }
-        if (catch_it) assert(!interrupt_flag.load(.acquire)); // A fresh window starts clear.
+        interrupt_saved = true;
     }
 
-    fn interrupt_pending(context: *anyopaque) bool {
+    /// Blocks SIGINT and SIGTERM, and saves the mask they were blocked under in `previous`.
+    fn block_interrupts(previous: *linux.sigset_t) void {
+        var blocked = linux.sigemptyset();
+        for (interrupt_signals) |which| linux.sigaddset(&blocked, which);
+        const result = linux.sigprocmask(linux.SIG.BLOCK, &blocked, previous);
+        assert(linux.errno(result) == .SUCCESS); // A valid mask.
+    }
+
+    fn interrupt_signal(context: *anyopaque) u8 {
         _ = from_context(context);
         assert(@intFromPtr(context) != 0);
-        return interrupt_flag.load(.acquire);
+        return interrupt_number.load(.acquire);
     }
 
     fn ignore_broken_pipe(context: *anyopaque, ignore: bool) void {
@@ -1761,9 +1806,10 @@ test "real host reads a file, reports a missing one, and closes every handle" {
 }
 
 test "a caught SIGINT and SIGTERM set the flag instead of ending the process" {
-    // Goal: the signals a build catches (REVIEW.md: every exit path) reach the flag, and
+    // Goal: the signals a build catches (REVIEW.md: every exit path) reach the flag, named, and
     // handlers are put back after. Method: catch, send each signal to this thread (so the
-    // handler has run when the call returns), read the flag, restore the default.
+    // handler has run when the call returns), read the signal, release; a second signal keeps
+    // the first one's name.
     var real: HostReal = .{};
     const subject = real.interface();
     for ([_]linux.SIG{ .INT, .TERM }) |which| {
@@ -1771,9 +1817,64 @@ test "a caught SIGINT and SIGTERM set the flag instead of ending the process" {
         try std.testing.expect(!subject.interrupt_pending());
         const sent = linux.tgkill(linux.getpid(), linux.gettid(), which);
         try std.testing.expectEqual(linux.E.SUCCESS, linux.errno(sent));
-        try std.testing.expect(subject.interrupt_pending());
+        try std.testing.expectEqual(@as(u8, @intCast(@backingInt(which))), subject.interrupt_signal());
+        const other: linux.SIG = if (which == .INT) .TERM else .INT;
+        _ = linux.tgkill(linux.getpid(), linux.gettid(), other);
+        try std.testing.expectEqual(@as(u8, @intCast(@backingInt(which))), subject.interrupt_signal());
         subject.catch_interrupts(false);
     }
+}
+
+fn sleeping_child(raw: *anyopaque) u8 {
+    _ = raw;
+    var rest: linux.timespec = .{ .sec = 30, .nsec = 0 };
+    _ = linux.nanosleep(&rest, null);
+    return 0;
+}
+
+test "a signal caught before the wait ends the wait at once, not when the child ends" {
+    // Goal: no lost wake-up: a SIGINT that lands after the caller looked at the value and
+    // before the wait blocks must still end the wait. Method: start a child that sleeps 30 s,
+    // catch, send SIGINT (the handler runs before the wait starts), wait with no time limit:
+    // the wait returns Interrupted at once. The child is then killed and reaped.
+    var real: HostReal = .{};
+    const subject = real.interface();
+    var unused: u8 = 0;
+    const pid = try subject.fork_child(false, sleeping_child, &unused);
+    subject.catch_interrupts(true);
+    defer subject.catch_interrupts(false);
+    const sent = linux.tgkill(linux.getpid(), linux.gettid(), .INT);
+    try std.testing.expectEqual(linux.E.SUCCESS, linux.errno(sent));
+    const started = subject.monotonic_ms();
+    try std.testing.expectError(error.Interrupted, subject.wait_any(&.{pid}, 0));
+    try std.testing.expect(subject.monotonic_ms() - started < 10_000);
+    try subject.signal(pid, constants.signal_kill);
+    _ = try subject.wait_for(pid);
+}
+
+test "an inherited ignored SIGTERM stays ignored while caught, and is ignored after" {
+    // Goal: a background job of a script (started with a signal ignored) is not stopped by a
+    // signal meant for the foreground, and release puts back what was there, not the default.
+    // Method: ignore SIGTERM, catch, send SIGTERM (nothing is recorded), release, read the
+    // disposition back (still ignored), then put the test process's own back.
+    var real: HostReal = .{};
+    const subject = real.interface();
+    var original: linux.Sigaction = undefined;
+    _ = linux.sigaction(.TERM, null, &original);
+    defer _ = linux.sigaction(.TERM, &original, null);
+    const ignore: linux.Sigaction = .{
+        .handler = .{ .handler = linux.SIG.IGN },
+        .mask = linux.sigemptyset(),
+        .flags = 0,
+    };
+    try std.testing.expectEqual(linux.E.SUCCESS, linux.errno(linux.sigaction(.TERM, &ignore, null)));
+    subject.catch_interrupts(true);
+    _ = linux.tgkill(linux.getpid(), linux.gettid(), .TERM);
+    try std.testing.expect(!subject.interrupt_pending());
+    subject.catch_interrupts(false);
+    var after: linux.Sigaction = undefined;
+    _ = linux.sigaction(.TERM, null, &after);
+    try std.testing.expect(after.handler.handler == linux.SIG.IGN);
 }
 
 test "real host refuses a file larger than the buffer instead of truncating" {

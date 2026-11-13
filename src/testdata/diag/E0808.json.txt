@@ -1,0 +1,1 @@
+{"code":"ZBX-E0808","severity":"error","blame":"user","summary":"the build was stopped by a signal","causes":["the build was stopped by SIGINT; the work of its unfinished steps was released"],"while":[],"context":{},"fixes":[],"docs":"https://zigbox.github.io/zigbox/errors/E0808.html","omitted":{"causes":0,"while":0,"context":0,"fixes":0}}

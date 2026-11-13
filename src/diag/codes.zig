@@ -216,6 +216,7 @@ pub const Code = enum(u8) {
     E0805,
     E0806,
     E0807,
+    E0808,
     W0801,
     E0817,
     E0818,
@@ -3418,6 +3419,24 @@ pub const registry = [_]Entry{
         ,
     },
     .{
+        .code = .E0808,
+        .severity = .@"error",
+        .blame = .user,
+        .summary = "the build was stopped by a signal",
+        .explanation =
+        \\zbx build stops when it gets SIGINT (Ctrl-C) or SIGTERM (kill, or a CI job
+        \\that timed out). It does not end at once: it stops the steps that are
+        \\running, removes the work they had begun and the store roots that kept
+        \\their inputs, and then exits with this error, so a stopped build leaves
+        \\nothing for store gc to keep. The steps that had finished are in the build
+        \\cache, and the next zbx build starts from them.
+        \\
+        \\The cause names the signal. Nothing is wrong with the build file or the
+        \\host; run zbx build again when you want the result. A build started in the
+        \\background of a script, with the signal ignored, keeps ignoring it.
+        ,
+    },
+    .{
         .code = .W0801,
         .severity = .warning,
         .blame = .user,
@@ -4305,7 +4324,7 @@ pub fn can_end_run(code: Code) bool {
         .E0515, .E0516, .E0517, .W0501, .W0502, .E0526, .W0551, .W0552 => false,
         .E0527, .E0528, .E0529, .E0530, .E0531, .E0532, .E0533, .E0534, .E0535 => false,
         .E0801, .E0802, .E0803, .E0804, .E0805, .E0806, .E0807, .W0801 => false,
-        .E0817, .E0818, .W0802 => false,
+        .E0808, .E0817, .E0818, .W0802 => false,
         .E0901, .E0902, .E0908, .E0909, .E0910, .E0911, .W0901, .W0902, .W0903 => false,
         .E1006, .E1007 => false,
         .E0220, .E0221, .E0222, .E0223, .E0224, .E0225, .W0207, .W0209 => false,

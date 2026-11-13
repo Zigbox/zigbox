@@ -402,7 +402,10 @@ const Run = struct {
         const before = run.ws.matches.count;
         run.scan_depth = 0;
         try run.scan_push(0, 0);
-        for (0..constants.store_walk_entries_max) |_| {
+        // Each pass takes an entry or ends a frame: a walk within the bound takes at most
+        // `store_walk_entries_max` entries, and each frame is entered for one of them. A project
+        // larger than that is refused, not cut short.
+        for (0..2 * @as(usize, constants.store_walk_entries_max)) |_| {
             if (run.scan_depth == 0) break;
             const top = &run.ws.scan[run.scan_depth - 1];
             if (top.next == top.offsets.len) {

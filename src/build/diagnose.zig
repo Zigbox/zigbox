@@ -762,7 +762,7 @@ pub fn step_name_hint(diag: *Diag, name: []const u8) void {
     var echo: Echo = undefined;
     const shown = text_util.sanitise(&echo, name);
     const sentence = "to use the output of the step of that name, write .base like this";
-    diag.fix_with(sentence, ".from = \"step:{s}\"", .{shown});
+    diag.fix_with(sentence, ".base = \"step:{s}\"", .{shown});
     assert(diag.code.? == .E0804);
 }
 
@@ -1210,6 +1210,19 @@ pub fn glob_pool_full(diag: *Diag, input: []const u8) void {
     assert(diag.code.? == .E0818);
 }
 
+/// `E0808`: a SIGINT or SIGTERM (`signal`, its number) stopped the build. Said once the
+/// scheduler has been told; the running steps are then aborted and their roots removed.
+pub fn build_interrupted(diag: *Diag, signal: u8) void {
+    assert(diag.code == null);
+    assert(signal == constants.signal_interrupt or signal == constants.signal_term);
+    const name = if (signal == constants.signal_interrupt) "SIGINT" else "SIGTERM";
+    diag.raise(.E0808);
+    diag.cause("the build was stopped by {s}; the work of its unfinished steps was released", .{
+        name,
+    });
+    assert(diag.code.? == .E0808);
+}
+
 pub const cache_label = "steps with cache mounts: ";
 
 /// `W0802`: the build has steps with `.caches`. `names` is their names in the build's order,
@@ -1345,7 +1358,7 @@ test "network_names joins the names and cuts what does not fit with an ellipsis"
 }
 
 test "a bare step name as a base gets a second fix that writes step:<name>" {
-    // Goal: `.from = "build"` (an image reference) is refused with the way to spell the step.
+    // Goal: `.base = "build"` (an image reference) is refused with the way to spell the step.
     // Method: raise E0804, add the hint, and read the fixes back: the pull first, the hint last.
     var diag: Diag = undefined;
     diag.reset();
@@ -1354,6 +1367,32 @@ test "a bare step name as a base gets a second fix that writes step:<name>" {
     try std.testing.expectEqual(@as(u32, 2), diag.fixes.count);
     const second = diag.fixes.items[1].command.slice();
     const first = diag.fixes.items[0].command.slice();
-    try std.testing.expect(std.mem.indexOf(u8, second, "step:build") != null);
+    try std.testing.expectEqualStrings(".base = \"step:build\"", second);
     try std.testing.expect(std.mem.indexOf(u8, first, "zbx pull") != null);
+}
+
+var hint_test_file: BuildFile = undefined;
+
+test "the step-name hint's example is a .base line the build file parser takes" {
+    // Goal: a user who pastes the printed fix gets a file that parses, not a second refusal.
+    // Method: print the hint for step "build", put its command in place of a step's `.base`
+    // field, and parse the file: it parses, and the step's base reads `step:build`.
+    var diag: Diag = undefined;
+    diag.reset();
+    base_not_locked(&diag, "pack", "build", false);
+    step_name_hint(&diag, "build");
+    const example = diag.fixes.items[1].command.slice();
+    var buffer: [512]u8 = undefined;
+    const text = try std.fmt.bufPrint(&buffer, "{s}{s}{s}", .{
+        ".{ .version = 1, .image = .{}, .steps = .{ " ++
+            ".{ .name = \"build\", .base = \"alpine:3\", .run = .{\"true\"} }, " ++
+            ".{ .name = \"pack\", ",
+        example,
+        ", .run = .{\"true\"} } } }\n",
+    });
+    const file = &hint_test_file;
+    var problem: file_mod.Problem = undefined;
+    const parsed = file_mod.parse(text, file, &problem);
+    try std.testing.expectEqual(file_mod.ParseResult.parsed, parsed);
+    try std.testing.expectEqualStrings("step:build", file.text(file.steps[1].base));
 }

@@ -333,6 +333,8 @@ pub const child_exit_setup_failed: u8 = 125;
 pub const errno_io: u16 = 5;
 /// SIGKILL, the same number on x86_64 and aarch64.
 pub const signal_kill: u8 = 9;
+/// SIGINT (Ctrl-C), the same number on x86_64 and aarch64.
+pub const signal_interrupt: u8 = 2;
 pub const signal_term: u8 = 15;
 /// SIGWINCH (the terminal's window changed size), 28 on x86_64 and aarch64. `exec` with a
 /// pseudo-terminal passes the new size on; nothing forwards it to a container.
