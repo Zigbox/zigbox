@@ -868,33 +868,12 @@ jobs:
             echo "release: the temporary keychain is on the search list" >&2
             exit 1
           fi
-      - name: Diagnose how codesign finds the throwaway identity
-        run: |
-          export PATH=/usr/bin:/bin:/usr/sbin:/sbin
-          t="$RUNNER_TEMP/diag-bin"
-          cp /bin/echo "$t"
-          for id in "$TEST_IDENTITY" zbx-release-test; do
-            for kc in "--keychain $KEYCHAIN" ""; do
-              for ts in "--timestamp" "--timestamp=none"; do
-                echo "== id=$id keychain=[$kc] $ts"
-                # shellcheck disable=SC2086
-                codesign --force --options runtime $ts --sign "$id" $kc "$t" 2>&1 || true
-              done
-            done
-          done
-          echo "== search list before:"; security list-keychains -d user
-          security list-keychains -d user -s "$KEYCHAIN" "$HOME/Library/Keychains/login.keychain-db" || true
-          echo "== search list after:"; security list-keychains -d user
-          security find-identity -v -p codesigning || true
-          for id in "$TEST_IDENTITY" zbx-release-test; do
-            echo "== on the search list: id=$id"
-            codesign --force --options runtime --timestamp=none --sign "$id" "$t" 2>&1 || true
-            codesign --force --options runtime --timestamp=none --sign "$id" --keychain "$KEYCHAIN" "$t" 2>&1 || true
-          done
-          security list-keychains -d user -s "$HOME/Library/Keychains/login.keychain-db" || true
-          /bin/rm -f "$t"
       - name: Build the universal zip and sign it with it (no notarization, no upload)
         run: |
+          # codesign finds a self-signed identity only when its keychain is on the search list (a
+          # real Developer ID identity is found through --keychain alone). This job is a one-job
+          # virtual machine, and the cleanup step puts the login keychain back.
+          /usr/bin/security list-keychains -d user -s "$KEYCHAIN" "$HOME/Library/Keychains/login.keychain-db"
           SDK="$(/usr/bin/xcrun --show-sdk-path)"
           zig build mac-release --sysroot "$SDK" -Dsdk \
             -Dsign-identity="$TEST_IDENTITY" -Dkeychain="$KEYCHAIN"
@@ -913,6 +892,7 @@ jobs:
       - name: Delete the keychain and everything this job wrote under the runner's temp
         if: ${{ always() }}
         run: |
+          /usr/bin/security list-keychains -d user -s "$HOME/Library/Keychains/login.keychain-db" || true
           /usr/bin/security delete-keychain "$KEYCHAIN" || true
           /bin/rm -rf "$KEYCHAIN" "$SECRETS_DIR" "$RUNNER_TEMP"/zig-aarch64-macos-* "$RUNNER_TEMP/zig-global"
 
