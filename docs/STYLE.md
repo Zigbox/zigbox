@@ -49,7 +49,7 @@ Design goals, in order: **safety, performance, developer experience.**
 - **The Linux package release** (M8) runs `gpg` and `rpm` in the release workflow (`.github/workflows/release.yml`, glue in `.github/release-sign.sh`) to sign the apt and dnf repositories and the rpm headers with a signing subkey, and to verify every signature (owner, 2026-11-11, superseding 2026-11-04). The primary key stays offline. It runs at release time only; `zbx` and `zig build packages` never run it, and the workflow's test job runs it with a throwaway key.
 - **The VM kernel build** (`zig build vm-kernel`, on arm64 Ubuntu 24.04) runs the kernel's own tool chain (`make`, `gcc`, `tar`, `apt-get` to install them). `zig build vm-kernel-docker` runs the same program inside an `ubuntu:24.04` container with `docker`, as a developer convenience on a Mac; no product code uses Docker.
 - **The VM image tool** downloads the pinned Alpine packages (`vm/alpine.zon`) with `std.http`, checks each against its SHA-256, and reads the `.apk` files itself (gzip and tar from `std`); it runs no external program.
-- Build, tidy, fuzz and VM tooling are written in Zig, not shell. A `.sh` file needs a written reason (`.github/release-sign.sh`: the program that signs is `gpg`).
+- Build, tidy, fuzz and VM tooling are written in Zig, not shell. A `.sh` file needs a written reason (`.github/release-sign.sh`: the program that signs is `gpg`; `.github/release-prepare-check.sh`: the program that checks its signature is `gpg`).
 
 ## Testing
 

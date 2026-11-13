@@ -333,11 +333,14 @@ fn make_universal(
     }
 }
 
-/// Whether the keychain has a notary profile of this name: `notarytool history` exits 0 with one.
+/// What `notarytool history` says of a notary profile in the keychain, in three states:
+/// `present` (it exits 0), `missing` (it fails and prints that no keychain item was found, so the
+/// profile was never stored) and `unknown` (any other failure: it could not run, Apple or the
+/// network is down, the key was revoked). Only `missing` is a known absence.
 const ProfileState = enum { present, missing, unknown };
 
-/// `notarytool history` succeeds when the profile exists. A missing profile is told apart from
-/// any other failure (Apple down, a revoked key, no network) by the text notarytool prints.
+/// Runs `notarytool history` for the profile and sorts the outcome into a `ProfileState`. A
+/// missing profile is told apart from any other failure by the text notarytool prints.
 fn profile_state(
     io: Io,
     arena: std.mem.Allocator,

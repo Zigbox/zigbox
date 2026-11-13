@@ -20,11 +20,16 @@ gates quoted). When `ci` is green on that commit, `.github/workflows/release.yml
 everything that can refuse, makes a **draft** release (no tag yet), and waits for the owner's one
 approval of the `release` environment. Nobody tags by hand. After the approval:
 
-- `linux` signs the apt and dnf trees and attaches `zigbox-repos.tar.gz` (the rest of this file);
+- `linux` signs the apt and dnf trees, writes the release assets, signs their `SHA256SUMS`, and
+  attaches the tarballs, the SBOM, the debs and rpms, `zigbox-repos.tar.gz`, `SHA256SUMS` and
+  `SHA256SUMS.asc` (the rest of this file);
 - `mac`, on a GitHub-hosted macOS runner, builds `zbx` for arm64 and x86_64, joins them with
   `lipo`, signs the result with the Developer ID certificate in a temporary keychain, notarizes
-  it, and attaches `zbx-<v>-macos-universal.zip`, its `.sha256` and the formula to the draft;
-- `prepare` checks the draft's four assets and the tap diff; `publish` publishes the draft, which
+  it, and attaches `zbx-<v>-macos-universal.zip`, its `.sha256`, `SHA256SUMS.macos` (the sum of
+  that zip alone; the zip is notarized, so it carries no gpg signature) and the formula to the
+  draft;
+- `prepare` checks that the draft holds exactly those assets, that both sums files match, that
+  `SHA256SUMS.asc` is by a subkey of the pinned release key, and the tap diff; `publish` publishes the draft, which
   creates the tag at the release commit;
 - `tap` and `site` (environment `release-publish`, `main` only, no reviewers) commit the formula
   to `Zigbox/homebrew-tap` and run the zigbox.org deploy, waiting for it;
@@ -49,6 +54,14 @@ the signing subkey expires after a year and is renewed):
 ```
 09991DC39816D3C914E2A22C5AB00BC328B7DBB7
 ```
+
+The public key itself is checked in as `docs/releases/zigbox-release-key.asc` (the owner commits
+`gpg --export -a 09991DC39816D3C914E2A22C5AB00BC328B7DBB7`, and commits a new export after every
+renewal or revocation). The `prepare` job (`.github/release-prepare-check.sh`) verifies
+`SHA256SUMS.asc` against that file, never against the keyring inside the draft's archive, so a
+revoked subkey stays refused. `prepare` also refuses a draft whose apt `Release` has fewer than 14
+days of `Valid-Until` left; after a late re-run of `mac`, re-run `linux` too.
+`.github/release-prepare-test.sh` runs the check with tampered drafts in the `test` job.
 
 ## One-off key setup
 
@@ -159,8 +172,14 @@ If the subkey leaks, revoke it with the primary key and set a new one the same w
 7. Writes `zigbox-repos.tar.gz`: `apt`, `rpm` and the two keyring files, and nothing else (not
    `to-sign/`, not the test key files).
 
-The `linux` job then attaches the archive to the release. The release has no other assets from the
-workflow: the release binaries are not attached by it.
+8. Writes the release assets (`zig build release-assets`, see below) with the same `N` as
+   `-Dsource-date-epoch`, so the whole release has one time: the workflow takes it once, after the
+   owner's approval, as `ZIGBOX_SIGNED_AT`. Then signs `SHA256SUMS` into `SHA256SUMS.asc` (armored,
+   detached) with the same subkey and verifies it against the public key alone. Everything goes to
+   `OUTPUT_DIR/assets/`.
+
+The `linux` job checks the sums and attaches everything in `OUTPUT_DIR/assets/` to the draft.
+`SHA256SUMS` covers the Linux assets only; the Mac job adds `SHA256SUMS.macos` for its zip.
 
 Each `zig build packages` run deletes `apt/`, `rpm/` and `to-sign/` under the output directory
 first, so the files of an earlier run never stay beside this one's.
@@ -200,8 +219,9 @@ write `SHA256SUMS` over everything the directory holds again, or add `-Dsums-nam
 to write a separate file and leave the signed one alone. Sign `SHA256SUMS` after this last step.
 
 `SHA256SUMS` is meant to be signed: a detached `SHA256SUMS.asc` by the release subkey, made after
-every asset is in the directory. In `release-sign.sh` that is one line beside the others:
-`sign_with -ab -o "$output/SHA256SUMS.asc" "$output/SHA256SUMS"`, checked with `check_gpg`.
+every asset is in the directory. `release-sign.sh` signs it with
+`sign_with --detach-sign --armor -o zig-out/release-assets/SHA256SUMS.asc zig-out/release-assets/SHA256SUMS`,
+checks it with `check_gpg`, then copies the whole `zig-out/release-assets` tree to `$output/assets`.
 `package-refresh.sh` re-signs `SHA256SUMS` itself because the archive's line changes, and only after checking the old signature.
 
 ## Keeping apt fresh

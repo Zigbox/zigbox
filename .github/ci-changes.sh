@@ -56,6 +56,7 @@ classify() {
     # The release workflow, its own actions and the signing and refresh scripts run only after a push
     # to main (and the release test jobs on a throwaway key); no demo runs them, so they select none.
     .github/workflows/release.yml | .github/release-sign.sh | .github/release-sign-test.sh | \
+      .github/release-prepare-check.sh | .github/release-prepare-test.sh | \
       .github/workflows/package-refresh.yml | .github/package-refresh.sh | \
       .github/package-refresh-test.sh | \
       .github/actions/setup-gh/* | .github/actions/find-draft/* | .github/actions/tap-formula/* | \
