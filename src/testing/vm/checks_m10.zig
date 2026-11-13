@@ -57,7 +57,7 @@ pub fn check_device_run(streams: Streams, status: u8) Error!void {
     if (status != 0) return error.ExitCodeWrong;
     if (!has_line(streams.stdout, "ZBXGPU=on")) return error.OutputWrong;
     if (!has_line(streams.stdout, "NODE-OPEN")) return error.OutputWrong;
-    if (!has_line(streams.stdout, "libzbxgpu")) return error.OutputWrong;
+    if (!has_line(streams.stdout, "libzbxgpu.so")) return error.OutputWrong;
     if (has(streams.stderr, "ZBX-E")) return error.OutputWrong;
 }
 
@@ -125,10 +125,10 @@ test "check_doctor wants the spec and the device, and no gap" {
 }
 
 test "check_device_run wants the node open, the variable and the library" {
-    const out = "ZBXGPU=on\nNODE-OPEN\nlibzbxgpu\n";
+    const out = "ZBXGPU=on\nNODE-OPEN\nlibzbxgpu.so\n";
     try check_device_run(both(out, "warning[ZBX-W0209]: x\n"), 0);
     try testing.expectError(error.ExitCodeWrong, check_device_run(quiet(out), 1));
-    const unopened = quiet("ZBXGPU=on\nlibzbxgpu\n");
+    const unopened = quiet("ZBXGPU=on\nlibzbxgpu.so\n");
     try testing.expectError(error.OutputWrong, check_device_run(unopened, 0));
     const refused = both(out, "error[ZBX-E0225]: x\n");
     try testing.expectError(error.OutputWrong, check_device_run(refused, 0));
