@@ -17,6 +17,8 @@ const image_diagnose = @import("image_diagnose.zig");
 const aws_diagnose = @import("aws/diagnose.zig");
 const push_diagnose = @import("push/diagnose.zig");
 const build_diagnose = @import("build/diagnose.zig");
+const import_diagnose = @import("import_diagnose.zig");
+const refusal_mod = @import("dockerfile/refusal.zig");
 const trust_diagnose = @import("trust/diagnose.zig");
 const policy_mod = @import("trust/policy.zig");
 const verdict_mod = @import("trust/verdict.zig");
@@ -813,6 +815,15 @@ const build_cases = [_]Case{
     .{ .code = .E0817, .args = &.{}, .direct = build_user_not_found, .exit = 1 },
     .{ .code = .E0818, .args = &.{}, .direct = build_glob_pool, .exit = 1 },
     .{ .code = .W0802, .args = &.{}, .direct = build_cache_steps, .warning = true, .exit = 0 },
+    .{ .code = .E0810, .args = &.{}, .direct = import_read_failed, .exit = 1 },
+    .{ .code = .E0811, .args = &.{}, .direct = import_e0811, .exit = 1 },
+    .{ .code = .E0812, .args = &.{}, .direct = import_e0812, .exit = 1 },
+    .{ .code = .E0813, .args = &.{}, .direct = import_e0813, .exit = 1 },
+    .{ .code = .E0814, .args = &.{}, .direct = import_e0814, .exit = 1 },
+    .{ .code = .E0815, .args = &.{}, .direct = import_e0815, .exit = 1 },
+    .{ .code = .E0816, .args = &.{}, .direct = import_output_exists, .exit = 1 },
+    .{ .code = .W0810, .args = &.{}, .direct = import_not_hermetic, .warning = true, .exit = 0 },
+    .{ .code = .W0811, .args = &.{}, .direct = import_dropped, .warning = true, .exit = 0 },
 };
 
 const key_directory = "/home/alice/.config/zbx/keys";
@@ -2590,6 +2601,61 @@ fn build_cache_steps(diag: *Diag) void {
 
 fn build_output_refused(diag: *Diag) void {
     build_diagnose.output_refused(diag, "compile", "/run/control", "FIFO");
+}
+
+fn import_read_failed(diag: *Diag) void {
+    import_diagnose.read_failed(diag, "Dockerfile", .missing);
+}
+
+fn import_e0811(diag: *Diag) void {
+    var refusal: refusal_mod.Refusal = undefined;
+    _ = refusal_mod.refuse(&refusal, .E0811, 3, "Dockerfile:3 has FROM --platform=linux/arm64, " ++
+        "but zbx builds only for the host, linux/amd64", .{}, "write --platform=$BUILDPLATFORM, " ++
+        "or remove the flag", .{}) catch {};
+    import_diagnose.refused(diag, &refusal, "Dockerfile");
+}
+
+fn import_e0812(diag: *Diag) void {
+    var refusal: refusal_mod.Refusal = undefined;
+    _ = refusal_mod.refuse(&refusal, .E0812, 5, "Dockerfile:5 uses `VERSION`, an ARG with no " ++
+        "default and no --build-arg", .{}, "give ARG VERSION a default, or pass it with " ++
+        "--build-arg in the build file", .{}) catch {};
+    import_diagnose.refused(diag, &refusal, "Dockerfile");
+}
+
+fn import_e0813(diag: *Diag) void {
+    var refusal: refusal_mod.Refusal = undefined;
+    _ = refusal_mod.refuse(&refusal, .E0813, 9, "Dockerfile:9 names a second stage " ++
+        "`build`", .{}, "give each stage its own name", .{}) catch {};
+    import_diagnose.refused(diag, &refusal, "Dockerfile");
+}
+
+fn import_e0814(diag: *Diag) void {
+    var refusal: refusal_mod.Refusal = undefined;
+    _ = refusal_mod.refuse(&refusal, .E0814, 7, "--hermetic: step fetch (Dockerfile:7) " ++
+        "has the network", .{}, "drop --hermetic, or change Dockerfile:7 so it needs " ++
+        "neither the network nor a cache", .{}) catch {};
+    import_diagnose.refused(diag, &refusal, "Dockerfile");
+}
+
+fn import_e0815(diag: *Diag) void {
+    var refusal: refusal_mod.Refusal = undefined;
+    _ = refusal_mod.refuse(&refusal, .E0815, 12, "Dockerfile:12 makes a string of 70000 " ++
+        "bytes, more than the build file's limit", .{}, "move the text into a script in the " ++
+        "context and COPY it", .{}) catch {};
+    import_diagnose.refused(diag, &refusal, "Dockerfile");
+}
+
+fn import_output_exists(diag: *Diag) void {
+    import_diagnose.output_exists(diag, "zbx.build.zon");
+}
+
+fn import_not_hermetic(diag: *Diag) void {
+    import_diagnose.not_hermetic(diag, "\"build-2\" (net, matched \"apk add\")", 1);
+}
+
+fn import_dropped(diag: *Diag) void {
+    import_diagnose.dropped(diag, "EXPOSE 8080 (label)", 1);
 }
 
 fn build_tag_not_recorded(diag: *Diag) void {

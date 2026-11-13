@@ -720,7 +720,7 @@ const ImportOption = enum {
     force,
 
     fn flag(option: ImportOption) []const u8 {
-        assert(@intFromEnum(option) < std.enums.values(ImportOption).len);
+        assert(@backingInt(option) < std.enums.values(ImportOption).len);
         assert(@tagName(option).len > 0);
         return switch (option) {
             .context => "--context",
