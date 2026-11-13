@@ -445,7 +445,7 @@ fn directives(t: *Translator) Refused!void {
     const parsed = &t.ws.parsed;
     if (parsed.syntax) |syntax| t.drop(syntax.line, "# syntax", "ignored: zbx reads the file");
     if (parsed.check) |check| t.drop(check.line, "# check", "ignored");
-    assert(parsed.escape == '\\' or parsed.escape == '`');
+    assert(std.mem.indexOfScalar(u8, "\\`", parsed.escape) != null);
 }
 
 /// The `.dockerignore`, as the file's `.exclude`: its lines but comments and blank ones.
@@ -532,7 +532,11 @@ fn refuse_problem(t: *Translator, problem: *const file_mod.Problem) Refused {
     const field = if (problem.field) |field| @tagName(field) else @tagName(problem.level);
     const where = if (line == 0) "the image's settings" else "the step";
     switch (problem.kind) {
-        .list_too_long, .text_too_long, .file_too_big, .string_too_long, .too_many_needs,
+        .list_too_long,
+        .text_too_long,
+        .file_too_big,
+        .string_too_long,
+        .too_many_needs,
         .too_many_mounts,
         => return refuse(t.refusal(), .E0815, line, "{s} from Dockerfile:{d} goes past the " ++
             "builder's bound on .{s} ({t})", .{ where, line, field, problem.kind }, "split " ++
@@ -608,7 +612,8 @@ pub fn absolute(
     path: []const u8,
     keep_slash: bool,
 ) Refused![]const u8 {
-    assert(directory.len > 0 and directory[0] == '/');
+    assert(directory.len > 0);
+    assert(directory[0] == '/');
     var parts: [constants.path_bytes_max / 2 + 2][]const u8 = undefined;
     var count: usize = 0;
     const joined = [2][]const u8{ if (path.len > 0 and path[0] == '/') "" else directory, path };

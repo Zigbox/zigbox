@@ -119,14 +119,14 @@ pub const Parsed = struct {
 /// The physical lines of a text, each without its line end (`\n` or `\r\n`).
 const Lines = struct {
     text: []const u8,
-    at: usize = 0,
+    at: u32 = 0,
     number: u32 = 0,
 
     fn next(lines: *Lines) ?[]const u8 {
         if (lines.at >= lines.text.len) return null;
         const rest = lines.text[lines.at..];
         const end = std.mem.indexOfScalar(u8, rest, '\n') orelse rest.len;
-        lines.at += end + 1;
+        lines.at += @intCast(end + 1);
         lines.number += 1;
         assert(lines.number <= lines.text.len);
         const line = rest[0..end];
@@ -331,7 +331,13 @@ fn marker_after(text: []const u8, from: usize) ?Marker {
             if (index >= text.len or text[index] != quote) continue;
             index += 1;
         }
-        return .{ .start = found, .end = index, .name = name, .strip = strip, .quoted = quote != 0 };
+        return .{
+            .start = found,
+            .end = index,
+            .name = name,
+            .strip = strip,
+            .quoted = quote != 0,
+        };
     }
     return null;
 }

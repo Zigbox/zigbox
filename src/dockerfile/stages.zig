@@ -130,6 +130,7 @@ pub fn stage_named(t: *const Translator, name: []const u8, before: u32) ?u32 {
     }
     if (name.len == 0 or name.len > 2) return null;
     for (name) |byte| if (!std.ascii.isDigit(byte)) return null;
+    // One or two digits, checked above, always parse.
     const number = std.fmt.parseInt(u32, name, 10) catch unreachable;
     return if (number < before) number else null;
 }
@@ -224,9 +225,10 @@ fn collision(t: *Translator, index: u32) Refused!void {
         var theirs: [slug_bytes_max]u8 = undefined;
         if (!std.mem.eql(u8, own, slug(t, @intCast(other_index), &theirs))) continue;
         const line = ws.stages[index].line;
-        return refuse(t.refusal(), .E0813, line, "the stages at Dockerfile:{d} and " ++
-            "Dockerfile:{d} both make steps named `{s}-<n>`", .{ other.line, line, own }, "rename " ++
-            "one of the stages so their names differ in [a-z0-9-]", .{});
+        const what = "the stages at Dockerfile:{d} and Dockerfile:{d} both make steps named " ++
+            "`{s}-<n>`";
+        const fix = "rename one of the stages so their names differ in [a-z0-9-]";
+        return refuse(t.refusal(), .E0813, line, what, .{ other.line, line, own }, fix, .{});
     }
 }
 
@@ -237,13 +239,14 @@ pub fn slug(t: *const Translator, index: u32, buffer: *[slug_bytes_max]u8) []con
     if (stage.name) |name| {
         for (name) |byte| {
             const lower = std.ascii.toLower(byte);
-            const kept = std.ascii.isDigit(lower) or (lower >= 'a' and lower <= 'z') or lower == '-';
+            const kept = std.ascii.isDigit(lower) or std.ascii.isLower(lower) or lower == '-';
             if (!kept or length == buffer.len) continue;
             buffer[length] = lower;
             length += 1;
         }
     }
     if (length > 0) return buffer[0..length];
+    // `stage` and at most two digits fit: there are at most import_stages_max stages.
     return std.fmt.bufPrint(buffer, "stage{d}", .{index}) catch unreachable;
 }
 

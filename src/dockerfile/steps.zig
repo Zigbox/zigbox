@@ -72,7 +72,7 @@ fn begin(t: *Translator, instruction: *const Instruction, kind: report_mod.Kind)
     const step = &ws.report.steps[index];
     const name = std.fmt.bufPrint(&step.name, "{s}-{d}", .{
         stages.slug(t, t.stage, &buffer), stage.steps_count,
-    }) catch unreachable;
+    }) catch unreachable; // A slug and a step number fit the name buffer.
     step.name_len = @intCast(name.len);
     step.line = line;
     step.kind = kind;
@@ -246,9 +246,9 @@ fn mount(t: *Translator, line: u32, written: []const u8, mounts: *Mounts) Error!
     while (parts.next()) |part| {
         const key = part[0 .. std.mem.indexOfScalar(u8, part, '=') orelse part.len];
         const known = [_][]const u8{
-            "type",   "target", "dst",  "destination", "source", "src",     "from",
-            "id",     "ro",     "readonly", "rw",      "readwrite", "mode", "uid",
-            "gid",    "sharing",
+            "type", "target",  "dst",      "destination", "source",    "src",  "from",
+            "id",   "ro",      "readonly", "rw",          "readwrite", "mode", "uid",
+            "gid",  "sharing",
         };
         for (known) |name| {
             if (std.mem.eql(u8, name, key)) break;
@@ -332,10 +332,8 @@ fn put_mounts(t: *Translator, mounts: *const Mounts) Refused!void {
                 try t.put(", .mode = ");
                 try t.put_string(mode);
             }
-            for ([_]?[]const u8{ cache.uid, cache.gid }, [_][]const u8{ "uid", "gid" }) |id, field| {
-                const number = id orelse continue;
-                try number_field(t, field, number);
-            }
+            if (cache.uid) |uid| try number_field(t, "uid", uid);
+            if (cache.gid) |gid| try number_field(t, "gid", gid);
             try t.put(" },\n");
         }
         try t.put(indent ++ "},\n");
@@ -361,8 +359,8 @@ fn number_field(t: *Translator, field: []const u8, number: []const u8) Refused!v
             if (!std.ascii.isDigit(byte)) break false;
         } else true;
     if (!good or (std.fmt.parseInt(u32, number, 10) catch null) == null) {
-        return unsupported(t, t.line, "RUN --mount=type=cache with a non-numeric ", field, "write " ++
-            "the id as a number");
+        const what = "RUN --mount=type=cache with a non-numeric ";
+        return unsupported(t, t.line, what, field, "write the id as a number");
     }
     try t.put(", .");
     try t.put(field);
@@ -406,6 +404,55 @@ fn env_item(t: *Translator, count: *u32, key: []const u8, value: []const u8) Ref
     count.* += 1;
 }
 
+const CopyFlags = struct {
+    from: ?[]const u8 = null,
+    chown: ?[]const u8 = null,
+    chmod: ?[]const u8 = null,
+    unpack: bool = true,
+    excludes: [words.flags_max][]const u8 = undefined,
+    excludes_count: u32 = 0,
+    /// `ADD --checksum` or `--keep-git-dir`: refused after the sources, so that `ADD
+    /// --checksum=... <url>` is refused for its URL.
+    remote_flag: ?[]const u8 = null,
+};
+
+fn copy_flags(
+    t: *Translator,
+    instruction: *const Instruction,
+    flags: *const words.Flags,
+    context: *const words.Context,
+) Error!CopyFlags {
+    const line = instruction.line;
+    const add = instruction.keyword == .add;
+    var result: CopyFlags = .{};
+    for (flags.slice()) |flag| {
+        const value = try words.word_of(flag.value orelse "", context, &t.out, t.refusal());
+        const name = flag.name;
+        if (std.mem.eql(u8, name, "from")) {
+            result.from = value;
+        } else if (std.mem.eql(u8, name, "chown")) {
+            result.chown = value;
+        } else if (std.mem.eql(u8, name, "chmod")) {
+            result.chmod = value;
+        } else if (std.mem.eql(u8, name, "exclude")) {
+            result.excludes[result.excludes_count] = value;
+            result.excludes_count += 1;
+        } else if (std.mem.eql(u8, name, "link")) {
+            t.drop(line, "COPY --link", "ignored: a copy step has its meaning already");
+        } else if (add and std.mem.eql(u8, name, "unpack") and std.mem.eql(u8, value, "false")) {
+            result.unpack = false;
+        } else if (add and (std.mem.eql(u8, name, "checksum") or
+            std.mem.eql(u8, name, "keep-git-dir")))
+        {
+            if (result.remote_flag == null) result.remote_flag = name;
+        } else {
+            return unsupported(t, line, "--", name, "remove the flag");
+        }
+    }
+    assert(result.excludes_count <= flags.count);
+    return result;
+}
+
 /// `COPY` and `ADD`: one copy step with one entry.
 pub fn copy(t: *Translator, instruction: *const Instruction) Error!void {
     const line = instruction.line;
@@ -417,39 +464,7 @@ pub fn copy(t: *Translator, instruction: *const Instruction) Error!void {
     var flags: words.Flags = undefined;
     try words.flags_of(t.text(instruction.text), line, &flags, t.refusal());
     const context = t.stage_context(line);
-    var from: ?[]const u8 = null;
-    var chown: ?[]const u8 = null;
-    var chmod: ?[]const u8 = null;
-    var unpack = true;
-    var excludes: [words.flags_max][]const u8 = undefined;
-    var excludes_count: u32 = 0;
-    var remote_flag: ?[]const u8 = null;
-    for (flags.slice()) |flag| {
-        const value = try words.word_of(flag.value orelse "", &context, &t.out, t.refusal());
-        if (std.mem.eql(u8, flag.name, "from")) {
-            from = value;
-        } else if (std.mem.eql(u8, flag.name, "chown")) {
-            chown = value;
-        } else if (std.mem.eql(u8, flag.name, "chmod")) {
-            chmod = value;
-        } else if (std.mem.eql(u8, flag.name, "exclude")) {
-            excludes[excludes_count] = value;
-            excludes_count += 1;
-        } else if (std.mem.eql(u8, flag.name, "link")) {
-            t.drop(line, "COPY --link", "ignored: a copy step has its meaning already");
-        } else if (instruction.keyword == .add and std.mem.eql(u8, flag.name, "unpack") and
-            std.mem.eql(u8, value, "false"))
-        {
-            unpack = false;
-        } else if (instruction.keyword == .add and remote_flag == null and
-            (std.mem.eql(u8, flag.name, "checksum") or std.mem.eql(u8, flag.name, "keep-git-dir")))
-        {
-            // Refused after the sources, so `ADD --checksum=... <url>` names the URL.
-            remote_flag = flag.name;
-        } else {
-            return unsupported(t, line, "--", flag.name, "remove the flag");
-        }
-    }
+    const given = try copy_flags(t, instruction, &flags, &context);
     var list: words.WordList = undefined;
     if (!try words.exec_form(flags.rest, line, &t.out, &list, t.refusal())) {
         try words.words_of(flags.rest, &context, &t.out, &list, t.refusal());
@@ -462,18 +477,28 @@ pub fn copy(t: *Translator, instruction: *const Instruction) Error!void {
         });
     }
     const sources = items[0 .. items.len - 1];
-    if (instruction.keyword == .add) try add_sources(t, line, sources, unpack);
-    if (remote_flag) |flag| return unsupported(t, line, "ADD --", flag, "remove the flag");
-    const state = t.state();
-    const to = try translate.absolute(t, line, state.directory(), items[items.len - 1], true);
+    if (instruction.keyword == .add) try add_sources(t, line, sources, given.unpack);
+    if (given.remote_flag) |flag| return unsupported(t, line, "ADD --", flag, "remove the flag");
+    const to = try translate.absolute(t, line, t.state().directory(), items[items.len - 1], true);
     var from_text: ?[]const u8 = null;
-    if (from) |name| {
+    if (given.from) |name| {
         from_text = try stage_head(t, line, name) orelse image: {
             _ = try t.reach(line, name);
             break :image name;
         };
     }
     const name = try begin(t, instruction, .copy);
+    try put_copy(t, &given, from_text, sources, to);
+    try end(t, name);
+}
+
+fn put_copy(
+    t: *Translator,
+    given: *const CopyFlags,
+    from_text: ?[]const u8,
+    sources: []const []const u8,
+    to: []const u8,
+) Refused!void {
     try t.put(indent ++ ".copy = .{\n" ++ indent ++ "    .{ ");
     if (from_text) |text| {
         try t.put(".from = ");
@@ -487,23 +512,23 @@ pub fn copy(t: *Translator, instruction: *const Instruction) Error!void {
     }
     try t.put(" }, .to = ");
     try t.put_string(to);
-    for ([_]?[]const u8{ chown, chmod }, [_][]const u8{ "chown", "chmod" }) |value, field| {
-        const text = value orelse continue;
-        try t.put(", .");
-        try t.put(field);
-        try t.put(" = ");
-        try t.put_string(text);
+    if (given.chown) |chown| {
+        try t.put(", .chown = ");
+        try t.put_string(chown);
     }
-    if (excludes_count > 0) {
+    if (given.chmod) |chmod| {
+        try t.put(", .chmod = ");
+        try t.put_string(chmod);
+    }
+    if (given.excludes_count > 0) {
         try t.put(", .exclude = .{");
-        for (excludes[0..excludes_count], 0..) |pattern, index| {
+        for (given.excludes[0..given.excludes_count], 0..) |pattern, index| {
             try t.put(if (index == 0) " " else ", ");
             try t.put_string(pattern);
         }
         try t.put(" }");
     }
     try t.put(" },\n" ++ indent ++ "},\n");
-    try end(t, name);
 }
 
 /// A context source as the builder reads it: relative to the project (Docker reads `/x` there
@@ -524,9 +549,10 @@ fn add_sources(t: *Translator, line: u32, sources: []const []const u8, unpack: b
         const remote = std.mem.indexOf(u8, source, "://") != null or
             std.mem.startsWith(u8, source, "git@");
         if (remote) {
+            const fix = "fetch it in a RUN with a checksum: `RUN curl -fsSLo /f <url> && " ++
+                "echo \"<sha256>  /f\" | sha256sum -c`";
             return refuse(t.refusal(), .E0811, line, "Dockerfile:{d} has ADD {s}, which " ++
-                "fetches at build time", .{ line, source }, "fetch it in a RUN with a " ++
-                "checksum: `RUN curl -fsSLo /f <url> && echo \"<sha256>  /f\" | sha256sum -c`", .{});
+                "fetches at build time", .{ line, source }, fix, .{});
         }
         if (!unpack) continue;
         for (archives) |suffix| {

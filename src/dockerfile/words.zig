@@ -156,7 +156,7 @@ pub fn exec_form(
 
 const Json = struct {
     text: []const u8,
-    at: usize = 0,
+    at: u32 = 0,
 
     fn skip(json: *Json) void {
         while (json.at < json.text.len) : (json.at += 1) {
@@ -227,7 +227,12 @@ const Json = struct {
 
 /// The whole of `text` as one word: quotes removed, escapes read, variables substituted, and
 /// whitespace kept (`WORKDIR`, `USER`, the legacy `ENV key value`).
-pub fn word_of(text: []const u8, context: *const Context, out: *Out, refusal: *Refusal) ![]const u8 {
+pub fn word_of(
+    text: []const u8,
+    context: *const Context,
+    out: *Out,
+    refusal: *Refusal,
+) ![]const u8 {
     var list: WordList = undefined;
     list.count = 0;
     const start = out.mark();
@@ -464,8 +469,10 @@ fn operator_at(text: []const u8, index: *usize, refusal: *Refusal, line: u32) Re
         '+' => return if (colon) .alt_empty else .alt_unset,
         '?' => return if (colon) .error_empty else .error_unset,
         '#', '%', '/' => if (!colon) {
-            return refuse(refusal, .E0811, line, "Dockerfile:{d} uses the `${{X{c}...}}` " ++
-                "substitution, which is pre-release Dockerfile syntax", .{ line, text[at] }, "do the edit in a RUN step's shell, or pass the value with --build-arg", .{});
+            const what = "Dockerfile:{d} uses the `${{X{c}...}}` substitution, which is " ++
+                "pre-release Dockerfile syntax";
+            const fix = "do the edit in a RUN step's shell, or pass the value with --build-arg";
+            return refuse(refusal, .E0811, line, what, .{ line, text[at] }, fix, .{});
         },
         else => {},
     }

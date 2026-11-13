@@ -37,9 +37,10 @@ pub fn apply(t: *Translator, instruction: *const Instruction) Error!void {
 
 fn expect_no_heredoc(t: *Translator, instruction: *const Instruction) Refused!void {
     if (instruction.heredocs_count == 0) return;
-    return refuse(t.refusal(), .E0811, instruction.line, "Dockerfile:{d} has a heredoc in {s}, " ++
-        "which zbx import reads only in RUN", .{ instruction.line, instruction.keyword.upper() },
-        "write the value on the line", .{});
+    const what = "Dockerfile:{d} has a heredoc in {s}, which zbx import reads only in RUN";
+    const args = .{ instruction.line, instruction.keyword.upper() };
+    return refuse(t.refusal(), .E0811, instruction.line, what, args, "write the value on " ++
+        "the line", .{});
 }
 
 /// The instruction's text with no flags; a flag is refused.
@@ -108,9 +109,10 @@ fn env(t: *Translator, instruction: *const Instruction) Error!void {
             if (std.mem.eql(u8, pair.key, key)) break index;
         } else slot: {
             if (state.env_count == constants.build_config_env_max) {
-                return refuse(t.refusal(), .E0815, instruction.line, "Dockerfile:{d} sets more " ++
-                    "than {d} env variables", .{ instruction.line, constants.build_config_env_max },
-                    "set fewer variables with ENV", .{});
+                const what = "Dockerfile:{d} sets more than {d} env variables";
+                const args = .{ instruction.line, constants.build_config_env_max };
+                return refuse(t.refusal(), .E0815, instruction.line, what, args, "set fewer " ++
+                    "variables with ENV", .{});
             }
             state.env_count += 1;
             break :slot state.env_count - 1;
@@ -147,7 +149,9 @@ pub fn arg(t: *Translator, instruction: *const Instruction, scope: Scope) Error!
             continue;
         }
         var value: ?[]const u8 = if (equals) |at| word[at + 1 ..] else null;
-        if (translate.build_arg(t.options, name)) |given| value = try t.keep(instruction.line, given);
+        if (translate.build_arg(t.options, name)) |given| {
+            value = try t.keep(instruction.line, given);
+        }
         if (value == null and scope == .stage) value = inherited(t, name);
         if (value == null) value = platform(t, name);
         const list_args = switch (scope) {
@@ -159,9 +163,10 @@ pub fn arg(t: *Translator, instruction: *const Instruction, scope: Scope) Error!
             .stage => &ws.args_count,
         };
         if (count.* == constants.import_variables_max) {
-            return refuse(t.refusal(), .E0815, instruction.line, "Dockerfile:{d} declares more " ++
-                "than {d} ARGs", .{ instruction.line, constants.import_variables_max }, "declare " ++
-                "fewer ARGs", .{});
+            const what = "Dockerfile:{d} declares more than {d} ARGs";
+            const args = .{ instruction.line, constants.import_variables_max };
+            return refuse(t.refusal(), .E0815, instruction.line, what, args, "declare fewer " ++
+                "ARGs", .{});
         }
         list_args[count.*] = .{ .name = name, .value = value };
         count.* += 1;
@@ -347,6 +352,7 @@ fn kept(t: *Translator, instruction: *const Instruction) Error!void {
     }
     try set_label(t, line, key, value);
     var became: [64]u8 = undefined;
+    // The longest key is `org.zigbox.import.healthcheck`, well inside the buffer.
     const shown = std.fmt.bufPrint(&became, "label {s}", .{key}) catch unreachable;
     t.drop(line, instruction.keyword.upper(), shown);
 }

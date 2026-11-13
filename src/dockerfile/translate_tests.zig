@@ -1,5 +1,6 @@
 //! The translator's acceptance set: each fixture under `src/build/dockerfile_fixtures/` with its
-//! golden translation (`.zon`) or golden refusal (`.refused`), through a table resolver
+//! golden translation (`.golden`, the build file) or golden refusal (`.refused`), through a
+//! table resolver
 //! (docs/briefs/M9-dockerfile-import.md, "The fixtures"). Changing the translation means
 //! updating the golden in the same commit.
 
@@ -23,7 +24,8 @@ pub const Table = struct {
         table.resolved += 1;
         const path = "PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin";
         if (std.mem.startsWith(u8, reference, "golang:")) {
-            return .{ .env = &.{ "PATH=/go/bin:/usr/local/go/bin:/usr/sbin:/usr/bin", "GOPATH=/go" }, .workdir = "/go" };
+            const go = "PATH=/go/bin:/usr/local/go/bin:/usr/sbin:/usr/bin";
+            return .{ .env = &.{ go, "GOPATH=/go" }, .workdir = "/go" };
         }
         return .{ .env = &.{path}, .workdir = "" };
     }
@@ -31,7 +33,7 @@ pub const Table = struct {
 
 pub const Case = struct {
     dockerfile: []const u8,
-    /// The golden's name, without `.zon` or `.refused`.
+    /// The golden's name, without `.golden` or `.refused`.
     golden: []const u8,
     dockerignore: []const u8 = "",
     build_args: []const translate.BuildArg = &.{},
@@ -45,7 +47,10 @@ pub const cases = [_]Case{
     .{
         .dockerfile = "arg_from",
         .golden = "arg_from.build_arg",
-        .build_args = &.{ .{ .name = "ARCH", .value = "arm64" }, .{ .name = "OS", .value = "linux" } },
+        .build_args = &.{
+            .{ .name = "ARCH", .value = "arm64" },
+            .{ .name = "OS", .value = "linux" },
+        },
     },
     .{ .dockerfile = "arg_from_no_default", .golden = "arg_from_no_default" },
     .{
@@ -95,7 +100,11 @@ pub fn options_of(case: *const Case, dockerfile: []const u8, table: *Table) tran
 
 /// The translation as a golden holds it: the build file, or the refusal's code, line and two
 /// sentences.
-pub fn outcome(ws: *translate.Workspace, options: *const translate.Options, buffer: []u8) ![]const u8 {
+pub fn outcome(
+    ws: *translate.Workspace,
+    options: *const translate.Options,
+    buffer: []u8,
+) ![]const u8 {
     const output = translate.translate(ws, options) catch |err| {
         assert(err == error.Refused);
         const refusal = &ws.refusal;
@@ -130,7 +139,7 @@ test "every fixture translates to its golden, or is refused as its golden says" 
 }
 
 fn golden(comptime name: []const u8) []const u8 {
-    const zon = fixtures ++ name ++ ".zon";
+    const zon = fixtures ++ name ++ ".golden";
     const refused = fixtures ++ name ++ ".refused";
     return if (comptime exists(name)) @embedFile(zon) else @embedFile(refused);
 }
@@ -138,7 +147,7 @@ fn golden(comptime name: []const u8) []const u8 {
 /// Whether the golden is a translation: the refusal goldens are listed here.
 fn exists(comptime name: []const u8) bool {
     const refusals = [_][]const u8{
-        "arg_from_no_default", "add_url",   "add_git",  "secret_mount", "mounts.hermetic",
+        "arg_from_no_default", "add_url",   "add_git", "secret_mount",    "mounts.hermetic",
         "target_skips.last",   "label_key", "onbuild", "stage_collision",
     };
     for (refusals) |refused| {

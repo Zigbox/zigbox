@@ -73,7 +73,7 @@ const Word = struct {
 
 const Words = struct {
     text: []const u8,
-    at: usize = 0,
+    at: u32 = 0,
 
     fn next(words: *Words) ?Word {
         var after_separator = false;

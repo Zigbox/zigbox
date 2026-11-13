@@ -175,8 +175,14 @@ test "the report shows each step's line and flags, then what was dropped" {
     report.dropped_count = 0;
     report.steps_count = 1;
     report.steps[0] = .{
-        .name = undefined, .name_len = 7, .line = 11, .kind = .run,
-        .network = "apk add", .matched = true, .cache = true, .bind = false,
+        .name = undefined,
+        .name_len = 7,
+        .line = 11,
+        .kind = .run,
+        .network = "apk add",
+        .matched = true,
+        .cache = true,
+        .bind = false,
     };
     @memcpy(report.steps[0].name[0..7], "tools-1");
     report.drop(9, "EXPOSE", "label org.zigbox.import.expose");
@@ -190,8 +196,8 @@ test "the report shows each step's line and flags, then what was dropped" {
     var json_buffer: [1024]u8 = undefined;
     var json_writer: Writer = .fixed(&json_buffer);
     try render_json(&report, "t.zon", &json_writer);
-    const parsed = try std.json.parseFromSlice(std.json.Value, testing.allocator,
-        json_writer.buffered(), .{});
+    const json = json_writer.buffered();
+    const parsed = try std.json.parseFromSlice(std.json.Value, testing.allocator, json, .{});
     defer parsed.deinit();
     try testing.expectEqual(@as(i64, 1), parsed.value.object.get("flagged").?.integer);
 }

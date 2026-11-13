@@ -34,7 +34,11 @@ pub const Notes = struct {
 
 /// `render` with comments: what `zbx import` writes. The comments do not change what the file
 /// parses to.
-pub fn render_noted(file: *const BuildFile, notes: *const Notes, writer: *Writer) Writer.Error!void {
+pub fn render_noted(
+    file: *const BuildFile,
+    notes: *const Notes,
+    writer: *Writer,
+) Writer.Error!void {
     assert(notes.steps.len == file.steps_count);
     for (notes.steps) |note| assert(std.mem.indexOfScalar(u8, note, '\n') == null);
     return render_with(file, notes, writer);
