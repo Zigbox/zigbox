@@ -30,6 +30,8 @@ const Host = struct {
     locked: u32,
     kfd: bool,
     spec: bool,
+    /// The NVIDIA kernel driver is loaded (`/proc/driver/nvidia/version` is there).
+    nvidia_driver: bool = false,
 };
 
 const render_names = [_][]const u8{
@@ -57,6 +59,9 @@ fn setup(sim: *HostSim, files: *Files, host: Host) void {
     files.add(.{ .path = "/dev/dri/card0", .content = "", .mode = char_mode, .gid = 44 });
     if (host.kfd) files.add(.{ .path = "/dev/kfd", .content = "", .mode = char_mode, .gid = 44 });
     if (host.spec) files.add(.{ .path = "/dev/nvidia0", .content = "", .mode = 0o020666 });
+    if (host.nvidia_driver) {
+        files.add(.{ .path = nvidia_version, .content = "NVRM", .mode = 0o444 });
+    }
     sim_run.start(sim, 5, files.items[0..files.count]);
     sim.groups[0] = 44;
     sim.groups_count = 1;
@@ -72,6 +77,17 @@ fn setup(sim: *HostSim, files: *Files, host: Host) void {
         std.debug.assert(sim.world.write_file("/etc/cdi/nvidia.json", nvidia_spec) == null);
     }
 }
+
+const nvidia_version = "/proc/driver/nvidia/version";
+
+/// One openable render node and the NVIDIA driver, with no usable spec.
+const nvidia_host: Host = .{
+    .open = 1,
+    .locked = 0,
+    .kfd = false,
+    .spec = false,
+    .nvidia_driver = true,
+};
 
 fn run_gpu(sim: *HostSim, word: [:0]const u8) u8 {
     const line = [_][:0]const u8{
@@ -176,15 +192,15 @@ test "look_dri and expand serve a caller that has no command line" {
     try testing.expectEqualStrings("/dev/kfd", dri.path(2));
 }
 
-test "--gpu all raises E0226 for a YAML spec instead of falling back to the render nodes" {
+test "--gpu all raises E0226 for a YAML spec on a host with the NVIDIA driver" {
     // Goal: the review's MUST. An NVIDIA host has nvidia-drm's render node, so a fallback would
-    // start the run with no driver libraries and no diagnostic. Method: openable node + YAML spec.
+    // start the run with no driver libraries and no diagnostic. Method: openable node, YAML
+    // spec, and the driver's /proc file.
     const sim = sim_get();
     defer testing.allocator.destroy(sim);
     var files: Files = undefined;
-    setup(sim, &files, .{ .open = 1, .locked = 0, .kfd = false, .spec = false });
-    sim.world.add_node("/etc/cdi", .dir);
-    std.debug.assert(sim.world.write_file("/etc/cdi/nvidia.yaml", "cdiVersion: 0.6.0\n") == null);
+    setup(sim, &files, nvidia_host);
+    write_yaml(sim, "/etc/cdi/nvidia.yaml");
     try testing.expectEqual(@as(u8, 125), run_gpu(sim, "all"));
     try testing.expect(std.mem.indexOf(u8, sim.stderr(), "ZBX-E0226") != null);
     try testing.expect(!bound(sim, "/dev/dri/renderD128"));
@@ -218,4 +234,47 @@ test "--gpu dri with more render nodes than a run takes says so, and does not bl
     try testing.expect(std.mem.indexOf(u8, text, "ZBX-E0225") != null);
     try testing.expect(std.mem.indexOf(u8, text, "--gpu dri found render nodes") != null);
     try testing.expect(std.mem.indexOf(u8, text, "name the nodes you want") != null);
+}
+
+test "--gpu all on a host without the NVIDIA driver gives the render node past a YAML spec" {
+    // Goal: the re-review's MUST, part (b). Another vendor's YAML spec says nothing about NVIDIA,
+    // so `all` is `dri`, as the brief has it. Method: openable node, YAML spec, no driver.
+    const sim = sim_get();
+    defer testing.allocator.destroy(sim);
+    var files: Files = undefined;
+    setup(sim, &files, .{ .open = 1, .locked = 0, .kfd = false, .spec = false });
+    write_yaml(sim, "/etc/cdi/amd.yaml");
+    try testing.expectEqual(@as(u8, 0), run_gpu(sim, "all"));
+    try testing.expect(bound(sim, "/dev/dri/renderD128"));
+}
+
+test "--gpu dri takes no look at the CDI specs" {
+    // Goal: the re-review's MUST, part (a): `dri` is the render nodes with no vendor tooling, so
+    // an unusable spec cannot refuse it, even on an NVIDIA host. Method: YAML spec, driver.
+    const sim = sim_get();
+    defer testing.allocator.destroy(sim);
+    var files: Files = undefined;
+    setup(sim, &files, nvidia_host);
+    write_yaml(sim, "/etc/cdi/nvidia.yaml");
+    try testing.expectEqual(@as(u8, 0), run_gpu(sim, "dri"));
+    try testing.expect(bound(sim, "/dev/dri/renderD128"));
+}
+
+test "--gpu all with a YAML spec and nothing openable names the spec in E0228" {
+    // Goal: the fallback keeps the spec's trouble as a cause of E0228. Method: YAML spec, no
+    // driver, a render node closed to the user.
+    const sim = sim_get();
+    defer testing.allocator.destroy(sim);
+    var files: Files = undefined;
+    setup(sim, &files, .{ .open = 0, .locked = 1, .kfd = false, .spec = false });
+    write_yaml(sim, "/etc/cdi/amd.yaml");
+    try testing.expectEqual(@as(u8, 125), run_gpu(sim, "all"));
+    const stderr = sim.stderr();
+    try testing.expect(std.mem.indexOf(u8, stderr, "ZBX-E0228") != null);
+    try testing.expect(std.mem.indexOf(u8, stderr, "a CDI spec could not be used") != null);
+}
+
+fn write_yaml(sim: *HostSim, path: []const u8) void {
+    sim.world.add_node("/etc/cdi", .dir);
+    std.debug.assert(sim.world.write_file(path, "cdiVersion: 0.6.0\n") == null);
 }

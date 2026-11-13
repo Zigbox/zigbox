@@ -116,9 +116,10 @@ pub fn no_gpu(diag: *Diag, nothing: gpu.Nothing) void {
     diag.while_("looking for a GPU for --gpu {s}", .{word});
     const looked = switch (nothing.ask) {
         .all => "no nvidia.com/gpu device in the CDI specs ($XDG_CONFIG_HOME/cdi, " ++
-            "/var/run/cdi, /etc/cdi), and no render node (/dev/dri/renderD*) or /dev/kfd " ++
-            "that you can open",
-        .dri => "no render node (/dev/dri/renderD*) or /dev/kfd that you can open",
+            "/var/run/cdi, /etc/cdi), and no render node (/dev/dri/renderD*) that you can " ++
+            "open (/dev/kfd alone is not enough)",
+        .dri => "no render node (/dev/dri/renderD*) that you can open (/dev/kfd alone is " ++
+            "not enough)",
     };
     diag.cause("{s}", .{looked});
     if (nothing.unopenable > 0) {
