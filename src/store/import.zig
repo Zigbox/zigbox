@@ -966,7 +966,8 @@ pub fn import(
 
 /// Applies the upper layer at `upper` to the tree `options.parent`: the new tree is in
 /// `result.digest`, written to the store, and is not yet a root (the caller records one, with
-/// the totals only it has). Nothing in `upper` is changed.
+/// the totals only it has), unless `options.label` is set: then it is rooted under that label as
+/// an import's is. Nothing in `upper` is changed.
 pub fn commit(
     store: *Store,
     ws: *Workspace,
@@ -981,8 +982,13 @@ pub fn commit(
     assert(!options.drop_xattrs); // A commit reads overlayfs's attributes for its whiteouts.
     try diagnose.hold(diag, store, .shared, "commit", "committing a container's changes");
     defer lock.release(store);
-    const run = try walk(store, ws, upper, options, result, diag);
+    var run = try walk(store, ws, upper, options, result, diag);
     assert(run.depth == 0);
+    // A caller that labels the root wants one, under the lock the walk held (N8: a build's
+    // output is rooted until its cache entry holds it); one that does not records its own.
+    if (options.save_root and options.label != null) {
+        try run.save_root(options.label.?, options.keep_existing_root);
+    }
 }
 
 fn walk(

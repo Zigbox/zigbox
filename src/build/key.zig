@@ -59,6 +59,20 @@ pub const Spec = struct {
     workdir: ?[]const u8 = null,
     binds: []const Bind = &.{},
     copies: []const Copy = &.{},
+    /// The step's cache directories (`.caches`). Not read by `compute`: a cache never changes
+    /// what a step's output is defined by. The step mounts them (`step.zig`).
+    caches: []const CacheMount = &.{},
+};
+
+/// A cache directory of a step: kept per build file under the store, bound at `path`.
+pub const CacheMount = struct {
+    id: []const u8,
+    path: []const u8,
+    ro: bool = false,
+    /// The mode, ids and owner the directory is made with; null: 0755, the step's user.
+    mode: ?u16 = null,
+    uid: ?u32 = null,
+    gid: ?u32 = null,
 };
 
 /// A read-only mount of a source tree at `to`, in the file's order.

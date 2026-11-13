@@ -222,8 +222,10 @@ pub const Code = enum(u8) {
     E0805,
     E0806,
     E0807,
+    E0808,
     W0801,
     E0817,
+    E0818,
     W0802,
     E0901,
     E0902,
@@ -3440,11 +3442,11 @@ pub const registry = [_]Entry{
         \\need order: a -> b -> a means a needs b and b needs a.
         \\
         \\The same code refuses a file that parses but uses something this zbx
-        \\reads and cannot build yet: a copy, a cache, a bind, an exclude, a
-        \\.user or .workdir on a step, a named .user in .image.config,
-        \\.output = .root, a step: base, or an input
-        \\with a pattern in it. The cause names the field; zbx build --graph still
-        \\shows the whole file.
+        \\reads and does not build: a copy with .chown or .chmod, a copy from
+        \\an image, an .exclude on a copy from a step:, a bind from the
+        \\project's files or from an image (a bind takes a step: output only),
+        \\or a bind on a copy step. The cause names the field; zbx build
+        \\--graph still shows the whole file.
         \\
         \\Nothing runs before the whole graph is valid. zbx build --graph prints
         \\it, in the order a build starts the steps.
@@ -3534,6 +3536,24 @@ pub const registry = [_]Entry{
         ,
     },
     .{
+        .code = .E0808,
+        .severity = .@"error",
+        .blame = .user,
+        .summary = "the build was stopped by a signal",
+        .explanation =
+        \\zbx build stops when it gets SIGINT (Ctrl-C) or SIGTERM (kill, or a CI job
+        \\that timed out). It does not end at once: it stops the steps that are
+        \\running, removes the work they had begun and the store roots that kept
+        \\their inputs, and then exits with this error, so a stopped build leaves
+        \\nothing for store gc to keep. The steps that had finished are in the build
+        \\cache, and the next zbx build starts from them.
+        \\
+        \\The cause names the signal. Nothing is wrong with the build file or the
+        \\host; run zbx build again when you want the result. A build started in the
+        \\background of a script, with the signal ignored, keeps ignoring it.
+        ,
+    },
+    .{
         .code = .W0801,
         .severity = .warning,
         .blame = .user,
@@ -3568,6 +3588,25 @@ pub const registry = [_]Entry{
         \\the name. To fix it, add the user or group in an earlier step (for example a
         \\step that runs adduser) and base this step on it with .base = "step:NAME",
         \\or write the id as a number.
+        ,
+    },
+    .{
+        .code = .E0818,
+        .severity = .@"error",
+        .blame = .user,
+        .summary = "a glob matched more paths than one import can hold",
+        .explanation =
+        \\An input or a copy source written as a glob is matched against the project
+        \\when the build runs, and every path it matches is kept so that the step's
+        \\inputs enter its tree in order. One import (a step's inputs, or one copy
+        \\entry's source, from the project or from a step's output) holds at most
+        \\65536 matched paths and 4 MiB of their names; each import starts afresh.
+        \\A directory that a glob matches counts once, however many files it holds.
+        \\
+        \\The cause names the input and the bound. To fix it, match a directory
+        \\instead of the files in it, narrow the glob, or add the paths you do not
+        \\need to .exclude (an excluded path is never walked into when no line
+        \\re-includes anything).
         ,
     },
     .{
@@ -4402,7 +4441,7 @@ pub fn can_end_run(code: Code) bool {
         .E0515, .E0516, .E0517, .W0501, .W0502, .E0526, .W0551, .W0552 => false,
         .E0527, .E0528, .E0529, .E0530, .E0531, .E0532, .E0533, .E0534, .E0535 => false,
         .E0801, .E0802, .E0803, .E0804, .E0805, .E0806, .E0807, .W0801 => false,
-        .E0817, .W0802 => false,
+        .E0808, .E0817, .E0818, .W0802 => false,
         .E0901, .E0902, .E0908, .E0909, .E0910, .E0911, .W0901, .W0902, .W0903 => false,
         .E1006, .E1007 => false,
         .E0220, .E0221, .E0222, .E0223, .E0224, .E0225, .E0226, .E0227 => false,

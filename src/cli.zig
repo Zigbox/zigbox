@@ -111,41 +111,42 @@ const help_text =
     \\  --rootfs <dir>  or a directory to use as the container's root, read and written in place
     \\  --name <name>   the container's name and hostname (default: zbx- and six hex digits)
     \\  --memory <size> memory limit: 128m, 1g (needs the systemd user manager)
-    \\  --pids <n>      limit on processes and threads, as in 64
-    \\  --cpus <n>      limit on CPU time, in CPUs: 0.5 is half of one
+    \\  --pids <n>      limit on processes and threads
+    \\  --cpus <n>      CPU limit, in CPUs: 0.5 is half of one
     \\  --read-only     mount the root read-only, with a tmpfs at /tmp and /run
     \\  --net <mode>    none (the default: a network of its own, only lo), host (share the host's)
     \\                  or user (the network through pasta, as the user: apt install passt)
     \\  --publish <h:c> forward TCP port h of this machine to port c of the container (repeatable;
     \\                  implies --net user)
-    \\  --listen <addr:port>  a TCP listener on the container's loopback (127.0.0.1 only;
-    \\                  --net none only), handed to the caller with --listen-send
-    \\  --listen-send <fd>  the inherited Unix socket the listener is sent over (SCM_RIGHTS)
+    \\  --listen <addr:port>  make a TCP listener on the container's loopback (only 127.0.0.1;
+    \\                  --net none only) and hand it to the caller with --listen-send
+    \\  --listen-send <fd>  the inherited Unix socket the listener goes over (SCM_RIGHTS)
     \\  -e <name>[=<value>]  set a variable in the container, over the image's (repeatable): with
     \\                  =<value> that value, without it zbx's own (an error if unset there).
     \\                  A value is never stored or printed; only the name is shown
     \\  -d, --detach    start the container and return; zbx ps and zbx stop find it again
-    \\  --timeout <ms>  stop the container when it has run this long (SIGTERM, then SIGKILL)
+    \\  --timeout <ms>  stop the container after this long (SIGTERM, then SIGKILL)
     \\  --grace <ms>    time between SIGTERM and SIGKILL (default 10000)
     \\  --state <name>:<path>[:ro]   mount the state volume <name> at <path> (repeatable, up to
-    \\                  8); made empty on first use; one writer at a time, or :ro for readers
-    \\  --tmpfs <path>[:<size>]   an empty tmpfs at <path>, gone at exit (repeatable; 64m if no
-    \\                  size; k, m or g); its pages count against --memory
+    \\                  8); the first use makes it, empty. One run writes a volume at a time;
+    \\                  :ro mounts it read-only, shared with other readers
+    \\  --tmpfs <path>[:<size>]   an empty tmpfs at <path>, gone at exit (repeatable; 64m without a
+    \\                  size; k, m or g). Its pages count against --memory
     \\  --bind <host>:<path>   the host's directory or file at <path>, always read-only; a
     \\                  <host> that does not exist is an error, never made (repeatable)
     \\  --device /dev/<path>|<vendor/class>=<name>   bind a host device node, or a CDI device from
-    \\                  /etc/cdi, /var/run/cdi or $XDG_CONFIG_HOME/cdi, at its path (repeatable,
-    \\                  up to 16); groups carry over
+    \\                  /etc/cdi, /var/run/cdi or $XDG_CONFIG_HOME/cdi (repeatable, up to
+    \\                  16); groups carry over
     \\  --gpu all|dri   the render nodes and /dev/kfd you can open; all: NVIDIA CDI devices if any
     \\                  (zbx doctor lists them)
     \\  --mount <host>:<path>  the project's directory or file at <path>, writable (repeatable).
-    \\                  <host> may be relative; it must be, or be inside, the project directory
-    \\                  (the one with zbx.lock, else the working directory), links followed.
-    \\                  The container must run as root, which is you: see --user
+    \\                  <host> may be relative; with symbolic links followed it must be the
+    \\                  project directory (the one with zbx.lock, else the working directory) or
+    \\                  inside it. The container must run as root, which is you: see --user
     \\  --secret <host-file>:<path>   a copy of one host file at <path>, read-only, mode 0400,
-    \\                  owned by the container's root; never stored or printed, and left out
-    \\                  of zbx commit (repeatable). Up to 8 of --tmpfs, --bind, --mount and
-    \\                  --secret; no two on one path
+    \\                  owned by the container's root. Never stored or printed; the mount
+    \\                  point is left out of zbx commit (repeatable).
+    \\                  Up to 8 of --tmpfs, --bind, --mount and --secret; no two on one path
     \\  --user <user>[:<group>]   run the command as this user of the image (a name from its
     \\                  /etc/passwd and /etc/group, or a number), over the image's own; --user 0
     \\                  makes a non-root image fit --mount
@@ -157,24 +158,23 @@ const help_text =
     \\
     \\logs:
     \\  zbx logs <name> [--follow] [--tail <n>] [--stream stdout|stderr]
-    \\  every run keeps what its command wrote to standard output and error, in order, in
-    \\  $XDG_STATE_HOME/zbx/logs (~/.local/state/zbx/logs): at most 5 MiB per container, the
-    \\  oldest output dropped first; removed with the container's run record
+    \\  every run keeps its stdout and stderr, in order, in $XDG_STATE_HOME/zbx/logs
+    \\  (~/.local/state/zbx/logs): at most 5 MiB per container, oldest dropped first;
+    \\  removed with the run record
     \\  --follow        go on showing what the container writes; ends, exit 0, when it ends
     \\  --tail <n>      only the last n lines
     \\  --stream <s>    only stdout, or only stderr
-    \\  a stream of a foreground run that is a terminal is left to the container (editors and
-    \\  pagers need it), so it is not logged; zbx logs says so
-    \\  --output json   one zbx.logs/1 object per record (a write of the container), per line;
-    \\                  a refusal is a diagnostic on stderr (zbx schema logs)
+    \\  a foreground run's stream that is a terminal is left to the container, not logged
+    \\  --output json   one zbx.logs/1 object per record, per line; a refusal is a
+    \\                  diagnostic on stderr (zbx schema logs)
     \\
     \\exec:
     \\  zbx exec <name> [-e <name>[=<value>]] [--user <user>[:<group>]] [--workdir <dir>]
     \\           -- <command> [args...]
-    \\  the command joins the container's namespaces and cgroup and has no more than the
-    \\  container: its capabilities, no_new_privs and seccomp filter. By default it has the
-    \\  container's environment, working directory and user; -e, --user and --workdir change
-    \\  them for this command only. With a terminal on zbx's input and output it gets a
+    \\  the command joins the container's namespaces and cgroup, with no more than its
+    \\  capabilities, no_new_privs and seccomp filter. It has the container's
+    \\  environment, directory and user; -e, --user and --workdir change them for it only.
+    \\  With a terminal on zbx's input and output it gets a
     \\  terminal of its own. It ends with the container. zbx ps does not list it; zbx bundle
     \\  of the container notes the recent execs (command and exit, never a value of -e)
     \\  --output json   ends with an exec_exit line on stderr (zbx schema exec)
@@ -191,21 +191,21 @@ const help_text =
     \\                           --output json prints zbx.export/1
     \\  zbx store verify         rehash everything; name each damaged file and the paths it breaks
     \\  zbx store gc             plan a collection of what no root reaches (changes nothing)
-    \\  zbx store gc --confirm <hash>   do that plan: move it to the trash, kept for 7 days
+    \\  zbx store gc --confirm <hash>   do that plan: move it to the trash, kept 7 days
     \\  zbx store gc --trash     list the trash
     \\  zbx store restore <id>   put a gc's trash back
-    \\  a digest is b3: and 64 hex digits, or any unique prefix of 12 or more hex digits
+    \\  a digest is b3: and 64 hex digits, or a unique prefix of 12 or more
     \\
     \\state:
     \\  zbx state ls             each volume: size, created, last used, last container, in use by
     \\  zbx state rm <name>      move a volume that no run holds to the trash, kept for 7 days
     \\  zbx state restore <name> bring the newest trash of <name> back
-    \\  zbx state export <name> [-o <file>]   write the volume as a gzip-compressed tar, owners as
-    \\                           the container sees them (999, not the host's ids), to <file>
+    \\  zbx state export <name> [-o <file>]   write the volume as a gzip tar, owners as the
+    \\                           container sees them (999, not the host's ids), to <file>
     \\                           or standard output (never a terminal); refused while a run
     \\                           writes the volume
-    \\  volumes live in $XDG_DATA_HOME/zbx/state (~/.local/share/zbx/state); store gc never
-    \\  touches them, and nothing but state rm removes one
+    \\  volumes live in $XDG_DATA_HOME/zbx/state (~/.local/share/zbx/state); only state rm
+    \\  removes one
     \\
     \\key:
     \\  zbx key new <name>       make an Ed25519 signing key, its secret sealed under a passphrase
@@ -214,9 +214,9 @@ const help_text =
     \\  zbx key new <name> --no-passphrase   keep the secret in the clear, mode 0600
     \\  zbx key list             each key: name, encryption, id and public key
     \\  zbx key show <name>      one key: name, id, public key and encryption
-    \\  names are up to 32 of a-z, 0-9 and '-'; keys live in $XDG_CONFIG_HOME/zbx/keys
-    \\  (~/.config/zbx/keys), mode 0700; a key is never overwritten; a forgotten passphrase is a
-    \\  lost key; list and show never ask for a passphrase and never print a secret
+    \\  names are up to 32 of a-z, 0-9 and '-'; keys live in $XDG_CONFIG_HOME/zbx/keys, mode
+    \\  0700, never overwritten; a forgotten passphrase is a lost key; list and show never
+    \\  ask for one and never print a secret
     \\
     \\sign:
     \\  zbx sign <what> [--key <name>] [--passphrase-file <file>]
@@ -224,8 +224,8 @@ const help_text =
     \\                  (name@sha256:<manifest digest>); a result or an image is named in
     \\                  the signature, so it counts only for a run of that one
     \\  --key <name>    the key to sign with; optional when there is exactly one
-    \\  the whole tree must be in the store and intact; the signature is added to the tree's
-    \\  record, at most 8 per tree; signing again with the same key changes nothing
+    \\  the whole tree must be in the store and intact; at most 8 signatures per tree;
+    \\  signing again with the same key changes nothing
     \\
     \\verify:
     \\  zbx verify <what> [--key <name>] [--public <ed25519:...>] [--strict] [--require-provenance]
@@ -234,7 +234,7 @@ const help_text =
     \\  a signer is trusted (by every policy file, or by --key or --public); the tree is whole
     \\  and every object hashes to its id; a trusted signature carries provenance of this tree;
     \\  the trees it names are in the store and sound; the build file and zbx.lock here are
-    \\  the ones it names. Reads the store and files only: no network, no registry
+    \\  the ones it names. Reads the store and files only: no network
     \\  --strict        a tree it names that is not in the store fails (else ZBX-W0903)
     \\  --require-provenance   a tree signed without provenance fails
     \\
@@ -251,8 +251,8 @@ const help_text =
     \\  files           /etc/zbx/policy.zon and $XDG_CONFIG_HOME/zbx/policy.zon (~/.config/zbx);
     \\                  a run must pass each one that exists
     \\  prints each file, its rules, each signature of the tree and why it counts or not, and
-    \\  whether the run would start; runs nothing. Exits 0 when it would start, 1 when a policy
-    \\  would refuse it (ZBX-E0905); a file that cannot be read is ZBX-E0904
+    \\  whether the run would start; runs nothing. Exits 0 if it would start, 1 if a policy
+    \\  would refuse it (ZBX-E0905); an unreadable file is ZBX-E0904
     \\
     \\push:
     \\  zbx push <source> <registry/repository:tag>
@@ -261,10 +261,10 @@ const help_text =
     \\                           read from a file or stdin (never the command line), log in:
     \\  zbx push --username <name> --password-stdin <source> <reference>
     \\  zbx push --username <name> --password-file <file> <source> <reference>
-    \\                           the file must be mode 0600 or tighter; one line, at most 4096 bytes
+    \\                           the file: mode 0600 or tighter, one line, at most 4096 bytes
     \\  zbx push <source> <account>.dkr.ecr.<region>.amazonaws.com/<repository>:<tag>
-    \\                           Amazon ECR: AWS credentials are found as `zbx pull` finds them (no
-    \\                           --username); the repository must exist, ECR creates none
+    \\                           Amazon ECR: AWS credentials as `zbx pull` finds them (no
+    \\                           --username); the repository must exist
     \\  zbx push --dry-run <source>   pack it and print the manifest digest; sends nothing
     \\
     \\pull:
@@ -272,33 +272,33 @@ const help_text =
     \\  <reference>     [registry/][namespace/]name[:tag][@sha256:<hex>], for example alpine:3.20
     \\                  or ghcr.io/owner/image:v1 (Docker Hub when no registry is named)
     \\  --resolve-only  print the digest of the image manifest for this machine's platform,
-    \\                  as the registry names it (anonymous; HTTPS_PROXY and NO_PROXY are used)
+    \\                  as the registry names it (anonymous; HTTPS_PROXY and NO_PROXY apply)
     \\  without it, the layers are downloaded into the store (a cut download resumes), unpacked
-    \\  into one tree and recorded, and zbx.lock (the nearest one up from here, else here) gets
-    \\  the entry; the manifest digest is printed, or with --output json the object of
-    \\  "zbx schema pull", which has the tree's digest
+    \\  into one tree and recorded, and zbx.lock (the nearest up from here, else here) gets
+    \\  the entry; prints the manifest digest, or with --output json the object of
+    \\  "zbx schema pull" (with the tree's digest)
     \\  ZBX_REGISTRY_MIRRORS=host[,host]   mirrors of Docker Hub to ask first (mirror.gcr.io)
     \\
     \\build:
     \\  zbx build --graph [-f <file>]
     \\  reads zbx.build.zon in the project directory (the one with zbx.lock, else the working
     \\  directory), or <file>, which must be inside it; checks it, its graph and its inputs, and
-    \\  prints the steps in the order a build starts them, then the image, without running
-    \\  anything (--output json: nodes and edges, see zbx schema build-graph)
-    \\  zbx build [-f <file>]
-    \\  builds the steps, then the image: one row per step (hit or miss, its time, and net for a
-    \\  step with network = true) and the result digest; --output json: one zbx.build/1 line per
-    \\  step (see zbx schema build). With --verbose each step's output also goes to stderr, a line
-    \\  at a time behind "<step> | " (a reader that stops reading stderr pauses the build).
+    \\  prints the steps in build order, then the image, running nothing
+    \\  (--output json: nodes and edges, see zbx schema build-graph)
+    \\  zbx build [-f <file>] [--clear-caches]
+    \\  builds the steps, then the image: one row per step (hit or miss, time, net, cache)
+    \\  and the result digest; --output json: one zbx.build/1
+    \\  line per step (see zbx schema build). --clear-caches first empties the cache
+    \\  directories. With --verbose each step's output also goes to stderr, a line at a time
+    \\  behind "<step> | " (a reader that stops reading stderr pauses the build).
     \\  zbx run <result digest> runs the result as its config says; zbx inspect <result digest>
-    \\  prints its tree and config (--output json: see zbx schema inspect); zbx inspect
-    \\  --provenance <result digest> prints the build's provenance record (--output json: see
-    \\  zbx schema inspect-provenance)
+    \\  prints its tree and config (zbx schema inspect); zbx inspect --provenance <result
+    \\  digest> prints the build's provenance record (zbx schema inspect-provenance)
     \\
     \\bundle:
     \\  zbx bundle (--last | <name>) [--no-redact]
     \\  --last          the most recent run; <name> is the run called that
-    \\  --no-redact     keep secrets in the bundle (prints a warning; review before sharing)
+    \\  --no-redact     keep secrets in the bundle (warns; review before sharing)
     \\  writes <state>/zbx/bundles/<UTC time>-<name>.tar.gz and prints its path
     \\
     \\options (before the "--" of run, or after any other command):
@@ -564,6 +564,8 @@ pub const PullArgs = struct {
 pub const BuildArgs = struct {
     graph: bool = false,
     file: ?[]const u8 = null,
+    /// `--clear-caches`: empty the build file's cache directories first.
+    clear_caches: bool = false,
 };
 
 pub const Invocation = struct {
@@ -671,6 +673,8 @@ const Token = union(enum) {
     /// `--graph`, and `-f` whose value is the next argument: `build`'s.
     graph,
     file_next,
+    /// `--clear-caches`: `build`'s.
+    clear_caches,
     /// `--no-passphrase`, and `--passphrase-file` with its value next or after an `=`: `key new`'s.
     no_passphrase,
     passphrase_file_next,
@@ -761,6 +765,7 @@ fn classify(argument: []const u8) Token {
     if (std.mem.eql(u8, argument, "--resolve-only")) return .resolve_only;
     if (std.mem.eql(u8, argument, "-o")) return .out_next;
     if (std.mem.eql(u8, argument, "--graph")) return .graph;
+    if (std.mem.eql(u8, argument, "--clear-caches")) return .clear_caches;
     if (std.mem.eql(u8, argument, "-f")) return .file_next;
     if (std.mem.eql(u8, argument, "--no-passphrase")) return .no_passphrase;
     if (std.mem.eql(u8, argument, "--passphrase-file")) return .passphrase_file_next;
@@ -884,7 +889,7 @@ pub fn scan_options(args: []const []const u8) Options {
             },
             .username_inline, .password_file_inline, .password_stdin => {},
             .password_refused => {},
-            .confirm_inline, .trash, .resolve_only, .by_image, .graph, .oci => {},
+            .confirm_inline, .trash, .resolve_only, .by_image, .graph, .clear_caches, .oci => {},
             .dry_run => {},
             .no_passphrase, .passphrase_file_inline, .key_inline, .provenance => {},
             .strict, .require_provenance, .public_inline, .apply => {},
@@ -981,7 +986,9 @@ pub fn parse(
             .provenance => try take_provenance(diag, &invocation.provenance, given, argument),
             .resolve_only => try take_pull_option(diag, &p.pull, given, argument),
             .out_next => try take_out_option(diag, &export_file, given, args, &index),
-            .graph, .file_next => try take_build_option(diag, &p.build, given, args, &index),
+            .graph, .clear_caches, .file_next => {
+                try take_build_option(diag, &p.build, given, args, &index);
+            },
             .no_passphrase,
             .passphrase_file_next,
             .passphrase_file_inline,
@@ -1309,7 +1316,7 @@ fn sign_option_twice(diag: *Diag, option: []const u8) ParseError {
     return error.UnexpectedArgument;
 }
 
-/// `--graph` and `-f FILE`, which only `build` takes.
+/// `--graph`, `--clear-caches` and `-f FILE`, which only `build` takes.
 fn take_build_option(
     diag: *Diag,
     build_args: *BuildArgs,
@@ -1321,13 +1328,17 @@ fn take_build_option(
     const argument = args[index.*];
     const token = classify(argument);
     assert(switch (token) {
-        .graph, .file_next => true,
+        .graph, .clear_caches, .file_next => true,
         else => false,
     });
     if (operands.len == 0) return unknown_option(diag, argument);
     if (command_named(operands[0]) != .build) return unknown_option(diag, argument);
     if (token == .graph) {
         build_args.graph = true;
+        return;
+    }
+    if (token == .clear_caches) {
+        build_args.clear_caches = true;
         return;
     }
     if (build_args.file != null) return file_twice(diag);
@@ -3056,7 +3067,11 @@ fn run_build(
         host,
         &storage.build,
         invocation.build,
-        .{ .json = invocation.options.output == .json, .verbose = invocation.options.verbose },
+        .{
+            .json = invocation.options.output == .json,
+            .verbose = invocation.options.verbose,
+            .clear_caches = invocation.build.clear_caches,
+        },
         &storage.handle.facts,
         diag,
     ) catch |err| return build_error(err);
@@ -3877,7 +3892,7 @@ fn resolve_writable(
     var any = false;
     for (typed) |*mount| any = any or mount.kind == .mount;
     if (!any) return typed;
-    mounts.resolve_sources(host, "", typed, &storage.run_mounts, diag) catch {
+    mounts.resolve_sources(host, .{}, typed, &storage.run_mounts, diag) catch {
         return error.StartFailed;
     };
     for (typed, 0..) |*mount, at| {
@@ -4703,6 +4718,13 @@ test "snapshot: help text on stdout, exit 0" {
     const decorated = [_][:0]const u8{ "zbx", "-v", "help", "--output=json" };
     try testing.expectEqual(@as(u8, 0), try run_case(&sim, &decorated));
     try testing.expectEqualStrings(@embedFile("testdata/help.stdout.txt"), sim.stdout());
+}
+
+test "help text keeps 512 bytes free of the output buffer" {
+    // Goal: two PRs that each add help text must not add up past output_bytes_max
+    // once merged; the margin leaves room for both. Tighten wording, never raise the bound.
+    const margin_bytes_min = 512;
+    try testing.expect(help_text.len + margin_bytes_min <= constants.output_bytes_max);
 }
 
 test "snapshot: --version prints the pinned version on stdout, exit 0" {

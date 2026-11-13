@@ -26,8 +26,11 @@ const load_mod = @import("load.zig");
 const support = @import("../store/test_support.zig");
 const digest_mod = @import("../store/digest.zig");
 const cache = @import("cache.zig");
+const schedule = @import("schedule.zig");
 const verify = @import("../store/verify.zig");
+const gc = @import("../store/gc.zig");
 
+const assert = std.debug.assert;
 const testing = std.testing;
 const Digest = digest_mod.Digest;
 
@@ -63,6 +66,7 @@ fn start() void {
     const parsed = file_mod.parse(file_tests.example, &loaded.file, &problem);
     testing.expectEqual(file_mod.ParseResult.parsed, parsed) catch unreachable; // The brief's file.
     for (&composed.slots) |*slot| slot.active = false;
+    composed.holds_count = 0;
     composed.outputs = @splat(Digest.of("unset"));
     context = .{
         .host = sim.interface(),
@@ -117,7 +121,15 @@ fn worker_ended(at: usize, pid: host_mod.Pid, bytes: []const u8) *compose.Slot {
     if (bytes.len > 0) host.write_handle_all(report.write, bytes) catch unreachable; // Room.
     host.close(report.write);
     const slot = &composed.slots[at];
-    slot.* = .{ .active = true, .index = 0, .pid = pid, .report = report, .key = composed.key };
+    slot.* = .{
+        .active = true,
+        .index = 0,
+        .pid = pid,
+        .report = report,
+        .key = composed.key,
+        .binds = undefined,
+        .binds_count = 0,
+    };
     return slot;
 }
 
@@ -761,6 +773,86 @@ test "W0801 is printed once on stderr, naming the network steps, and never on st
     try testing.expectEqualStrings("", sim.stdout());
 }
 
+test "a step with cache mounts ends its row with cache, and its JSON line says so" {
+    // Goal: the report marks a step that has `.caches` (the brief's `cache`); additive in JSON.
+    // Method: the same settle as the network marker, with the span's count set.
+    start();
+    loaded.file.steps[0].caches.count = 1;
+    const answer = answer_of(made_output());
+    try testing.expect(settle(worker_ended(0, 7, &answer), .{ .exited = 0 }).ok);
+    try testing.expectEqualStrings("  compile   miss   0.00 s   cache\n", sim.stdout());
+    try testing.expect(composed.timings[0].caches);
+    start();
+    loaded.file.steps[0].caches.count = 1;
+    context.json = true;
+    try testing.expect(settle(worker_ended(0, 7, &answer), .{ .exited = 0 }).ok);
+    try testing.expect(std.mem.indexOf(u8, sim.stdout(), ",\"caches\":true}") != null);
+}
+
+test "W0802 is printed once on stderr, naming the steps with caches, never on stdout" {
+    // Goal: a build with cache mounts warns once; one without says nothing. Method: set the
+    // count on a step of the example and render in both modes.
+    start();
+    context.warn_caches();
+    try testing.expectEqualStrings("", sim.stderr());
+    loaded.file.steps[1].caches.count = 1;
+    context.warn_caches();
+    try testing.expect(std.mem.startsWith(u8, sim.stderr(), "warning[ZBX-W0802]: "));
+    try testing.expect(std.mem.indexOf(u8, sim.stderr(), "notice") != null);
+    try testing.expectEqualStrings("", sim.stdout());
+    sim.stderr_len = 0;
+    context.json = true;
+    context.warn_caches();
+    try testing.expect(std.mem.startsWith(u8, sim.stderr(), "{\"code\":\"ZBX-W0802\""));
+    try testing.expectEqualStrings("", sim.stdout());
+}
+
+test "a bind from a step's output is selected from that output, and nothing matched is E0803" {
+    // Goal: the bind's key part is the selection of `.source` in the earlier step's output.
+    // Method: step "a"'s output is the sample tree; "b" binds a directory, then another, then
+    // a path that is not there.
+    start();
+    const text =
+        \\.{ .version = 1, .image = .{}, .steps = .{
+        \\  .{ .name = "a", .base = "alpine:3.20", .run = .{"true"} },
+        \\  .{ .name = "b", .base = "alpine:3.20", .run = .{"true"},
+        \\    .binds = .{ .{ .from = "step:a", .source = "/etc", .to = "/t" } } },
+        \\} }
+    ;
+    var problem: file_mod.Problem = undefined;
+    const parsed = file_mod.parse(text, &loaded.file, &problem);
+    try testing.expectEqual(file_mod.ParseResult.parsed, parsed);
+    composed.outputs[0] = made_output();
+    var spec: key_mod.Spec = undefined;
+    try context.resolve_binds(1, &spec);
+    try testing.expectEqual(@as(usize, 1), spec.binds.len);
+    try testing.expectEqualStrings("/t", spec.binds[0].to);
+    const first = spec.binds[0].source;
+    try context.resolve_binds(1, &spec);
+    try testing.expect(first.eql(spec.binds[0].source));
+    const other = ".binds = .{ .{ .from = \"step:a\", .source = \"/bin\", .to = \"/t\" } }";
+    const nothing = ".binds = .{ .{ .from = \"step:a\", .source = \"/nope\", .to = \"/t\" } }";
+    inline for (.{ other, nothing }, 0..) |field, at| {
+        var buffer: [512]u8 = undefined;
+        const edited = try std.fmt.bufPrint(&buffer, "{s}{s}{s}", .{
+            ".{ .version = 1, .image = .{}, .steps = .{ " ++
+                ".{ .name = \"a\", .base = \"alpine:3.20\", .run = .{\"true\"} }, " ++
+                ".{ .name = \"b\", .base = \"alpine:3.20\", .run = .{\"true\"}, ",
+            field,
+            " } } }",
+        });
+        const again = file_mod.parse(edited, &loaded.file, &problem);
+        try testing.expectEqual(file_mod.ParseResult.parsed, again);
+        if (at == 0) {
+            try context.resolve_binds(1, &spec);
+            try testing.expect(!first.eql(spec.binds[0].source));
+        } else {
+            try testing.expectError(error.Failed, context.resolve_binds(1, &spec));
+            try testing.expectEqual(.E0803, diag.code.?);
+        }
+    }
+}
+
 var verify_workspace: verify.Workspace = undefined;
 
 /// One step from its import to its cache entry, as the worker and then the parent do them, on the
@@ -949,4 +1041,499 @@ test "a step whose base no policy trusts is refused before it starts, naming the
     // The one-line form shows only the last cause, so that names the step too.
     const cause = diag.causes.slice()[diag.causes.count - 1].slice();
     try testing.expect(std.mem.indexOf(u8, cause, "the base of step 'compile'") != null);
+}
+
+test "a copy step makes its output with no worker, and an unmatched file never moves the key" {
+    // Goal: `.copy` is built in the parent: a miss is recorded and reported as one, the same
+    // step again is a hit, and a project file that no `.src` takes changes nothing. Method: copy
+    // `a.txt` and begin; edit `other.txt` and begin again; edit `a.txt` and begin again.
+    registry_started(&registry.fixture.oci.amd64.digest);
+    var buffer: [512]u8 = undefined;
+    const text = try std.fmt.bufPrint(&buffer, "{s}{s}{s}", .{
+        ".{ .version = 1, .image = .{}, .steps = .{ .{ .name = \"put\", .base = \"",
+        locked_reference,
+        "\", .copy = .{ .{ .src = .{\"a.txt\"}, .to = \"/opt/\" } } } } }\n",
+    });
+    var problem: file_mod.Problem = undefined;
+    const parsed = file_mod.parse(text, &loaded.file, &problem);
+    try testing.expectEqual(file_mod.ParseResult.parsed, parsed);
+    files.put_dir("/p", 0o755);
+    files.put_file("/p/a.txt", 0o644, "a\n");
+    files.put_file("/p/other.txt", 0o644, "o\n");
+    set_path(&loaded.project, "/p");
+    set_path(&loaded.path, "/p/zbx.build.zon");
+    try testing.expect(try context.begin(0) == .hit);
+    try testing.expect(diag.code == null);
+    try testing.expectEqual(@as(u32, 1), context.misses);
+    const first = composed.outputs[0];
+    files.remove_path("/p/other.txt");
+    files.put_file("/p/other.txt", 0o644, "changed\n");
+    try testing.expect(try context.begin(0) == .hit);
+    try testing.expectEqual(@as(u32, 1), context.hits);
+    try testing.expect(first.eql(composed.outputs[0]));
+    files.remove_path("/p/a.txt");
+    files.put_file("/p/a.txt", 0o644, "edited\n");
+    try testing.expect(try context.begin(0) == .hit);
+    try testing.expectEqual(@as(u32, 2), context.misses);
+    try testing.expect(!first.eql(composed.outputs[0]));
+}
+
+test "a config user written as a name becomes its numbers, and an unknown name is E0817" {
+    // Goal: the record of a result holds `uid:gid` only. Method: the sample tree's passwd names
+    // root; `root` becomes `0:0`, a numeric user is left as written, `nobody` is refused.
+    start();
+    composed.record.tree = made_output();
+    composed.record.config.clear();
+    _ = composed.record.config.settings.set(.user, "root");
+    try context.numeric_user();
+    try testing.expectEqualStrings("0:0", composed.record.config.settings.get(.user));
+    _ = composed.record.config.settings.set(.user, "5:6");
+    try context.numeric_user();
+    try testing.expectEqualStrings("5:6", composed.record.config.settings.get(.user));
+    _ = composed.record.config.settings.set(.user, "nobody");
+    try testing.expectError(error.Failed, context.numeric_user());
+    try testing.expectEqual(codes.Code.E0817, diag.code.?);
+}
+
+fn copy_project_loaded() !void {
+    registry_started(&registry.fixture.oci.amd64.digest);
+    var buffer: [512]u8 = undefined;
+    const text = try std.fmt.bufPrint(&buffer, "{s}{s}{s}", .{
+        ".{ .version = 1, .image = .{}, .steps = .{ .{ .name = \"put\", .base = \"",
+        locked_reference,
+        "\", .copy = .{ .{ .src = .{\"a.txt\"}, .to = \"/opt/\" } } } } }\n",
+    });
+    var problem: file_mod.Problem = undefined;
+    const parsed = file_mod.parse(text, &loaded.file, &problem);
+    try testing.expectEqual(file_mod.ParseResult.parsed, parsed);
+    files.put_dir("/p", 0o755);
+    files.put_file("/p/a.txt", 0o644, "a\n");
+    set_path(&loaded.project, "/p");
+    set_path(&loaded.path, "/p/zbx.build.zon");
+}
+
+fn import_entry(entry: ?u32) !Digest {
+    return import_step_entry(0, entry);
+}
+
+fn import_step_entry(step: u8, entry: ?u32) !Digest {
+    var input: input_tree.Workspace = undefined;
+    var problem: inputs_mod.Problem = undefined;
+    const request: input_job.Request = .{
+        .host = sim.interface(),
+        .facts = &facts,
+        .store = &store,
+        .loaded = &loaded,
+        .step = step,
+        .entry = entry,
+        .ws = &input,
+        .problem = &problem,
+    };
+    return input_job.import(&request, &diag);
+}
+
+test "a copy's project source is a root between the import and the selection" {
+    // Goal: a concurrent `store gc` cannot remove the source tree a copy selects from. Method:
+    // import entry 0 as `begin_copy` does and read the root record (named for the step, as a
+    // step's output root is; a command step's whole-project import is rooted the same way); a
+    // root the user made first is kept as it was; a build that selects drops only the root it
+    // made.
+    try copy_project_loaded();
+    var text: [constants.store_source_bytes_max]u8 = undefined;
+    const whole = try import_entry(null);
+    try testing.expectEqualStrings("build:put", root_source(whole, &text).?);
+    const source = try import_entry(0);
+    try testing.expect(!source.eql(whole)); // The entry selects part of the project.
+    try testing.expectEqualStrings("build:put", root_source(source, &text).?);
+    var kept: roots.Root = undefined;
+    var errno: u16 = 0;
+    try roots.load(&store, source, &kept, &errno);
+    kept.set_source("mine");
+    var failure: @import("../store/fs.zig").Failure = undefined;
+    try roots.save(&store, &kept, &failure);
+    _ = try import_entry(0);
+    try testing.expectEqualStrings("mine", root_source(source, &text).?);
+    try testing.expect(diag.code == null);
+}
+
+test "a copy step leaves no root of its project source behind" {
+    // Goal: the root is for the window only. Method: build the copy step as the test above's
+    // file has it, then count the roots: the source's, the selection's and the output's are
+    // all dropped once the entry is written.
+    try copy_project_loaded();
+    try testing.expect(try context.begin(0) == .hit);
+    try testing.expect(diag.code == null);
+    try testing.expectEqual(@as(u32, 0), build_roots(&scratch_roots));
+}
+
+test "a copy source's root that cannot be written is one diagnostic, not a crash" {
+    // Goal: the failure path of the root. Method: a full disk after the import's own writes is
+    // hard to aim at, so the tree is imported once, and then the next write of the model fails:
+    // the second import finds the tree and its first write is the root record's.
+    try copy_project_loaded();
+    _ = try import_entry(0);
+    const source = try import_entry(0);
+    var path: @import("../store/fs.zig").PathBuf = undefined;
+    files.remove_path(store.root_record_path(&path, source));
+    files.faults.fail_mutation = files.mutations;
+    try testing.expectError(error.Failed, import_entry(0));
+    try testing.expect(diag.code != null);
+}
+
+test "steps that share a cache id come one after another, each after the nearest holder" {
+    // Goal: `sharing=locked`. Method: four steps in file order, three holding the id `go` (one
+    // with a second id too) and one none; the plan gets an edge from each holder to the nearest
+    // holder before it, none from the step without caches, and stays a valid order.
+    const text =
+        ".{ .version = 1, .image = .{}, .steps = .{\n" ++
+        " .{ .name = \"a\", .base = \"b\", .run = .{\"x\"},\n" ++
+        "   .caches = .{ .{ .id = \"go\", .path = \"/c\" } } },\n" ++
+        " .{ .name = \"m\", .base = \"b\", .run = .{\"x\"} },\n" ++
+        " .{ .name = \"b\", .base = \"b\", .run = .{\"x\"}, .caches = .{\n" ++
+        "   .{ .id = \"go\", .path = \"/c\" }, .{ .id = \"npm\", .path = \"/n\" } } },\n" ++
+        " .{ .name = \"c\", .base = \"b\", .run = .{\"x\"}, .caches = .{\n" ++
+        "   .{ .id = \"npm\", .path = \"/n\" }, .{ .id = \"go\", .path = \"/c\" } } },\n" ++
+        "} }\n";
+    var problem: file_mod.Problem = undefined;
+    const parsed = file_mod.parse(text, &loaded.file, &problem);
+    try testing.expectEqual(file_mod.ParseResult.parsed, parsed);
+    var plan: schedule.Plan = std.mem.zeroes(schedule.Plan);
+    plan.count = 4;
+    for (0..4) |at| plan.order[at] = @intCast(at);
+    compose.cache_edges(&loaded.file, &plan);
+    try testing.expectEqual(@as(usize, 0), plan.needs_of(0).len);
+    try testing.expectEqual(@as(usize, 0), plan.needs_of(1).len);
+    try testing.expectEqualSlices(u8, &.{0}, plan.needs_of(2));
+    // `c` holds `npm` (last held by `b`) and `go` (also `b`): one edge, not two.
+    try testing.expectEqualSlices(u8, &.{2}, plan.needs_of(3));
+    try testing.expect(plan.valid());
+}
+
+var scratch_roots: [8]roots.Root = undefined;
+var gc_workspace: gc.Workspace = undefined;
+var gc_tables: [16 * 1024 * 1024]u8 align(8) = @splat(0);
+
+/// How many trees a `store gc` would remove now, with no tree kept alive but by a root or an
+/// entry.
+fn removable_trees() u64 {
+    gc_workspace.tables = &gc_tables;
+    var result: gc.Plan = undefined;
+    var failure: gc.Failure = undefined;
+    const arena = &import_workspace.arena;
+    gc.plan(&store, &gc_workspace, arena, &.{}, &result, &failure) catch unreachable; // Plans.
+    return result.counts.trees;
+}
+
+/// The roots a build made (`build:<step>`), newest first, in `out`; the other roots (the pulled
+/// image's) are not the build's.
+fn build_roots(out: []roots.Root) u32 {
+    var found: [8]roots.Root = undefined;
+    const listed = roots.list(&store, &import_workspace.arena, &found) catch unreachable; // Lists.
+    var count: u32 = 0;
+    for (found[0..listed.count]) |root| {
+        if (!std.mem.startsWith(u8, root.source_text(), "build:")) continue;
+        out[count] = root;
+        count += 1;
+    }
+    return count;
+}
+
+/// What the store looks like in the middle of a build: the roots it made, and how many more
+/// trees a `store gc` would take if those roots were gone.
+const RootsSeen = struct {
+    roots: u32 = 0,
+    fired: bool = false,
+    removable_with: u64 = 0,
+    removable_without: u64 = 0,
+
+    fn look(raw: *anyopaque) void {
+        const seen: *RootsSeen = @ptrCast(@alignCast(raw));
+        seen.measure();
+    }
+
+    fn measure(seen: *RootsSeen) void {
+        var made: [8]roots.Root = undefined;
+        seen.roots = build_roots(&made);
+        seen.removable_with = removable_trees();
+        for (made[0..seen.roots]) |root| {
+            roots.remove(&store, root.digest) catch unreachable; // The root was listed just now.
+        }
+        seen.removable_without = removable_trees();
+        seen.fired = true;
+    }
+};
+
+test "a copy's selection tree is a root between its write and the cache entry" {
+    // Goal: a `store gc` between the selection's write and the cache entry (it takes the lock
+    // exclusively, and the build holds it shared only per call) cannot remove the selection.
+    // Method: stop the build at the cache entry's write (the first rename into the build
+    // cache) and count the roots: the source's is dropped and the selection's is there, one;
+    // a gc plan with it keeps a tree that a plan without it would remove; after the build none
+    // is left.
+    try copy_project_loaded();
+    var seen: RootsSeen = .{};
+    files.hook = .{
+        .rename_to_contains = "/build/cache",
+        .context = &seen,
+        .call = RootsSeen.look,
+    };
+    try testing.expect(try context.begin(0) == .hit);
+    try testing.expect(seen.fired);
+    try testing.expectEqual(@as(u32, 1), seen.roots);
+    try testing.expect(seen.removable_without > seen.removable_with);
+}
+
+test "a copy that selects nothing leaves no root behind" {
+    // Goal: the failure path of the selection's root. Method: the pattern matches no file; the
+    // build is refused (E0803-class diagnostic) and the store holds no root of this build.
+    try copy_project_loaded();
+    files.remove_path("/p/a.txt");
+    files.put_file("/p/b.txt", 0o644, "b\n");
+    try testing.expectError(error.Failed, context.begin(0));
+    try testing.expect(diag.code != null);
+    try testing.expectEqual(@as(u32, 0), build_roots(&scratch_roots));
+}
+
+test "a command step's input tree is a root while its worker runs, and gone after" {
+    // Goal: the tree the worker reads cannot be removed by a `store gc` between the import and
+    // the worker's use, and no root of the build outlives the step. Method: begin a command
+    // step with an input (it starts a worker); one root, and a plan with it keeps a tree a plan
+    // without it would remove. Then abort the worker, as a failed build does: no root is left.
+    try command_project_loaded();
+    try testing.expect(try context.begin(0) == .running);
+    var seen: RootsSeen = .{};
+    seen.measure();
+    try testing.expectEqual(@as(u32, 1), seen.roots);
+    try testing.expect(seen.removable_without > seen.removable_with);
+    try testing.expect(diag.code == null);
+}
+
+test "a command step's input root is dropped when its worker is aborted or fails" {
+    // Goal: the exit paths of that root. Method: begin, abort: no root; begin, settle with a
+    // failing worker: no root.
+    try command_project_loaded();
+    try testing.expect(try context.begin(0) == .running);
+    try testing.expectEqual(@as(u32, 1), build_roots(&scratch_roots));
+    compose.Context.abort_step(@ptrCast(&context));
+    try testing.expectEqual(@as(u32, 0), build_roots(&scratch_roots));
+    try testing.expect(try context.begin(0) == .running);
+    try testing.expectEqual(@as(u32, 1), build_roots(&scratch_roots));
+    // The worker the sim forked is replaced by one that ends at once with no answer.
+    const slot = worker_ended(0, 7, &.{});
+    try testing.expect(!settle(slot, .{ .exited = 1 }).ok);
+    try testing.expectEqual(@as(u32, 0), build_roots(&scratch_roots));
+}
+
+/// Step "a" is the sample tree (not run); step "b" has the project's `a.txt` as input, binds
+/// `/etc` of "a" and runs a command, so beginning it starts a worker.
+fn bind_project_loaded() !void {
+    registry_started(&registry.fixture.oci.amd64.digest);
+    var buffer: [768]u8 = undefined;
+    const text = try std.fmt.bufPrint(&buffer, "{s}{s}{s}{s}{s}", .{
+        ".{ .version = 1, .image = .{}, .steps = .{ .{ .name = \"a\", .base = \"",
+        locked_reference,
+        "\", .run = .{\"true\"} }, .{ .name = \"b\", .base = \"",
+        locked_reference,
+        "\", .inputs = .{\"a.txt\"}, .run = .{\"true\"}, " ++
+            ".binds = .{ .{ .from = \"step:a\", .source = \"/etc\", .to = \"/t\" } } } } }\n",
+    });
+    var problem: file_mod.Problem = undefined;
+    const parsed = file_mod.parse(text, &loaded.file, &problem);
+    try testing.expectEqual(file_mod.ParseResult.parsed, parsed);
+    files.put_dir("/p", 0o755);
+    files.put_file("/p/a.txt", 0o644, "a\n");
+    set_path(&loaded.project, "/p");
+    set_path(&loaded.path, "/p/zbx.build.zon");
+    composed.outputs[0] = made_output();
+}
+
+test "a bind's selection tree is a root while its worker runs, and gone after" {
+    // Goal: the tree a bind mounts cannot be removed by a `store gc` between its selection and
+    // the worker's use. Method: begin step "b" (it starts a worker): the bind's selection is a
+    // root of the build, and a gc plan keeps it; abort the worker, as a failed build does, and
+    // then begin and settle a failing one: no root of the build is left either time.
+    try bind_project_loaded();
+    try testing.expect(try context.begin(1) == .running);
+    const bound = composed.slots[0].binds[0];
+    var record: roots.Root = undefined;
+    var errno: u16 = 0;
+    try roots.load(&store, bound, &record, &errno);
+    try testing.expect(std.mem.startsWith(u8, record.source_text(), "build:"));
+    var seen: RootsSeen = .{};
+    seen.measure();
+    try testing.expect(seen.removable_without > seen.removable_with);
+    for (composed.slots) |slot| try testing.expect(slot.active == (slot.binds_count == 1));
+    compose.Context.abort_step(@ptrCast(&context));
+    try testing.expectEqual(@as(u32, 0), build_roots(&scratch_roots));
+    try testing.expect(try context.begin(1) == .running);
+    const slot = worker_ended(0, 7, &.{});
+    slot.index = 1;
+    slot.binds_count = 1;
+    slot.binds[0] = composed.bind_keys[0].source;
+    try testing.expect(!settle(slot, .{ .exited = 1 }).ok);
+    try testing.expectEqual(@as(u32, 0), build_roots(&scratch_roots));
+}
+
+test "a tree two users hold keeps its root until the last one is done" {
+    // Goal: one root record exists per digest, so the first user to finish must not drop it under
+    // the others (steps with the same bind selection, or the same inputs). Method: two steps'
+    // workers hold the same bind selection; one is aborted by settling: the root stays; the
+    // other goes: no root.
+    try bind_project_loaded();
+    try testing.expect(try context.begin(1) == .running);
+    try testing.expect(try context.begin(1) == .running);
+    try testing.expectEqual(@as(u32, 2), composed.holds_count);
+    // The first worker ends (a fresh slot stands for it: the sim's own child is not run here).
+    const gone = worker_ended(0, 7, &.{});
+    gone.index = 1;
+    gone.binds_count = 1;
+    gone.binds[0] = composed.bind_keys[0].source;
+    _ = settle(gone, .{ .exited = 1 });
+    try testing.expectEqual(@as(u32, 2), build_roots(&scratch_roots));
+    compose.Context.abort_step(@ptrCast(&context));
+    try testing.expectEqual(@as(u32, 0), build_roots(&scratch_roots));
+    try testing.expectEqual(@as(u32, 0), composed.holds_count);
+}
+
+test "a SIGINT or SIGTERM during a build is one diagnostic, and no root outlives it" {
+    // Goal: a signal ends a build through the abort path, so its roots are removed (a process
+    // the signal killed would leave them to `store gc` forever). Method: a step's worker runs;
+    // the wait is interrupted and the signal is pending: the wait fails with E0808 whose cause
+    // names the signal; abort leaves no root. A step begun after the signal is refused the
+    // same way, before it imports anything.
+    try command_project_loaded();
+    sim.interface().catch_interrupts(true);
+    try testing.expect(try context.begin(0) == .running);
+    try testing.expectEqual(@as(u32, 1), build_roots(&scratch_roots));
+    sim.wait_interrupted = true;
+    try testing.expectError(error.Failed, context.wait());
+    try testing.expectEqual(codes.Code.E0808, diag.code.?);
+    try testing.expect(std.mem.indexOf(u8, diag.last_cause().?, "SIGINT") != null);
+    compose.Context.abort_step(@ptrCast(&context));
+    try testing.expectEqual(@as(u32, 0), build_roots(&scratch_roots));
+    diag.reset();
+    try testing.expect(sim.interface().interrupt_pending());
+    try testing.expectError(error.Failed, context.begin(0));
+    try testing.expectEqual(codes.Code.E0808, diag.code.?);
+    try testing.expectEqual(@as(u32, 0), build_roots(&scratch_roots));
+    sim.interface().catch_interrupts(false);
+}
+
+test "a signal the instant the handler is in is the interrupted outcome, not a crash" {
+    // Goal: a Ctrl-C right after `catch_interrupts(true)` is an ordinary path (it once tripped
+    // an assertion). Method: the sim sends SIGINT as the handler goes in; the next step is
+    // refused with E0808 before it imports anything, and a wait already pending ends at once.
+    try command_project_loaded();
+    sim.interrupt_on_catch = true;
+    sim.interface().catch_interrupts(true);
+    try testing.expect(sim.interface().interrupt_pending());
+    try testing.expectError(error.Failed, context.begin(0));
+    try testing.expectEqual(codes.Code.E0808, diag.code.?);
+    try testing.expectEqual(@as(u32, 0), build_roots(&scratch_roots));
+    try testing.expectError(error.Interrupted, sim.interface().wait_any(&.{7}, 0));
+    sim.interface().catch_interrupts(false);
+    try testing.expect(!sim.interface().interrupt_pending());
+}
+
+test "a signal that arrives while a step runs and before the wait ends the wait at once" {
+    // Goal: a signal pending when `wait` is called is seen there, not after the next worker
+    // exits. Method: begin a worker, then the signal (no scripted interrupt of the wait): wait
+    // is E0808 naming SIGTERM, and abort leaves no root.
+    try command_project_loaded();
+    sim.interface().catch_interrupts(true);
+    try testing.expect(try context.begin(0) == .running);
+    sim.interrupt_arrived = constants.signal_term;
+    try testing.expectError(error.Failed, context.wait());
+    try testing.expectEqual(codes.Code.E0808, diag.code.?);
+    try testing.expect(std.mem.indexOf(u8, diag.last_cause().?, "SIGTERM") != null);
+    compose.Context.abort_step(@ptrCast(&context));
+    try testing.expectEqual(@as(u32, 0), build_roots(&scratch_roots));
+    sim.interface().catch_interrupts(false);
+}
+
+test "a signal during the image's assembly fails the build, never a success" {
+    // Goal: once every step is done, a signal still stops the build: `build_image` does not
+    // assemble, save or print a digest. Method: the image step of a finished build with the
+    // signal pending: E0808, and nothing on stdout says `built`.
+    image_started("/etc");
+    sim.interface().catch_interrupts(true);
+    sim.interrupt_arrived = constants.signal_interrupt;
+    try testing.expectError(error.Failed, context.build_image());
+    try testing.expectEqual(codes.Code.E0808, diag.code.?);
+    try testing.expect(std.mem.indexOf(u8, sim.stdout(), "built") == null);
+    sim.interface().catch_interrupts(false);
+}
+
+test "a copy step importing the tree a running step holds leaves that step's root" {
+    // Goal: roots are released per holder: a copy step's project source, which it never
+    // counted, is not dropped from under a command step whose input is the same tree. Method:
+    // "compile" holds the tree of `a.txt` while its worker runs; "put" copies `a.txt`, so its
+    // source is the same digest; after "put" the root is still there; abort "compile": gone.
+    try shared_project_loaded();
+    try testing.expect(try context.begin(0) == .running);
+    try testing.expectEqual(@as(u32, 1), composed.holds_count);
+    const tree = composed.holds[0].digest;
+    try testing.expect(tree.eql(try import_step_entry(1, 0))); // The premise: one digest.
+    diag.reset();
+    try testing.expect(try context.begin(1) != .running);
+    try testing.expect(diag.code == null);
+    var record: roots.Root = undefined;
+    var errno: u16 = 0;
+    try roots.load(&store, tree, &record, &errno);
+    compose.Context.abort_step(@ptrCast(&context));
+    try testing.expectEqual(@as(u32, 0), build_roots(&scratch_roots));
+    try testing.expectEqual(@as(u32, 0), composed.holds_count);
+}
+
+/// Step "compile" runs a command with the project's `a.txt` as input; step "put" copies the
+/// same `a.txt` into its base.
+fn shared_project_loaded() !void {
+    registry_started(&registry.fixture.oci.amd64.digest);
+    var buffer: [768]u8 = undefined;
+    const text = try std.fmt.bufPrint(&buffer, "{s}{s}{s}{s}{s}", .{
+        ".{ .version = 1, .image = .{}, .steps = .{ .{ .name = \"compile\", .base = \"",
+        locked_reference,
+        "\", .inputs = .{\"a.txt\"}, .run = .{\"true\"} }, .{ .name = \"put\", .base = \"",
+        locked_reference,
+        "\", .copy = .{ .{ .src = .{\"a.txt\"}, .to = \"/opt/\" } } } } }\n",
+    });
+    var problem: file_mod.Problem = undefined;
+    const parsed = file_mod.parse(text, &loaded.file, &problem);
+    try testing.expectEqual(file_mod.ParseResult.parsed, parsed);
+    files.put_dir("/p", 0o755);
+    files.put_file("/p/a.txt", 0o644, "a\n");
+    set_path(&loaded.project, "/p");
+    set_path(&loaded.path, "/p/zbx.build.zon");
+}
+
+test "a user that no longer fits the settings is E0807, not a crash" {
+    // Goal: the numeric `uid:gid` is written beside the name in a store that only grows, so a
+    // config that fills the budget cannot take it; that is the user's input, so one coded
+    // refusal. Method: set the name `root`, mark the settings block full, then resolve it.
+    start();
+    composed.record.tree = made_output();
+    composed.record.config.clear();
+    _ = composed.record.config.settings.set(.user, "root") orelse unreachable; // Empty store.
+    const settings = &composed.record.config.settings;
+    settings.used = @intCast(settings.bytes.len); // Every word's bytes taken: no room for more.
+    try testing.expectEqualStrings("root", composed.record.config.settings.get(.user));
+    try testing.expectError(error.Failed, context.numeric_user());
+    try testing.expectEqual(codes.Code.E0807, diag.code.?);
+}
+
+fn command_project_loaded() !void {
+    registry_started(&registry.fixture.oci.amd64.digest);
+    var buffer: [512]u8 = undefined;
+    const text = try std.fmt.bufPrint(&buffer, "{s}{s}{s}", .{
+        ".{ .version = 1, .image = .{}, .steps = .{ .{ .name = \"compile\", .base = \"",
+        locked_reference,
+        "\", .inputs = .{\"a.txt\"}, .run = .{\"true\"} } } }\n",
+    });
+    var problem: file_mod.Problem = undefined;
+    const parsed = file_mod.parse(text, &loaded.file, &problem);
+    try testing.expectEqual(file_mod.ParseResult.parsed, parsed);
+    files.put_dir("/p", 0o755);
+    files.put_file("/p/a.txt", 0o644, "a\n");
+    set_path(&loaded.project, "/p");
+    set_path(&loaded.path, "/p/zbx.build.zon");
 }

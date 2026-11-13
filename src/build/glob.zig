@@ -4,14 +4,17 @@
 //!
 //! The language is the part of Docker's (moby's `patternmatcher`) that zbx and Docker agree on:
 //! `*` is any run of bytes but `/`, `?` is one byte but `/`, `[a-z]` is a class that never takes
-//! `/`, `\x` is the byte `x`, `**/` is any number of leading directories (including none), and
-//! a `**` that ends the pattern is any run of bytes, `/` too. A path is relative, written with
+//! `/`, `\x` is the byte `x` (for a `x` that is not a letter or digit), `**/` is any number of
+//! leading directories (including none), and a `**` that ends the pattern is any run of bytes,
+//! `/` too. A path is relative, written with
 //! `/`, with no `.` or `..` part and no trailing `/`.
 //!
-//! Two forms mean something else in Docker than they would here, so they are refused
-//! (`bad_deep`, `bad_class`) rather than read: a `**` that is not a whole segment (`a**b`,
-//! `**.log`), a negated class (`[!a]`, `[^a]`), and a class holding `*`, `?` or `/`, or a range
-//! across `/` (`[*?]`, `[+-0]`). Write `**/*.log` and list the bytes.
+//! Some forms mean something else in Docker than they would here, so they are refused
+//! (`bad_deep`, `bad_class`, `bad_escape`) rather than read: a `**` that is not a whole segment
+//! (`a**b`, `**.log`), a negated class (`[!a]`, `[^a]`), a class holding `*`, `?`, `/` or an
+//! inner `[` (`[[:digit:]]`), a range across `/` (`[+-0]`) or reversed (`[c-a]`), and a `\`
+//! before a letter or digit (`\d`, `\n`: Go reads those as classes and control bytes). Write
+//! `**/*.log`, list the bytes, and escape only punctuation.
 //!
 //! An exclude list is `.dockerignore`'s: a line is a pattern, a `#` line or a blank one is
 //! skipped, `!` re-includes, and the last line that matches a path or one of its parent
@@ -25,7 +28,7 @@ const Kind = enum(u8) { literal, one, run, deep, deep_slash, class };
 
 const Token = struct {
     kind: Kind,
-    /// The byte for `literal`; for `class`, whether it is negated (1) or not (0).
+    /// The byte for `literal`; unused (0) for `class`.
     byte: u8,
     /// For `class`: where its body is in the pattern.
     begin: u16,
@@ -70,6 +73,7 @@ fn tokenise(pattern: []const u8, tokens: *Tokens) ?Fault {
             },
             '\\' => {
                 if (index == pattern.len) return .bad_escape;
+                if (std.ascii.isAlphanumeric(pattern[index])) return .bad_escape;
                 token.byte = pattern[index];
                 index += 1;
             },
@@ -115,7 +119,9 @@ fn read_class(pattern: []const u8, index: *u32, token: *Token) ?Fault {
 
 /// Whether the class `body` (the bytes between `[` and `]`) reads the same in Docker. Docker
 /// rewrites an unescaped `*` and `?` inside a class to `[^/]*` and `[^/]`, and a class that
-/// holds `/`, or a range across it, takes the separator; all of those are refused.
+/// holds `/`, or a range across it, takes the separator; an inner `[` may open a POSIX class
+/// (`[:digit:]`), a reversed range does not compile, and `\` before a letter or digit is a Go
+/// escape class. All of those are refused.
 fn class_plain(body: []const u8) bool {
     var index: usize = 0;
     while (index < body.len) {
@@ -126,6 +132,7 @@ fn class_plain(body: []const u8) bool {
             low = body[index];
             index += 1;
             escaped = true;
+            if (std.ascii.isAlphanumeric(low)) return false;
         }
         var high = low;
         if (index + 1 < body.len and body[index] == '-') {
@@ -134,9 +141,11 @@ fn class_plain(body: []const u8) bool {
             if (high == '\\' and index < body.len) {
                 high = body[index];
                 index += 1;
+                if (std.ascii.isAlphanumeric(high)) return false;
             }
         }
-        if (!escaped and (low == '*' or low == '?')) return false;
+        if (!escaped and (low == '*' or low == '?' or low == '[')) return false;
+        if (low > high) return false;
         if (low <= '/' and '/' <= high) return false;
     }
     return true;
@@ -316,7 +325,7 @@ pub fn line_fault(text: []const u8) ?Fault {
 /// Whether the exclude `lines` leave `path` out: the last line that matches `path` or one of
 /// its parent directories decides, and a path no line matches is in.
 pub fn excluded(lines: []const []const u8, path: []const u8) bool {
-    assert(lines.len <= constants.build_exclude_lines_max);
+    assert(lines.len <= constants.build_exclude_chain_max);
     assert(path.len > 0);
     var result = false;
     for (lines) |text| {

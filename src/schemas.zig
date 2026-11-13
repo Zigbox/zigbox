@@ -851,6 +851,7 @@ const build_schema =
     \\"start_ms":{"type":"integer","description":"milliseconds since the build began"},
     \\"end_ms":{"type":"integer","description":"a hit starts and ends when it is found"},
     \\"network":{"type":"boolean","description":"the step was given the network"},
+    \\"caches":{"const":true,"description":"M9: present only on a step with cache mounts"},
     \\"build_result":{"type":"object","required":["digest","hits","misses","elapsed_ms"],
     \\"properties":{"digest":{"type":"string","pattern":"^b3:[0-9a-f]{64}$",
     \\"description":"the result digest: zbx run and zbx inspect take it"},
