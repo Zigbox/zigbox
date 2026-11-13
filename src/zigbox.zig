@@ -171,18 +171,27 @@ pub const push = struct {
 };
 
 /// The package writer (M8): `.deb` and `.rpm` packages and the apt and dnf trees around them,
-/// reproducibly, for a second product's own packages (Zigcube's C3). Pure: the caller passes its
-/// bytes (`File.bytes`) and an allocator, and owns every returned slice; nothing touches a host,
-/// a clock or the build system. It signs nothing: an rpm takes a detached header signature the
-/// caller made (`rpm.Options`), and the trees are unsigned until the caller signs `Release` and
-/// each `repomd.xml`. `zig build packages` writes zbx's own packages with the same files. The
-/// same files are the `zigbox_package` module; a compilation imports one module or the other.
+/// reproducibly, for a second product's own packages (Zigcube's C3), and the check that reads a
+/// tree back (`zig build packages-check`). Pure: the caller passes its bytes (`File.bytes`) and an
+/// allocator, and owns every returned slice; nothing touches a host, a clock or the build system.
+/// It signs nothing: an rpm takes a detached header signature the caller made (`rpm.Options`),
+/// and the trees are unsigned until the caller signs `Release` and each `repomd.xml`. The caller
+/// names its own repository (`apt.Identity`) and build host (`rpm.Options.build_host`).
+///
+/// Only the names below are the contract (docs/decisions/2026-11-13-zigcube-zb1-zb2.md); the
+/// test at the bottom of this file fails if one is added, renamed or removed. `zig build packages`
+/// writes zbx's own packages with the same files, which are also the `zigbox_package` module.
+/// A compilation that links the runtime uses `zigbox.package` and never imports
+/// `zigbox_package` too: Zig refuses a file in two modules, with
+/// `error: file exists in modules 'zigbox' and 'zigbox_package'`.
 pub const package = struct {
-    pub const model = @import("package/model.zig");
-    pub const deb = @import("package/deb.zig");
-    pub const rpm = @import("package/rpm.zig");
-    pub const apt = @import("package/apt.zig");
-    pub const dnf = @import("package/dnf.zig");
+    const model = @import("package/model.zig");
+    const deb_file = @import("package/deb.zig");
+    const rpm_file = @import("package/rpm.zig");
+    const apt_file = @import("package/apt.zig");
+    const dnf_file = @import("package/dnf.zig");
+    const check_file = @import("package_check.zig");
+
     pub const Package = model.Package;
     pub const File = model.File;
     pub const Architecture = model.Architecture;
@@ -191,6 +200,35 @@ pub const package = struct {
     pub const Error = model.Error;
     pub const validate = model.validate;
     pub const describe = model.describe;
+
+    pub const deb = struct {
+        pub const write = deb_file.write;
+        pub const file_name = deb_file.file_name;
+    };
+
+    pub const rpm = struct {
+        pub const Options = rpm_file.Options;
+        pub const write = rpm_file.write;
+        pub const file_name = rpm_file.file_name;
+        pub const header_bytes = rpm_file.header_bytes;
+    };
+
+    pub const apt = struct {
+        pub const Identity = apt_file.Identity;
+        pub const write = apt_file.write;
+    };
+
+    pub const dnf = struct {
+        pub const write = dnf_file.write;
+    };
+
+    /// `zig build packages-check` over a tree the caller assembled: `apt/` and
+    /// `rpm/<architecture>/` for both architectures, as `zig build packages` lays them out.
+    pub const check_tree = check_file.check;
+    pub const CheckOptions = check_file.Options;
+    pub const CheckError = check_file.Error;
+    pub const CheckSource = check_file.Source;
+    pub const TreeSource = check_file.TreeSource;
 };
 
 /// The pure trust surface (M8): policy, verdict, DSSE, statements, keys' public text and the
@@ -242,10 +280,6 @@ test "the module's surface is what the contract names" {
     _ = push.export_layout;
     _ = push.send;
     _ = push.UploadWorkspace;
-    _ = package.deb.write;
-    _ = package.rpm.write;
-    _ = package.apt.write;
-    _ = package.dnf.write;
     _ = exec_signal;
     _ = ExecHandle;
     _ = trust.verdict.judge;
@@ -254,6 +288,46 @@ test "the module's surface is what the contract names" {
     _ = trust.statement.parse;
     try std.testing.expect(std.meta.fieldNames(ExecExit).len == 3);
     try std.testing.expect(std.meta.fieldNames(Status).len == 3);
+}
+
+/// Fails unless `namespace` declares exactly `names`, in any order: a public name added to the
+/// package writer's surface without a decision is as much a change of contract as one removed.
+fn expect_exactly(comptime namespace: type, comptime names: []const []const u8) !void {
+    const declared = comptime std.meta.declarations(namespace);
+    try std.testing.expectEqual(names.len, declared.len);
+    for (names) |name| {
+        const found = for (declared) |declared_name| {
+            if (std.mem.eql(u8, name, declared_name)) break true;
+        } else false;
+        if (!found) std.debug.print("not declared: {s}\n", .{name});
+        try std.testing.expect(found);
+    }
+}
+
+test "the package writer's surface is exactly what the decision names" {
+    // Goal: ZB-1's contract (docs/decisions/2026-11-13-zigcube-zb1-zb2.md) changes only on
+    // purpose. Method: each namespace's public declarations are compared, name by name and by
+    // count, with the documented list; each function is referenced so its signature compiles.
+    try expect_exactly(package, &.{
+        "Package",    "File",         "Architecture", "Built",       "TreeFile",   "Error",
+        "validate",   "describe",     "deb",          "rpm",         "apt",        "dnf",
+        "check_tree", "CheckOptions", "CheckError",   "CheckSource", "TreeSource",
+    });
+    try expect_exactly(package.deb, &.{ "write", "file_name" });
+    try expect_exactly(package.rpm, &.{ "Options", "write", "file_name", "header_bytes" });
+    try expect_exactly(package.apt, &.{ "Identity", "write" });
+    try expect_exactly(package.dnf, &.{"write"});
+    _ = package.validate;
+    _ = package.describe;
+    _ = package.deb.write;
+    _ = package.deb.file_name;
+    _ = package.rpm.write;
+    _ = package.rpm.file_name;
+    _ = package.rpm.header_bytes;
+    _ = package.apt.write;
+    _ = package.dnf.write;
+    _ = package.check_tree;
+    _ = package.TreeSource.source;
 }
 
 test "the module's surface for a second product's diagnostics" {

@@ -177,14 +177,26 @@ fn date_text_buffered(epoch: u64) ?DateBuffer {
     return result;
 }
 
+/// Who publishes a repository, as `Release` names it: apt pins and unattended-upgrades match on
+/// `Origin` and `Label`, so each product's repository names itself. One line each.
+pub const Identity = struct {
+    origin: []const u8,
+    label: []const u8,
+    description: []const u8,
+};
+
 /// The whole tree except the signatures: pool, Packages, Packages.gz and Release. `signed_at` is
 /// the signing time in seconds; null keeps the fixed build date and writes no `Valid-Until`.
 pub fn write(
     memory: Allocator,
     built: []const model.Built,
     signed_at: ?u64,
+    identity: *const Identity,
 ) Error![]model.TreeFile {
     if (built.len == 0 or built.len > constants.repo_packages_max) return error.TooManyFiles;
+    try model.check_line(identity.origin);
+    try model.check_line(identity.label);
+    try model.check_line(identity.description);
     const sorted = try memory.dupe(model.Built, built);
     std.mem.sort(model.Built, sorted, {}, built_less);
     var files: std.ArrayList(model.TreeFile) = .empty;
@@ -220,12 +232,14 @@ pub fn write(
         }
     }
     release.writer.print(
-        "Origin: Zigbox\nLabel: Zigbox\nSuite: {s}\nCodename: {s}\n{s}" ++
-            "Architectures: {s}\nComponents: {s}\nDescription: Zigbox packages\nSHA256:\n{s}",
+        "Origin: {s}\nLabel: {s}\nSuite: {s}\nCodename: {s}\n{s}" ++
+            "Architectures: {s}\nComponents: {s}\nDescription: {s}\nSHA256:\n{s}",
         .{
+            identity.origin,                   identity.label,
             suite,                             suite,
             try date_lines(memory, signed_at), names.items,
-            component,                         sums.written(),
+            component,                         identity.description,
+            sums.written(),
         },
     ) catch return error.WriteFailed;
     const release_path = "dists/" ++ suite ++ "/Release";
@@ -235,6 +249,11 @@ pub fn write(
 }
 
 const filename_line = "Filename: pool/main/s/sample/sample_1.2.3_amd64.deb";
+const test_identity: Identity = .{
+    .origin = "Sample",
+    .label = "Sample Label",
+    .description = "Sample packages",
+};
 
 test "the tree has the pool, a Packages pair per architecture and a Release that sums them" {
     // Goal: the layout and every sum in Release equal the placed bytes.
@@ -243,7 +262,7 @@ test "the tree has the pool, a Packages pair per architecture and a Release that
     const memory = arena.allocator();
     const bytes = try deb.write(memory, &deb.sample);
     const built = [_]model.Built{.{ .package = &deb.sample, .bytes = bytes }};
-    const files = try write(memory, &built, null);
+    const files = try write(memory, &built, null, &test_identity);
     try std.testing.expectEqual(@as(usize, 4), files.len);
     try std.testing.expectEqualStrings("pool/main/s/sample/sample_1.2.3_amd64.deb", files[0].path);
     const release = files[files.len - 1];
@@ -273,17 +292,17 @@ test "a signing time gives Date and Valid-Until 21 days later, and redate keeps 
     const bytes = try deb.write(memory, &deb.sample);
     const built = [_]model.Built{.{ .package = &deb.sample, .bytes = bytes }};
     const at: u64 = 1_794_148_734; // 2026-11-08 14:38:54 UTC, a Sunday.
-    const files = try write(memory, &built, at);
+    const files = try write(memory, &built, at, &test_identity);
     const release = files[files.len - 1].bytes;
     const expected = "Date: Sun, 08 Nov 2026 14:38:54 UTC\n" ++
         "Valid-Until: Sun, 29 Nov 2026 14:38:54 UTC\n";
     try std.testing.expect(std.mem.indexOf(u8, release, expected) != null);
-    const plain = (try write(memory, &built, null))[files.len - 1].bytes;
+    const plain = (try write(memory, &built, null, &test_identity))[files.len - 1].bytes;
     try std.testing.expect(std.mem.indexOf(u8, plain, "Valid-Until") == null);
     const later = at + 7 * 86_400;
     const again = try redate(memory, release, later);
     try std.testing.expectEqualStrings(again, try redate(memory, plain, later));
-    const rebuilt = (try write(memory, &built, later))[files.len - 1].bytes;
+    const rebuilt = (try write(memory, &built, later, &test_identity))[files.len - 1].bytes;
     try std.testing.expectEqualStrings(rebuilt, again);
     try std.testing.expectEqual(@as(?u64, at), parse_date("Sun, 08 Nov 2026 14:38:54 UTC"));
     const epoch = parse_date("Tue, 01 Jan 1980 00:00:00 UTC");
@@ -307,4 +326,37 @@ test "a signing time outside the bounds, and a Release with no Date, are refused
     try std.testing.expectError(error.BadRelease, high);
     const no_date = redate(memory, "Origin: Zigbox\nSHA256:\n", constants.apt_signed_at_min);
     try std.testing.expectError(error.BadRelease, no_date);
+}
+
+test "Release names the caller's identity, and an identity that is not one line is refused" {
+    // Goal: Origin, Label and Description are the caller's, so two products' repositories never
+    // match one apt pin; a value that would add or break a Release line is refused before any
+    // output, at the bound and one past it.
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const memory = arena.allocator();
+    const bytes = try deb.write(memory, &deb.sample);
+    const built = [_]model.Built{.{ .package = &deb.sample, .bytes = bytes }};
+    const files = try write(memory, &built, null, &test_identity);
+    const release = files[files.len - 1].bytes;
+    const head = "Origin: Sample\nLabel: Sample Label\n";
+    try std.testing.expect(std.mem.startsWith(u8, release, head));
+    try std.testing.expect(std.mem.indexOf(u8, release, "Description: Sample packages\n") != null);
+    try std.testing.expect(std.mem.indexOf(u8, release, "Zigbox") == null);
+    const longest: [constants.package_summary_bytes_max]u8 = @splat('o');
+    var identity = test_identity;
+    identity.origin = &longest;
+    _ = try write(memory, &built, null, &identity);
+    const refused = [_][]const u8{ "", longest ++ "o", "Sample\nOrigin: Zigbox", "a\tb" };
+    for (refused) |bad| {
+        for (0..3) |field| {
+            identity = test_identity;
+            switch (field) {
+                0 => identity.origin = bad,
+                1 => identity.label = bad,
+                else => identity.description = bad,
+            }
+            try std.testing.expectError(error.BadText, write(memory, &built, null, &identity));
+        }
+    }
 }

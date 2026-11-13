@@ -36,10 +36,12 @@ const supervisor_env = [_]host_sim.EnvironmentVariable{
 };
 
 /// The worker's environment: the agent's state directory (through HOME) and the user's bus
-/// (through XDG_RUNTIME_DIR), and nothing of the supervisor's.
+/// (through XDG_RUNTIME_DIR), nothing of the supervisor's, and one variable of its own that the
+/// exec'd command must not see.
 const worker_env = [_]host_sim.EnvironmentVariable{
     .{ .name = "HOME", .value = sim_run.home_path },
     .{ .name = "XDG_RUNTIME_DIR", .value = "/run/user/1000" },
+    .{ .name = "ZCUBE_WORKER", .value = "1" },
 };
 
 /// A worker of another user's home: it has no state directory of the agent's.
@@ -48,9 +50,13 @@ const stranger_env = [_]host_sim.EnvironmentVariable{
     .{ .name = "XDG_RUNTIME_DIR", .value = "/run/user/1000" },
 };
 
-/// Starts `web` detached, as Zigcube's supervisor does, then forgets the supervisor's handle and
-/// gives the host the worker's environment.
-fn supervisor_starts(sim: *HostSim, seed: u64) !u32 {
+/// Whether the supervisor keeps its `run.Handle` after the start (to reap the container's PID 1,
+/// as Zigcube's supervisor does) or drops it, to show the worker never needs it.
+const Supervisor = enum { drops_handle, keeps_handle };
+
+/// Starts `web` detached, as Zigcube's supervisor does, then gives the host the worker's
+/// environment; the supervisor's handle is dropped unless `supervisor` keeps it.
+fn supervisor_starts(sim: *HostSim, seed: u64, supervisor: Supervisor) !u32 {
     sim_run.init(sim, seed);
     disk.init(seed);
     disk.put_dir("/home", 0o755);
@@ -69,7 +75,7 @@ fn supervisor_starts(sim: *HostSim, seed: u64) !u32 {
     try testing.expectEqual(run.Status.running, run.inspect(&supervisor_handle));
     const pid = supervisor_handle.pid;
     std.debug.assert(pid > 1);
-    supervisor_handle = undefined;
+    if (supervisor == .drops_handle) supervisor_handle = undefined;
     sim.environment_variables = &worker_env;
     return pid;
 }
@@ -85,11 +91,12 @@ fn worker_execs(sim: *HostSim, command: []const []const u8, diag: *Diag) exec.Er
 
 test "a worker with the agent's state directory execs into a supervisor's container" {
     // Goal: ZB-2's first case. Method: the supervisor starts `web` detached and drops its
-    // handle; a worker with only HOME and XDG_RUNTIME_DIR execs `/bin/sh -c true` with no
-    // terminal; the command is in the container's PID namespace and cgroup, sees the container's
-    // environment rather than the worker's, ends with 0, and leaves no terminal and no history.
+    // handle; a worker with only HOME, XDG_RUNTIME_DIR and a variable of its own execs
+    // `/bin/sh -c true` with no terminal; the command is in the container's PID namespace and
+    // cgroup, sees the container's environment rather than the worker's or the supervisor's,
+    // ends with 0, and leaves no terminal and no history.
     var sim: HostSim = undefined;
-    const container_pid = try supervisor_starts(&sim, 31);
+    const container_pid = try supervisor_starts(&sim, 31, .drops_handle);
     var diag: Diag = undefined;
     diag.reset();
     try worker_execs(&sim, &.{ "/bin/sh", "-c", "true" }, &diag);
@@ -98,6 +105,7 @@ test "a worker with the agent's state directory execs into a supervisor's contai
     try testing.expect(command.in_scope);
     try testing.expect(command.in_scope_before_run);
     try testing.expect(std.mem.indexOf(u8, command.envp(), "ZCUBE_ROLE") == null);
+    try testing.expect(std.mem.indexOf(u8, command.envp(), "ZCUBE_WORKER") == null);
     try testing.expect(std.mem.indexOf(u8, command.envp(), "HOSTNAME=web\n") != null);
     try testing.expect(!sim.world.input_is_raw);
     const exit = exec.wait(&worker_handle);
@@ -118,11 +126,33 @@ test "a worker's exec ends with SIGKILL and container_ended when the container e
     // container's PID 1 is killed; the wait returns at once with `.signaled = 9` (code 137)
     // and `container_ended`, without hanging.
     var sim: HostSim = undefined;
-    const container_pid = try supervisor_starts(&sim, 32);
+    const container_pid = try supervisor_starts(&sim, 32, .drops_handle);
     var diag: Diag = undefined;
     diag.reset();
     try worker_execs(&sim, &.{ "/bin/sleep", "1000" }, &diag);
     try testing.expect(sim.world.kill(container_pid, constants.signal_kill) == null);
+    const exit = exec.wait(&worker_handle);
+    try testing.expectEqual(exec.Exit{ .signaled = constants.signal_kill }, exit);
+    try testing.expectEqual(@as(?u8, 137), exit.code());
+    try testing.expect(worker_handle.container_ended);
+}
+
+test "a worker's exec ends with container_ended when the supervisor reaped PID 1 first" {
+    // Goal: ZB-2's usual order on a real agent: the supervisor holds the `run.Handle` and its
+    // `run.wait` reaps the container's PID 1, so /proc/<pid> is gone (not a zombie) before the
+    // worker's `exec_wait` asks whether the container lives. Method: as the case above, but the
+    // supervisor keeps its handle and waits on it after the kill, before the worker's wait.
+    var sim: HostSim = undefined;
+    const container_pid = try supervisor_starts(&sim, 34, .keeps_handle);
+    var diag: Diag = undefined;
+    diag.reset();
+    try worker_execs(&sim, &.{ "/bin/sleep", "1000" }, &diag);
+    try testing.expect(sim.world.kill(container_pid, constants.signal_kill) == null);
+    const reason = run.wait(&supervisor_handle);
+    try testing.expectEqual(run.ExitReason{ .signaled = constants.signal_kill }, reason);
+    try testing.expect(run.inspect(&supervisor_handle) == .stopped);
+    // Reaped, not a zombie: its /proc entry is gone.
+    try testing.expectEqual(.reaped, sim.world.find_process(container_pid).?.state);
     const exit = exec.wait(&worker_handle);
     try testing.expectEqual(exec.Exit{ .signaled = constants.signal_kill }, exit);
     try testing.expectEqual(@as(?u8, 137), exit.code());
@@ -134,7 +164,7 @@ test "a worker's exec into a container that already ended, or without the state,
     // agent's state directory gets E0402 (no such container) while the container runs; once
     // PID 1 is gone, a worker with it gets E0220 (not running). Neither leaves a child.
     var sim: HostSim = undefined;
-    const container_pid = try supervisor_starts(&sim, 33);
+    const container_pid = try supervisor_starts(&sim, 33, .drops_handle);
     var diag: Diag = undefined;
     diag.reset();
     // The supervisor's own children (the container's) are not the worker's to reap.
