@@ -9,11 +9,11 @@ const testing = std.testing;
 const script = ".github/ci-changes.sh";
 const max_paths = 8;
 
-/// Every output the script writes: `code`, the eleven demos and the packages demo.
+/// Every output the script writes: `code`, the twelve demos and the packages demo.
 const all_outputs = [_][]const u8{
-    "code",             "demo_m0", "demo_m1",  "demo_m2", "demo_m3", "demo_m4",
-    "demo_m5",          "demo_m6", "demo_m6b", "demo_m7", "demo_m8", "demo_m8b",
-    "demo_m8_packages",
+    "code",     "demo_m0",          "demo_m1",  "demo_m2", "demo_m3", "demo_m4",
+    "demo_m5",  "demo_m6",          "demo_m6b", "demo_m7", "demo_m8", "demo_m8b",
+    "demo_m10", "demo_m8_packages",
 };
 
 const Row = struct {
@@ -67,23 +67,29 @@ const rows = [_]Row{
     .{
         .paths = &.{".github/workflows/ci.yml"},
         .true_outputs = &.{
-            "code",             "demo_m0", "demo_m1",  "demo_m2", "demo_m3", "demo_m4",
-            "demo_m5",          "demo_m6", "demo_m6b", "demo_m7", "demo_m8", "demo_m8b",
-            "demo_m8_packages",
+            "code",     "demo_m0",          "demo_m1",  "demo_m2", "demo_m3", "demo_m4",
+            "demo_m5",  "demo_m6",          "demo_m6b", "demo_m7", "demo_m8", "demo_m8b",
+            "demo_m10", "demo_m8_packages",
         },
     },
     // The runtime every demo runs on selects every VM demo, not the packages demo.
     .{
         .paths = &.{"src/cli.zig"},
         .true_outputs = &.{
-            "code",    "demo_m0", "demo_m1",  "demo_m2", "demo_m3", "demo_m4",
-            "demo_m5", "demo_m6", "demo_m6b", "demo_m7", "demo_m8", "demo_m8b",
+            "code",     "demo_m0", "demo_m1",  "demo_m2", "demo_m3", "demo_m4",
+            "demo_m5",  "demo_m6", "demo_m6b", "demo_m7", "demo_m8", "demo_m8b",
+            "demo_m10",
         },
     },
     // The M8b demo: its harness files select demo_m8b alone.
     .{
         .paths = &.{"src/testing/vm/checks_m8b.zig"},
         .true_outputs = &.{ "code", "demo_m8b" },
+    },
+    // The M10 demo: its harness files select demo_m10 alone.
+    .{
+        .paths = &.{ "src/testing/vm/checks_m10.zig", "src/testing/vm/m10_fixture/probe.zig" },
+        .true_outputs = &.{ "code", "demo_m10" },
     },
     // The M8 demo: its harness files and its source area select demo_m8 and not the packages.
     .{

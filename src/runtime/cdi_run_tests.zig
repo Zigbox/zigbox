@@ -9,6 +9,7 @@ const host_mod = @import("../host.zig");
 const cdi = @import("cdi.zig");
 const run_lib = @import("run.zig");
 const Diag = @import("../diag/diag.zig").Diag;
+const schemas = @import("../schemas.zig");
 
 const HostSim = host_sim.HostSim;
 const testing = std.testing;
@@ -59,6 +60,34 @@ test "a CDI name is kept in the record, and ps shows it as asked, without a node
     const out = sim.stdout();
     const shown = "\"devices\":[{\"asked\":\"vendor.example/gpu=0\"}]";
     try testing.expect(std.mem.indexOf(u8, out, shown) != null);
+    try expect_devices_follow_schema(out);
+}
+
+/// Checks every `devices` item of a `ps --output json` document against the published `ps`
+/// schema: each member it requires is present, and each member present is one it names. A
+/// consumer that validates against the schema (Zigcube's agent) refuses anything else.
+fn expect_devices_follow_schema(document: []const u8) !void {
+    const schema_text = schemas.of("ps").?;
+    var schema = try std.json.parseFromSlice(std.json.Value, testing.allocator, schema_text, .{});
+    defer schema.deinit();
+    const container = schema.value.object.get("properties").?.object.get("containers").?
+        .object.get("items").?.object;
+    const item = container.get("properties").?.object.get("devices").?.object.get("items").?
+        .object;
+    const required = item.get("required").?.array.items;
+    const named = item.get("properties").?.object;
+    var parsed = try std.json.parseFromSlice(std.json.Value, testing.allocator, document, .{});
+    defer parsed.deinit();
+    var seen: u32 = 0;
+    for (parsed.value.object.get("containers").?.array.items) |entry| {
+        const devices = entry.object.get("devices") orelse continue;
+        for (devices.array.items) |device| {
+            for (required) |name| try testing.expect(device.object.get(name.string) != null);
+            for (device.object.keys()) |key| try testing.expect(named.get(key) != null);
+            seen += 1;
+        }
+    }
+    try testing.expect(seen > 0);
 }
 
 const library_spec =

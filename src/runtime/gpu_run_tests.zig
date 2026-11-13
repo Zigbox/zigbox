@@ -4,6 +4,7 @@
 
 const std = @import("std");
 const host_sim = @import("../host_sim.zig");
+const constants = @import("../constants.zig");
 const gpu = @import("gpu.zig");
 const sim_run = @import("sim_run.zig");
 
@@ -163,6 +164,13 @@ test "--gpu takes all or dri only, and a repeat is refused" {
     setup(sim, &files, .{ .open = 1, .locked = 0, .kfd = false, .spec = false });
     try testing.expectEqual(@as(u8, 125), run_gpu(sim, "nvidia"));
     try testing.expect(std.mem.indexOf(u8, sim.stderr(), "ZBX-E0225") != null);
+    // The keyword is `--gpu`'s: as a `--device` value it is a name that is none, not an alias.
+    const alias = [_][:0]const u8{
+        "zbx", "run", "--rootfs", rootfs, "--device", "gpu=all", "--", "/bin/sh",
+    };
+    try testing.expectEqual(@as(u8, 125), sim_run.run_cli(sim, &alias));
+    try testing.expect(std.mem.indexOf(u8, sim.stderr(), "ZBX-E0225") != null);
+    try testing.expect(std.mem.indexOf(u8, sim.stderr(), "--device 'gpu=all'") != null);
     const twice = [_][:0]const u8{
         "zbx", "run", "--rootfs", rootfs, "--gpu", "dri", "--gpu", "dri", "--", "/bin/sh",
     };
@@ -196,6 +204,53 @@ test "--gpu all raises E0226 for a YAML spec on a host with the NVIDIA driver" {
     try testing.expectEqual(@as(u8, 125), run_gpu(sim, "all"));
     try testing.expect(std.mem.indexOf(u8, sim.stderr(), "ZBX-E0226") != null);
     try testing.expect(!bound(sim, "/dev/dri/renderD128"));
+}
+
+/// 17 openable render nodes, one more than a run takes.
+const many_nodes = blk: {
+    var list: [constants.run_devices_max + 1]host_sim.File = undefined;
+    for (&list, 0..) |*file, index| {
+        file.* = .{
+            .path = std.fmt.comptimePrint("/dev/dri/renderD{d}", .{128 + index}),
+            .content = "",
+            .mode = char_mode,
+            .gid = 44,
+        };
+    }
+    break :blk list;
+};
+
+test "--gpu dri with more render nodes than a run takes says so, and does not blame --device" {
+    // Goal: the E0225 wording of the too_many cause. Method: 17 openable nodes, no --device.
+    const sim = sim_get();
+    defer testing.allocator.destroy(sim);
+    sim_run.start(sim, 5, &(sim_run.files ++ many_nodes));
+    sim.groups[0] = 44;
+    sim.groups_count = 1;
+    sim.world.add_node("/dev/dri", .dir);
+    for (many_nodes) |file| std.debug.assert(sim.world.write_file(file.path, "") == null);
+    try testing.expectEqual(@as(u8, 125), run_gpu(sim, "dri"));
+    const text = sim.stderr();
+    try testing.expect(std.mem.indexOf(u8, text, "ZBX-E0225") != null);
+    try testing.expect(std.mem.indexOf(u8, text, "--gpu dri found ") != null);
+    try testing.expect(std.mem.indexOf(u8, text, "name the nodes you want") != null);
+}
+
+test "--gpu all that falls back to too many render nodes names --gpu all, not dri" {
+    // Goal: the review of #140. `all` on a host without an NVIDIA spec is the render nodes, and
+    // the refusal must name the flag the user typed. Method: 17 openable nodes, no spec, `all`.
+    const sim = sim_get();
+    defer testing.allocator.destroy(sim);
+    sim_run.start(sim, 5, &(sim_run.files ++ many_nodes));
+    sim.groups[0] = 44;
+    sim.groups_count = 1;
+    sim.world.add_node("/dev/dri", .dir);
+    for (many_nodes) |file| std.debug.assert(sim.world.write_file(file.path, "") == null);
+    try testing.expectEqual(@as(u8, 125), run_gpu(sim, "all"));
+    const text = sim.stderr();
+    try testing.expect(std.mem.indexOf(u8, text, "ZBX-E0225") != null);
+    try testing.expect(std.mem.indexOf(u8, text, "--gpu all found ") != null);
+    try testing.expect(std.mem.indexOf(u8, text, "--gpu dri") == null);
 }
 
 test "--gpu all on a host without the NVIDIA driver gives the render node past a YAML spec" {

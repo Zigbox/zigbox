@@ -372,10 +372,32 @@ pub const all = [_]Fixture{
         .extra_files = &.{
             .{ .path = "/dev/dri/renderD128", .content = "", .mode = 0o020660, .gid = 110 },
             .{ .path = "/dev/kfd", .content = "", .mode = 0o020666, .gid = 110 },
+            .{ .path = "/etc/group", .content = "root:x:0:\nrender:x:110:bob\n" },
         },
         .written = &.{.{ .path = "/dev/dri/renderD128", .content = "" }},
     }),
+    // A YAML spec beside a JSON one: the YAML is refused with the fix, the JSON device is fine.
+    build(.{
+        .name = "gpu_cdi_yaml",
+        .extra_files = &.{.{ .path = "/dev/fake0", .content = "", .mode = 0o020666 }},
+        .written = &.{
+            .{ .path = "/etc/cdi/nvidia.yaml", .content = "cdiVersion: 0.6.0\n" },
+            .{ .path = "/etc/cdi/zigbox-test.json", .content = test_spec },
+        },
+    }),
+    // A driver upgraded since the spec was written: a library the spec mounts is gone.
+    build(.{
+        .name = "gpu_cdi_stale",
+        .extra_files = &.{.{ .path = "/dev/fake0", .content = "", .mode = 0o020666 }},
+        .written = &.{.{ .path = "/etc/cdi/zigbox-test.json", .content = stale_spec }},
+    }),
 };
+
+const stale_spec =
+    \\{"cdiVersion":"0.6.0","kind":"zigbox.test/gpu","devices":[
+    \\ {"name":"0","containerEdits":{"deviceNodes":[{"path":"/dev/fake0"}],
+    \\ "mounts":[{"hostPath":"/usr/lib/libfake.so.1.0","containerPath":"/usr/lib/libfake.so.1"}]}}]}
+;
 
 const test_spec =
     \\{"cdiVersion":"0.6.0","kind":"zigbox.test/gpu","devices":[

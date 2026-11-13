@@ -79,6 +79,7 @@ footer{border-top:1px solid var(--line);padding-block:24px;color:var(--muted);
 <p>--device /dev/&lt;path&gt; binds a device node of the host into the container's /dev at the same path. zbx takes a character device below /dev that you can open for reading and writing, given once; at most 16 per run, and never one of the devices every container has (null, zero, full, random, urandom, tty).</p>
 <p>A rootless container has no device cgroup: the host's file permissions alone decide who may open a node. zbx therefore looks at the node first, and refuses one it cannot open, naming its mode and group, rather than letting the workload fail later. It never changes a node's mode or group.</p>
 <p>A run with devices keeps your supplementary groups, so a node that is 0660 root:render opens for a member of &quot;render&quot;.</p>
+<p>--gpu takes &quot;all&quot; or &quot;dri&quot; and nothing else; &quot;--device gpu=all&quot; is not an alias for it. A --gpu dri that finds more render nodes than a run takes is refused with this code too: name the nodes you want instead.</p>
 <h2>Offline</h2>
 <p>The same text, without a network:</p>
 <pre class="term">zbx explain E0225</pre>

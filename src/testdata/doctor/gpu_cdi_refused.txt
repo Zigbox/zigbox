@@ -9,4 +9,4 @@ gpu  gap spec /etc/cdi/a-broken.json  refused: it is not valid JSON
 gpu  ok  spec /etc/cdi/zigbox-test.json  zigbox.test/gpu, 1 devices
 gpu  gap device zigbox.test/gpu=0  you cannot open /dev/fake0: mode 0660, group 44, you are not in that group
 gpu  gap fix a spec was refused  fix or remove the file named above; a spec is read at every start
-gpu  gap fix a node is closed to you  ask whoever runs this host to put you in group 44 (render for render nodes: sudo usermod -aG render $USER), then log in again
+gpu  gap fix a node is closed to you  ask whoever runs this host to put you in group 44, then log in again
