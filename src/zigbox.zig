@@ -6,8 +6,13 @@
 //!     an image digest; the command, the name, the labels and the environment (`env`) are the
 //!     contract's. `limits` (memory bytes, pids, CPU thousandths) is enforced by the container's
 //!     cgroup scope.
-//!   - `start(host, spec, options, handle, diag)`: starts it; on return the command is running.
-//!     `StartOptions.detached` marks the run as one whose supervisor outlives the caller.
+//!   - `start(host, spec, options, handle, gate, diag)`: starts it; on return the command is
+//!     running. `StartOptions.detached` marks the run as one whose supervisor outlives the
+//!     caller. Before anything is made, the run passes the node's trust policy exactly as
+//!     `zbx run` does (`trust/start_gate.zig`): the same policy files (`/etc/zbx/policy.zon`,
+//!     then the user's), the same verdict and tamper check, the same refusal codes (E0903 to
+//!     E0907). There is no way to skip it. With no policy file it reads nothing more and changes
+//!     nothing; `gate` (a `GateWorkspace`, about 17 MiB) is the caller's memory for it.
 //!   - `wait(handle)`: how it ended, as an `ExitReason`. `StartOptions.timeout_ms` ends a run
 //!     that lasts too long (SIGTERM, then SIGKILL after `grace_ms`); `timed_out(handle)` says so.
 //!   - `signal(handle, number)`: sends it a signal, with the forwarding rule of PID 1.
@@ -33,6 +38,7 @@
 const std = @import("std");
 
 const run = @import("runtime/run.zig");
+const start_gate = @import("trust/start_gate.zig");
 
 pub const Spec = run.Spec;
 pub const Label = run.Label;
@@ -43,8 +49,11 @@ pub const ExitReason = run.ExitReason;
 pub const StartOptions = run.StartOptions;
 pub const Warn = run.Warn;
 pub const Error = run.Error;
+/// The memory `start`'s trust gate works in: the caller's, in static or heap storage.
+pub const GateWorkspace = start_gate.Workspace;
 
-pub const start = run.start;
+/// `run.start` behind the trust gate. The ungated start is not part of the library.
+pub const start = start_gate.start;
 pub const wait = run.wait;
 pub const signal = run.signal;
 pub const inspect = run.inspect;
@@ -201,6 +210,7 @@ test "the module's surface is what the contract names" {
     _ = Status;
     _ = ExitReason;
     _ = start;
+    _ = GateWorkspace;
     _ = wait;
     _ = signal;
     _ = inspect;

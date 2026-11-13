@@ -358,7 +358,14 @@ pub fn inspect(handle: *const Handle) Status {
 
 /// Everything a run's handle holds before the first check: what the caller gave, and the state
 /// of a run that has not begun.
-fn init_handle(host: Host, container: *const Spec, options: StartOptions, handle: *Handle) void {
+/// Sets `handle` up for a start of `container`: what `start` does first, and what a start that
+/// is refused before it (the library's trust gate, `trust/start_gate.zig`) leaves.
+pub fn init_handle(
+    host: Host,
+    container: *const Spec,
+    options: StartOptions,
+    handle: *Handle,
+) void {
     assert(container.devices.len <= constants.run_devices_max);
     assert(@intFromPtr(handle) != 0);
     handle.host = host;
