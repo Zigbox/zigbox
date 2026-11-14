@@ -2215,7 +2215,8 @@ test "a fetch that cannot be downloaded is E0820 naming the step and the URL, ne
     try testing.expectEqual(codes.Code.E0820, diag.code.?);
     var shown: [constants.output_bytes_max]u8 = undefined;
     const text = render.render(&diag, .text, false, &shown);
-    try testing.expect(std.mem.indexOf(u8, text, "http://127.0.0.1:8080/gone.txt answered") != null);
+    const answered = "http://127.0.0.1:8080/gone.txt answered";
+    try testing.expect(std.mem.indexOf(u8, text, answered) != null);
     try testing.expect(std.mem.indexOf(u8, text, "token") == null);
     const verbose = render.render(&diag, .verbose, false, &shown);
     try testing.expect(std.mem.indexOf(u8, verbose, "build step \"put\"") != null);

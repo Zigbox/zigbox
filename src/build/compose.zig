@@ -1419,7 +1419,9 @@ pub const Context = struct {
     fn interrupt_of(pointer: *anyopaque) u8 {
         const context: *Context = @ptrCast(@alignCast(pointer));
         assert(@intFromPtr(context.ws) != 0);
-        return context.host.interrupt_signal();
+        const signal = context.host.interrupt_signal();
+        assert(signal <= 64); // A Linux signal number.
+        return signal;
     }
 
     /// The diagnostic for `ws.fetcher.reason`: a cache write is E0416/E0417 as a pull's is, a

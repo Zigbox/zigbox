@@ -414,5 +414,6 @@ fn ipv4_part(text: []const u8) ?u64 {
             digits = text[1..];
         }
     }
+    assert(digits.len <= text.len);
     return std.fmt.parseUnsigned(u64, digits, base) catch null;
 }

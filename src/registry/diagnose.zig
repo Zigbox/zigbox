@@ -114,17 +114,23 @@ pub const BlobKind = enum {
     fetched,
 
     fn noun(kind: BlobKind) []const u8 {
-        return switch (kind) {
+        const text = switch (kind) {
             .layer => "a downloaded layer",
             .fetched => "a fetched file",
         };
+        assert(text.len > 0);
+        assert(std.mem.startsWith(u8, text, "a "));
+        return text;
     }
 
     fn again(kind: BlobKind) []const u8 {
-        return switch (kind) {
+        const text = switch (kind) {
             .layer => "remove the damaged blob and pull again:",
             .fetched => "remove the damaged blob and build again:",
         };
+        assert(text.len > 0);
+        assert(std.mem.endsWith(u8, text, ":"));
+        return text;
     }
 };
 

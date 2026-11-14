@@ -121,6 +121,10 @@ fn expect_import(session: *Session, out: *Io.Writer) !void {
     };
     const hermetic = zf ++ " import --hermetic -o h.build.zon";
     _ = try common.expect_exit(session, out, step7, hermetic, 0);
+    const sealed = try hello.read_file(session, out, step7, project_dir ++ "/h.build.zon");
+    checks.check_entry(sealed) catch |err| {
+        return fail_step(out, step7, "expected --hermetic to write the same .fetch entry", err);
+    };
 }
 
 fn build(session: *Session, out: *Io.Writer) !checks.Report {

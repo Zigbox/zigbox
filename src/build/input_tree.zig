@@ -8,8 +8,9 @@
 //! does while the build reads it. A declared input's links are followed (beneath; `inputs.zig`
 //! has already refused one that leads out). Inside a directory input nothing is followed: a link
 //! is imported as a link, its text in the tree and so in the key. So is a link at the top of the
-//! project that the whole project (`.`) matched, as Docker's `COPY .` keeps it. A device, a FIFO or a socket is
-//! refused (E0803). The key is computed from what was read, never from a second look.
+//! project that the whole project (`.`) matched, as Docker's `COPY .` keeps it. A device, a FIFO
+//! or a socket is refused (E0803). The key is computed from what was read, never from a second
+//! look.
 //!
 //! What the tree records is normalised, so that two checkouts of one commit give one key: every
 //! owner is 0, no extended attribute is kept, a directory is 0755, a file is 0755 if its owner

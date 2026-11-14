@@ -137,7 +137,8 @@ test "a mismatch leaves nothing in blobs/sha256 nor in blobs/partial, and names 
     // hash for E0821.
     const blobs = setup(2);
     const wrong = Sha256.of("something else");
-    try testing.expectError(error.Failed, test_fetcher.fetch("https://h.test/hello.txt", wrong, partial));
+    const failed = test_fetcher.fetch("https://h.test/hello.txt", wrong, partial);
+    try testing.expectError(error.Failed, failed);
     try testing.expect(test_fetcher.reason == .mismatch);
     try testing.expect(test_fetcher.reason.mismatch.eql(Sha256.of(payload)));
     try testing.expect(final_content(blobs, wrong) == null);
@@ -155,7 +156,8 @@ test "redirects are followed within the bound, and never to http or to loopback"
     try testing.expectEqualStrings(payload, final_content(blobs, digest).?);
     try testing.expectEqual(@as(u32, 2), test_net.requests);
     _ = setup(4);
-    try testing.expectError(error.Failed, test_fetcher.fetch("https://h.test/loop", digest, partial));
+    const failed = test_fetcher.fetch("https://h.test/loop", digest, partial);
+    try testing.expectError(error.Failed, failed);
     try testing.expect(test_fetcher.reason == .redirects);
     try testing.expectEqual(constants.build_fetch_redirects_max + 1, test_net.requests);
     const refusals = [_]struct { []const u8, fetch_mod.Refusal }{
@@ -181,17 +183,20 @@ test "a status, a body over the bound and a network error are told apart, and le
     // Goal: E0820's three kinds of reason, each with nothing left in the blob directories.
     const digest = Sha256.of(payload);
     var blobs = setup(7);
-    try testing.expectError(error.Failed, test_fetcher.fetch("https://h.test/missing", digest, partial));
+    const missing = test_fetcher.fetch("https://h.test/missing", digest, partial);
+    try testing.expectError(error.Failed, missing);
     try testing.expectEqual(@as(u16, 404), test_fetcher.reason.status);
     try testing.expect(no_partial());
     blobs = setup(8);
-    try testing.expectError(error.Failed, test_fetcher.fetch("https://h.test/big", digest, partial));
+    const big = test_fetcher.fetch("https://h.test/big", digest, partial);
+    try testing.expectError(error.Failed, big);
     try testing.expect(test_fetcher.reason == .too_large);
     try testing.expect(no_partial());
     blobs = setup(9);
     test_net.faults.fail_request = 0;
     test_net.faults.fail_error = error.UnknownHost;
-    try testing.expectError(error.Failed, test_fetcher.fetch("https://h.test/hello.txt", digest, partial));
+    const failed = test_fetcher.fetch("https://h.test/hello.txt", digest, partial);
+    try testing.expectError(error.Failed, failed);
     try testing.expectEqual(error.UnknownHost, test_fetcher.reason.network);
     try testing.expect(final_content(blobs, digest) == null);
 }
