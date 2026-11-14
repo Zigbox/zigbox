@@ -123,7 +123,7 @@ fn partial_directory(store: *const Store, buffer: *PathBuf, id: Digest) [:0]cons
     return store.path(buffer, &.{ "/partial/", &hex });
 }
 
-fn partial_chunk(store: *const Store, buffer: *PathBuf, id: Digest, index: u32) [:0]const u8 {
+pub fn partial_chunk(store: *const Store, buffer: *PathBuf, id: Digest, index: u32) [:0]const u8 {
     assert(store.root_len > 1);
     assert(index < constants.store_chunks_max);
     const hex = id.hex();

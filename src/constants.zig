@@ -2026,3 +2026,50 @@ comptime {
     assert(fuse_reply_bytes > fuse_read_bytes_max);
     assert(fuse_congestion_threshold < fuse_max_background);
 }
+
+// Lazy start (S2): the chunk resolver (`src/lazy/`). The values are the brief's, approved by the
+// owner on 2026-11-14 (docs/briefs/S2-lazy-start.md, decision 4).
+/// One request to one source, for at most `lazy_range_bytes_max`.
+pub const lazy_attempt_timeout_ms: u32 = 10_000;
+/// The longest a read waits for a chunk that is not local before it fails with `EIO` (E1203).
+pub const lazy_read_deadline_ms: u32 = 30_000;
+/// A read that needs only sources that are down fails after this long instead.
+pub const lazy_down_fail_ms: u32 = 2_000;
+/// A source that is down gets one request (a probe) per this long; one success brings it back.
+pub const lazy_down_probe_ms: u32 = 5_000;
+/// Requests on behalf of readers (and their readahead) at once, across every source.
+pub const lazy_fetches_max: u32 = 8;
+/// Requests of the background fill at once; they never hold a slot a reader is waiting for.
+pub const lazy_fill_fetches_max: u32 = 2;
+/// After two reads of consecutive chunks of one file, the chunks fetched ahead of the reader.
+pub const lazy_readahead_chunks: u32 = 4;
+/// The most compressed bytes one `Range` request asks for (neighbouring chunks coalesced).
+pub const lazy_range_bytes_max: u32 = 8 * 1024 * 1024;
+/// Below this many free bytes on the store's disk the fill stops; below a quarter of it a read's
+/// fetch fails (E1206).
+pub const lazy_store_free_bytes_min: u64 = 1024 * 1024 * 1024;
+/// The sources one resolver asks after the store: the peers a library caller passes, and the
+/// registry. A run that passes more peers is refused.
+pub const lazy_sources_max: u32 = 8;
+/// The chunks one request may carry: a range of `lazy_range_bytes_max` holds at most this many
+/// whole chunks of incompressible data.
+pub const lazy_job_chunks_max: u32 = lazy_range_bytes_max / store_chunk_bytes;
+/// Fetch slots: each has a range buffer and a chunk buffer, fixed at start.
+pub const lazy_slots: u32 = lazy_fetches_max + lazy_fill_fetches_max;
+/// Chunks the resolver tracks at once: every slot's chunks, and each waiting reader's chunk
+/// with its readahead.
+pub const lazy_pending_max: u32 = lazy_slots * lazy_job_chunks_max +
+    lazy_fuse_threads * (1 + lazy_readahead_chunks);
+
+comptime {
+    assert(lazy_attempt_timeout_ms < lazy_read_deadline_ms);
+    assert(lazy_down_fail_ms < lazy_attempt_timeout_ms);
+    assert(lazy_down_fail_ms < lazy_down_probe_ms);
+    assert(lazy_fill_fetches_max < lazy_fetches_max);
+    assert(lazy_readahead_chunks <= lazy_job_chunks_max);
+    assert(lazy_range_bytes_max % store_chunk_bytes == 0);
+    assert(lazy_job_chunks_max >= 1);
+    assert(lazy_sources_max <= 8); // A source set is one byte per object.
+    assert(lazy_store_free_bytes_min % 4 == 0);
+    assert(lazy_pending_max <= 1024);
+}
