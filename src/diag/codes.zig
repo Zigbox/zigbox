@@ -196,6 +196,9 @@ pub const Code = enum(u8) {
     E0607,
     E0608,
     E0609,
+    E0610,
+    E0611,
+    E0612,
     E0701,
     E0702,
     E0703,
@@ -3134,6 +3137,64 @@ pub const registry = [_]Entry{
         ,
     },
     .{
+        .code = .E0610,
+        .severity = .@"error",
+        .blame = .user,
+        .summary = "a socket can be made only in a container with --net none",
+        .explanation =
+        \\A socket made for a container lives in the container's network namespace.
+        \\zbx makes one only in a container started with --net none (the default),
+        \\whose namespace holds nothing but its own loopback. A container started with
+        \\--net host shares the host's network namespace, so a socket made "in" it
+        \\would be the host's: that would open a port on the host under the
+        \\container's name. A container with --net user reaches the outside through
+        \\pasta, and sockets in it are not offered.
+        \\
+        \\Start the container with --net none (or without --net) and ask again.
+        ,
+    },
+    .{
+        .code = .E0611,
+        .severity = .@"error",
+        .blame = .environment,
+        .summary = "a socket could not be made inside the container",
+        .explanation =
+        \\zbx makes the socket with a short-lived helper process that joins the
+        \\container's user and network namespaces, opens the socket and hands it back
+        \\with SCM_RIGHTS. One of those steps failed; the step and the system error
+        \\are in the message. Usual causes: the caller is not the user that started
+        \\the container (joining its user namespace is then refused), the container
+        \\ended while the helper ran, or the caller has no free descriptor. A caller
+        \\that ignores SIGCHLD has its helper reaped by the kernel, and the wait for
+        \\it fails with ECHILD: leave SIGCHLD at its default to use this call.
+        \\
+        \\The helper is a child of the caller and never enters the container's PID
+        \\namespace, so nothing inside the container can see or signal it.
+        ,
+    },
+    .{
+        .code = .E0612,
+        .severity = .@"error",
+        .blame = .user,
+        .summary = "the hosts file cannot be bound at /etc/hosts",
+        .explanation =
+        \\--hosts-file binds a file you own, read-only, at /etc/hosts in place of the
+        \\one zbx generates. It is refused for a container with a network (a
+        \\container with --net user or --net host resolves names through DNS, and a
+        \\hosts file would shadow it), for a path that is not absolute, and for a
+        \\path that is missing, not a regular file, not readable by you, or that
+        \\cannot be followed to a file (a loop of symbolic links) or read when the
+        \\container starts. The cause says which.
+        \\
+        \\The file itself is bound, not a copy: rewriting it in place is seen inside
+        \\at once, replacing it by renaming another file over it is not. The path is
+        \\not kept in the container's run record, so nothing that reads the record
+        \\(zbx ps, a bundle, an agent that adopts the container) learns it, and a
+        \\container run again gets it only if it is given again. /etc/resolv.conf and
+        \\/etc/hostname are generated as before.
+        ,
+    },
+    .{
         .code = .E0701,
         .severity = .@"error",
         .blame = .environment,
@@ -3474,7 +3535,10 @@ pub const registry = [_]Entry{
         \\link that leads out is refused naming where it leads, as a --mount
         \\outside the project is: a build sees only what the project holds.
         \\
-        \\Inputs are checked before anything runs.
+        \\Inputs are checked before anything runs. A copy step's .src is refused
+        \\when it matches nothing, and when it matches more than one path while
+        \\its .to does not end in /: every match would land on the one path, so,
+        \\as Docker does, end .to with / to copy each match into a directory.
         ,
     },
     .{

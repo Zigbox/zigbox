@@ -179,6 +179,7 @@ const module_allowlist = [_][]const u8{
     "seccomp_policy",
     "zigbox_vm",
     "m9_vm_cases",
+    "zigbox",
 };
 
 const skipped_directories = [_][]const u8{ ".git", ".zig-cache", "zig-out", "zig-pkg" };

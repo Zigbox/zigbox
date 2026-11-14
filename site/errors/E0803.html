@@ -77,7 +77,7 @@ footer{border-top:1px solid var(--line);padding-block:24px;color:var(--muted);
 <dl class="facts"><div><dt>Kind</dt><dd>error</dd></div><div><dt>Blame</dt><dd>user</dd></div><div><dt>Exit code</dt><dd>1</dd></div></dl>
 <h2>What it means</h2>
 <p>A step's .inputs are files or directories of the project, written as paths relative to the project directory (src/main.go: no leading /, no . or .. part). Each is resolved with every symbolic link followed, and must be there, be a file or a directory, and stay inside the project. A link that leads out is refused naming where it leads, as a --mount outside the project is: a build sees only what the project holds.</p>
-<p>Inputs are checked before anything runs.</p>
+<p>Inputs are checked before anything runs. A copy step's .src is refused when it matches nothing, and when it matches more than one path while its .to does not end in /: every match would land on the one path, so, as Docker does, end .to with / to copy each match into a directory.</p>
 <h2>Offline</h2>
 <p>The same text, without a network:</p>
 <pre class="term">zbx explain E0803</pre>
