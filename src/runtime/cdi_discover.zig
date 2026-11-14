@@ -1,8 +1,11 @@
 //! Finds the CDI specs of the host and resolves the devices a run asked for (M10 slice 2).
-//! Directories, the first that has a device deciding it (as in the reference implementation,
-//! where a later directory in `/etc/cdi`, `/var/run/cdi` order overrides an earlier one):
-//! `$XDG_CONFIG_HOME/cdi` (`$HOME/.config/cdi` when it is unset), `/var/run/cdi`, `/etc/cdi`,
-//! each read in name order, at most `cdi_dir_entries_max` spec files in all (more is refused).
+//! Directories, the first that has a device deciding it: `$XDG_CONFIG_HOME/cdi`
+//! (`$HOME/.config/cdi` when it is unset), then `/var/run/cdi`, then `/etc/cdi`, each read in
+//! name order, at most `cdi_dir_entries_max` spec files in all (more is refused). The user's
+//! directory is Zigbox's own, read first so a rootless user's spec wins; the reference
+//! implementation has only the two system directories, the later of `/etc/cdi`, `/var/run/cdi`
+//! overriding the earlier, which is the order here read first-wins
+//! (docs/decisions/2026-11-13-cdi-discovery-and-late-steps.md).
 //! What the specs name is then looked at on the host:
 //! a mount's source must be there (E0226) and a node must be one the caller can open (E0225).
 

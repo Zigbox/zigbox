@@ -186,7 +186,7 @@ first, so the files of an earlier run never stay beside this one's.
 
 ### The site deploy
 
-The site's deploy (`.github/workflows/deploy.yml` in `Zigbox/zigbox.github.io`) copies the newest
+The site's deploy (`.github/workflows/deploy.yml` in `Zigbox/website`) copies the newest
 release's asset to `https://zigbox.org/apt`, `/rpm` and the two keyring files byte for byte
 ([decision](../decisions/2026-11-10-packages-on-zigbox-org.md)). It refuses an asset that holds
 anything else (links, dot files, `.html`, `to-sign/`, the test key) or lacks `InRelease`,
@@ -318,7 +318,7 @@ will not overwrite a file, so use an empty signatures directory every time. The 
 publishing the draft release in `release.yml`, never by hand; only with the owner's written
 go-ahead in `docs/decisions/` create the tag and release with `gh release create` from the gated
 commit, run `release.yml` by `workflow_dispatch`, and start the site deploy with `gh workflow run deploy.yml --repo
-Zigbox/zigbox.github.io`.
+Zigbox/website`.
 
 For the Mac zip, on a Mac with the Developer ID certificate in the login keychain and a notary
 profile there (`xcrun notarytool store-credentials zbx-notary`), from a logged-in graphical
