@@ -44,6 +44,7 @@ const dockerignore_fuzz = @import("fuzz_dockerignore.zig");
 const pull_report_fuzz = @import("fuzz_pull_report.zig");
 const key_fuzz = @import("fuzz_key.zig");
 const openpgp_fuzz = @import("fuzz_openpgp.zig");
+const dnf_fuzz = @import("fuzz_dnf.zig");
 const json_fuzz = @import("fuzz_json.zig");
 const cdi_fuzz = @import("fuzz_cdi.zig");
 const trust_fuzz = @import("fuzz_trust.zig");
@@ -99,6 +100,7 @@ const fuzzers = [_]Fuzzer{
     .{ .name = "pull_report", .run_iteration = pull_report_fuzz.fuzz_pull_report },
     .{ .name = "key", .run_iteration = key_fuzz.fuzz_key },
     .{ .name = "openpgp", .run_iteration = openpgp_fuzz.fuzz_openpgp },
+    .{ .name = "dnf", .run_iteration = dnf_fuzz.fuzz_dnf },
     .{ .name = "json", .run_iteration = json_fuzz.fuzz_json },
     .{ .name = "cdi", .run_iteration = cdi_fuzz.fuzz_cdi },
     .{ .name = "trust", .run_iteration = trust_fuzz.fuzz_trust },

@@ -88,7 +88,7 @@ fn package_xml(
 ) Error!void {
     const package = built.package;
     const parts = rpm.split(built.bytes) orelse
-        unreachable; // `built.bytes` is an rpm this module just wrote.
+        unreachable; // `write` refused every rpm `check_built` does not accept.
     const entries = try model.layout(memory, package, true);
     const epoch = constants.package_source_date_epoch;
     const rpm_arch = package.architecture.rpm_name();
@@ -122,7 +122,7 @@ fn package_xml(
         "</rpm:license>\n    <rpm:vendor></rpm:vendor>\n    <rpm:group>Unspecified</rpm:group>\n",
     );
     const build_host = rpm.build_host_of(parts.main_header) orelse
-        unreachable; // `rpm.write` names a build host in every main header.
+        unreachable; // `check_built` found the build host in this main header.
     try put(writer, "    <rpm:buildhost>");
     try put_escaped(writer, build_host);
     try put(writer, "</rpm:buildhost>\n");
@@ -226,13 +226,32 @@ fn built_less(_: void, left: model.Built, right: model.Built) bool {
     return std.mem.order(u8, left.package.version, right.package.version) == .lt;
 }
 
-/// The tree of one architecture: paths are relative to `rpm/<basearch>/`.
+/// `built.bytes` is the rpm `rpm.write` makes for `built.package` on `architecture`: it splits,
+/// names a build host, and its main header is the one that package and build host give. The
+/// signature header is not compared, since the caller may have placed a header signature there.
+/// Anything else is `ForeignRpm`, a refusal: the bytes come from the caller.
+fn check_built(
+    memory: Allocator,
+    architecture: model.Architecture,
+    built: model.Built,
+) Error!void {
+    if (built.package.architecture != architecture) return error.ForeignRpm;
+    const parts = rpm.split(built.bytes) orelse return error.ForeignRpm;
+    const build_host = rpm.build_host_of(parts.main_header) orelse return error.ForeignRpm;
+    model.check_line(build_host) catch return error.ForeignRpm;
+    const expected = try rpm.header_bytes(memory, built.package, build_host);
+    if (!std.mem.eql(u8, expected, parts.main_header)) return error.ForeignRpm;
+}
+
+/// The tree of one architecture: paths are relative to `rpm/<basearch>/`. Every rpm must be one
+/// `rpm.write` made for its package and `architecture`; any other bytes are `ForeignRpm`.
 pub fn write(
     memory: Allocator,
     architecture: model.Architecture,
     built: []const model.Built,
 ) Error![]model.TreeFile {
     if (built.len == 0 or built.len > constants.repo_packages_max) return error.TooManyFiles;
+    for (built) |item| try check_built(memory, architecture, item);
     const sorted = try memory.dupe(model.Built, built);
     std.mem.sort(model.Built, sorted, {}, built_less);
     var files: std.ArrayList(model.TreeFile) = .empty;
@@ -246,7 +265,7 @@ pub fn write(
         .{constants.package_source_date_epoch},
     );
     for (sorted) |item| {
-        assert(item.package.architecture == architecture);
+        assert(item.package.architecture == architecture); // `check_built` refused the others.
         try files.append(
             memory,
             .{ .path = try rpm.file_name(memory, item.package), .bytes = item.bytes },
@@ -307,4 +326,44 @@ test "the tree has the rpm, three checksum-named metadata files and repomd.xml" 
         try std.testing.expect(std.mem.indexOf(u8, repomd, sum) != null);
         try std.testing.expect(std.mem.indexOf(u8, file.path, sum) != null);
     }
+}
+
+test "bytes rpm.write did not make for the package are refused, not trusted" {
+    // Goal: `dnf.write` takes its rpms from the caller, so foreign bytes are a refusal
+    // (`ForeignRpm`), never a panic or a tree that describes other bytes. Method: empty bytes,
+    // a deb, a cut rpm, one flipped byte in the main header, another package's rpm, an rpm of
+    // the other architecture; then an rpm whose signature header changed (as a placed header
+    // signature changes it) is still accepted.
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const memory = arena.allocator();
+    const sample = &@import("deb.zig").sample;
+    const good = try rpm.write(memory, sample, .{ .build_host = "zigbox-build" });
+    const parts = rpm.split(good).?;
+
+    var other = sample.*;
+    other.version = "1.2.4";
+    var aarch64 = sample.*;
+    aarch64.architecture = .aarch64;
+    const flipped = try memory.dupe(u8, good);
+    flipped[parts.header_start + parts.main_header.len / 2] ^= 0x20;
+    const foreign = [_][]const u8{
+        "",
+        try @import("deb.zig").write(memory, sample),
+        good[0 .. parts.header_end - 1],
+        flipped,
+        try rpm.write(memory, &other, .{ .build_host = "zigbox-build" }),
+    };
+    for (foreign) |bytes| {
+        const built = [_]model.Built{.{ .package = sample, .bytes = bytes }};
+        try std.testing.expectError(error.ForeignRpm, write(memory, .x86_64, &built));
+    }
+    const elsewhere = try rpm.write(memory, &aarch64, .{ .build_host = "zigbox-build" });
+    const wrong_tree = [_]model.Built{.{ .package = &aarch64, .bytes = elsewhere }};
+    try std.testing.expectError(error.ForeignRpm, write(memory, .x86_64, &wrong_tree));
+
+    const resigned = try memory.dupe(u8, good);
+    resigned[parts.header_start - 1] ^= 0x01; // Padding or data of the signature header.
+    const accepted = [_]model.Built{.{ .package = sample, .bytes = resigned }};
+    _ = try write(memory, .x86_64, &accepted);
 }

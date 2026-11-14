@@ -336,6 +336,7 @@ test {
     _ = @import("trust/key_store_tests.zig");
     _ = @import("fuzz_key.zig");
     _ = @import("fuzz_openpgp.zig");
+    _ = @import("fuzz_dnf.zig");
     _ = @import("trust/json.zig");
     _ = @import("trust/json_tests.zig");
     _ = @import("trust/dsse.zig");

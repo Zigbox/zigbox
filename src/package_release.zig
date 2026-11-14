@@ -113,7 +113,7 @@ pub fn header_signature_name(memory: Allocator, rpm_file: []const u8) Error![]u8
         return error.OutOfMemory;
 }
 
-pub fn repomd_path(memory: Allocator, index: usize) Error![]u8 {
+pub fn repomd_path(memory: Allocator, index: usize) error{OutOfMemory}![]u8 {
     return std.fmt.allocPrint(memory, "rpm/{s}/repodata/repomd.xml", .{
         architectures[index].rpm_name(),
     }) catch return error.OutOfMemory;
