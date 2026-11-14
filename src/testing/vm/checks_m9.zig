@@ -67,21 +67,38 @@ pub fn contains_all(text: []const u8, wants: []const []const u8) bool {
     return true;
 }
 
+/// The text report and the warnings after it: `zbx import` prints both to stderr, the report
+/// first, and nothing to stdout (only `--output json` writes stdout). Null when the report is
+/// empty or a warning comes first.
+const Split = struct { report: []const u8, warnings: []const u8 };
+
+fn split_report(stdout: []const u8, stderr: []const u8) ?Split {
+    if (stdout.len != 0) return null;
+    const at = if (std.mem.indexOf(u8, stderr, "\nwarning[")) |index| index + 1 else stderr.len;
+    assert(at <= stderr.len);
+    if (at == 0 or std.mem.startsWith(u8, stderr, "warning[")) return null;
+    const split: Split = .{ .report = stderr[0..at], .warnings = stderr[at..] };
+    assert(split.report.len + split.warnings.len == stderr.len);
+    return split;
+}
+
 /// Step 1: `zbx import` exited 0; the report has each step with its line and kind and nothing
-/// after (no `net`, no `cache`: the `tools` stage is not reached), the footer, and W0811 names
-/// `EXPOSE` and `HEALTHCHECK` as labels.
+/// after (no `net`, no `cache`: the `tools` stage is not reached), the footer, `EXPOSE` and
+/// `HEALTHCHECK` as labels, and W0811 follows it.
 pub fn check_import(stdout: []const u8, stderr: []const u8, status: u8) Error!void {
     if (status != 0) return error.ImportWrong;
+    const split = split_report(stdout, stderr) orelse return error.ImportWrong;
+    const report = split.report;
     var buffer: [64]u8 = undefined;
     for (steps) |one| {
         const want = std.fmt.bufPrint(&buffer, "{s}  Dockerfile:{d}  {s}", .{
             one.name, one.line, one.kind,
         }) catch unreachable; // 64 holds the longest name.
-        if (!has_line(stdout, want)) return error.ImportWrong;
+        if (!has_line(report, want)) return error.ImportWrong;
     }
-    if (count_step_lines(stdout) != steps.len) return error.ImportWrong;
-    if (!has_line(stdout, footer)) return error.ImportWrong;
-    if (!std.mem.startsWith(u8, stderr, "warning[ZBX-W0811]: ")) return error.ImportWrong;
+    if (count_step_lines(report) != steps.len) return error.ImportWrong;
+    if (!has_line(report, footer)) return error.ImportWrong;
+    if (!std.mem.startsWith(u8, split.warnings, "warning[ZBX-W0811]: ")) return error.ImportWrong;
     if (std.mem.indexOf(u8, stderr, "error[") != null) return error.ImportWrong;
     // W0811's cause is cut after a few entries, so the labels are read from the report's list
     // of what did not carry over, which W0811 summarizes.
@@ -90,7 +107,7 @@ pub fn check_import(stdout: []const u8, stderr: []const u8, status: u8) Error!vo
         "  Dockerfile:20  HEALTHCHECK: label org.zigbox.import.healthcheck",
     };
     for (labels) |label| {
-        if (!has_line(stdout, label)) return error.ImportWrong;
+        if (!has_line(report, label)) return error.ImportWrong;
     }
 }
 
@@ -181,15 +198,15 @@ pub fn check_owner(stdout: []const u8) Error!void {
 /// stderr carries W0810 and then W0811 (the brief has W0810 last; the dropped parts follow it).
 pub fn check_tools(stdout: []const u8, stderr: []const u8, status: u8) Error!void {
     if (status != 0) return error.ImportWrong;
+    const split = split_report(stdout, stderr) orelse return error.ImportWrong;
     const line = "tools-1  Dockerfile:11  run  net (matched \"apk add\")  cache";
-    if (!has_line(stdout, line)) return error.ImportWrong;
-    if (count_step_lines(stdout) != 1) return error.ImportWrong;
-    if (std.mem.indexOf(u8, stdout, "; 1 flagged") == null) return error.ImportWrong;
-    const w0810 = std.mem.indexOf(u8, stderr, "warning[ZBX-W0810]: ") orelse
+    if (!has_line(split.report, line)) return error.ImportWrong;
+    if (count_step_lines(split.report) != 1) return error.ImportWrong;
+    if (std.mem.indexOf(u8, split.report, "; 1 flagged") == null) return error.ImportWrong;
+    if (!std.mem.startsWith(u8, split.warnings, "warning[ZBX-W0810]: ")) return error.ImportWrong;
+    if (std.mem.indexOf(u8, split.warnings, "\nwarning[ZBX-W0811]: ") == null) {
         return error.ImportWrong;
-    const w0811 = std.mem.indexOf(u8, stderr, "warning[ZBX-W0811]: ") orelse
-        return error.ImportWrong;
-    if (w0810 > w0811) return error.ImportWrong;
+    }
     if (std.mem.indexOf(u8, stderr, "error[") != null) return error.ImportWrong;
 }
 
@@ -327,8 +344,9 @@ const testing = std.testing;
 const digest_a = "b3:" ++ @as([64]u8, @splat('a'));
 const digest_b = "b3:" ++ @as([64]u8, @splat('b'));
 
-/// Recorded from the binary on 2026-11-14 (slice 3 and the copy chown work merged).
-const import_stdout =
+/// Recorded from the binary on 2026-11-14 (slice 3 and the copy chown work merged): stderr is
+/// the report, then W0811; stdout is empty.
+const import_report =
     "build-1  Dockerfile:5  copy\n" ++
     "build-2  Dockerfile:6  copy\n" ++
     "build-3  Dockerfile:8  run\n" ++
@@ -343,29 +361,35 @@ const import_stdout =
     "  Dockerfile:20  HEALTHCHECK: label org.zigbox.import.healthcheck\n" ++
     footer ++ "\n";
 
-const import_stderr =
+const import_warning =
     "warning[ZBX-W0811]: parts of the Dockerfile did not carry over\n" ++
     "  cause  not carried over: # syntax:1 (ignored: zbx reads the file), COPY\n" ++
     "         --chown:16 (kept, but zbx build refuses it (E0802) for now), COPY\n" ++
     "         --chmod:16 (kept, but zbx build refuses it (E0802) for now)...\n" ++
     "  fix    nothing to do unless one matters; the report says what became of each\n";
+const import_stderr = import_report ++ import_warning;
 
 test "the import report: each step with its line, the footer, W0811 naming the labels" {
-    // Goal: step 1's check accepts what the binary printed and refuses a flag, a lost step or
-    // a missing warning. Method: the recorded output, then each edited.
-    try check_import(import_stdout, import_stderr, 0);
-    try testing.expectError(error.ImportWrong, check_import(import_stdout, import_stderr, 1));
-    var buffer: [1024]u8 = undefined;
-    const net_size = std.mem.replacementSize(u8, import_stdout, "8  run", "8  run  net");
+    // Goal: step 1's check accepts what the binary printed and refuses a flag, a lost step, a
+    // missing warning, a report on stdout or a warning before it. Method: the recorded output,
+    // then each edited.
+    try check_import("", import_stderr, 0);
+    try testing.expectError(error.ImportWrong, check_import("", import_stderr, 1));
+    try testing.expectError(error.ImportWrong, check_import(import_report, import_warning, 0));
+    try testing.expectError(error.ImportWrong, check_import("", import_report, 0));
+    try testing.expectError(error.ImportWrong, check_import("", import_warning, 0));
+    const first = import_warning ++ import_report;
+    try testing.expectError(error.ImportWrong, check_import("", first, 0));
+    var buffer: [2048]u8 = undefined;
+    const net_size = std.mem.replacementSize(u8, import_stderr, "8  run", "8  run  net");
     const netted = buffer[0..net_size];
-    _ = std.mem.replace(u8, import_stdout, "8  run", "8  run  net", netted);
-    try testing.expectError(error.ImportWrong, check_import(netted, import_stderr, 0));
-    const lost = import_stdout["build-1  Dockerfile:5  copy\n".len..];
-    try testing.expectError(error.ImportWrong, check_import(lost, import_stderr, 0));
-    try testing.expectError(error.ImportWrong, check_import(import_stdout, "", 0));
-    const health = comptime std.mem.indexOf(u8, import_stdout, "  Dockerfile:20").?;
-    const no_health = import_stdout[0..health] ++ footer ++ "\n";
-    try testing.expectError(error.ImportWrong, check_import(no_health, import_stderr, 0));
+    _ = std.mem.replace(u8, import_stderr, "8  run", "8  run  net", netted);
+    try testing.expectError(error.ImportWrong, check_import("", netted, 0));
+    const lost = import_stderr["build-1  Dockerfile:5  copy\n".len..];
+    try testing.expectError(error.ImportWrong, check_import("", lost, 0));
+    const health = comptime std.mem.indexOf(u8, import_report, "  Dockerfile:20").?;
+    const no_health = import_report[0..health] ++ footer ++ "\n" ++ import_warning;
+    try testing.expectError(error.ImportWrong, check_import("", no_health, 0));
 }
 
 const row_names = [_][]const u8{
@@ -441,21 +465,19 @@ test "inspect shows the user, the workdir and the labels; its tree runs the stat
 }
 
 test "the tools stage: flagged with its match and cache, W0810 then W0811" {
-    // Goal: step 6's import check. Method: the recorded output, then without the flag, without
-    // either warning and with the two warnings swapped.
-    const stdout = "tools-1  Dockerfile:11  run  net (matched \"apk add\")  cache\n" ++
+    // Goal: step 6's import check. Method: the recorded stderr (the report, then the warnings),
+    // then without the flag, without either warning, with the two swapped, and on stdout.
+    const report = "tools-1  Dockerfile:11  run  net (matched \"apk add\")  cache\n" ++
         "imported 1 step from 1 stage (target tools) to tools.build.zon; 1 flagged\n";
-    const stderr = "warning[ZBX-W0810]: the import has steps that are not hermetic\n" ++
-        "warning[ZBX-W0811]: parts of the Dockerfile did not carry over\n";
-    try check_tools(stdout, stderr, 0);
+    const w0810 = "warning[ZBX-W0810]: the import has steps that are not hermetic\n";
+    const w0811 = "warning[ZBX-W0811]: parts of the Dockerfile did not carry over\n";
+    try check_tools("", report ++ w0810 ++ w0811, 0);
+    try testing.expectError(error.ImportWrong, check_tools(report, w0810 ++ w0811, 0));
     const bare = "tools-1  Dockerfile:11  run\nimported 1 step; 0 flagged\n";
-    try testing.expectError(error.ImportWrong, check_tools(bare, stderr, 0));
-    const no_w0810 = stderr[std.mem.indexOf(u8, stderr, "warning[ZBX-W0811]").?..];
-    try testing.expectError(error.ImportWrong, check_tools(stdout, no_w0810, 0));
-    const no_w0811 = stderr[0..std.mem.indexOf(u8, stderr, "warning[ZBX-W0811]").?];
-    try testing.expectError(error.ImportWrong, check_tools(stdout, no_w0811, 0));
-    const swapped = "warning[ZBX-W0811]: parts\nwarning[ZBX-W0810]: steps\n";
-    try testing.expectError(error.ImportWrong, check_tools(stdout, swapped, 0));
+    try testing.expectError(error.ImportWrong, check_tools("", bare ++ w0810 ++ w0811, 0));
+    try testing.expectError(error.ImportWrong, check_tools("", report ++ w0811, 0));
+    try testing.expectError(error.ImportWrong, check_tools("", report ++ w0810, 0));
+    try testing.expectError(error.ImportWrong, check_tools("", report ++ w0811 ++ w0810, 0));
     const both = "warning[ZBX-W0801]: a\nwarning[ZBX-W0802]: b\n";
     try check_warnings(both, &.{ "ZBX-W0801", "ZBX-W0802" });
     const one = "warning[ZBX-W0801]: a\n";
