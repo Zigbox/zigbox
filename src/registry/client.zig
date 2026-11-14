@@ -573,7 +573,7 @@ fn url_of(
     return text;
 }
 
-fn is_redirect(status: u16) bool {
+pub fn is_redirect(status: u16) bool {
     assert(status >= 100);
     assert(status <= 599);
     return status == 301 or status == 302 or status == 303 or status == 307 or status == 308;
