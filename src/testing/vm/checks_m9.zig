@@ -229,9 +229,11 @@ pub fn check_refused(
     if (!contains_all(stderr, wants)) return error.RefusalWrong;
 }
 
-/// The pull's own refusal with the network down: exit 1 and a first line `error[ZBX-E05..]`.
+/// The pull's own refusal with the network down: a first line `error[ZBX-E05..]` and the exit
+/// code of a failure the user did not cause: 2 (environment, as a name that does not resolve) or
+/// 3 (external, a registry that fails), never 1 (user) or 70 (internal).
 pub fn check_pull_refused(stderr: []const u8, status: u8) Error!void {
-    if (status != 1) return error.RefusalWrong;
+    if (status != 2 and status != 3) return error.RefusalWrong;
     if (!std.mem.startsWith(u8, stderr, "error[ZBX-E05")) return error.RefusalWrong;
     if (std.mem.indexOf(u8, stderr, "errno") != null) return error.RefusalWrong;
 }
@@ -492,10 +494,14 @@ test "refusals: the code first, the words anywhere once wrapped, never errno" {
     try testing.expectError(error.RefusalWrong, check_refused(hermetic, 0, "ZBX-E0814", &.{}));
     const elsewhere = check_refused(hermetic, 1, "ZBX-E0814", &.{"Dockerfile:12"});
     try testing.expectError(error.RefusalWrong, elsewhere);
-    try check_pull_refused("error[ZBX-E0501]: can't reach the registry\n", 1);
-    try testing.expectError(error.RefusalWrong, check_pull_refused("error[ZBX-E0814]: x\n", 1));
+    const resolve = "error[ZBX-E0502]: the registry's name does not resolve\n";
+    try check_pull_refused(resolve, 2);
+    try check_pull_refused(resolve, 3);
+    try testing.expectError(error.RefusalWrong, check_pull_refused(resolve, 1));
+    try testing.expectError(error.RefusalWrong, check_pull_refused(resolve, 70));
+    try testing.expectError(error.RefusalWrong, check_pull_refused("error[ZBX-E0814]: x\n", 2));
     const errno = "error[ZBX-E0501]: errno 101\n";
-    try testing.expectError(error.RefusalWrong, check_pull_refused(errno, 1));
+    try testing.expectError(error.RefusalWrong, check_pull_refused(errno, 2));
 }
 
 test "a fixture's refusal golden is read and matched against the binary's stderr" {
