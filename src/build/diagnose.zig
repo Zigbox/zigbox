@@ -1614,8 +1614,8 @@ pub fn pin_stale(diag: *Diag, name: []const u8, pinned_key: Digest, key: Digest)
     diag.context("step", "{s}", .{name});
     diag.context("pinned", "{s}", .{pinned_key.text()});
     diag.context("key", "{s}", .{key.text()});
-    diag.fix(.{ .sentence = "delete the step's pin from zbx.lock and run zbx build --pin " ++
-        "to pin the changed step" });
+    diag.fix(.{ .sentence = "run zbx build --pin: it replaces the stale pin with the " ++
+        "changed step's" });
     assert(diag.code.? == .E0822);
 }
 

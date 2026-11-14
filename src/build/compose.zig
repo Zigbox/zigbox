@@ -1270,9 +1270,6 @@ pub const Context = struct {
         return context.emit(line);
     }
 
-    /// `W0801` once, on stderr, before any step runs, when the build file has steps with
-    /// `network = true`. Only a warning: a stderr that cannot be written loses it and the build
-    /// goes on.
     /// Sets the step's output excludes in `spec` (`pin.excludes`) and returns its lock pin.
     /// Every step's want starts as none; `judge_pin` sets it once the key is known.
     fn output_excludes(context: *Context, index: u8, spec: *key_mod.Spec) ?*const lock_file.Pin {
@@ -1289,7 +1286,7 @@ pub const Context = struct {
 
     /// What the step's output is checked against, now that `ws.key` is its key; a stale lock
     /// pin under `--locked` or `--hermetic` is E0822.
-    fn judge_pin(context: *Context, index: u8, lock_pin: ?*const lock_file.Pin) Error!void {
+    pub fn judge_pin(context: *Context, index: u8, lock_pin: ?*const lock_file.Pin) Error!void {
         const ws = context.ws;
         const file = &context.loaded.file;
         const step = &file.steps[index];
@@ -1330,7 +1327,7 @@ pub const Context = struct {
 
     /// `--hermetic`: E0814 for the first step with a cache mount or an unpinned network step,
     /// before any step runs.
-    fn check_hermetic(context: *Context) Error!void {
+    pub fn check_hermetic(context: *Context) Error!void {
         assert(context.pins == .hermetic);
         const loaded = context.loaded;
         const lock_held = &context.ws.locking.lock;
@@ -1343,7 +1340,7 @@ pub const Context = struct {
 
     /// `--pin`: records the steps being pinned, with their keys and outputs, and writes the
     /// lock once, atomically. Nothing to pin leaves the lock as it is.
-    fn save_pins(context: *Context) Error!void {
+    pub fn save_pins(context: *Context) Error!void {
         assert(context.pins == .pin);
         const ws = context.ws;
         const file = &context.loaded.file;
@@ -1367,6 +1364,9 @@ pub const Context = struct {
         };
     }
 
+    /// `W0801` once, on stderr, before any step runs, when the build file has steps with
+    /// `network = true`. Only a warning: a stderr that cannot be written loses it and the build
+    /// goes on.
     pub fn warn_network(context: *Context) void {
         const file = &context.loaded.file;
         var names: [constants.build_steps_max][]const u8 = undefined;

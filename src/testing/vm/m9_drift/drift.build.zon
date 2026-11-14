@@ -1,0 +1,24 @@
+// The demo's step 8: `fetch` stands in for a download whose bytes change from run to run.
+.{
+    .version = 1,
+    .steps = .{
+        .{
+            .name = "fetch",
+            .base = "alpine:3.20",
+            .network = true,
+            .run = .{ "/bin/sh", "-c", "cat /proc/sys/kernel/random/uuid > /out/id" },
+        },
+        .{
+            .name = "use",
+            .base = "alpine:3.20",
+            .needs = .{"fetch"},
+            .run = .{ "/bin/sh", "-c", "cp /in/fetch/id /out/id" },
+        },
+    },
+    .image = .{
+        .base = "alpine:3.20",
+        .add = .{
+            .{ .from = "use", .to = "/srv" },
+        },
+    },
+}

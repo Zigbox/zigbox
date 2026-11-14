@@ -631,3 +631,17 @@ test "a commit whose read of the opaque mark fails is refused, never committed w
     try testing.expect(result.digest.eql(expected));
     try testing.expectEqual(@as(u64, 0), result.xattrs_skipped);
 }
+
+test "an output exclude that is a directory the parent has keeps all of it as the parent has it" {
+    // Goal: a pinned step's default excludes (`/var/log` and the like) are directories its base
+    // has; what the step writes below one never reaches the output (M9 slice 3c). Method: an
+    // upper layer that adds a file under, and changes a file in, a directory of the parent;
+    // excluding the directory gives the parent itself.
+    const parent = start();
+    make_upper("/upper");
+    files.put_dir("/upper/etc", 0o755);
+    files.put_file("/upper/etc/when", 0o644, "Thu\n");
+    files.put_file("/upper/etc/shadow", 0o600, "changed\n");
+    try testing.expect(commit_excluding("/upper", parent, &[_][]const u8{"/etc"}).eql(parent));
+    try testing.expect(!commit_excluding("/upper", parent, &.{}).eql(parent));
+}

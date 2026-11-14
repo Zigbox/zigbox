@@ -1054,16 +1054,11 @@ pub fn parse(
             .provenance => try take_provenance(diag, &invocation.provenance, given, argument),
             .resolve_only => try take_pull_option(diag, &p.pull, given, argument),
             .out_next => try take_out_option(diag, &export_file, given, args, &index),
-            .import_flag => |flag| if (flag == .hermetic and builds(given)) {
-                try take_pin_mode(diag, &p.build, .hermetic);
-            } else {
-                try take_import_option(diag, &p.import, given, args, &index);
-            },
+            .import_flag => |flag| try take_import_flag(diag, &p, given, args, &index, flag),
             .import_next, .import_inline => {
                 try take_import_option(diag, &p.import, given, args, &index);
             },
-            .pin => try take_build_pins(diag, &p.build, given, argument, .pin),
-            .locked => try take_build_pins(diag, &p.build, given, argument, .locked),
+            .pin, .locked => try take_build_pins(diag, &p.build, given, argument),
             .graph, .clear_caches, .file_next => {
                 try take_build_option(diag, &p.build, given, args, &index);
             },
@@ -1553,12 +1548,27 @@ fn take_build_pins(
     build_args: *BuildArgs,
     operands: []const []const u8,
     argument: []const u8,
-    mode: pin_mode.Mode,
 ) ParseError!void {
-    assert(mode == .pin or mode == .locked);
     assert(argument.len > 0);
     if (!builds(operands)) return unknown_option(diag, argument);
+    const mode: pin_mode.Mode = if (std.mem.eql(u8, argument, "--pin")) .pin else .locked;
+    if (mode == .locked) assert(std.mem.eql(u8, argument, "--locked"));
     try take_pin_mode(diag, build_args, mode);
+}
+
+/// An import flag: `--hermetic` on `build` is a pin mode, and every other use is `import`'s.
+fn take_import_flag(
+    diag: *Diag,
+    p: *Parsed,
+    operands: []const []const u8,
+    args: []const []const u8,
+    index: *usize,
+    flag: ImportOption,
+) ParseError!void {
+    assert(index.* < args.len);
+    assert(operands.len <= args.len);
+    if (flag == .hermetic and builds(operands)) return take_pin_mode(diag, &p.build, .hermetic);
+    try take_import_option(diag, &p.import, operands, args, index);
 }
 
 /// Sets the build's pin mode. `--pin` records pins and the others enforce them, so `--pin` with
@@ -1575,7 +1585,8 @@ fn take_pin_mode(diag: *Diag, build_args: *BuildArgs, mode: pin_mode.Mode) Parse
         return;
     }
     const other: pin_mode.Mode = if (mode == .pin) was else mode;
-    assert(other == .locked or other == .hermetic);
+    assert(other != .plain);
+    assert(other != .pin);
     return pin_conflict(diag, if (other == .locked) "--locked" else "--hermetic");
 }
 

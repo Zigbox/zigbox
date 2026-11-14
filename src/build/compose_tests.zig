@@ -69,6 +69,8 @@ fn start() void {
     for (&composed.slots) |*slot| slot.active = false;
     composed.holds_count = 0;
     composed.outputs = @splat(Digest.of("unset"));
+    composed.wants = @splat(.none);
+    composed.locking.lock.clear();
     context = .{
         .host = sim.interface(),
         .facts = &facts,
@@ -1989,4 +1991,115 @@ test "a signal during a copy's restamp ends the step before its cache entry" {
     sim.interface().catch_interrupts(false);
     files.faults.owner_gate = gate;
     try owned_nothing_recorded();
+}
+
+const lock_file = @import("../lock_file.zig");
+
+/// `start`, with step 0 (`compile`) a network step of the project `/p` whose output is checked
+/// against `want`, in `mode`.
+fn pinned_started(want: @import("pin.zig").Want, mode: @import("pin.zig").Mode) void {
+    start();
+    set_path(&loaded.project, "/p");
+    set_path(&loaded.path, "/p/zbx.build.zon");
+    loaded.file.steps[0].network = true;
+    composed.wants[0] = want;
+    context.pins = mode;
+}
+
+test "an output that is not its pin is E0822 under --locked, and no dependent sees it" {
+    // Goal: drift fails the step when pins are enforced. Method: a pin that is not the output
+    // the worker answers; the step fails with E0822, records no output and writes no row.
+    pinned_started(.{ .expect = Digest.of("pinned") }, .locked);
+    const answer = answer_of(made_output());
+    const ended = settle(worker_ended(0, 7, &answer), .{ .exited = 0 });
+    try testing.expect(!ended.ok);
+    try testing.expect(diag.code.? == .E0822);
+    try testing.expect(composed.outputs[0].eql(Digest.of("unset")));
+    try testing.expectEqualStrings("", sim.stdout());
+}
+
+test "drift without --locked is W0803 on stderr, and the new output is used" {
+    pinned_started(.{ .expect = Digest.of("pinned") }, .plain);
+    const output = made_output();
+    const answer = answer_of(output);
+    const ended = settle(worker_ended(0, 7, &answer), .{ .exited = 0 });
+    try testing.expect(ended.ok);
+    try testing.expect(diag.code == null);
+    try testing.expect(composed.outputs[0].eql(output));
+    try testing.expect(std.mem.indexOf(u8, sim.stderr(), "W0803") != null);
+    try testing.expect(std.mem.indexOf(u8, sim.stderr(), "compile") != null);
+    try testing.expect(std.mem.indexOf(u8, sim.stdout(), "W0803") == null);
+}
+
+test "an output that is its pin passes quietly in every mode" {
+    for ([_]@import("pin.zig").Mode{ .plain, .locked, .hermetic }) |mode| {
+        start();
+        const output = made_output();
+        pinned_started(.{ .expect = output }, mode);
+        const answer = answer_of(output);
+        const ended = settle(worker_ended(0, 7, &answer), .{ .exited = 0 });
+        try testing.expect(ended.ok);
+        try testing.expect(composed.outputs[0].eql(output));
+        try testing.expectEqualStrings("", sim.stderr());
+    }
+}
+
+test "a stale lock pin is E0822 under --locked, and left for --pin to replace otherwise" {
+    // Goal: a pin recorded for another key is refused only when pins are enforced. Method:
+    // judge step 0 against a lock pin of another key, in each mode.
+    pinned_started(.none, .locked);
+    try composed.locking.lock.put_pin("zbx.build.zon", "compile", Digest.of("old"), Digest.of("o"));
+    const found = composed.locking.lock.find_pin("zbx.build.zon", "compile");
+    try testing.expectError(error.Failed, context.judge_pin(0, found));
+    try testing.expect(diag.code.? == .E0822);
+    try testing.expect(std.mem.indexOf(u8, diag.last_cause().?, "stale") != null);
+    diag.reset();
+    composed.wants[0] = .none;
+    context.pins = .pin;
+    try context.judge_pin(0, found);
+    try testing.expectEqual(@as(@import("pin.zig").Want, .pinning), composed.wants[0]);
+    composed.wants[0] = .none;
+    context.pins = .plain;
+    try context.judge_pin(0, found);
+    try testing.expectEqual(@as(@import("pin.zig").Want, .none), composed.wants[0]);
+}
+
+test "--hermetic is E0814 for an unpinned network step, and passes once it is pinned" {
+    pinned_started(.none, .hermetic);
+    try testing.expectError(error.Failed, context.check_hermetic());
+    try testing.expect(diag.code.? == .E0814);
+    diag.reset();
+    try composed.locking.lock.put_pin("zbx.build.zon", "compile", Digest.of("k"), Digest.of("o"));
+    try context.check_hermetic();
+    try testing.expect(diag.code == null);
+}
+
+/// `pinned_started` in `--pin` mode, with the lock located in the project directory.
+fn pinning_started(want: @import("pin.zig").Want) !void {
+    pinned_started(want, .pin);
+    files.put_dir("/p", 0o755);
+    _ = sim.world.processes[sim.world.current].cwd.set("/p");
+    try lock_file.locate(sim.interface(), sim.interface().filesystem(), &composed.locking.located);
+    try testing.expect(!composed.locking.located.exists);
+    composed.timings[0].key = Digest.of("key");
+    composed.outputs[0] = Digest.of("output");
+}
+
+test "--pin writes the lock once with the pinned step's key and output, as version 2" {
+    try pinning_started(.pinning);
+    try context.save_pins();
+    var buffer: [constants.lock_file_bytes_max]u8 = undefined;
+    const text = try sim.interface().filesystem().read_whole("/p/zbx.lock", &buffer);
+    try testing.expect(std.mem.indexOf(u8, text, ".version = 2") != null);
+    try testing.expect(std.mem.indexOf(u8, text, "compile") != null);
+    try testing.expect(std.mem.indexOf(u8, text, &Digest.of("key").text()) != null);
+    try testing.expect(std.mem.indexOf(u8, text, &Digest.of("output").text()) != null);
+    try testing.expect(composed.locking.located.exists);
+}
+
+test "--pin with nothing to pin leaves the lock unwritten" {
+    try pinning_started(.none);
+    try context.save_pins();
+    try testing.expect(!composed.locking.located.exists);
+    try testing.expectError(error.NotFound, sim.interface().filesystem().lstat("/p/zbx.lock"));
 }

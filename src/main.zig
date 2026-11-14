@@ -290,6 +290,10 @@ test {
 }
 
 test {
+    _ = @import("build/pin_tests.zig");
+}
+
+test {
     _ = @import("build/copy_tests.zig");
     _ = @import("build/copy_owner_tests.zig");
 }

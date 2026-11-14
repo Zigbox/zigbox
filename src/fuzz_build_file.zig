@@ -73,6 +73,15 @@ const inputs = [_][]const u8{ "go.mod", "main.go", "src", "src/a.c", "VERSION", 
 
 const targets = [_][]const u8{ "/", "/usr/local/bin", "/out", "/etc/hello", "/a/b/c" };
 
+/// Output excludes: absolute plain paths, never `/`.
+const output_excludes = [_][]const u8{ "/var/log", "/var/cache", "/tmp", "/a b", "/ü/x" };
+
+/// `.expect` values: whole BLAKE3 digests.
+const expects = [_][]const u8{
+    "b3:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+    "b3:af1349b9f5f9a1a6a0404dea36dcc9499bcb25c9adc112b7cc9a93cae41f3262",
+};
+
 const users = [_][]const u8{
     "0:0", "1000:1000", "65534:65534", "4294967295:0", "app", "app:app", "0", "nobody:65534",
 };
@@ -179,8 +188,10 @@ fn gen_step(gen: *Gen, shape: *const Shape, index: u32) void {
     assert(shape.needs[index] <= index);
     var order: [7]StepField = std.enums.values(StepField)[0..7].*;
     gen.random.shuffle(StepField, &order);
+    const network = gen.random.boolean();
     gen.put(".{");
-    gen_builder_fields(gen, shape, index);
+    const cached = gen_builder_fields(gen, shape, index);
+    gen_pin_fields(gen, network and !cached);
     for (order, 0..) |which, at| {
         gen.field(switch (which) {
             inline else => |tag| "." ++ @tagName(tag),
@@ -198,7 +209,7 @@ fn gen_step(gen: *Gen, shape: *const Shape, index: u32) void {
                 gen.string(words[gen.random.uintLessThan(usize, words.len)]);
                 gen.put(" }");
             },
-            .network => gen.put(if (gen.random.boolean()) "true" else "false"),
+            .network => gen.put(if (network) "true" else "false"),
         }
         gen.comma(@intCast(at), order.len);
     }
@@ -220,7 +231,8 @@ fn gen_step_base(gen: *Gen, index: u32) void {
 /// The builder's additions, each written or not at random, before a step's other fields. Each is
 /// followed by a comma. The mounts stay within the bound: needs, caches and binds together are
 /// at most `mounts_max - 2`, so a cache or a bind is written only when the needs leave room.
-fn gen_builder_fields(gen: *Gen, shape: *const Shape, index: u32) void {
+/// Returns whether a cache was written.
+fn gen_builder_fields(gen: *Gen, shape: *const Shape, index: u32) bool {
     assert(index < shape.steps);
     assert(shape.needs[index] <= constants.build_step_needs_max);
     if (gen.random.boolean()) {
@@ -250,6 +262,22 @@ fn gen_builder_fields(gen: *Gen, shape: *const Shape, index: u32) void {
         gen.put(".{ .{ .from = \"step:");
         gen.put(step_names[gen.random.uintLessThan(u32, index)]);
         gen.put("\", .source = \"/usr/bin\", .to = \"/bound\" } },");
+    }
+    return cached == 1;
+}
+
+/// The output pin fields (M9 slice 3c), each written or not at random and followed by a comma:
+/// `.expect` only on a network step without caches, the only kind that takes it.
+fn gen_pin_fields(gen: *Gen, pinnable: bool) void {
+    if (pinnable and gen.random.boolean()) {
+        gen.field(".expect");
+        gen.string(expects[gen.random.uintLessThan(usize, expects.len)]);
+        gen.put(",");
+    }
+    if (gen.random.boolean()) {
+        gen.field(".output_exclude");
+        gen.distinct_list(&output_excludes, gen.random.uintAtMost(u32, 3));
+        gen.put(",");
     }
 }
 
