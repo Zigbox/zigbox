@@ -171,6 +171,7 @@ test {
     _ = @import("fuse/fixture.zig");
     _ = @import("fuse/serve.zig");
     _ = @import("fuse/kernel_tests.zig");
+    _ = @import("fuse/lazy_server_tests.zig");
     _ = @import("host_real_fuse.zig");
     _ = @import("layer/reader.zig");
     _ = @import("layer/tar.zig");

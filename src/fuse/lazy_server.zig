@@ -143,7 +143,10 @@ pub const Server = struct {
         };
         assert(store.chunk_bytes > 0);
         assert(store.chunk_bytes <= constants.store_chunk_bytes);
-        server.cache.init(server.threaded.io(), &server.cache_memory, store.chunk_bytes);
+        const cache_used = cache_mod.memory_bytes(store.chunk_bytes);
+        assert(cache_used <= server.cache_memory.len);
+        const cache_memory = server.cache_memory[0..@intCast(cache_used)];
+        server.cache.init(server.threaded.io(), cache_memory, store.chunk_bytes);
         server.server = .{
             .table = &server.table,
             .cache = &server.cache,

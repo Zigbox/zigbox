@@ -58,12 +58,15 @@ pub const Server = struct {
 
     fn node(server: *const Server, nodeid: u64) Refused!*const Node {
         assert(server.chunk_bytes > 0);
-        return server.table.node(nodeid) orelse error.NoEnt;
+        const found = server.table.node(nodeid) orelse return error.NoEnt;
+        assert(nodeid <= server.table.node_count); // A node the table holds has an id in range.
+        return found;
     }
 
     fn directory(server: *const Server, nodeid: u64) Refused!*const Node {
         const found = try server.node(nodeid);
         if (found.kind != .dir) return error.NotDir;
+        assert(found.children_first + found.children_count <= server.table.child_count);
         return found;
     }
 };
@@ -87,7 +90,9 @@ pub const Worker = struct {
     }
 
     fn put_value(worker: *Worker, value: anytype) void {
+        const before = worker.reply_len;
         worker.put(std.mem.asBytes(&value));
+        assert(worker.reply_len - before == @sizeOf(@TypeOf(value))); // Whole, never a part.
     }
 
     fn room(worker: *const Worker) u32 {
@@ -101,6 +106,7 @@ pub const Worker = struct {
 /// header has no `unique` to answer to).
 pub fn handle(server: *const Server, worker: *Worker, request: []const u8) []const u8 {
     assert(server.cache.chunk_bytes == server.chunk_bytes);
+    assert(worker.reply.len >= constants.fuse_reply_bytes);
     if (request.len < @sizeOf(abi.InHeader)) return &.{};
     const header = std.mem.bytesToValue(abi.InHeader, request[0..@sizeOf(abi.InHeader)]);
     const opcode: abi.Opcode = @fromBackingInt(@intCast(header.opcode));
@@ -122,6 +128,8 @@ pub fn handle(server: *const Server, worker: *Worker, request: []const u8) []con
         .unique = header.unique,
     };
     @memcpy(worker.reply[0..@sizeOf(abi.OutHeader)], std.mem.asBytes(&out));
+    assert(worker.reply_len >= @sizeOf(abi.OutHeader));
+    assert(worker.reply_len <= worker.reply.len);
     if (errno != 0) assert(worker.reply_len == @sizeOf(abi.OutHeader));
     return worker.reply[0..worker.reply_len];
 }
@@ -136,6 +144,8 @@ fn dispatch(
     if (header.len != request.len) return error.Inval;
     if (header.total_extlen != 0) return error.Inval;
     const body = request[@sizeOf(abi.InHeader)..];
+    assert(header.len >= @sizeOf(abi.InHeader));
+    assert(body.len == header.len - @sizeOf(abi.InHeader));
     const id = header.nodeid;
     switch (@as(abi.Opcode, @fromBackingInt(@intCast(header.opcode)))) {
         .init => try init(worker, body),
@@ -161,7 +171,7 @@ fn dispatch(
 }
 
 fn errno_of(err: Refused) abi.Errno {
-    return switch (err) {
+    const errno: abi.Errno = switch (err) {
         error.NoEnt => .noent,
         error.Io => .io,
         error.NotDir => .notdir,
@@ -173,9 +183,12 @@ fn errno_of(err: Refused) abi.Errno {
         error.NoData => .nodata,
         error.Proto => .proto,
     };
+    assert(@backingInt(errno) > 0); // A reply's error is the negation of this, never zero.
+    return errno;
 }
 
 fn take(comptime T: type, body: []const u8) Refused!T {
+    assert(@sizeOf(T) <= constants.fuse_request_bytes);
     if (body.len < @sizeOf(T)) return error.Inval;
     return std.mem.bytesToValue(T, body[0..@sizeOf(T)]);
 }
@@ -185,10 +198,13 @@ fn name_in(bytes: []const u8) Refused![]const u8 {
     const end = std.mem.indexOfScalar(u8, bytes, 0) orelse return error.Inval;
     if (end == 0) return error.Inval;
     if (end > abi.name_bytes_max) return error.Inval;
+    assert(bytes[end] == 0); // The name stops at its terminator,
+    assert(std.mem.indexOfScalar(u8, bytes[0..end], 0) == null); // and holds none.
     return bytes[0..end];
 }
 
 fn init(worker: *Worker, body: []const u8) Refused!void {
+    assert(worker.reply_len == @sizeOf(abi.OutHeader)); // Nothing is written before the answer.
     const in = try take(abi.InitIn, body);
     if (in.major < abi.major_version) return error.Proto;
     var out = std.mem.zeroes(abi.InitOut);
@@ -207,6 +223,7 @@ fn init(worker: *Worker, body: []const u8) Refused!void {
     out.max_write = constants.fuse_max_write;
     out.time_gran = 1;
     out.max_pages = constants.fuse_max_pages;
+    assert(out.flags & ~init_flags == 0); // Only flags the server asked for.
     worker.put_value(out);
 }
 
@@ -225,6 +242,8 @@ fn attr_of(found: *const Node, nodeid: u64) abi.Attr {
         .symlink => mode_symlink,
     };
     const time = constants.store_mtime_seconds;
+    if (found.kind == .dir) assert(size == block_bytes);
+    if (found.kind == .file) assert(size == found.size);
     return .{
         .ino = nodeid,
         .size = size,
@@ -255,6 +274,8 @@ fn attr_out(found: *const Node, nodeid: u64) abi.AttrOut {
 }
 
 fn entry_out(found: *const Node, nodeid: u64) abi.EntryOut {
+    assert(nodeid > 0); // A node id of 0 is the negative entry, built apart in `lookup`.
+    assert(found.nlink > 0);
     return .{
         .nodeid = nodeid,
         .generation = 0,
@@ -270,12 +291,15 @@ fn lookup(server: *const Server, worker: *Worker, nodeid: u64, body: []const u8)
     const directory = try server.directory(nodeid);
     const wanted = try name_in(body);
     if (server.table.lookup(directory, wanted)) |child| {
+        assert(child.node < server.table.node_count);
+        assert(child.name_len == wanted.len);
         const found = server.table.node(child.node + 1).?;
         worker.put_value(entry_out(found, child.node + 1));
     } else {
         // Absent, and absent for good: node id 0 with a lifetime is a negative entry.
         var absent = std.mem.zeroes(abi.EntryOut);
         absent.entry_valid = constants.fuse_valid_seconds;
+        assert(absent.nodeid == 0);
         worker.put_value(absent);
     }
 }
@@ -283,7 +307,10 @@ fn lookup(server: *const Server, worker: *Worker, nodeid: u64, body: []const u8)
 fn readlink(server: *const Server, worker: *Worker, nodeid: u64) Refused!void {
     const found = try server.node(nodeid);
     if (found.kind != .symlink) return error.Inval;
-    worker.put(server.table.target(found));
+    const target = server.table.target(found);
+    assert(target.len == found.size);
+    assert(target.len <= worker.room());
+    worker.put(target);
 }
 
 fn open(
@@ -302,8 +329,11 @@ fn open(
     const truncate: u32 = 0o1000; // O_TRUNC.
     if (in.flags & access_mode != 0) return error.Rofs;
     if (in.flags & truncate != 0) return error.Rofs;
+    assert(found.kind == wanted); // The three refusals above leave only the kind asked for.
     var flags: u32 = abi.open_keep_cache;
     if (wanted == .dir) flags |= abi.open_cache_dir;
+    if (wanted == .file) assert(flags & abi.open_cache_dir == 0);
+    assert(flags & abi.open_keep_cache != 0);
     worker.put_value(abi.OpenOut{ .fh = 0, .open_flags = flags, .padding = 0 });
 }
 
@@ -314,6 +344,8 @@ fn read(server: *const Server, worker: *Worker, nodeid: u64, body: []const u8) R
     const in = try take(abi.ReadIn, body);
     if (in.offset >= found.size) return; // At or past the end: no bytes.
     const length: u64 = @min(in.size, constants.fuse_read_bytes_max, found.size - in.offset);
+    assert(length <= in.size); // Never more than the kernel asked for,
+    assert(length <= found.size - in.offset); // nor than the file holds past the offset,
     assert(length <= worker.room());
     var at: u64 = in.offset;
     const end = in.offset + length;
@@ -328,6 +360,7 @@ fn read(server: *const Server, worker: *Worker, nodeid: u64, body: []const u8) R
         at += part;
     }
     assert(at == end);
+    assert(worker.reply_len == @sizeOf(abi.OutHeader) + length); // Exactly the bytes counted.
 }
 
 /// Chunk `index` of a file, verified, from the shared cache: held there already, or read now.
@@ -347,6 +380,8 @@ fn chunk_of(
         return error.Io;
     };
     assert(pinned.bytes.len == expected);
+    assert(expected > 0);
+    assert(expected <= server.chunk_bytes);
     return pinned;
 }
 
@@ -356,6 +391,7 @@ fn readdirplus(server: *const Server, worker: *Worker, nodeid: u64, body: []cons
     const list = server.table.children(directory);
     // Entry `k` is ".", "..", then the children; a record's `off` is the next entry's.
     const total: u64 = @as(u64, list.len) + 2;
+    assert(total >= 2);
     const room: u32 = @min(in.size, worker.room());
     var used: u32 = 0;
     var entry: u64 = in.offset;
@@ -368,6 +404,7 @@ fn readdirplus(server: *const Server, worker: *Worker, nodeid: u64, body: []cons
                 @as(u64, list[@intCast(entry - 2)].node) + 1,
             },
         };
+        assert(id > 0);
         const bytes = abi.direntplus_bytes(@intCast(name.len));
         if (used + bytes > room) {
             // An empty reply is the end of the directory to the kernel: refuse instead when
@@ -378,6 +415,8 @@ fn readdirplus(server: *const Server, worker: *Worker, nodeid: u64, body: []cons
         put_direntplus(server, worker, name, id, entry + 1, entry >= 2);
         used += bytes;
     }
+    assert(used <= room);
+    assert(worker.reply_len == @sizeOf(abi.OutHeader) + used);
 }
 
 fn put_direntplus(
@@ -388,6 +427,8 @@ fn put_direntplus(
     next: u64,
     linked: bool,
 ) void {
+    assert(next > 0); // The offset of the entry after this one.
+    assert(name.len > 0);
     const found = server.table.node(nodeid).?;
     var record = std.mem.zeroes(abi.Direntplus);
     // "." and ".." carry node id 0: the kernel links neither, and needs no attributes for them.
@@ -414,6 +455,8 @@ fn put_direntplus(
 /// Overlay's own attributes on a lower layer would steer the overlay (an opaque directory, a
 /// redirect); the store never keeps them, and the server never shows one.
 fn is_overlay(name: []const u8) bool {
+    assert(name.len > 0);
+    assert(name.len <= constants.store_xattr_name_bytes_max);
     return std.mem.startsWith(u8, name, "user.overlay.") or
         std.mem.startsWith(u8, name, "trusted.overlay.");
 }
@@ -428,6 +471,8 @@ fn getxattr(server: *const Server, worker: *Worker, nodeid: u64, body: []const u
         if (std.mem.eql(u8, attribute.name, wanted)) break attribute.value;
     } else return error.NoData;
     assert(!iterator.broken);
+    assert(value.len <= constants.store_xattr_value_bytes_max);
+    assert(!is_overlay(wanted)); // The server never shows one.
     try put_sized(worker, in.size, value);
 }
 
@@ -440,6 +485,7 @@ fn listxattr(server: *const Server, worker: *Worker, nodeid: u64, body: []const 
         if (!is_overlay(attribute.name)) total += @intCast(attribute.name.len + 1);
     }
     assert(!iterator.broken);
+    assert(total <= constants.store_xattr_names_bytes_max);
     if (in.size == 0) return worker.put_value(abi.GetxattrOut{ .size = total, .padding = 0 });
     if (total > in.size) return error.Range;
     iterator = xattrs.Iterator.init(server.table.attributes(found));
@@ -448,11 +494,13 @@ fn listxattr(server: *const Server, worker: *Worker, nodeid: u64, body: []const 
         worker.put(attribute.name);
         worker.put(&.{0});
     }
+    assert(worker.reply_len == @sizeOf(abi.OutHeader) + total); // The names counted, no more.
 }
 
 /// A size of zero asks for the length; a buffer too small for the value is `ERANGE`.
 fn put_sized(worker: *Worker, size: u32, value: []const u8) Refused!void {
     assert(value.len <= constants.store_xattr_value_bytes_max);
+    assert(worker.reply_len == @sizeOf(abi.OutHeader)); // Nothing is written before the value.
     if (size == 0) {
         return worker.put_value(abi.GetxattrOut{ .size = @intCast(value.len), .padding = 0 });
     }
@@ -462,6 +510,7 @@ fn put_sized(worker: *Worker, size: u32, value: []const u8) Refused!void {
 
 fn statfs(server: *const Server) abi.StatfsOut {
     var st = std.mem.zeroes(abi.Kstatfs);
+    assert(server.table.node_count >= 1); // The root.
     st.files = server.table.node_count;
     st.bsize = block_bytes;
     st.frsize = block_bytes;

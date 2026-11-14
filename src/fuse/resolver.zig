@@ -32,12 +32,15 @@ pub const StoreTrees = struct {
     fn load(context: *anyopaque, digest: Digest, out: []u8) nodes.LoadError![]const u8 {
         const trees_source: *StoreTrees = @ptrCast(@alignCast(context));
         assert(out.len >= constants.store_tree_bytes_max);
-        return trees.load(
+        const bytes = try trees.load(
             trees_source.store,
             digest,
             out[0..constants.store_tree_bytes_max],
             &trees_source.errno,
         );
+        assert(bytes.len > 0); // A tree holds at least its own header.
+        assert(bytes.len <= constants.store_tree_bytes_max);
+        return bytes;
     }
 };
 
@@ -51,22 +54,27 @@ pub const StoreChunks = struct {
 
     pub fn init(store: *const Store, io: []u8, scratch: *xattrs.Scratch) StoreChunks {
         assert(io.len >= constants.store_chunks_max * constants.store_digest_bytes);
+        assert(store.chunk_bytes > 0);
         return .{ .store = store, .io = io, .scratch = scratch, .last = null };
     }
 
     pub fn chunks(store_chunks: *StoreChunks) ops.Chunks {
+        assert(store_chunks.io.len >= constants.store_chunks_max * constants.store_digest_bytes);
         return .{ .context = store_chunks, .read = read };
     }
 
     fn read(context: *anyopaque, wanted: ops.Object, index: u32, out: []u8) ops.ChunkError!u32 {
         const store_chunks: *StoreChunks = @ptrCast(@alignCast(context));
         assert(out.len >= store_chunks.store.chunk_bytes);
+        assert(index < constants.store_chunks_max); // An object has at most this many chunks.
         const s = store_chunks;
         const id = wanted.id;
         const length = chunk_read.read_chunk(s.store, s.io, s.scratch, id, index, out) catch |err| {
             s.last = err;
             return error.Unavailable;
         };
+        assert(length > 0); // A chunk of a file is never empty.
+        assert(length <= s.store.chunk_bytes);
         assert(length <= out.len);
         return @intCast(length); // At most a chunk, and a chunk's size is a u32.
     }
@@ -80,10 +88,12 @@ pub const StoreChunks = struct {
 /// `objects` is a slice whose items carry `wanted.id` and `wanted.size`, as `lazy.Catalog`'s do.
 pub fn check_objects(table: *const nodes.Table, objects: anytype) error{Malformed}!void {
     if (objects.len != table.object_count) return error.Malformed;
+    assert(table.node_count >= 1); // The root.
     var nodeid: u64 = 1;
     while (nodeid <= table.node_count) : (nodeid += 1) {
         const found = table.node(nodeid).?;
         if (found.kind != .file) continue;
+        assert(table.ordinal(found) < objects.len);
         const wanted = &objects[table.ordinal(found)].wanted;
         if (!wanted.id.eql(found.digest)) return error.Malformed;
         if (wanted.size != found.size) return error.Malformed;

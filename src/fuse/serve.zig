@@ -190,3 +190,69 @@ pub const Serving = struct {
         return serving.memory[at..][0..constants.fuse_request_bytes];
     }
 };
+
+/// A device that never has a request: every receive is `Again`, counted.
+const Idle = struct {
+    receives: std.atomic.Value(u32) = .init(0),
+
+    fn device(idle: *Idle) Device {
+        return .{ .context = idle, .receive = receive, .send = send };
+    }
+
+    fn receive(context: *anyopaque, buffer: []u8) ReceiveError!u32 {
+        const idle: *Idle = @ptrCast(@alignCast(context));
+        assert(buffer.len == constants.fuse_request_bytes);
+        _ = idle.receives.fetchAdd(1, .monotonic);
+        std.Thread.yield() catch {};
+        return error.Again;
+    }
+
+    fn send(context: *anyopaque, bytes: []const u8) void {
+        _ = context;
+        _ = bytes;
+        unreachable; // Nothing was received, so nothing is answered.
+    }
+};
+
+const test_threads_partial = 2;
+var test_memory: [constants.lazy_fuse_threads * thread_memory_bytes]u8 align(8) = undefined;
+
+fn test_serving(idle: *Idle, chunks: *const [constants.lazy_fuse_threads]ops.Chunks) Serving {
+    // No request reaches the server, so its table, cache and chunk sources are never read.
+    const server: *const ops.Server = undefined;
+    return Serving.init(server, idle.device(), chunks, &test_memory);
+}
+
+test "handshake: no INIT within the deadline is TimedOut after exactly the polls allowed" {
+    // Goal: the INIT wait is bounded by `fuse_init_timeout_ms`, counted in device waits.
+    // Method: a device that is never ready (it returns at once, as a poll timeout would); the
+    // handshake gives up with `TimedOut` after `handshake_polls_max` receives, no more.
+    var idle: Idle = .{};
+    const chunks: [constants.lazy_fuse_threads]ops.Chunks = undefined;
+    var serving = test_serving(&idle, &chunks);
+    try std.testing.expectError(error.TimedOut, serving.handshake());
+    try std.testing.expectEqual(handshake_polls_max, idle.receives.load(.monotonic));
+    try std.testing.expectEqual(0, serving.started);
+}
+
+test "stop and wait join threads whose connection never ends, a partial start included" {
+    // Goal: teardown does not depend on the kernel: threads that only ever see `Again` return
+    // after `stop`, also when `start` failed partway (fewer threads started than wanted).
+    // Method: start two of the threads as `start` would before a failed spawn, let them poll,
+    // then `stop` and `wait`; every one is joined and none is left counted.
+    var idle: Idle = .{};
+    const chunks: [constants.lazy_fuse_threads]ops.Chunks = undefined;
+    var serving = test_serving(&idle, &chunks);
+    comptime assert(test_threads_partial < constants.lazy_fuse_threads);
+    while (serving.started < test_threads_partial) {
+        const index = serving.started;
+        serving.threads[index] = try std.Thread.spawn(.{}, Serving.run, .{ &serving, index });
+        serving.started += 1;
+    }
+    while (idle.receives.load(.monotonic) < 2 * test_threads_partial) std.Thread.yield() catch {};
+    serving.stop();
+    serving.wait();
+    try std.testing.expectEqual(0, serving.started);
+    const after = idle.receives.load(.monotonic);
+    try std.testing.expect(after >= 2 * test_threads_partial);
+}
