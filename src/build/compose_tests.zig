@@ -1537,3 +1537,156 @@ fn command_project_loaded() !void {
     set_path(&loaded.project, "/p");
     set_path(&loaded.path, "/p/zbx.build.zon");
 }
+
+const graph_mod = @import("graph.zig");
+const sim_run = @import("../runtime/sim_run.zig");
+const tree_mod = @import("../store/tree.zig");
+const trees_mod = @import("../store/trees.zig");
+
+/// Step 0 `base` copies the project's `etc` (a passwd naming `app`) into the fixture image;
+/// step 1 `put` copies `a.txt` onto it with `owner` and `mode` (empty: not given).
+fn owned_copy_loaded(owner: []const u8, mode: []const u8) !void {
+    registry_started(&registry.fixture.oci.amd64.digest);
+    sim.files = &sim_run.files; // A host that maps a full range of ids: owners are kept.
+    try owned_copy_parsed(owner, mode);
+    files.put_dir("/p", 0o755);
+    files.put_dir("/p/etc", 0o755);
+    files.put_file("/p/etc/passwd", 0o644, "root:x:0:0:root:/root:/bin/sh\n" ++
+        "app:x:1000:1001::/home/app:/bin/sh\n");
+    files.put_file("/p/etc/group", 0o644, "root:x:0:\napp:x:1001:\nstaff:x:50:\n");
+    files.put_file("/p/a.txt", 0o644, "a\n");
+    set_path(&loaded.project, "/p");
+    set_path(&loaded.path, "/p/zbx.build.zon");
+}
+
+/// The build file of `owned_copy_loaded` with another `owner` and `mode`, in the same world.
+fn owned_copy_parsed(owner: []const u8, mode: []const u8) !void {
+    var fields: [64]u8 = undefined;
+    var length: usize = 0;
+    if (owner.len > 0) {
+        length += (try std.fmt.bufPrint(fields[length..], ", .chown = \"{s}\"", .{owner})).len;
+    }
+    if (mode.len > 0) {
+        length += (try std.fmt.bufPrint(fields[length..], ", .chmod = \"{s}\"", .{mode})).len;
+    }
+    var buffer: [768]u8 = undefined;
+    const text = try std.fmt.bufPrint(&buffer, "{s}{s}{s}{s}{s}", .{
+        ".{ .version = 1, .image = .{}, .steps = .{ .{ .name = \"base\", .base = \"",
+        locked_reference,
+        "\", .copy = .{ .{ .src = .{\"etc\"}, .to = \"/etc\" } } }, .{ .name = \"put\", " ++
+            ".base = \"step:base\", .copy = .{ .{ .src = .{\"a.txt\"}, .to = \"/opt/app/\"",
+        fields[0..length],
+        " } } } } }\n",
+    });
+    var problem: file_mod.Problem = undefined;
+    const parsed = file_mod.parse(text, &loaded.file, &problem);
+    try testing.expectEqual(file_mod.ParseResult.parsed, parsed);
+    var refused: graph_mod.Problem = undefined;
+    const ordered = graph_mod.order(&loaded.file, &loaded.graph, &refused);
+    try testing.expectEqual(graph_mod.Result.ordered, ordered);
+}
+
+/// Builds step `base`, which pulls the locked image (its layers' owners are written in the
+/// parent by the sim's pull), then refuses any change of owner outside a new user namespace.
+fn owned_base_built() !void {
+    try testing.expect(try context.begin(0) == .hit);
+    files.faults.owner_gate = .{ .context = &sim, .in_new_user_namespace = in_new_user_namespace };
+}
+
+/// The entry at `path` in `root`.
+fn owned_entry(root: Digest, path: []const []const u8) !tree_mod.Entry {
+    var read: [64 * 1024]u8 = undefined;
+    var errno: u16 = 0;
+    var at = root;
+    var entry: tree_mod.Entry = undefined;
+    for (path) |part| {
+        var decoder: tree_mod.Decoder = undefined;
+        try decoder.init(try trees_mod.load(&store, at, &read, &errno));
+        while (try decoder.next(&entry)) {
+            if (std.mem.eql(u8, entry.name, part)) break;
+        } else return error.TestUnexpectedResult;
+        at = entry.subtree;
+    }
+    return entry;
+}
+
+test "a copy's .chown names a user of its base and .chmod a mode, inside the user namespace" {
+    // Goal: `.chown` and `.chmod` are built (M9 slice 2's cut closed). Method: the base step
+    // puts a passwd naming `app` (1000, primary group 1001); the copy step takes `a.txt` with
+    // `.chown = "app"` and `.chmod = "600"`. The sim refuses a change of owner outside a new
+    // user namespace, so the step fails if the object is written in the parent.
+    try owned_copy_loaded("app", "600");
+    try owned_base_built();
+    try testing.expect(try context.begin(1) == .hit);
+    try testing.expect(diag.code == null);
+    const output = composed.outputs[1];
+    const file = try owned_entry(output, &.{ "opt", "app", "a.txt" });
+    try testing.expectEqual(@as(u32, 1000), file.uid);
+    try testing.expectEqual(@as(u32, 1001), file.gid);
+    try testing.expectEqual(@as(u16, 0o600), file.mode);
+    var path: @import("../store/fs.zig").PathBuf = undefined;
+    const stat = files.stat_of(store.object_path(&path, file.object)).?;
+    try testing.expectEqual(@as(u32, 1000), stat.uid);
+    // A directory made on the way is the owner's, with the mode a directory needs.
+    const made = try owned_entry(output, &.{ "opt", "app" });
+    try testing.expectEqual(@as(u32, 1000), made.uid);
+    try testing.expectEqual(@as(u16, 0o755), made.mode);
+    // Built again: a hit, the same tree.
+    try testing.expect(try context.begin(1) == .hit);
+    try testing.expectEqual(@as(u32, 1), context.hits);
+    try testing.expect(output.eql(composed.outputs[1]));
+}
+
+test "on a host that maps one id, a copy's .chown is container root and its .chmod applies" {
+    // Goal: under the one-id map (W0201) every owner the store writes is 0, as an import's is;
+    // the mode is not an owner and still applies. Method: the same copy on a host with no
+    // subordinate range.
+    try owned_copy_loaded("app", "600");
+    sim.files = &.{};
+    try owned_base_built();
+    try testing.expect(try context.begin(1) == .hit);
+    const file = try owned_entry(composed.outputs[1], &.{ "opt", "app", "a.txt" });
+    try testing.expectEqual(@as(u32, 0), file.uid);
+    try testing.expectEqual(@as(u32, 0), file.gid);
+    try testing.expectEqual(@as(u16, 0o600), file.mode);
+}
+
+test "a copy's .chown and .chmod are in its key: a changed one misses, an owner by number too" {
+    // Goal: the two fields reach the key. Method: the same copy with three stamps; each is a
+    // miss with its own output, and `1000:50` gives the group by number.
+    try owned_copy_loaded("app", "");
+    try owned_base_built();
+    try testing.expect(try context.begin(1) == .hit);
+    const by_name = composed.outputs[1];
+    const misses = context.misses;
+    try owned_copy_parsed("app:staff", "");
+    try testing.expect(try context.begin(0) == .hit);
+    try testing.expect(try context.begin(1) == .hit);
+    try testing.expectEqual(misses + 1, context.misses);
+    try testing.expect(!by_name.eql(composed.outputs[1]));
+    const staffed = try owned_entry(composed.outputs[1], &.{ "opt", "app", "a.txt" });
+    try testing.expectEqual(@as(u32, 50), staffed.gid);
+    try owned_copy_parsed("1000:50", "644");
+    try testing.expect(try context.begin(0) == .hit);
+    try testing.expect(try context.begin(1) == .hit);
+    try testing.expectEqual(misses + 2, context.misses);
+    const numbered = try owned_entry(composed.outputs[1], &.{ "opt", "app", "a.txt" });
+    try testing.expectEqual(@as(u32, 1000), numbered.uid);
+    try testing.expectEqual(@as(u32, 50), numbered.gid);
+    try testing.expectEqual(@as(u16, 0o644), numbered.mode);
+}
+
+test "a copy's .chown that its base lacks, or the id 4294967295, is one E0817 line" {
+    // Goal: the refusal names the step and the name, and nothing is recorded. Method: `nobody`
+    // and `4294967295` against the base whose passwd has root and app.
+    const owners = [_][]const u8{ "nobody", "app:wheel", "4294967295", "app:4294967295" };
+    for (owners) |owner| {
+        try owned_copy_loaded(owner, "");
+        try owned_base_built();
+        try testing.expectError(error.Failed, context.begin(1));
+        try testing.expectEqual(codes.Code.E0817, diag.code.?);
+        const cause = diag.causes.slice()[diag.causes.count - 1].slice();
+        try testing.expect(std.mem.indexOf(u8, cause, owner) != null);
+        try testing.expectEqual(@as(u32, 1), context.misses);
+    }
+}

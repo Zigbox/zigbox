@@ -3587,7 +3587,8 @@ pub const registry = [_]Entry{
         \\The cause names where the name was written (the step or .image.config) and
         \\the name. To fix it, add the user or group in an earlier step (for example a
         \\step that runs adduser) and base this step on it with .base = "step:NAME",
-        \\or write the id as a number.
+        \\or write the id as a number. A copy's .chown of 4294967295 is refused the
+        \\same way: to the kernel that id means no owner, so no file can have it.
         ,
     },
     .{

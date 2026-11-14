@@ -1186,6 +1186,35 @@ pub fn user_not_found(diag: *Diag, where: []const u8, name: []const u8) void {
     assert(diag.code.? == .E0817);
 }
 
+/// `E0817` for a copy's `.chown` that names a user or group the base's /etc/passwd or
+/// /etc/group lacks, or the id 4294967295, which `chown` reads as "leave it" and no file has.
+pub fn copy_owner_not_found(diag: *Diag, step: []const u8, text: []const u8, unowned: bool) void {
+    assert(diag.code == null);
+    assert(text.len > 0);
+    var step_echo: Echo = undefined;
+    var echo: Echo = undefined;
+    const step_shown = text_util.sanitise(&step_echo, step);
+    const shown = text_util.sanitise(&echo, text);
+    diag.raise(.E0817);
+    diag.while_("copying files in step \"{s}\"", .{step_shown});
+    if (unowned) {
+        diag.cause(".copy .chown \"{s}\" gives the id 4294967295, which no file can have", .{
+            shown,
+        });
+        diag.fix(.{ .sentence = "give an owner below 4294967295" });
+    } else {
+        diag.cause(".copy .chown \"{s}\" names a user or group that is not in " ++
+            "/etc/passwd or /etc/group of the step's base", .{shown});
+        diag.fix(.{
+            .sentence = "add the user in an earlier step and base this step on it with " ++
+                ".base = \"step:NAME\", or write the id as a number",
+        });
+    }
+    diag.context("step", "{s}", .{step_shown});
+    diag.context("name", "{s}", .{shown});
+    assert(diag.code.? == .E0817);
+}
+
 /// `E0818`: the paths the globs of one import (a step's inputs, or one copy entry's source)
 /// matched are more than `build_glob_matches_max`, or their names more than
 /// `build_glob_pool_bytes_max`. `input` is the glob being matched.

@@ -288,6 +288,7 @@ test {
 
 test {
     _ = @import("build/copy_tests.zig");
+    _ = @import("build/copy_owner_tests.zig");
 }
 
 test {
