@@ -104,6 +104,11 @@ const rows = [_]Row{
         .paths = &.{"src/testing/vm/main_s2_lazy.zig"},
         .true_outputs = &.{ "code", "demo_s2_lazy" },
     },
+    // The FUSE kernel test is a test file, but the guest runs it.
+    .{
+        .paths = &.{ "src/fuse/kernel_tests.zig", "src/fuse_kernel_test_root.zig" },
+        .true_outputs = &.{ "code", "demo_s2_lazy" },
+    },
     // The M8 demo: its harness files and its source area select demo_m8 and not the packages.
     .{
         .paths = &.{"src/testing/vm/checks_m8.zig"},

@@ -82,6 +82,8 @@ classify() {
     src/testing/vm/*m8_packages*) want_packages=1; return ;;
     src/mac/* | src/macos_main.zig | src/mac_release.zig | src/testing/mac* | \
       src/testing/vm/*top20* | src/testing/vm/*z7* | LICENSE | docs/* | site/* | *.md) return ;;
+    # The FUSE kernel test runs in demo-s2-lazy's guest, unlike other tests.
+    src/fuse/kernel_tests.zig | src/fuse_kernel_test_root.zig) want_one s2_lazy; return ;;
     src/*_tests.zig | src/*/*_tests.zig | src/fuzz*.zig | src/tidy.zig | src/errors_site.zig | \
       src/size_check.zig | src/testdata/* | src/*/fixtures/*) return ;;
     # A harness file named for a demo (checks_m3.zig, upgrade_m6b.zig, m7_project/): that demo and
