@@ -1,8 +1,18 @@
 # Brief: S2 · Lazy start (`zbx run --lazy`)
 
 *Decided (2026-11-14). The owner approved S2 as a goal, and all thirteen owner's calls at the end as
-recommended, on 2026-11-14. Codes and bounds below are approved as those calls. Sequencing: S2 (lazy
-start) is built after Zigbox 0.5.2, and S1 (microVM isolation) is deferred until S2 ships.*
+recommended, on 2026-11-14. Codes and bounds below are approved as those calls. Sequencing: S2 is
+built in parallel with Zigbox 0.5.2; slices 1 to 4 start at once, each coding against the interfaces
+this brief fixes, and slice 5 waits for all four. S1 is deferred until S2 ships. The owner ruled on
+2026-11-14 that S2 ships as Zigbox 0.6.0, released on its own: Jepsen gates Zigcube's 0.6.0 (C3 to
+C5), not Zigbox's.*
+
+Release gate for Zigbox 0.6.0 (owner, 2026-11-14): two independent adversarial release reviews run
+in parallel, one by an Opus session and one by a Fable session, in place of the usual two Opus
+reviews. The Fable review is thorough: it identifies weaknesses, suggests improvements, and above
+all suggests improvements to testing. Every MUST from either is fixed, or accepted by the owner in
+writing in docs/decisions/, before the tag. This gate does not apply to 0.5.2, which keeps two Opus
+reviews.
 
 Read these first:
 - `AGENTS.md`, `REVIEW.md`, `docs/STYLE.md` and `DIAGNOSTICS.md`.
@@ -170,7 +180,7 @@ brings it back. Nothing is poisoned: a later read of the same chunk tries again.
 The reading process sees only `EIO`. `zbx` explains it: one coded line per file on stderr (or in
 the detached run's log), at most `lazy_errors_shown_max` per run, then one summary line.
 
-**Bounds (proposals; the owner approves).** In `constants.zig`, each with comptime asserts:
+**Bounds (approved by the owner 2026-11-14).** In `constants.zig`, each with comptime asserts:
 
 | Constant | Value | Why |
 | --- | --- | --- |
@@ -274,7 +284,7 @@ travels with the peer's summary). Recommendation: out of S2. The index format re
 section for a chunk order so a profile can be added without a new layer writer version; readahead
 and range coalescing are S2's only prefetch.
 
-## Diagnostics (proposals; the owner approves codes)
+## Diagnostics (approved by the owner 2026-11-14)
 
 `src/diag/codes.zig` ends at `10xx` (`E1017`, `W1003`), and S1 proposes `11xx`. Proposal: a new
 group **`12xx`, lazy start**, added to `DIAGNOSTICS.md` in both repos when S2 starts. If S1's group
