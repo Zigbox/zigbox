@@ -71,7 +71,12 @@ fn joiner_step(child: *const Context, step: Step) Error!void {
     switch (step.kind) {
         .joiner_die_with_parent => try host.die_with_parent(),
         .join_namespace => {
-            const handle = child.namespaces[@backingInt(step.namespace)].?;
+            // The parent opened none for a network that is the host's (`--net host`): there is
+            // nothing to join, and the command already has the container's network.
+            const handle = child.namespaces[@backingInt(step.namespace)] orelse {
+                assert(step.namespace == .net);
+                return;
+            };
             try host.join_namespace(handle, step.namespace);
         },
         .fork_command => {

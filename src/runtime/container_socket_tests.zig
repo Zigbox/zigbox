@@ -8,6 +8,8 @@ const std = @import("std");
 const host_mod = @import("../host.zig");
 const codes = @import("../diag/codes.zig");
 const container_socket = @import("container_socket.zig");
+const exec = @import("exec.zig");
+const lifecycle = @import("lifecycle.zig");
 const host_sim = @import("../host_sim.zig");
 const run = @import("run.zig");
 const sim_run = @import("sim_run.zig");
@@ -171,4 +173,64 @@ test "a fault at any host call is one coded diagnostic or a socket, and nothing 
             _ = children; // A faulted wait leaves its child unreaped; see above.
         }
     }
+}
+
+var worker_handle: exec.Handle = undefined;
+
+/// The call a worker makes: no terminal, no history entry, a handle of its own.
+fn worker_execs(sim: *HostSim, diag: *Diag) exec.Error!void {
+    std.debug.assert(diag.code == null);
+    const command: exec.Spec = .{ .name = "web", .command = &.{"/bin/sh"}, .terminal = false };
+    const options: exec.Options = .{ .keep_history = false };
+    return exec.start(sim.interface(), &command, options, &worker_handle, diag);
+}
+
+test "exec joins the network namespace of a --net none container, with its loopback up (ZB-7)" {
+    // Goal: ZB-7, what Zigcube's per-replica probes rely on: a command from `exec` sees the
+    // container's own loopback, so `wget 127.0.0.1:P` reaches the container's listener and not
+    // the host's. Method: start `web` with `none`; the exec'd command's process is in a new
+    // network namespace with `lo` up; for a `--net host` container it joins none (the host's
+    // network is the container's, so there is nothing to join). The VM (demo-c4) runs `ip addr`
+    // and `wget 127.0.0.1` for real.
+    var sim: HostSim = undefined;
+    try supervisor_starts(&sim, 77, .none);
+    var diag: Diag = undefined;
+    diag.reset();
+    try worker_execs(&sim, &diag);
+    const inside = sim.world.find_process(worker_handle.pid.?).?;
+    try testing.expect(inside.new_net);
+    try testing.expect(inside.loopback_up);
+    _ = exec.wait(&worker_handle);
+    try supervisor_starts(&sim, 78, .host);
+    diag.reset();
+    try worker_execs(&sim, &diag);
+    try testing.expect(!sim.world.find_process(worker_handle.pid.?).?.new_net);
+    _ = exec.wait(&worker_handle);
+}
+
+test "a socket outlives the supervisor's handle and an adoption by a restarted agent (ZB-8)" {
+    // Goal: ZB-8: the socket is a descriptor of the caller's, not state of the agent's. Method:
+    // make a socket, drop the starter's `run.Handle` (done in `supervisor_starts`), adopt the
+    // container by name as a restarted agent does; the socket is still open and still the
+    // container's, a second one is made after the adoption, and closing the first leaves the
+    // second.
+    var sim: HostSim = undefined;
+    try supervisor_starts(&sim, 79, .none);
+    var diag: Diag = undefined;
+    diag.reset();
+    const before = try make(&sim, &diag);
+    var ref: lifecycle.Ref = undefined;
+    var state: lifecycle.State = undefined;
+    try lifecycle.adopt(sim.interface(), "web", &ref, &state);
+    try testing.expectEqual(lifecycle.State.running, state);
+    try testing.expect(sim.world.made_in_container_net(before));
+    try testing.expectEqual(@as(u32, 1), sim.world.open_listeners());
+    diag.reset();
+    const after = try make(&sim, &diag);
+    try testing.expect(sim.world.made_in_container_net(after));
+    try testing.expectEqual(@as(u32, 2), sim.world.open_listeners());
+    sim.interface().close(before);
+    try testing.expectEqual(@as(u32, 1), sim.world.open_listeners());
+    sim.interface().close(after);
+    try testing.expectEqual(@as(u32, 0), sim.world.open_listeners());
 }
