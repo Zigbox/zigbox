@@ -1,0 +1,39 @@
+// Imported by `zbx import` from Dockerfile: target stage1, --network detect.
+// Edit this file from here on: `zbx build` reads it, not the Dockerfile.
+.{
+    .version = 1,
+    .steps = .{
+        // Dockerfile:4  RUN echo built > /out.txt
+        .{
+            .name = "build-1",
+            .base = "alpine:3.20",
+            .run = .{ "/bin/sh", "-c", "echo built > /out.txt" },
+            .output = .root,
+        },
+        // Dockerfile:7  COPY --from=$SRC /out.txt .
+        .{
+            .name = "stage1-1",
+            .base = "alpine:3.20",
+            .copy = .{
+                .{ .from = "step:build-1", .src = .{ "/out.txt" }, .to = "/app/" },
+            },
+        },
+        // Dockerfile:8  RUN --mount=type=bind,from=${SRC},source=/,target=/mnt cat /mnt/out.txt
+        .{
+            .name = "stage1-2",
+            .base = "step:stage1-1",
+            .run = .{ "/bin/sh", "-c", "cat /mnt/out.txt" },
+            .output = .root,
+            .workdir = "/app",
+            .binds = .{
+                .{ .from = "step:build-1", .source = "/", .to = "/mnt" },
+            },
+        },
+    },
+    .image = .{
+        .base = "step:stage1-2",
+        .config = .{
+            .workdir = "/app",
+        },
+    },
+}

@@ -76,7 +76,7 @@ footer{border-top:1px solid var(--line);padding-block:24px;color:var(--muted);
 <p class="summary">--hermetic refused a step</p>
 <dl class="facts"><div><dt>Kind</dt><dd>error</dd></div><div><dt>Blame</dt><dd>user</dd></div><div><dt>Exit code</dt><dd>1</dd></div></dl>
 <h2>What it means</h2>
-<p>zbx import --hermetic refuses a translation in which any step would have the network or a cache mount, because such a step's output can depend on more than its inputs. A RUN gets the network when it says --network=default and the import's --network is all, or when --network detect finds a fetching command in its text (apk add, apt-get, pip install, go mod download, curl and the rest of the checked-in table); a RUN --mount=type=cache gets a cache.</p>
+<p>zbx import --hermetic refuses a translation in which any step would have the network or a cache mount, because such a step's output can depend on more than its inputs. A RUN gets the network when it says --network=default and the import's --network is all, or when --network detect finds a fetching command in its text (apk add, apt-get, pip install, go mod download, curl and the rest of the checked-in table); a RUN --mount=type=cache gets a cache. A bind from another stage's step is not refused: that step's output is an input of the build, so it is hermetic.</p>
 <p>The cause names the first such line and why. Nothing is written. Drop --hermetic to import with the steps flagged (W0810), or change the step: fetch the files once, outside the build, and copy them in.</p>
 <h2>Offline</h2>
 <p>The same text, without a network:</p>

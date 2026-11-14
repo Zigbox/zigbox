@@ -376,6 +376,15 @@ fn dollar(
         try put_plain(text[index + 1 .. end], context, out, refusal);
         return end;
     }
+    // A positional parameter (`$1`, `$@`, `$*`) is never set in a Dockerfile: BuildKit
+    // expands it to nothing.
+    if (end < text.len) {
+        if (std.ascii.isDigit(text[end])) {
+            while (end < text.len and std.ascii.isDigit(text[end])) end += 1;
+            return end;
+        }
+        if (text[end] == '@' or text[end] == '*') return end + 1;
+    }
     try out.push(refusal, line, "$");
     return index + 1;
 }
@@ -420,7 +429,7 @@ fn braced(
     if (name.len == 0 or index >= text.len) return refuse_substitution(refusal, line, text, start);
     const operator = try operator_at(text, &index, refusal, line);
     const word_start = index;
-    const end = closing_brace(text, index) orelse
+    const end = closing_brace(text, index, context.escape) orelse
         return refuse_substitution(refusal, line, text, start);
     const word = text[word_start..end];
     if (operator == .plain) {
@@ -479,10 +488,16 @@ fn operator_at(text: []const u8, index: *usize, refusal: *Refusal, line: u32) Re
     return refuse_substitution(refusal, line, text, at);
 }
 
-fn closing_brace(text: []const u8, start: usize) ?usize {
+/// The `}` that closes the substitution whose word starts at `start`; an escaped brace is
+/// part of the word (`${A:-a\}b}` is `a}b`).
+fn closing_brace(text: []const u8, start: usize, escape: u8) ?usize {
     var depth: u32 = 0;
     var index = start;
     while (index < text.len) : (index += 1) {
+        if (text[index] == escape) {
+            index += 1;
+            continue;
+        }
         if (text[index] == '{') depth += 1;
         if (text[index] == '}') {
             if (depth == 0) return index;
@@ -492,13 +507,24 @@ fn closing_brace(text: []const u8, start: usize) ?usize {
     return null;
 }
 
-/// An operator's word: `$Y` and `${Y}` are substituted, escapes read; another operator is E0811.
+/// An operator's word: `$Y` and `${Y}` are substituted, escapes read and quotes removed, as
+/// BuildKit reads it (`${A:-"a b"}` is `a b`); inside single quotes nothing is substituted.
+/// Another operator is E0811.
 fn nested(word: []const u8, context: *const Context, out: *Out, refusal: *Refusal) !void {
     const line = context.line;
+    var quote: u8 = 0;
     var index: usize = 0;
     while (index < word.len) {
         const byte = word[index];
-        if (byte == context.escape and index + 1 < word.len) {
+        if (quote == '\'') {
+            if (byte == '\'') quote = 0 else try out.push(refusal, line, word[index..][0..1]);
+            index += 1;
+        } else if (byte == '"' or byte == '\'') {
+            if (quote == byte) quote = 0 else if (quote == 0) quote = byte else {
+                try out.push(refusal, line, word[index..][0..1]);
+            }
+            index += 1;
+        } else if (byte == context.escape and index + 1 < word.len) {
             try out.push(refusal, line, word[index + 1 ..][0..1]);
             index += 2;
         } else if (byte == '$' and index + 1 < word.len and word[index + 1] == '{') {
@@ -581,6 +607,9 @@ test "substitution follows Docker's operators" {
     try expect_word("${M:-ok}", "ok");
     try expect_word("'$A' \"$A\" \\$A", "$A a b $A");
     try expect_word("\"q\\\"\\$\\x\"", "q\"$\\x");
+    try expect_word("$1|$12x|$@|$*|$", "|x|||$");
+    try expect_word("${U:-\"a b\"}|${U:-'$A'}|${U:-\"$A\"}", "a b|$A|a b");
+    try expect_word("${U:-a\\}b}", "a}b");
 }
 
 test "substitution refusals name their code" {

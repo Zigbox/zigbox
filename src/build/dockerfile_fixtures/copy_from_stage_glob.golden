@@ -8,7 +8,7 @@
             .name = "build-1",
             .base = "golang:1.22",
             .copy = .{
-                .{ .src = .{ "." }, .to = "/go/src/cli" },
+                .{ .src = .{ "." }, .to = "/go/src/cli/" },
             },
         },
         // Dockerfile:5  RUN ./scripts/build/binary

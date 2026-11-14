@@ -2632,7 +2632,7 @@ fn import_e0813(diag: *Diag) void {
 
 fn import_e0814(diag: *Diag) void {
     var refusal: refusal_mod.Refusal = undefined;
-    _ = refusal_mod.refuse(&refusal, .E0814, 7, "--hermetic: step fetch (Dockerfile:7) " ++
+    _ = refusal_mod.refuse(&refusal, .E0814, 7, "Dockerfile:7 makes step fetch, which " ++
         "has the network", .{}, "drop --hermetic, or change Dockerfile:7 so it needs " ++
         "neither the network nor a cache", .{}) catch {};
     import_diagnose.refused(diag, &refusal, "Dockerfile");

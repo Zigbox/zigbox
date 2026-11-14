@@ -3721,7 +3721,8 @@ pub const registry = [_]Entry{
         \\the import's --network is all, or when --network detect finds a fetching
         \\command in its text (apk add, apt-get, pip install, go mod download, curl
         \\and the rest of the checked-in table); a RUN --mount=type=cache gets a
-        \\cache.
+        \\cache. A bind from another stage's step is not refused: that step's output
+        \\is an input of the build, so it is hermetic.
         \\
         \\The cause names the first such line and why. Nothing is written. Drop
         \\--hermetic to import with the steps flagged (W0810), or change the step:
@@ -3790,10 +3791,12 @@ pub const registry = [_]Entry{
         \\syntax and check directives, COPY --link, RUN --security=sandbox, a cache's
         \\sharing mode, the BUILDKIT_* and SOURCE_DATE_EPOCH arguments, and an ENV of
         \\a variable the build fixes are ignored: the builder has their meaning
-        \\already, or keeps its own.
+        \\already, or keeps its own. A COPY's --chown or --chmod, a COPY --from an
+        \\image, and --exclude on a COPY --from a stage are kept in the build file,
+        \\but zbx build does not run them yet (E0802), so the list names them too.
         \\
-        \\The cause names each part. Nothing is wrong; read the list to be sure none
-        \\of them matters to the image.
+        \\The cause names each part. Read the list to be sure none of them matters to
+        \\the image, and change any copy that zbx build would refuse.
         ,
     },
     .{

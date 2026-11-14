@@ -509,13 +509,12 @@ fn finish(t: *Translator) Error![]const u8 {
 fn hermetic(t: *Translator) Refused!void {
     assert(t.options.hermetic);
     for (t.ws.report.steps_slice()) |*step| {
+        // The brief refuses the network or a cache; a bind from a stage is content-addressed,
+        // so it is shown in the report but not flagged.
         if (!step.flagged()) continue;
-        const why = if (step.network != null) "the network" else if (step.cache)
-            "a cache mount"
-        else
-            "a bind mount";
-        return refuse(t.refusal(), .E0814, step.line, "--hermetic: step {s} (Dockerfile:{d}) " ++
-            "has {s}", .{ step.name_text(), step.line, why }, "drop --hermetic, or change " ++
+        const why = if (step.network != null) "the network" else "a cache mount";
+        return refuse(t.refusal(), .E0814, step.line, "Dockerfile:{d} makes step {s}, which " ++
+            "has {s}", .{ step.line, step.name_text(), why }, "drop --hermetic, or change " ++
             "Dockerfile:{d} so it needs neither the network nor a cache", .{step.line});
     }
 }
@@ -545,10 +544,27 @@ fn refuse_problem(t: *Translator, problem: *const file_mod.Problem) Refused {
             "builder's bound on .{s} ({t})", .{ where, line, field, problem.kind }, "split " ++
             "the instruction, or import a smaller --target", .{}),
         else => return refuse(t.refusal(), .E0811, line, "{s} from Dockerfile:{d} has .{s} " ++
-            "`{s}`, which a build file cannot hold ({t})", .{
-            where, line, field, problem.word_text(), problem.kind,
+            "`{s}`, which a build file cannot hold: {s}", .{
+            where, line, field, problem.word_text(), problem_words(problem.kind),
         }, "change the instruction at Dockerfile:{d}", .{line}),
     }
+}
+
+/// Why the builder's parser refused a value, in words rather than its enum tag.
+fn problem_words(kind: file_mod.ProblemKind) []const u8 {
+    const words_of_kind = switch (kind) {
+        .nul_byte => "it holds a NUL byte, which no argument, path or variable can hold",
+        .bad_string => "it holds a control byte, or bytes that are not UTF-8",
+        .bad_reference => "it is not an image reference",
+        .bad_env => "it is not KEY=VALUE with a key of letters, digits and _",
+        .env_twice => "it sets the same key twice",
+        .env_fixed => "it sets a key of the builder's fixed environment",
+        .bad_step_name, .reserved_step_name => "it is not a step name the builder takes",
+        else => "the builder's parser refuses it",
+    };
+    assert(words_of_kind.len > 0);
+    assert(words_of_kind.len < 80);
+    return words_of_kind;
 }
 
 fn header(t: *Translator) Refused!void {
@@ -606,8 +622,10 @@ pub fn note(t: *Translator, instruction: *const lines.Instruction) Refused![]con
     return bytes;
 }
 
-/// `path` made absolute against `directory` and cleaned: no `.`, `..` or empty parts. A
-/// trailing `/` is kept when `keep_slash`, as a `COPY` destination needs it.
+/// `path` made absolute against `directory` and cleaned: no `.`, `..` or empty parts. When
+/// `keep_slash`, a path that names a directory by its spelling (see `names_directory`) ends in
+/// `/`, as a `COPY` destination needs it: the builder copies a file *into* a `to` that ends in
+/// `/`, and *as* any other.
 pub fn absolute(
     t: *Translator,
     line: u32,
@@ -638,11 +656,29 @@ pub fn absolute(
         try t.out.push(t.refusal(), line, "/");
         try t.out.push(t.refusal(), line, part);
     }
-    const slash = keep_slash and path.len > 0 and path[path.len - 1] == '/';
+    const slash = keep_slash and names_directory(path);
     if (count == 0 or slash) try t.out.push(t.refusal(), line, "/");
     const result = t.out.since(start);
     if (result.len > constants.path_bytes_max) return path_too_long(t, line);
     return result;
+}
+
+/// Whether a destination is a directory by its spelling, as BuildKit reads it: it ends in
+/// `/`, or its last part is `.` or `..` (`COPY main.go .` copies into the workdir).
+pub fn names_directory(path: []const u8) bool {
+    if (path.len == 0) return false;
+    if (path[path.len - 1] == '/') return true;
+    const last = path[if (std.mem.lastIndexOfScalar(u8, path, '/')) |at| at + 1 else 0..];
+    assert(last.len > 0);
+    return std.mem.eql(u8, last, ".") or std.mem.eql(u8, last, "..");
+}
+
+test "a destination names a directory by a trailing slash, `.` or `..`" {
+    // Goal: the spellings BuildKit copies into, and the ones it copies as. Method: a table.
+    const into = [_][]const u8{ ".", "..", "./", "/", "/app/", "/app/.", "a/..", "/." };
+    const as = [_][]const u8{ "", "a", "/app", "./a", "/app/.a", "..a", "a.", "/app/..." };
+    for (into) |path| try std.testing.expect(names_directory(path));
+    for (as) |path| try std.testing.expect(!names_directory(path));
 }
 
 fn path_too_long(t: *Translator, line: u32) Refused {

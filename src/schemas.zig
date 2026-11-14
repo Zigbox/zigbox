@@ -656,7 +656,7 @@ const import_schema =
     \\"dropped":{"type":"array","items":{"type":"object","required":["line","what","became"],
     \\"properties":{"line":{"type":"integer"},"what":{"type":"string"},
     \\"became":{"type":"string"}}}},
-    \\"flagged":{"type":"integer","description":"steps flagged as possibly needing the network"}}}
+    \\"flagged":{"type":"integer","description":"steps not hermetic (network or cache)"}}}
 ;
 
 const push_schema =

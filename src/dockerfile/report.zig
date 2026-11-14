@@ -29,8 +29,10 @@ pub const Step = struct {
         return step.name[0..step.name_len];
     }
 
+    /// Not hermetic: what `--hermetic` refuses. A bind reads a step's output, an input of the
+    /// build, so it is shown but not flagged.
     pub fn flagged(step: *const Step) bool {
-        return step.network != null or step.cache or step.bind;
+        return step.network != null or step.cache;
     }
 };
 
