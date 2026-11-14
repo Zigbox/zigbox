@@ -111,9 +111,9 @@ fn fuzz_lock_text(random: std.Random) void {
             unreachable; // Ten pins of short names fit.
         };
     }
-    for (1..first.pin_count) |index| {
+    for (first.pins[0..first.pin_count], 0..) |*after, index| {
+        if (index == 0) continue;
         const before = &first.pins[index - 1];
-        const after = &first.pins[index];
         const files = std.mem.order(u8, first.pin_file(before), first.pin_file(after));
         assert(files != .gt);
         if (files == .eq) {

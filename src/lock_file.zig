@@ -1046,9 +1046,12 @@ test "the pins are full at lock_pins_max" {
     try testing.expectEqual(@as(u32, constants.lock_pins_max), back.pin_count);
     var longer: [constants.lock_file_bytes_max]u8 = undefined;
     const end = std.mem.lastIndexOf(u8, text, "    },\n}\n").?;
-    const extra = try std.fmt.bufPrint(&longer, "{s}        .{{\n            .file = \"z\",\n" ++
-        "            .step = \"z\",\n            .key = \"{s}\",\n            .output = \"{s}\",\n" ++
-        "        }},\n    }},\n}}\n", .{ text[0..end], Digest.of("k").text(), Digest.of("o").text() });
+    const pin_format = "{s}        .{{\n            .file = \"z\",\n" ++
+        "            .step = \"z\",\n            .key = \"{s}\",\n" ++
+        "            .output = \"{s}\",\n        }},\n    }},\n}}\n";
+    const digests = .{ Digest.of("k").text(), Digest.of("o").text() };
+    const values = .{ text[0..end], digests[0], digests[1] };
+    const extra = try std.fmt.bufPrint(&longer, pin_format, values);
     try testing.expectEqual(ProblemKind.too_big, problem_of(extra).?.kind);
 }
 

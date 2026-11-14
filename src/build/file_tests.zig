@@ -518,3 +518,41 @@ test "each M9 refusal names its kind" {
     );
     try step_refused(run ++ ".binds = .{ .{ .source = \"../a\", .to = \"/b\" } }", .bad_source);
 }
+
+test "an output pin and output excludes are read, and each refusal names its kind" {
+    // Goal: `.expect` and `.output_exclude` (M9 slice 3c) and their negative space. Method: an
+    // accepted step, then one step per refusal, then the list at its bound and one past it.
+    const digest = comptime "\"b3:" ++ repeat("0", 64) ++ "\"";
+    const network = ".run = .{\"x\"}, .network = true, ";
+    const run = try parse_ok(m9_head ++ network ++ ".expect = " ++ digest ++
+        ", .output_exclude = .{ \"/var/log\", \"/a b\" } } } }");
+    try testing.expect(run.steps[0].expect != null);
+    try testing.expectEqual(@as(u32, 2), run.steps[0].output_exclude.count);
+    try step_refused(network ++ ".expect = \"b3:00\"", .bad_expect);
+    try step_refused(network ++ ".expect = \"sha256:" ++ repeat("0", 64) ++ "\"", .bad_expect);
+    try step_refused(".run = .{\"x\"}, .expect = " ++ digest, .expect_without_network);
+    try step_refused(
+        network ++ ".caches = .{ .{ .id = \"a\", .path = \"/c\" } }, .expect = " ++ digest,
+        .expect_with_caches,
+    );
+    try step_refused(network ++ ".output_exclude = .{ \"var/log\" }", .bad_output_exclude);
+    try step_refused(network ++ ".output_exclude = .{ \"/\" }", .bad_output_exclude);
+    try step_refused(network ++ ".output_exclude = .{ \"/a/../b\" }", .bad_output_exclude);
+    try step_refused(
+        ".copy = .{ .{ .src = .{\"a\"}, .to = \"/a\" } }, .output_exclude = .{ \"/a\" }",
+        .output_exclude_on_copy,
+    );
+    const one = "\"/p\", ";
+    const at_bound = comptime repeat(one, constants.build_output_excludes_max);
+    _ = try parse_ok(m9_head ++ network ++ ".output_exclude = .{ " ++ at_bound ++ "} } } }");
+    try step_refused(network ++ ".output_exclude = .{ " ++ at_bound ++ one ++ "}", .list_too_long);
+}
+
+fn repeat(comptime unit: []const u8, comptime times: u32) *const [unit.len * times]u8 {
+    comptime {
+        var out: [unit.len * times]u8 = undefined;
+        for (0..times) |index| @memcpy(out[index * unit.len ..][0..unit.len], unit);
+        const final = out;
+        return &final;
+    }
+}

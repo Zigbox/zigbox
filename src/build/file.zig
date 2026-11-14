@@ -23,6 +23,7 @@ const constants = @import("../constants.zig");
 const lexer_mod = @import("lexer.zig");
 const reference_mod = @import("../registry/reference.zig");
 const glob = @import("glob.zig");
+const Digest = @import("../store/digest.zig").Digest;
 
 const Lexer = lexer_mod.Lexer;
 const Token = lexer_mod.Token;
@@ -123,6 +124,11 @@ pub const Step = struct {
     caches: Span,
     binds: Span,
     exclude: Span,
+    /// M9 slice 3c: the output pin written by hand (`b3:<hex>`), on a network step only.
+    expect: ?Text,
+    /// M9 slice 3c: absolute paths whose changes are dropped from the output before it is
+    /// hashed; not given means none, or the defaults when the step is pinned (`build/pin.zig`).
+    output_exclude: Span,
     /// Where the step's `.{` is.
     line: u32,
     column: u32,
@@ -266,6 +272,9 @@ pub const Field = enum {
     mode,
     uid,
     gid,
+    // M9 slice 3c.
+    expect,
+    output_exclude,
 };
 
 /// Where in the schema a problem is.
@@ -285,8 +294,9 @@ pub const Level = enum {
         return switch (level) {
             .file => &.{ .version, .exclude, .steps, .image },
             .step => &.{
-                .name,   .base, .inputs,  .needs, .env,    .run,   .network,
-                .output, .user, .workdir, .copy,  .caches, .binds, .exclude,
+                .name,   .base,           .inputs,  .needs, .env,    .run,   .network,
+                .output, .user,           .workdir, .copy,  .caches, .binds, .exclude,
+                .expect, .output_exclude,
             },
             .image => &.{ .base, .add, .config },
             .add => &.{ .from, .to },
@@ -399,6 +409,16 @@ pub const ProblemKind = enum {
     bad_number,
     /// Two caches or binds of one step mount at one path (`word` is it).
     mount_twice,
+    /// M9 slice 3c: `.expect` is not `b3:` and 64 lowercase hex digits (`word` is it).
+    bad_expect,
+    /// `.expect` on a step without `network = true`: such a step is keyed by what it reads.
+    expect_without_network,
+    /// `.expect` on a step with `.caches`: its output depends on a cache outside its key.
+    expect_with_caches,
+    /// An `.output_exclude` path that is not absolute and plain, or is `/` (`word` is it).
+    bad_output_exclude,
+    /// `.output_exclude` on a copy step: its output is what it copies, so nothing is left out.
+    output_exclude_on_copy,
     // E0802: the graph.
     /// More `needs` than a step can mount.
     too_many_needs,
@@ -686,6 +706,8 @@ fn parse_step(parser: *Parser, step: *Step, open: Token) Refused!void {
     step.caches = Span.none;
     step.binds = Span.none;
     step.exclude = Span.none;
+    step.expect = null;
+    step.output_exclude = Span.none;
     var fields: Fields = .{ .level = .step };
     while (try fields.next(parser)) |field| {
         switch (field) {
@@ -718,6 +740,21 @@ fn parse_step(parser: *Parser, step: *Step, open: Token) Refused!void {
         return parser.fail(.empty_list, open, .step, .copy);
     }
     try check_mounts(parser, step, open);
+    try check_expect(parser, step, open);
+}
+
+/// `.expect` pins a network step's output by hand; a step without the network is keyed by what
+/// it reads, and a step with caches has output that depends on what its key leaves out.
+fn check_expect(parser: *Parser, step: *const Step, open: Token) Refused!void {
+    assert(open.tag == .open);
+    // A copy step's output is what it copies: there is nothing for the list to leave out.
+    if (step.output_exclude.given and step.copy.given) {
+        return parser.fail(.output_exclude_on_copy, open, .step, .output_exclude);
+    }
+    if (step.expect == null) return;
+    if (!step.network) return parser.fail(.expect_without_network, open, .step, .expect);
+    if (step.caches.count > 0) return parser.fail(.expect_with_caches, open, .step, .expect);
+    assert(step.network);
 }
 
 /// The fields M9 added to a step.
@@ -742,6 +779,14 @@ fn parse_step_more(parser: *Parser, step: *Step, field: Field) Refused!void {
         .caches => try parse_caches(parser, step),
         .binds => try parse_binds(parser, step),
         .exclude => try parse_exclude(parser, .step, &step.exclude),
+        .expect => {
+            const expect = try parse_string(parser, .step, field);
+            if (Digest.parse(parser.file.text(expect)) == null) {
+                return parser.fail_value(.bad_expect, expect, .step, field);
+            }
+            step.expect = expect;
+        },
+        .output_exclude => try parse_output_exclude(parser, step),
         else => unreachable, // `Fields.next` returns only the fields of the level.
     }
 }
@@ -767,6 +812,19 @@ fn check_mounts(parser: *Parser, step: *const Step, open: Token) Refused!void {
     const fixed: u32 = if (step.output == .root) 0 else 2;
     const total = step.needs.count + step.binds.count + step.caches.count + fixed;
     if (total > constants.mounts_max) return parser.fail(.too_many_mounts, open, .step, .binds);
+}
+
+/// `.output_exclude`: absolute plain paths, not `/` (which would drop the whole output).
+fn parse_output_exclude(parser: *Parser, step: *Step) Refused!void {
+    const max = constants.build_output_excludes_max;
+    try parse_texts(parser, .step, .output_exclude, &step.output_exclude, max);
+    assert(step.output_exclude.count <= max);
+    for (parser.file.texts(step.output_exclude)) |path| {
+        const text = parser.file.text(path);
+        if (!is_absolute_plain(text) or text.len == 1) {
+            return parser.fail_value(.bad_output_exclude, path, .step, .output_exclude);
+        }
+    }
 }
 
 /// A list of exclude lines (`.dockerignore` syntax), into the file's `list_texts`.

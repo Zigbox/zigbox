@@ -62,6 +62,10 @@ pub const Spec = struct {
     /// The step's cache directories (`.caches`). Not read by `compute`: a cache never changes
     /// what a step's output is defined by. The step mounts them (`step.zig`).
     caches: []const CacheMount = &.{},
+    /// M9 slice 3c: the paths left out of a pinned step's output (`.output_exclude`, or the
+    /// defaults `pin.default_excludes`), in the file's order; null for a step that is not
+    /// pinned, which has no output excludes and the key it had before.
+    output_exclude: ?[]const []const u8 = null,
 };
 
 /// A cache directory of a step: kept per build file under the store, bound at `path`.
@@ -108,6 +112,8 @@ const Tag = enum(u8) {
     workdir = 14,
     binds = 15,
     copies = 16,
+    // 17 to 19 are left for slice 3b's fetches, so the two slices merge without renumbering.
+    output_exclude = 20,
 };
 
 /// The fixed environment a step sees after the image's and the build file's, as `KEY=VALUE`.
@@ -252,6 +258,12 @@ fn encode_more(encoder: *Encoder, spec: *const Spec) Error!void {
             try encoder.optional(copy.chown);
             try encoder.optional(copy.chmod);
         }
+    }
+    if (spec.output_exclude) |paths| {
+        assert(paths.len <= constants.build_output_excludes_max);
+        try encoder.tag(.output_exclude);
+        try encoder.int(@intCast(paths.len));
+        for (paths) |path| try encoder.string(path);
     }
 }
 
@@ -490,7 +502,7 @@ test "key: an M7 step keeps its key; each M9 field changes it; an excluded file 
     const plain = try key_of(&base, 0);
     const plain_hex = plain.hex();
     try testing.expectEqualStrings(golden_key_hex, &plain_hex);
-    var seen: [8]Digest = undefined;
+    var seen: [11]Digest = undefined;
     var count: usize = 0;
     const variants = [_]Spec{
         with_more(base, .{ .root_output = true }),
@@ -505,6 +517,9 @@ test "key: an M7 step keeps its key; each M9 field changes it; an excluded file 
             .to = "/c",
             .chmod = "0755",
         }} }),
+        with_more(base, .{ .output_exclude = &.{} }),
+        with_more(base, .{ .output_exclude = &.{"/var/log"} }),
+        with_more(base, .{ .output_exclude = &.{ "/var/log", "/tmp" } }),
     };
     for (variants) |variant| {
         const changed = try key_of(&variant, 1);
@@ -522,6 +537,7 @@ fn with_more(spec: Spec, more: struct {
     workdir: ?[]const u8 = null,
     binds: []const Bind = &.{},
     copies: []const Copy = &.{},
+    output_exclude: ?[]const []const u8 = null,
 }) Spec {
     var result = spec;
     result.root_output = more.root_output;
@@ -529,6 +545,7 @@ fn with_more(spec: Spec, more: struct {
     result.workdir = more.workdir;
     result.binds = more.binds;
     result.copies = more.copies;
+    result.output_exclude = more.output_exclude;
     return result;
 }
 
