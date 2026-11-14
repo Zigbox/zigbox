@@ -15,6 +15,9 @@
 //!   4. A `READ` that succeeds returns exactly the file's bytes at that offset (the oracle is the
 //!      fixture's content), and one of an object whose chunks fail never succeeds with data.
 //!   5. A `READDIRPLUS` that succeeds holds whole records, in order, within the asked size.
+//!   6. A built table's file ordinals are first appearance in a preorder walk of the fixture's own
+//!      trees (the index's object order), its object count is that walk's distinct objects, and
+//!      its arena holds each distinct tree once.
 
 const std = @import("std");
 const assert = std.debug.assert;
@@ -43,6 +46,7 @@ var reply_buffer: [constants.fuse_reply_bytes]u8 align(8) = undefined;
 var request_buffer: [constants.fuse_request_bytes]u8 = undefined;
 var links: [nodes_room_max]u32 = undefined;
 var pool: [4 * chunk_bytes_max]u8 = undefined;
+var walked: [nodes_room_max]Digest = undefined;
 
 /// What the iterations reached, so the test can see that no property was checked vacuously.
 var reached: struct {
@@ -86,6 +90,7 @@ pub fn fuzz_fuse_request(seed: u64) void {
         }
     };
     check_table();
+    check_walk(root);
     const before = snapshot();
     if (random.uintLessThan(u32, 4) == 0) fixture.failing = random_file(random);
     const server: ops.Server = .{ .table = &table, .chunk_bytes = chunk_bytes };
@@ -209,6 +214,59 @@ fn check_table() void {
             .dir, .symlink => assert(links[index] == 1),
         }
     }
+}
+
+/// Property 6, by a walk of the fixture's trees that shares nothing with the table's.
+fn check_walk(root: Digest) void {
+    // Each directory names only earlier ones, so a path holds each at most once.
+    var decoders: [directories_max]tree.Decoder = undefined;
+    var trees_seen: [directories_max]Digest = undefined;
+    var trees_count: u32 = 0;
+    var tree_bytes: u64 = 0;
+    var objects: u32 = 0;
+    var depth: u32 = 0;
+    var next: ?Digest = root;
+    while (true) {
+        if (next) |digest| {
+            const bytes = fixture.tree_held(digest).?; // The build found it.
+            if (!contains(trees_seen[0..trees_count], digest)) {
+                trees_seen[trees_count] = digest;
+                trees_count += 1;
+                tree_bytes += bytes.len;
+            }
+            decoders[depth].init(bytes) catch unreachable; // The build decoded it.
+            depth += 1;
+            next = null;
+        }
+        if (depth == 0) break;
+        var entry: tree.Entry = undefined;
+        const more = decoders[depth - 1].next(&entry) catch unreachable; // The build did.
+        if (!more) {
+            depth -= 1;
+            continue;
+        }
+        switch (entry.kind) {
+            .file => if (!contains(walked[0..objects], entry.object)) {
+                walked[objects] = entry.object;
+                objects += 1;
+            },
+            .dir => next = entry.subtree,
+            .symlink => {},
+        }
+    }
+    assert(objects == table.object_count);
+    assert(tree_bytes == table.arena_len);
+    for (1..table.node_count + 1) |nodeid| {
+        const found = table.node(nodeid).?;
+        if (found.kind == .file) assert(walked[table.ordinal(found)].eql(found.digest));
+    }
+}
+
+fn contains(list: []const Digest, wanted: Digest) bool {
+    for (list) |held| {
+        if (held.eql(wanted)) return true;
+    }
+    return false;
 }
 
 fn snapshot() [32]u8 {

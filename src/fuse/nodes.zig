@@ -18,8 +18,14 @@
 //! bytes, which the decoder enforces), so a lookup is a binary search.
 //!
 //! The directory objects are copied into `arena` and kept: names, symlink targets and attribute
-//! sections are slices of it. Their total is bounded by `lazy_index_bytes_max`, the bound on the
-//! index that carries them. Node ids are index + 1, so the root (index 0) is `FUSE_ROOT_ID`.
+//! sections are slices of it. Each distinct tree is copied once (a subtree named twice is read
+//! again from the arena), so the arena needs no more than the index's trees section, which the
+//! caller sizes it to (docs/decisions/2026-11-14-s2-fuse-server.md); `lazy_index_bytes_max` bounds
+//! that. Node ids are index + 1, so the root (index 0) is `FUSE_ROOT_ID`.
+//!
+//! After the build, `number_objects` gives each file node its **ordinal**: its position in the
+//! index's object list, which is first appearance in the pack's walk (preorder, names in the
+//! tree's order). The chunk resolver addresses objects by that position.
 
 const std = @import("std");
 const assert = std.debug.assert;
@@ -35,24 +41,29 @@ pub const Kind = tree.Kind;
 pub const Node = struct {
     /// A file's object id, a directory's tree digest; zero for a symlink.
     digest: Digest,
-    /// A file's length in bytes, a symlink's target length; zero for a directory.
+    /// A file's length in bytes, a symlink's target length, a directory's tree length (the kernel
+    /// is shown a block for a directory, never this).
     size: u64,
     uid: u32,
     gid: u32,
     nlink: u32,
     /// A directory's parent (the root is its own); zero otherwise.
     parent: u32,
-    /// A directory's children: `children[children_first..][0..children_count]`.
+    /// A directory's children: `children[children_first..][0..children_count]`. A file has none,
+    /// and keeps its ordinal here instead (`Table.ordinal`), so a node stays 80 bytes.
     children_first: u32,
     children_count: u32,
     /// The canonical attribute section, as a slice of `arena`; a length of zero is the empty one.
     xattrs_at: u32,
     xattrs_len: u32,
-    /// A symlink's target in `arena` (its length is `size`).
+    /// A symlink's target, or a directory's tree, in `arena` (its length is `size`).
     target_at: u32,
     mode: u16,
     kind: Kind,
 };
+
+/// A file node's ordinal before `number_objects` gives it one.
+const unnumbered: u32 = std.math.maxInt(u32);
 
 pub const Child = struct {
     node: u32,
@@ -96,15 +107,24 @@ pub const Table = struct {
     node_count: u32,
     child_count: u32,
     arena_len: u32,
+    /// Distinct file objects, numbered by `number_objects`.
+    object_count: u32,
 
     pub fn init(table: *Table, memory: Memory) void {
         assert(memory.nodes.len > 0);
         assert(memory.nodes.len < std.math.maxInt(u32));
         assert(std.math.isPowerOfTwo(memory.slots.len));
         assert(memory.slots.len >= 2 * memory.nodes.len);
-        assert(memory.arena.len >= @as(u64, memory.arena_limit) + constants.store_tree_bytes_max);
+        // The arena is the trees' room plus one tree, read whole before it is found too large.
+        assert(memory.arena.len == @as(u64, memory.arena_limit) + constants.store_tree_bytes_max);
         assert(memory.arena.len < std.math.maxInt(u32));
-        table.* = .{ .memory = memory, .node_count = 0, .child_count = 0, .arena_len = 0 };
+        table.* = .{
+            .memory = memory,
+            .node_count = 0,
+            .child_count = 0,
+            .arena_len = 0,
+            .object_count = 0,
+        };
         @memset(memory.slots, 0);
     }
 
@@ -142,6 +162,13 @@ pub const Table = struct {
         assert(found.xattrs_at + found.xattrs_len <= table.arena_len);
         if (found.xattrs_len == 0) return &xattrs.empty;
         return table.memory.arena[found.xattrs_at..][0..found.xattrs_len];
+    }
+
+    /// A file's position in the index's object list.
+    pub fn ordinal(table: *const Table, found: *const Node) u32 {
+        assert(found.kind == .file);
+        assert(found.children_first < table.object_count);
+        return found.children_first;
     }
 
     pub fn target(table: *const Table, found: *const Node) []const u8 {
@@ -197,17 +224,51 @@ pub const Table = struct {
         }
         assert(table.node_count <= table.memory.nodes.len);
         assert(table.memory.nodes[0].kind == .dir);
+        try table.number_objects();
+    }
+
+    /// Gives each file node its ordinal: first appearance in a preorder walk, names in the tree's
+    /// order, as the pack writes the layer and the index lists objects. A subtree named twice is
+    /// walked twice, and its files are already numbered the second time.
+    fn number_objects(table: *Table) BuildError!void {
+        assert(table.object_count == 0);
+        const Frame = struct { node: u32, next: u32 };
+        var frames: [constants.store_depth_max + 1]Frame = undefined;
+        frames[0] = .{ .node = 0, .next = 0 };
+        var depth: u32 = 1;
+        while (depth > 0) {
+            const frame = &frames[depth - 1];
+            const list = table.children(&table.memory.nodes[frame.node]);
+            if (frame.next == list.len) {
+                depth -= 1;
+                continue;
+            }
+            const child = list[frame.next];
+            frame.next += 1;
+            const named = &table.memory.nodes[child.node];
+            switch (named.kind) {
+                .file => if (named.children_first == unnumbered) {
+                    named.children_first = table.object_count;
+                    table.object_count += 1;
+                },
+                .dir => {
+                    // The store never holds a deeper tree; an index that names one is forged.
+                    if (depth == frames.len) return error.Malformed;
+                    frames[depth] = .{ .node = child.node, .next = 0 };
+                    depth += 1;
+                },
+                .symlink => {},
+            }
+        }
+        assert(table.object_count <= table.node_count);
     }
 
     fn expand(table: *Table, source: TreeSource, index: u32) BuildError!void {
         assert(table.memory.nodes[index].kind == .dir);
         assert(table.arena_len <= table.memory.arena_limit);
-        const room = table.memory.arena[table.arena_len..];
-        assert(room.len >= constants.store_tree_bytes_max);
-        const bytes = try source.load(source.context, table.memory.nodes[index].digest, room);
-        assert(bytes.ptr == room.ptr);
-        if (bytes.len > table.memory.arena_limit - table.arena_len) return error.TooLarge;
-        table.arena_len += @intCast(bytes.len);
+        const bytes = try table.tree_of(source, index);
+        table.memory.nodes[index].target_at = table.offset_of(bytes);
+        table.memory.nodes[index].size = bytes.len;
         var decoder: tree.Decoder = undefined;
         decoder.init(bytes) catch return error.Malformed;
         const first = table.child_count;
@@ -225,6 +286,47 @@ pub const Table = struct {
             directory.gid = decoder.own.gid;
             table.set_attributes(directory, decoder.own.xattrs);
         }
+    }
+
+    /// The directory object of node `index`: read from `source` into the arena the first time its
+    /// digest is met, and the arena's copy after that.
+    fn tree_of(table: *Table, source: TreeSource, index: u32) BuildError![]const u8 {
+        const digest = table.memory.nodes[index].digest;
+        const slot = table.slot_of(digest, .dir);
+        const held = table.memory.slots[slot];
+        if (held != 0) {
+            assert(held - 1 < index); // Breadth first: the earlier node was expanded first.
+            const earlier = &table.memory.nodes[held - 1];
+            assert(earlier.target_at + earlier.size <= table.arena_len);
+            return table.memory.arena[earlier.target_at..][0..@intCast(earlier.size)];
+        }
+        const room = table.memory.arena[table.arena_len..];
+        assert(room.len >= constants.store_tree_bytes_max);
+        const bytes = try source.load(source.context, digest, room);
+        assert(bytes.ptr == room.ptr);
+        if (bytes.len > table.memory.arena_limit - table.arena_len) return error.TooLarge;
+        table.arena_len += @intCast(bytes.len);
+        table.memory.slots[slot] = index + 1;
+        return bytes;
+    }
+
+    /// The map slot of `digest` among nodes of `kind`: the one that holds it, or the empty one
+    /// where it goes. Files are keyed by object id, directories by tree digest.
+    fn slot_of(table: *const Table, digest: Digest, kind: Kind) usize {
+        assert(kind != .symlink);
+        const mask = table.memory.slots.len - 1;
+        var slot: usize = std.mem.readInt(u64, digest.bytes[0..8], .little) & mask;
+        var probes: usize = 0;
+        while (probes < table.memory.slots.len) : (probes += 1) {
+            const held = table.memory.slots[slot];
+            if (held == 0) return slot;
+            const existing = &table.memory.nodes[held - 1];
+            if (existing.kind == kind and existing.digest.eql(digest)) return slot;
+            slot = (slot + 1) & mask;
+        }
+        // The map is at least twice the node room and each taken slot holds a distinct node, so
+        // it is never full.
+        unreachable;
     }
 
     fn add_child(table: *Table, parent: u32, entry: *const tree.Entry) BuildError!void {
@@ -248,29 +350,20 @@ pub const Table = struct {
     /// The node of a file entry's object: the one an earlier link made, or a new one.
     fn file_node(table: *Table, entry: *const tree.Entry) BuildError!u32 {
         assert(entry.kind == .file);
-        const mask = table.memory.slots.len - 1;
-        var slot: usize = std.mem.readInt(u64, entry.object.bytes[0..8], .little) & mask;
-        var probes: usize = 0;
-        while (probes < table.memory.slots.len) : (probes += 1) {
-            const held = table.memory.slots[slot];
-            if (held == 0) {
-                const created = try table.new_node(entry, 0);
-                table.memory.slots[slot] = created + 1;
-                return created;
-            }
-            const existing = &table.memory.nodes[held - 1];
-            assert(existing.kind == .file);
-            if (existing.digest.eql(entry.object)) {
-                // One object is one content: a tree that gives it two sizes is lying.
-                if (existing.size != entry.size) return error.Malformed;
-                existing.nlink += 1;
-                return held - 1;
-            }
-            slot = (slot + 1) & mask;
+        const slot = table.slot_of(entry.object, .file);
+        const held = table.memory.slots[slot];
+        if (held == 0) {
+            const created = try table.new_node(entry, 0);
+            table.memory.nodes[created].children_first = unnumbered;
+            table.memory.slots[slot] = created + 1;
+            return created;
         }
-        // The map is at least twice the node room and a node is made before its slot is taken,
-        // so a full map would mean more nodes than room.
-        unreachable;
+        const existing = &table.memory.nodes[held - 1];
+        assert(existing.kind == .file);
+        // One object is one content: a tree that gives it two sizes is lying.
+        if (existing.size != entry.size) return error.Malformed;
+        existing.nlink += 1;
+        return held - 1;
     }
 
     fn new_node(table: *Table, entry: *const tree.Entry, parent: u32) BuildError!u32 {
@@ -385,12 +478,14 @@ pub fn carve(region: []align(8) u8, nodes: u32, arena_limit: u32) Memory {
 }
 
 comptime {
-    assert(@sizeOf(Node) <= 80);
+    assert(@sizeOf(Node) == 80);
     assert(@sizeOf(Child) <= 12);
     assert(@alignOf(Node) <= 8);
-    // The node table at its bound stays near the brief's 24 MiB, before the directory objects.
-    assert(@as(u64, constants.lazy_nodes_max) * (@sizeOf(Node) + @sizeOf(Child) + 8) <
-        32 * 1024 * 1024);
+    // The fixed part at its bound is the approved 25 MiB (a node, a child and two map slots per
+    // node); the arena is the trees section on top (docs/decisions/2026-11-14-s2-fuse-server.md).
+    const slots_max = std.math.ceilPowerOfTwoAssert(u64, 2 * @as(u64, constants.lazy_nodes_max));
+    assert(@as(u64, constants.lazy_nodes_max) * (@sizeOf(Node) + @sizeOf(Child)) +
+        slots_max * @sizeOf(u32) <= 25 * 1024 * 1024);
     assert(@as(u64, constants.lazy_index_bytes_max) + constants.store_tree_bytes_max <
         std.math.maxInt(u32));
 }
@@ -517,4 +612,46 @@ test "a tree that lies about a file, or names a missing tree, is refused" {
     try fixture.dir("d", Digest.of("no such tree"));
     const missing = fixture.finish();
     try testing.expectError(error.NotFound, built(&region, 16, 4096, missing));
+}
+
+test "a subtree named twice is copied once, and ordinals follow the pack's walk" {
+    // Goal: the arena needs only the distinct trees, and each file's ordinal is its first
+    // appearance in a preorder walk. Method: a root names one subtree twice (`d1`, `d2`) and then
+    // a file `z`; the arena is sized to exactly the two distinct trees and the build succeeds;
+    // the subtree's files take ordinals 0 and 1 under `d1`, keep them under `d2`, and `z` is 2.
+    const fixture = &test_fixture;
+    fixture.init(64);
+    _ = fixture.begin();
+    _ = try fixture.file("p", "first", 0o644, &xattrs.empty);
+    _ = try fixture.file("q", "second", 0o644, &xattrs.empty);
+    const sub = fixture.finish();
+    _ = fixture.begin();
+    try fixture.dir("d1", sub);
+    try fixture.dir("d2", sub);
+    _ = try fixture.file("z", "last", 0o644, &xattrs.empty);
+    const own: tree.Own = .{ .mode = 0o755, .uid = 0, .gid = 0, .xattrs = &xattrs.empty };
+    const root = try fixture.finish_root(own);
+    const distinct = fixture.trees[0].len + fixture.trees[1].len;
+    var region: []align(8) u8 = &.{};
+    defer testing.allocator.free(region);
+    const table = try built(&region, 16, distinct, root);
+    try testing.expectEqual(distinct, table.arena_len);
+    try testing.expectEqual(@as(u32, 3), table.object_count);
+    const want = [_]struct { path: []const u8, ordinal: u32 }{
+        .{ .path = "d1/p", .ordinal = 0 },
+        .{ .path = "d1/q", .ordinal = 1 },
+        .{ .path = "d2/p", .ordinal = 0 },
+        .{ .path = "d2/q", .ordinal = 1 },
+        .{ .path = "z", .ordinal = 2 },
+    };
+    for (want) |entry| {
+        var at: u64 = 1; // The root.
+        var parts = std.mem.splitScalar(u8, entry.path, '/');
+        while (parts.next()) |part| at = @as(u64, table.lookup(table.node(at).?, part).?.node) + 1;
+        try testing.expectEqual(entry.ordinal, table.ordinal(table.node(at).?));
+    }
+    // One byte less and the second tree does not fit.
+    var short: []align(8) u8 = &.{};
+    defer testing.allocator.free(short);
+    try testing.expectError(error.TooLarge, built(&short, 16, distinct - 1, root));
 }

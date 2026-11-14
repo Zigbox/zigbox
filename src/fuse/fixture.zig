@@ -133,6 +133,15 @@ pub const Fixture = struct {
         return null;
     }
 
+    /// The bytes kept under `digest`, or null for a tree the fixture does not hold.
+    pub fn tree_held(fixture: *const Fixture, digest: Digest) ?[]const u8 {
+        assert(fixture.tree_count <= trees_max);
+        for (fixture.trees[0..fixture.tree_count]) |held| {
+            if (held.digest.eql(digest)) return fixture.tree_store[held.at..][0..held.len];
+        }
+        return null;
+    }
+
     pub fn source(fixture: *Fixture) nodes.TreeSource {
         return .{ .context = fixture, .load = load };
     }
@@ -153,8 +162,9 @@ pub const Fixture = struct {
         return error.NotFound;
     }
 
-    fn read(context: *anyopaque, id: Digest, index: u32, out: []u8) ops.ChunkError!u32 {
+    fn read(context: *anyopaque, wanted: ops.Object, index: u32, out: []u8) ops.ChunkError!u32 {
         const fixture: *Fixture = @ptrCast(@alignCast(context));
+        const id = wanted.id;
         assert(out.len >= fixture.chunk_bytes);
         fixture.chunk_reads += 1;
         if (fixture.failing) |failing| {

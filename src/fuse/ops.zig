@@ -26,11 +26,15 @@ const Node = nodes.Node;
 
 pub const ChunkError = error{Unavailable};
 
-/// Where a `READ` gets its bytes: chunk `index` of object `id`, verified against its hash, into
+/// Which object a `READ` wants: its id, and its ordinal (its place in the index's object list,
+/// `nodes.Table.ordinal`), by which the chunk resolver finds it.
+pub const Object = struct { id: Digest, ordinal: u32 };
+
+/// Where a `READ` gets its bytes: chunk `index` of `object`, verified against its hash, into
 /// `out` (which holds a chunk); the length. One per serving thread, so it may keep scratch space.
 pub const Chunks = struct {
     context: *anyopaque,
-    read: *const fn (context: *anyopaque, id: Digest, index: u32, out: []u8) ChunkError!u32,
+    read: *const fn (context: *anyopaque, object: Object, index: u32, out: []u8) ChunkError!u32,
 };
 
 /// The oldest kernel protocol the server serves: the one it speaks. Kernels older than that
@@ -344,7 +348,8 @@ fn chunk_of(
     }
     worker.held = null;
     const out = worker.chunk[0..server.chunk_bytes];
-    const got = worker.chunks.read(worker.chunks.context, found.digest, index, out) catch {
+    const wanted: Object = .{ .id = found.digest, .ordinal = server.table.ordinal(found) };
+    const got = worker.chunks.read(worker.chunks.context, wanted, index, out) catch {
         return error.Io;
     };
     // A length the object's size does not give is a source that lied.

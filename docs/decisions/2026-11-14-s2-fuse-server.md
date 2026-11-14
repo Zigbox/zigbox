@@ -13,7 +13,9 @@ The node table has a fixed part and an arena.
 - **The arena** holds the image's directory objects, so that replies can point into their names,
   attribute sections and symlink targets. It is sized from the index's trees section, whose length
   is known before the build, plus one tree's room (`store_tree_bytes_max`). The table checks at
-  run time that its arena is exactly that size. Its ceiling is `lazy_index_bytes_max`: the trees
+  run time that its arena is exactly that size. Each distinct tree is copied once: a subtree named
+  twice is found by digest in the id map and read again from the arena, so the trees section is
+  always enough. Its ceiling is `lazy_index_bytes_max`: the trees
   are part of the index, and the index is bounded already.
 
 The lazy run's memory budget is therefore restated: **about 140 MiB plus the image's trees
@@ -31,12 +33,14 @@ Two alternatives were rejected:
 
 Slice 3's `Resolver.read` addresses an object by its position in `Catalog.objects`, which is the
 index's object order. That order is first appearance in a preorder walk of the tree: names in the
-tree's order, each directory before what it holds, and a subtree already seen skipped.
+tree's order, each directory before what it holds. The pack writes a repeated subtree again, so its
+objects keep the ordinals of their first appearance.
 
 After the build, the table walks itself the same way and records each file node's ordinal. The
 ordinal goes in a field that files do not otherwise use (a directory's first child), so `Node`
-stays 80 bytes, which a comptime assert checks. The walk's stack reuses the build's id map, so it
-needs no new memory.
+stays 80 bytes, which a comptime assert checks. The walk's stack is a fixed array of
+`store_depth_max + 1` frames (about half a KiB); a deeper tree, which the store never holds, is
+refused as malformed.
 
 When the run starts, the adapter (`fuse/resolver.zig`) checks every file node's id against
 `catalog.objects[ordinal].wanted.id`. A mismatch refuses the run as a malformed index, with the

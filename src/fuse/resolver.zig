@@ -57,10 +57,11 @@ pub const StoreChunks = struct {
         return .{ .context = store_chunks, .read = read };
     }
 
-    fn read(context: *anyopaque, id: Digest, index: u32, out: []u8) ops.ChunkError!u32 {
+    fn read(context: *anyopaque, wanted: ops.Object, index: u32, out: []u8) ops.ChunkError!u32 {
         const store_chunks: *StoreChunks = @ptrCast(@alignCast(context));
         assert(out.len >= store_chunks.store.chunk_bytes);
         const s = store_chunks;
+        const id = wanted.id;
         const length = chunk_read.read_chunk(s.store, s.io, s.scratch, id, index, out) catch |err| {
             s.last = err;
             return error.Unavailable;
@@ -69,6 +70,24 @@ pub const StoreChunks = struct {
         return @intCast(length); // At most a chunk, and a chunk's size is a u32.
     }
 };
+
+/// Checks the index's object list against the table before any read: one object per file node,
+/// at the node's ordinal, with the node's id and size. An index whose object order disagrees with
+/// its own trees is refused as malformed, with the malformed-index code, since a read by ordinal
+/// would otherwise serve one file's bytes as another's
+/// (docs/decisions/2026-11-14-s2-fuse-server.md).
+/// `objects` is a slice whose items carry `wanted.id` and `wanted.size`, as `lazy.Catalog`'s do.
+pub fn check_objects(table: *const nodes.Table, objects: anytype) error{Malformed}!void {
+    if (objects.len != table.object_count) return error.Malformed;
+    var nodeid: u64 = 1;
+    while (nodeid <= table.node_count) : (nodeid += 1) {
+        const found = table.node(nodeid).?;
+        if (found.kind != .file) continue;
+        const wanted = &objects[table.ordinal(found)].wanted;
+        if (!wanted.id.eql(found.digest)) return error.Malformed;
+        if (wanted.size != found.size) return error.Malformed;
+    }
+}
 
 const testing = std.testing;
 const host_sim = @import("../host_sim.zig");
@@ -184,3 +203,38 @@ test "the store adapter serves a stored image: its tree from trees, its bytes ve
     try testing.expectEqual(@as(i32, -5), fixture_mod.reply_header(reply).@"error");
     try testing.expectEqual(chunk_read.Error.Damaged, store_chunks.last.?);
 }
+
+test "an index whose object order disagrees with its trees is refused before any read" {
+    // Goal: the server trusts an ordinal only after the index's object list matches the walk.
+    // Method: a root with files `a` then `b`; the list in walk order passes; swapped, one short,
+    // or with a size the tree does not give, it is refused as malformed.
+    const fixture = &adapter_fixture;
+    fixture.init(64);
+    _ = fixture.begin();
+    const a = try fixture.file("a", "alpha", 0o644, &xattrs.empty);
+    const b = try fixture.file("b", "bravo!", 0o644, &xattrs.empty);
+    const own: tree.Own = .{ .mode = 0o755, .uid = 0, .gid = 0, .xattrs = &xattrs.empty };
+    const root = try fixture.finish_root(own);
+    const held = try fixture_mod.table_memory(testing.allocator, 4, 4096);
+    defer testing.allocator.free(held.region);
+    var table: nodes.Table = undefined;
+    table.init(held.memory);
+    try table.build(fixture.source(), root);
+
+    const Listed = struct { wanted: struct { id: Digest, size: u64 } };
+    const in_order = [_]Listed{
+        .{ .wanted = .{ .id = a, .size = 5 } },
+        .{ .wanted = .{ .id = b, .size = 6 } },
+    };
+    try check_objects(&table, @as([]const Listed, &in_order));
+    const swapped = [_]Listed{ in_order[1], in_order[0] };
+    const short: []const Listed = in_order[0..1];
+    var resized = in_order;
+    resized[1].wanted.size = 7;
+    const refused = [_][]const Listed{ &swapped, short, &resized };
+    for (refused) |objects| {
+        try testing.expectError(error.Malformed, check_objects(&table, objects));
+    }
+}
+
+var adapter_fixture: fixture_mod.Fixture = undefined;
