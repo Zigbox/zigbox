@@ -565,7 +565,7 @@ pub fn copy(t: *Translator, instruction: *const Instruction) Error!void {
     }
     note_unbuilt(t, line, &given, from_text);
     const name = try begin(t, instruction, .copy);
-    try put_copy(t, &given, from_text, sources, to);
+    try put_copy(t, line, &given, from_text, sources, to);
     try end(t, name);
 }
 
@@ -586,6 +586,7 @@ fn note_unbuilt(t: *Translator, line: u32, given: *const CopyFlags, from_text: ?
 
 fn put_copy(
     t: *Translator,
+    line: u32,
     given: *const CopyFlags,
     from_text: ?[]const u8,
     sources: []const []const u8,
@@ -600,7 +601,7 @@ fn put_copy(
     try t.put(".src = .{");
     for (sources, 0..) |source, index| {
         try t.put(if (index == 0) " " else ", ");
-        try t.put_string(if (from_text == null) project_path(source) else source);
+        try t.put_string(if (from_text == null) try project_path(t, line, source) else source);
     }
     try t.put(" }, .to = ");
     try t.put_string(to);
@@ -623,11 +624,24 @@ fn put_copy(
     try t.put(" },\n" ++ indent ++ "},\n");
 }
 
-/// A context source as the builder reads it: relative to the project (Docker reads `/x` there
-/// as `x`, and `/` as the whole context).
-fn project_path(source: []const u8) []const u8 {
-    const trimmed = std.mem.trimStart(u8, source, "/");
-    return if (trimmed.len == 0) "." else trimmed;
+/// A context source as the builder reads it: relative to the project, in plain parts. Docker
+/// cleans a source (`filepath.Clean`) and reads `/x` as `x`, so `./x`, `a//b`, `a/./b` and a
+/// trailing `/` are written plainly, and the whole context (`.`, `./`, `/`) as `.`, the one
+/// dot spelling the parser takes (docs/decisions/2026-11-14-m9-copy-dot-whole-project.md). A
+/// `..` part is kept, for the parser to refuse.
+fn project_path(t: *Translator, line: u32, source: []const u8) Refused![]const u8 {
+    const start = t.out.mark();
+    var parts = std.mem.tokenizeScalar(u8, source, '/');
+    while (parts.next()) |part| {
+        if (std.mem.eql(u8, part, ".")) continue;
+        if (t.out.since(start).len > 0) try t.out.push(t.refusal(), line, "/");
+        try t.out.push(t.refusal(), line, part);
+    }
+    const result = t.out.since(start);
+    assert(result.len <= source.len);
+    if (result.len == 0) return ".";
+    assert(result[0] != '/');
+    return result;
 }
 
 const archives = [_][]const u8{
