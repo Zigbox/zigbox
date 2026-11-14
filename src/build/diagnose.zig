@@ -18,6 +18,8 @@ const fs_mod = @import("../store/fs.zig");
 const assemble_mod = @import("assemble.zig");
 const result_mod = @import("result.zig");
 const tree_mod = @import("../store/tree.zig");
+const fetch_mod = @import("fetch.zig");
+const net_mod = @import("../registry/net.zig");
 const Diag = @import("../diag/diag.zig").Diag;
 const Digest = @import("../store/digest.zig").Digest;
 
@@ -1475,6 +1477,94 @@ pub fn result_operand(diag: *Diag, operand: []const u8, absent: bool) void {
     }
     diag.context("cmd", "inspect", .{});
     diag.context("arg", "{s}", .{echo});
+}
+
+/// The URL of a fetch as a message shows it: control bytes replaced, a long one cut.
+const UrlEcho = [256]u8;
+
+/// ZBX-E0820: a fetch could not be downloaded. A failure to write the blob cache is not this
+/// code: it is E0416 or E0417, as a pull's is (`registry/diagnose.zig` `cache_failed`).
+pub fn fetch_failed(diag: *Diag, step: []const u8, url: []const u8, reason: fetch_mod.Reason) void {
+    assert(diag.code == null);
+    assert(reason != .mismatch and reason != .io);
+    var url_echo: UrlEcho = undefined;
+    const shown = text_util.sanitise(&url_echo, url);
+    diag.raise(.E0820);
+    diag.while_("downloading the .fetch of build step \"{s}\"", .{step});
+    switch (reason) {
+        .status => |status| diag.cause("{s} answered HTTP {d}, not 200", .{ shown, status }),
+        .network => |err| diag.cause("{s} could not be read: {s}", .{ shown, network_words(err) }),
+        .too_large => diag.cause("{s} sent more than {d} MiB, the most a fetch may hold", .{
+            shown, constants.build_fetch_bytes_max / (1024 * 1024),
+        }),
+        .redirects => diag.cause("{s} redirected more than {d} times", .{
+            shown, constants.build_fetch_redirects_max,
+        }),
+        .refused => |refusal| diag.cause("{s} redirected {s}", .{ shown, refusal_words(refusal) }),
+        .io, .mismatch => unreachable, // Asserted above.
+    }
+    diag.context("step", "{s}", .{step});
+    diag.context("url", "{s}", .{shown});
+    diag.fix(.{ .sentence = "check the URL, or put the bytes in the store with an earlier " ++
+        "build on a host that can reach it" });
+    assert(diag.code.? == .E0820);
+}
+
+fn network_words(err: net_mod.Error) []const u8 {
+    assert(@errorName(err).len > 0);
+    return switch (err) {
+        error.UnknownHost => "no address was found for its host",
+        error.ConnectFailed, error.TimedOut => "the connection could not be made",
+        error.ProxyFailed => "the proxy refused the connection",
+        error.TlsUntrusted => "its certificate is not signed by a trusted authority",
+        error.TlsExpired => "its certificate has expired",
+        error.TlsHostMismatch => "its certificate names another host",
+        error.TlsFailed => "the TLS handshake failed",
+        error.NoCertificates => "no CA certificates could be loaded to check it",
+        error.Stalled => "the server stopped sending",
+        error.Truncated => "the connection closed before the whole file arrived",
+        error.TooLarge, error.BadResponse => "the answer is not usable HTTP",
+        error.Unsupported => "the request is not one this build can make",
+        error.SinkFailed, error.SourceFailed, error.IoFailed => "the connection failed",
+    };
+}
+
+fn refusal_words(refusal: fetch_mod.Refusal) []const u8 {
+    assert(@intFromEnum(refusal) <= @intFromEnum(fetch_mod.Refusal.malformed));
+    return switch (refusal) {
+        .http => "to plain http, which only a loopback host may use",
+        .loopback => "from a host that is not loopback to one that is",
+        .malformed => "to a place that cannot be followed (no Location, or not an http URL)",
+    };
+}
+
+/// ZBX-E0821: the fetched bytes are not the ones `.sha256` pins. Either side can be wrong, so
+/// there are two fixes.
+pub fn fetch_mismatch(
+    diag: *Diag,
+    step: []const u8,
+    url: []const u8,
+    expected: *const [64]u8,
+    received: *const [64]u8,
+) void {
+    assert(diag.code == null);
+    assert(!std.mem.eql(u8, expected, received));
+    var url_echo: UrlEcho = undefined;
+    const shown = text_util.sanitise(&url_echo, url);
+    diag.raise(.E0821);
+    diag.while_("downloading the .fetch of build step \"{s}\"", .{step});
+    diag.cause("the bytes from {s} are sha256:{s}, not sha256:{s} as .sha256 pins", .{
+        shown, received, expected,
+    });
+    diag.context("step", "{s}", .{step});
+    diag.context("url", "{s}", .{shown});
+    diag.context("expected", "sha256:{s}", .{expected});
+    diag.context("received", "sha256:{s}", .{received});
+    diag.fix(.{ .sentence = "if the hash was copied wrongly, correct .sha256 (or " ++
+        "ADD --checksum)" });
+    diag.fix(.{ .sentence = "otherwise find out why the server's file changed before " ++
+        "trusting it" });
+    assert(diag.code.? == .E0821);
 }
 
 test "network_names joins the names and cuts what does not fit with an ellipsis" {

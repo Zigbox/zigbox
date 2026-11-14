@@ -226,6 +226,8 @@ pub const Code = enum(u8) {
     W0801,
     E0817,
     E0818,
+    E0820,
+    E0821,
     W0802,
     E0810,
     E0811,
@@ -3628,6 +3630,41 @@ pub const registry = [_]Entry{
         ,
     },
     .{
+        .code = .E0820,
+        .severity = .@"error",
+        .blame = .external,
+        .summary = "a fetch could not be downloaded",
+        .explanation =
+        \\A copy entry's .fetch is downloaded in the parent, before any step runs,
+        \\through the same HTTP client a pull uses (proxies from the environment,
+        \\SSL_CERT_FILE honoured). Only https:// is fetched; plain http:// only for a
+        \\loopback host. A redirect may not go from https to http, nor from a host
+        \\that is not loopback to one that is, and at most 4 redirects are followed.
+        \\A body over 1 GiB is refused.
+        \\
+        \\The message says why: the HTTP status, the network error, the size bound,
+        \\the redirects. If the bytes are in the store already (blobs/sha256 under
+        \\the pinned hash, from an earlier build or a pull), nothing is downloaded,
+        \\so a build on a host that can reach the URL fills the store for one that
+        \\cannot.
+        ,
+    },
+    .{
+        .code = .E0821,
+        .severity = .@"error",
+        .blame = .external,
+        .summary = "the fetched bytes do not match their pinned hash",
+        .explanation =
+        \\A copy entry's .fetch pins the file by its SHA-256, and the bytes are
+        \\hashed as they arrive. When the hash is not the pinned one, the file is
+        \\removed, nothing reaches the store, and no step runs.
+        \\
+        \\Either side can be wrong. If the hash was copied wrongly, correct .sha256
+        \\(or the Dockerfile's ADD --checksum). If it was right, the server's file
+        \\has changed: find out why before trusting the new bytes.
+        ,
+    },
+    .{
         .code = .W0802,
         .severity = .warning,
         .blame = .user,
@@ -4622,7 +4659,7 @@ pub fn can_end_run(code: Code) bool {
         .E0515, .E0516, .E0517, .W0501, .W0502, .E0526, .W0551, .W0552 => false,
         .E0527, .E0528, .E0529, .E0530, .E0531, .E0532, .E0533, .E0534, .E0535 => false,
         .E0801, .E0802, .E0803, .E0804, .E0805, .E0806, .E0807, .W0801 => false,
-        .E0808, .E0817, .E0818, .W0802 => false,
+        .E0808, .E0817, .E0818, .E0820, .E0821, .W0802 => false,
         .E0810, .E0811, .E0812, .E0813, .E0814, .E0815, .E0816, .W0810, .W0811 => false,
         .E0901, .E0902, .E0908, .E0909, .E0910, .E0911, .W0901, .W0902, .W0903 => false,
         .E1006, .E1007 => false,

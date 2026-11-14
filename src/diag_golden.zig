@@ -814,6 +814,8 @@ const build_cases = [_]Case{
     .{ .code = .W0801, .args = &.{}, .direct = build_network_steps, .warning = true, .exit = 0 },
     .{ .code = .E0817, .args = &.{}, .direct = build_user_not_found, .exit = 1 },
     .{ .code = .E0818, .args = &.{}, .direct = build_glob_pool, .exit = 1 },
+    .{ .code = .E0820, .args = &.{}, .direct = build_fetch_failed, .exit = 3 },
+    .{ .code = .E0821, .args = &.{}, .direct = build_fetch_mismatch, .exit = 3 },
     .{ .code = .W0802, .args = &.{}, .direct = build_cache_steps, .warning = true, .exit = 0 },
     .{ .code = .E0810, .args = &.{}, .direct = import_read_failed, .exit = 1 },
     .{ .code = .E0811, .args = &.{}, .direct = import_e0811, .exit = 1 },
@@ -2559,6 +2561,27 @@ fn expect_direct(
         std.debug.print("GOLDEN {s} {s}\n", .{ name, @tagName(style) });
         return err;
     };
+}
+
+fn build_fetch_failed(diag: *Diag) void {
+    build_diagnose.fetch_failed(
+        diag,
+        "fetch",
+        "https://example.org/tool-1.2.tar.gz",
+        .{ .status = 404 },
+    );
+}
+
+fn build_fetch_mismatch(diag: *Diag) void {
+    const expected = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855";
+    const received = "2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824";
+    build_diagnose.fetch_mismatch(
+        diag,
+        "fetch",
+        "https://example.org/tool-1.2.tar.gz",
+        expected,
+        received,
+    );
 }
 
 /// E0804 to E0806 come from a build's steps, which slice 3's `zbx build` runs: until then the
