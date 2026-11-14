@@ -542,6 +542,9 @@ pub const Options = struct {
     /// of the publisher's, not the machine's, so the file does not depend on where it was built.
     build_host: []const u8,
     /// An OpenPGP signature (binary packet) over `header_bytes`, to place in the signature header.
+    /// At most `constants.openpgp_signature_bytes_max` (1024) bytes: a longer one is a broken
+    /// contract that `write` asserts, so a caller with untrusted bytes checks the length first,
+    /// as `dnf.write` does.
     header_signature: ?[]const u8 = null,
 };
 

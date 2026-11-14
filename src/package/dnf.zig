@@ -231,6 +231,8 @@ fn built_less(_: void, left: model.Built, right: model.Built) bool {
 /// signature header carries (both are the caller's to choose). The rpm is written again with
 /// those and compared whole, so a changed lead, header, digest or payload is caught, not only a
 /// changed main header. Anything else is `ForeignRpm`, a refusal: the bytes come from the caller.
+/// The rewrite runs in its own arena, freed on return, so a tree holds the intermediates (cpio,
+/// gzip output, headers) of one rpm at a time, not of every rpm until the caller frees `memory`.
 fn check_built(
     memory: Allocator,
     architecture: model.Architecture,
@@ -245,13 +247,17 @@ fn check_built(
         if (bytes.len > constants.openpgp_signature_bytes_max) return error.ForeignRpm;
     }
     const options: rpm.Options = .{ .build_host = build_host, .header_signature = signature };
-    const expected = try rpm.write(memory, built.package, options);
-    defer memory.free(expected);
+    var rewrite: std.heap.ArenaAllocator = .init(memory);
+    defer rewrite.deinit();
+    const expected = try rpm.write(rewrite.allocator(), built.package, options);
+    assert(expected.len > 0);
     if (!std.mem.eql(u8, expected, built.bytes)) return error.ForeignRpm;
 }
 
 /// The tree of one architecture: paths are relative to `rpm/<basearch>/`. Every rpm must be one
-/// `rpm.write` made for its package and `architecture`; any other bytes are `ForeignRpm`.
+/// `rpm.write` made for its package and `architecture`; any other bytes are `ForeignRpm`. That is
+/// this build's `rpm.write`: an rpm an earlier Zigbox made can differ (its payload compression or
+/// a header field), so rpms kept across a Zigbox upgrade are refused; write them again.
 pub fn write(
     memory: Allocator,
     architecture: model.Architecture,
@@ -388,4 +394,54 @@ test "bytes rpm.write did not make for the package are refused, not trusted" {
     );
     const accepted = [_]model.Built{.{ .package = sample, .bytes = signed }};
     _ = try write(memory, .x86_64, &accepted);
+}
+
+test "a header signature of 1024 bytes is accepted, one of 1025 is refused, not a crash" {
+    // Goal: the bound `rpm.write` asserts (`openpgp_signature_bytes_max`) is checked before the
+    // rewrite, so a caller's rpm past it is `ForeignRpm`, not a panic. Method: an rpm with a
+    // 1024-byte signature is accepted; the same rpm with its signature entry widened to 1025
+    // bytes of the signature header's data is refused. Without the length check in
+    // `check_built` this test panicked in `rpm.signature_header`.
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const memory = arena.allocator();
+    const sample = &@import("deb.zig").sample;
+    const signature: [constants.openpgp_signature_bytes_max]u8 = @splat(0x88);
+    const options: rpm.Options = .{ .build_host = "zigbox-build", .header_signature = &signature };
+    const good = try rpm.write(memory, sample, options);
+    const at_bound = [_]model.Built{.{ .package = sample, .bytes = good }};
+    _ = try write(memory, .x86_64, &at_bound);
+
+    const wide = try memory.dupe(u8, good);
+    const header = rpm.split(wide).?.signature_header;
+    const entries = std.mem.readInt(u32, header[8..12], .big);
+    const entry_at = for (0..entries) |index| {
+        const at = 16 + index * 16;
+        if (std.mem.readInt(u32, header[at..][0..4], .big) == rpm.sig_tag.rsa) break at;
+    } else unreachable; // `rpm.write` placed the signature.
+    const field_at = (header.ptr - wide.ptr) + entry_at;
+    std.mem.writeInt(u32, wide[field_at + 8 ..][0..4], 0, .big);
+    std.mem.writeInt(u32, wide[field_at + 12 ..][0..4], signature.len + 1, .big);
+    const read = rpm.binary_tag(header, rpm.sig_tag.rsa).?;
+    try std.testing.expectEqual(constants.openpgp_signature_bytes_max + 1, read.len);
+    const past_bound = [_]model.Built{.{ .package = sample, .bytes = wide }};
+    try std.testing.expectError(error.ForeignRpm, write(memory, .x86_64, &past_bound));
+}
+
+test "a build host that rpm.write would refuse is ForeignRpm, not the writer's own error" {
+    // Goal: `check_built` checks the build host as `rpm.write` does before rewriting, so a
+    // damaged one is `ForeignRpm` as documented. Method: a control byte (0x01) in the build host
+    // of a good rpm. Without the `check_line` guard this test got `rpm.write`'s own error.
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const memory = arena.allocator();
+    const sample = &@import("deb.zig").sample;
+    const good = try rpm.write(memory, sample, .{ .build_host = "zigbox-build" });
+    const damaged = try memory.dupe(u8, good);
+    const host_at = std.mem.indexOf(u8, damaged, "zigbox-build").?;
+    damaged[host_at + "zigbox".len] = 0x01;
+    const host = damaged[host_at..][0.."zigbox-build".len];
+    try std.testing.expectError(error.BadText, model.check_line(host));
+    const built = [_]model.Built{.{ .package = sample, .bytes = damaged }};
+    try std.testing.expectError(error.ForeignRpm, write(memory, .x86_64, &built));
 }

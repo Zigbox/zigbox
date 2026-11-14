@@ -19,8 +19,13 @@ header, while the signature header's digests no longer matched), so the comparis
 
 - The header signature's own bytes are not judged by `dnf.write`; `check_tree` with
   `signatures_required` reads them. One longer than `openpgp_signature_bytes_max` (1024) is
-  `ForeignRpm`.
-- The rewrite costs about one more rpm of memory per package, freed before the next.
+  `ForeignRpm`; `rpm.write` asserts that bound, and `rpm.Options.header_signature` says so.
+- The rewrite runs in its own arena, freed before the next package: at most one rpm's rewrite
+  (the rpm and its intermediates: file lists, cpio, gzip output, headers) is held at a time,
+  beside the caller's tree.
+- Only this Zigbox build's `rpm.write` output is accepted. An rpm an earlier Zigbox made can
+  differ (payload compression, a header field), so a caller that keeps rpms across a Zigbox
+  upgrade gets `ForeignRpm` for them and writes them again.
 - `zig build fuzz -- dnf` damages signed and unsigned rpms and checks that only damage inside the
   signature's own bytes, or none, is accepted.
 
