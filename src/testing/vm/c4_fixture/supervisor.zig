@@ -56,7 +56,7 @@ fn say_diag(label: []const u8, diag: *const Diag) void {
 
 fn make_socket(name: []const u8, label: []const u8) ?i32 {
     assert(name.len > 0);
-    var real: HostReal = .{};
+    var real: HostReal = .{ .environ = process_environ };
     var diag: Diag = undefined;
     diag.reset();
     const handle = zigbox.container_socket(real.interface(), name, .tcp4, &diag) catch {
@@ -81,6 +81,8 @@ fn address_of(ip: []const u8, port: u16) ?linux.sockaddr.in {
 
 const Listen = struct { id: usize, name: []const u8, address: linux.sockaddr.in };
 var listens: [slots_max]Listen = undefined;
+/// The process environment, which the real host reads the state directory from (HOME).
+var process_environ: std.process.Environ = .empty;
 var name_storage: [slots_max][64]u8 = undefined;
 
 fn serve(listen: *const Listen) void {
@@ -151,7 +153,7 @@ fn dial(id: usize, ip: []const u8, port: u16, text: []const u8) void {
 
 fn adopt(name: []const u8) void {
     assert(name.len > 0);
-    var real: HostReal = .{};
+    var real: HostReal = .{ .environ = process_environ };
     var ref: zigbox.Ref = undefined;
     var state: zigbox.lifecycle.State = undefined;
     zigbox.adopt(real.interface(), name, &ref, &state) catch |err| {
@@ -210,7 +212,8 @@ fn hold(id: usize, name: []const u8) void {
     say("HELD {d}", .{id});
 }
 
-pub fn main() u8 {
+pub fn main(init: std.process.Init.Minimal) u8 {
+    process_environ = init.environ;
     say("SUPERVISOR-PID {d}", .{linux.getpid()});
     var line: [line_bytes_max]u8 = undefined;
     var length: usize = 0;
