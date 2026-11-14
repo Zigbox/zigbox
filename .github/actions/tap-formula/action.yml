@@ -34,10 +34,14 @@ runs:
           echo "changed=false" >> "$GITHUB_OUTPUT"
           exit 0
         fi
-        changed=$(diff -U0 "$current" "$FORMULA" | { grep -E '^[+-]' || true; } | { grep -Ev '^(\+\+\+|---)' || true; })
-        # url, version and sha256 change every release. The two other lines are what the move to
-        # one universal binary changes, once: the header comment and the arm64-only dependency.
+        # diff exits 1 when the files differ, which they do here; under pipefail that would end the
+        # step silently, so its status is dropped (2, trouble, cannot happen: both files exist).
+        changed=$({ diff -U0 "$current" "$FORMULA" || true; } | { grep -E '^[+-]' || true; } | { grep -Ev '^(\+\+\+|---)' || true; })
+        # url, version and sha256 change every release. The other lines are what the move to one
+        # universal binary changes, once: the header comment and the two comment lines that say why
+        # the arm64-only dependency stays.
         allowed='^[+-] *(url|version|sha256) "|^[+-]# zbx for macOS|^-  depends_on arch: :arm64$'
+        allowed+='|^\+  # The universal zip carries an x86_64 slice|^\+  # silicon: an Intel Mac is refused'
         if [ -n "$(grep -Ev "$allowed" <<< "$changed" || true)" ]; then
           echo "release: the formula differs from the tap's in more than url, version and sha256:" >&2
           printf '%s\n' "$changed" >&2
