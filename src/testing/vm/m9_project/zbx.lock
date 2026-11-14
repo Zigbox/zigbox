@@ -1,0 +1,17 @@
+.{
+    .version = 1,
+    .images = .{
+        .{
+            .reference = "alpine:3.20",
+            .manifest = "sha256:c64c687cbea9300178b30c95835354e34c4e4febc4badfe27102879de0483b5e",
+            .platform = "linux/amd64",
+            .tree = "b3:5b340463c9e6605c8a4771f525e4a13174bddc504e982112707e9cd785d31306",
+        },
+        .{
+            .reference = "golang:1.23-alpine",
+            .manifest = "sha256:a7ecaac5efda22510d8c903bdc6b19026543f1eac3317d47363680df22161bd8",
+            .platform = "linux/amd64",
+            .tree = "b3:e1ce24ac00d6c15fa2c382ed11e9d4c02f1c987af34fc155e8c300082755c707",
+        },
+    },
+}

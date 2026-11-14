@@ -9,11 +9,11 @@ const testing = std.testing;
 const script = ".github/ci-changes.sh";
 const max_paths = 8;
 
-/// Every output the script writes: `code`, the twelve demos and the packages demo.
+/// Every output the script writes: `code`, the thirteen demos and the packages demo.
 const all_outputs = [_][]const u8{
-    "code",     "demo_m0",          "demo_m1",  "demo_m2", "demo_m3", "demo_m4",
-    "demo_m5",  "demo_m6",          "demo_m6b", "demo_m7", "demo_m8", "demo_m8b",
-    "demo_m10", "demo_m8_packages",
+    "code",    "demo_m0",  "demo_m1",          "demo_m2", "demo_m3", "demo_m4",
+    "demo_m5", "demo_m6",  "demo_m6b",         "demo_m7", "demo_m8", "demo_m8b",
+    "demo_m9", "demo_m10", "demo_m8_packages",
 };
 
 const Row = struct {
@@ -67,18 +67,18 @@ const rows = [_]Row{
     .{
         .paths = &.{".github/workflows/ci.yml"},
         .true_outputs = &.{
-            "code",     "demo_m0",          "demo_m1",  "demo_m2", "demo_m3", "demo_m4",
-            "demo_m5",  "demo_m6",          "demo_m6b", "demo_m7", "demo_m8", "demo_m8b",
-            "demo_m10", "demo_m8_packages",
+            "code",    "demo_m0",  "demo_m1",          "demo_m2", "demo_m3", "demo_m4",
+            "demo_m5", "demo_m6",  "demo_m6b",         "demo_m7", "demo_m8", "demo_m8b",
+            "demo_m9", "demo_m10", "demo_m8_packages",
         },
     },
     // The runtime every demo runs on selects every VM demo, not the packages demo.
     .{
         .paths = &.{"src/cli.zig"},
         .true_outputs = &.{
-            "code",     "demo_m0", "demo_m1",  "demo_m2", "demo_m3", "demo_m4",
-            "demo_m5",  "demo_m6", "demo_m6b", "demo_m7", "demo_m8", "demo_m8b",
-            "demo_m10",
+            "code",    "demo_m0",  "demo_m1",  "demo_m2", "demo_m3", "demo_m4",
+            "demo_m5", "demo_m6",  "demo_m6b", "demo_m7", "demo_m8", "demo_m8b",
+            "demo_m9", "demo_m10",
         },
     },
     // The M8b demo: its harness files select demo_m8b alone.
@@ -121,6 +121,32 @@ const rows = [_]Row{
     .{
         .paths = &.{"build.zig"},
         .true_outputs = &all_outputs,
+    },
+    // The M9 demo: its harness files, the translator and its fixtures select demo_m9; the builder
+    // selects M7's and M9's demos.
+    .{
+        .paths = &.{ "src/testing/vm/checks_m9.zig", "src/testing/vm/m9_project/Dockerfile" },
+        .true_outputs = &.{ "code", "demo_m9" },
+    },
+    .{
+        .paths = &.{"src/dockerfile/translate.zig"},
+        .true_outputs = &.{ "code", "demo_m9" },
+    },
+    .{
+        .paths = &.{"src/build/dockerfile_fixtures/mounts.golden"},
+        .true_outputs = &.{ "code", "demo_m9" },
+    },
+    .{
+        .paths = &.{"src/import_commands.zig"},
+        .true_outputs = &.{ "code", "demo_m9" },
+    },
+    .{
+        .paths = &.{"src/build/graph.zig"},
+        .true_outputs = &.{ "code", "demo_m7", "demo_m9" },
+    },
+    .{
+        .paths = &.{ "docs/demos/m9.md", "src/dockerfile/translate.zig" },
+        .true_outputs = &.{ "code", "demo_m9" },
     },
 };
 

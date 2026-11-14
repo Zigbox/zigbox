@@ -169,13 +169,16 @@ const asserts_per_function_min: u32 = 2;
 
 // `seccomp_policy` is the allowlist file, handed to the top-20 harness by build.zig because the
 // harness's module root cannot reach it by a path. `zigbox_vm` is the VM module
-// (src/testing/vm/lib/), handed to the VM demo harnesses by build.zig.
+// (src/testing/vm/lib/), handed to the VM demo harnesses by build.zig. `m9_vm_cases` is the
+// index of the Dockerfile fixtures demo-m9 translates (src/build/dockerfile_fixtures/), handed to
+// its harness the same way.
 const module_allowlist = [_][]const u8{
     "std",
     "builtin",
     "build_options",
     "seccomp_policy",
     "zigbox_vm",
+    "m9_vm_cases",
 };
 
 const skipped_directories = [_][]const u8{ ".git", ".zig-cache", "zig-out", "zig-pkg" };

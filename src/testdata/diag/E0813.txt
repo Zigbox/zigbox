@@ -1,0 +1,5 @@
+error[ZBX-E0813]: a Dockerfile stage can't be used
+  cause  Dockerfile:9 names a second stage `build`
+  fix    give each stage its own name
+  more   zbx explain E0813 · rerun with --verbose for the full cause chain
+  docs   https://zigbox.github.io/zigbox/errors/E0813.html

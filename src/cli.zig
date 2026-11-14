@@ -57,6 +57,7 @@ const logs_commands = @import("logs_commands.zig");
 const exec_commands = @import("exec_commands.zig");
 const pull_commands = @import("pull_commands.zig");
 const build_commands = @import("build_commands.zig");
+const import_commands = @import("import_commands.zig");
 const lifecycle = @import("runtime/lifecycle.zig");
 const Sha256 = @import("registry/digest.zig").Sha256;
 
@@ -91,6 +92,7 @@ const help_text =
     \\  push <source> <ref>   pack a build result, an image or a tree and put it in a registry
     \\                  (see below)
     \\  build --graph   check the project's zbx.build.zon and print its steps in order (see below)
+    \\  import          write a zbx.build.zon from a Dockerfile, running nothing (see below)
     \\  inspect <id>    print a build result: its tree and the config it runs with
     \\  schema <cmd>    print the JSON schema of a command's output
     \\  explain <code>  explain a diagnostic code offline, for example E0001 (--output json: a
@@ -115,7 +117,7 @@ const help_text =
     \\  --cpus <n>      CPU limit, in CPUs: 0.5 is half of one
     \\  --read-only     mount the root read-only, with a tmpfs at /tmp and /run
     \\  --net <mode>    none (the default: a network of its own, only lo), host (share the host's)
-    \\                  or user (the network through pasta, as the user: apt install passt)
+    \\                  or user (through pasta: apt install passt)
     \\  --publish <h:c> forward TCP port h of this machine to port c of the container (repeatable;
     \\                  implies --net user)
     \\  --listen <addr:port>  make a TCP listener on the container's loopback (only 127.0.0.1;
@@ -138,7 +140,6 @@ const help_text =
     \\                  /etc/cdi, /var/run/cdi or $XDG_CONFIG_HOME/cdi (repeatable, up to
     \\                  16); groups carry over
     \\  --gpu all|dri   the render nodes and /dev/kfd you can open; all: NVIDIA CDI devices if any
-    \\                  (zbx doctor lists them)
     \\  --mount <host>:<path>  the project's directory or file at <path>, writable (repeatable).
     \\                  <host> may be relative; with symbolic links followed it must be the
     \\                  project directory (the one with zbx.lock, else the working directory) or
@@ -158,13 +159,12 @@ const help_text =
     \\
     \\logs:
     \\  zbx logs <name> [--follow] [--tail <n>] [--stream stdout|stderr]
-    \\  every run keeps its stdout and stderr, in order, in $XDG_STATE_HOME/zbx/logs
-    \\  (~/.local/state/zbx/logs): at most 5 MiB per container, oldest dropped first;
-    \\  removed with the run record
+    \\  every run keeps its stdout and stderr, in order, in $XDG_STATE_HOME/zbx/logs:
+    \\  at most 5 MiB per container, oldest dropped first; removed with the run record
     \\  --follow        go on showing what the container writes; ends, exit 0, when it ends
     \\  --tail <n>      only the last n lines
     \\  --stream <s>    only stdout, or only stderr
-    \\  a foreground run's stream that is a terminal is left to the container, not logged
+    \\  a terminal stream of a foreground run is the container's, not logged
     \\  --output json   one zbx.logs/1 object per record, per line; a refusal is a
     \\                  diagnostic on stderr (zbx schema logs)
     \\
@@ -174,9 +174,9 @@ const help_text =
     \\  the command joins the container's namespaces and cgroup, with no more than its
     \\  capabilities, no_new_privs and seccomp filter. It has the container's
     \\  environment, directory and user; -e, --user and --workdir change them for it only.
-    \\  With a terminal on zbx's input and output it gets a
-    \\  terminal of its own. It ends with the container. zbx ps does not list it; zbx bundle
-    \\  of the container notes the recent execs (command and exit, never a value of -e)
+    \\  With a terminal on zbx's input and output it gets its own
+    \\  terminal. It ends with the container; zbx ps does not list it; zbx bundle notes it
+    \\  (command and exit, never a value of -e)
     \\  --output json   ends with an exec_exit line on stderr (zbx schema exec)
     \\
     \\store:
@@ -201,22 +201,21 @@ const help_text =
     \\  zbx state rm <name>      move a volume that no run holds to the trash, kept for 7 days
     \\  zbx state restore <name> bring the newest trash of <name> back
     \\  zbx state export <name> [-o <file>]   write the volume as a gzip tar, owners as the
-    \\                           container sees them (999, not the host's ids), to <file>
+    \\                           container sees them, to <file>
     \\                           or standard output (never a terminal); refused while a run
     \\                           writes the volume
-    \\  volumes live in $XDG_DATA_HOME/zbx/state (~/.local/share/zbx/state); only state rm
-    \\  removes one
+    \\  volumes live in $XDG_DATA_HOME/zbx/state; only state rm removes one
     \\
     \\key:
     \\  zbx key new <name>       make an Ed25519 signing key, its secret sealed under a passphrase
-    \\                           (argon2id); asked twice on a terminal, or the first line of
+    \\                          ; asked twice on a terminal, or the first line of
     \\                           --passphrase-file <file>, which only you can read
     \\  zbx key new <name> --no-passphrase   keep the secret in the clear, mode 0600
     \\  zbx key list             each key: name, encryption, id and public key
     \\  zbx key show <name>      one key: name, id, public key and encryption
-    \\  names are up to 32 of a-z, 0-9 and '-'; keys live in $XDG_CONFIG_HOME/zbx/keys, mode
-    \\  0700, never overwritten; a forgotten passphrase is a lost key; list and show never
-    \\  ask for one and never print a secret
+    \\  names: up to 32 of a-z, 0-9, '-'; keys live in $XDG_CONFIG_HOME/zbx/keys, mode 0700,
+    \\  never overwritten; a forgotten passphrase is a lost key; list and show never ask for
+    \\  one or print a secret
     \\
     \\sign:
     \\  zbx sign <what> [--key <name>] [--passphrase-file <file>]
@@ -242,14 +241,14 @@ const help_text =
     \\  zbx trust export <tree>     print the tree's signatures as a bundle
     \\  zbx trust import <file>     verify every line of a bundle, then add what is new
     \\  zbx trust prune [--apply]   list the signature and provenance records whose trees are
-    \\                              gone; --apply removes them (a damaged one is kept, ZBX-W0902)
+    \\                              gone; --apply removes them
     \\
     \\policy:
     \\  zbx policy check [<what>]
     \\  <what>          a build result or a tree (b3:<64 hex>), or an image name, as `zbx run`
     \\                  takes it; omitted: only describe the policy files
-    \\  files           /etc/zbx/policy.zon and $XDG_CONFIG_HOME/zbx/policy.zon (~/.config/zbx);
-    \\                  a run must pass each one that exists
+    \\  files           /etc/zbx/policy.zon and $XDG_CONFIG_HOME/zbx/policy.zon; a run
+    \\                  must pass each one that exists
     \\  prints each file, its rules, each signature of the tree and why it counts or not, and
     \\  whether the run would start; runs nothing. Exits 0 if it would start, 1 if a policy
     \\  would refuse it (ZBX-E0905); an unreadable file is ZBX-E0904
@@ -273,11 +272,11 @@ const help_text =
     \\                  or ghcr.io/owner/image:v1 (Docker Hub when no registry is named)
     \\  --resolve-only  print the digest of the image manifest for this machine's platform,
     \\                  as the registry names it (anonymous; HTTPS_PROXY and NO_PROXY apply)
-    \\  without it, the layers are downloaded into the store (a cut download resumes), unpacked
+    \\  without it, the layers are downloaded into the store, unpacked
     \\  into one tree and recorded, and zbx.lock (the nearest up from here, else here) gets
     \\  the entry; prints the manifest digest, or with --output json the object of
-    \\  "zbx schema pull" (with the tree's digest)
-    \\  ZBX_REGISTRY_MIRRORS=host[,host]   mirrors of Docker Hub to ask first (mirror.gcr.io)
+    \\  "zbx schema pull"
+    \\  ZBX_REGISTRY_MIRRORS=host[,host]   mirrors of Docker Hub to ask first
     \\
     \\build:
     \\  zbx build --graph [-f <file>]
@@ -290,10 +289,16 @@ const help_text =
     \\  and the result digest; --output json: one zbx.build/1
     \\  line per step (see zbx schema build). --clear-caches first empties the cache
     \\  directories. With --verbose each step's output also goes to stderr, a line at a time
-    \\  behind "<step> | " (a reader that stops reading stderr pauses the build).
+    \\  behind "<step> | ".
     \\  zbx run <result digest> runs the result as its config says; zbx inspect <result digest>
     \\  prints its tree and config (zbx schema inspect); zbx inspect --provenance <result
     \\  digest> prints the build's provenance record (zbx schema inspect-provenance)
+    \\
+    \\import:
+    \\  zbx import [<Dockerfile>] [--context <dir>] [--target <stage>] [--build-arg NAME=VALUE]
+    \\             [--network detect|all|none] [--hermetic] [--force] [-o <file>]
+    \\  pins each base image in zbx.lock, refuses what zbx cannot honour and writes nothing then;
+    \\  --output json: zbx.import/1
     \\
     \\bundle:
     \\  zbx bundle (--last | <name>) [--no-redact]
@@ -329,6 +334,7 @@ pub const Command = enum {
     doctor,
     explain,
     help,
+    import,
     inspect,
     key,
     lock,
@@ -595,6 +601,8 @@ pub const Invocation = struct {
     verify: VerifyArgs,
     /// Set only when `command` is `trust`.
     trust: TrustArgs,
+    /// Set only when `command` is `import`.
+    import: import_commands.Args,
 };
 
 pub const ParseError = error{
@@ -691,11 +699,57 @@ const Token = union(enum) {
     public_inline: []const u8,
     /// `--apply`: `trust prune`'s.
     apply,
+    /// `--context`, `--target`, `--build-arg`, `--network` (value next or after an `=`) and
+    /// `--hermetic`, `--force`: `import`'s.
+    import_next: ImportOption,
+    import_inline: struct { option: ImportOption, value: []const u8 },
+    import_flag: ImportOption,
     /// `--`: after `run`, everything that follows is the command.
     separator,
     unknown_option,
     operand,
 };
+
+/// The options of `import`.
+const ImportOption = enum {
+    context,
+    target,
+    build_arg,
+    network,
+    hermetic,
+    force,
+
+    fn flag(option: ImportOption) []const u8 {
+        assert(@backingInt(option) < std.enums.values(ImportOption).len);
+        assert(@tagName(option).len > 0);
+        return switch (option) {
+            .context => "--context",
+            .target => "--target",
+            .build_arg => "--build-arg",
+            .network => "--network",
+            .hermetic => "--hermetic",
+            .force => "--force",
+        };
+    }
+};
+
+/// `--context`, `--context=x` and the other options of `import`, or null.
+fn import_option_of(argument: []const u8) ?Token {
+    assert(argument.len <= constants.arg_bytes_max);
+    assert(std.enums.values(ImportOption).len == 6);
+    inline for (comptime std.enums.values(ImportOption)) |option| {
+        const flag = comptime option.flag();
+        const bare = option == .hermetic or option == .force;
+        if (std.mem.eql(u8, argument, flag)) {
+            if (bare) return .{ .import_flag = option };
+            return .{ .import_next = option };
+        }
+        if (!bare and std.mem.startsWith(u8, argument, flag ++ "=")) {
+            return .{ .import_inline = .{ .option = option, .value = argument[flag.len + 1 ..] } };
+        }
+    }
+    return null;
+}
 
 /// `--rootfs`, `--rootfs=x` and the other value options of `run`, or null.
 fn run_option_of(argument: []const u8) ?Token {
@@ -742,6 +796,7 @@ fn classify(argument: []const u8) Token {
         return .{ .output_inline = argument[inline_prefix.len..] };
     }
     if (run_option_of(argument)) |token| return token;
+    if (import_option_of(argument)) |token| return token;
     if (std.mem.eql(u8, argument, "--")) return .separator;
     if (std.mem.eql(u8, argument, "-e")) return .env_next;
     if (std.mem.eql(u8, argument, "--env")) return .env_next;
@@ -813,6 +868,7 @@ pub fn command_named(name: []const u8) ?Command {
     if (std.mem.eql(u8, name, "doctor")) found = .doctor;
     if (std.mem.eql(u8, name, "explain")) found = .explain;
     if (std.mem.eql(u8, name, "help")) found = .help;
+    if (std.mem.eql(u8, name, "import")) found = .import;
     if (std.mem.eql(u8, name, "inspect")) found = .inspect;
     if (std.mem.eql(u8, name, "key")) found = .key;
     if (std.mem.eql(u8, name, "lock")) found = .lock;
@@ -840,7 +896,7 @@ fn operands_count(command: Command) u32 {
     assert(@tagName(command).len > 0);
     const count: u32 = switch (command) {
         .build, .bundle, .doctor, .help, .ps, .run, .version => 0,
-        .explain, .schema, .stop, .commit, .pull, .lock, .logs => 1,
+        .explain, .schema, .stop, .commit, .pull, .lock, .logs, .import => 1,
         .push => 2,
         .exec, .inspect, .sign, .verify => 1,
         .store, .state, .key, .policy, .trust => 2,
@@ -878,7 +934,7 @@ pub fn scan_options(args: []const []const u8) Options {
             .separator => {
                 if (is_run) break;
             },
-            .confirm_next, .out_next, .file_next, .passphrase_file_next => {
+            .import_next, .confirm_next, .out_next, .file_next, .passphrase_file_next => {
                 if (index + 1 < args.len) index += 1;
             },
             .key_next, .public_next => {
@@ -894,6 +950,7 @@ pub fn scan_options(args: []const []const u8) Options {
             .no_passphrase, .passphrase_file_inline, .key_inline, .provenance => {},
             .strict, .require_provenance, .public_inline, .apply => {},
             .run_option_inline, .env_inline, .unknown_option, .last, .no_redact => {},
+            .import_inline, .import_flag => {},
             .read_only, .detach, .all, .follow => {},
             .operand => {
                 if (!seen_operand) first = command_named(args[index]);
@@ -935,6 +992,7 @@ const Parsed = struct {
     sign: SignArgs = .{ .operand = "" },
     verify: VerifyArgs = .{ .operand = "" },
     trust_apply: bool = false,
+    import: import_commands.Args = .{},
 
     fn store(p: *const Parsed, invocation: *Invocation) void {
         assert(@intFromPtr(p) != 0);
@@ -947,6 +1005,7 @@ const Parsed = struct {
         invocation.sign = p.sign;
         invocation.verify = p.verify;
         invocation.trust = .{ .action = .prune, .apply = p.trust_apply };
+        invocation.import = p.import;
     }
 };
 
@@ -986,6 +1045,9 @@ pub fn parse(
             .provenance => try take_provenance(diag, &invocation.provenance, given, argument),
             .resolve_only => try take_pull_option(diag, &p.pull, given, argument),
             .out_next => try take_out_option(diag, &export_file, given, args, &index),
+            .import_next, .import_inline, .import_flag => {
+                try take_import_option(diag, &p.import, given, args, &index);
+            },
             .graph, .clear_caches, .file_next => {
                 try take_build_option(diag, &p.build, given, args, &index);
             },
@@ -1011,6 +1073,16 @@ pub fn parse(
     p.store(invocation);
     try resolve(args, operands[0..count], invocation, diag);
     try check_options(&gc_args, invocation, diag);
+    put_export_file(invocation, export_file);
+}
+
+/// `-o <file>` is `import`'s output, or else `state export`'s.
+fn put_export_file(invocation: *Invocation, export_file: ?[]const u8) void {
+    if (invocation.command == .import) {
+        invocation.import.output = export_file;
+        invocation.import.dockerfile = invocation.operand;
+        return;
+    }
     invocation.state.out = export_file;
     if (export_file != null) assert(invocation.state.action == .@"export"); // `-o` is its own.
 }
@@ -1093,7 +1165,7 @@ fn take_all_option(
     run_args.all = true;
 }
 
-/// `-o FILE`, which only `state export` takes.
+/// `-o FILE`, which only `state export` and `import` take.
 fn take_out_option(
     diag: *Diag,
     export_file: *?[]const u8,
@@ -1106,11 +1178,35 @@ fn take_out_option(
     const argument = args[index.*];
     const is_export = operands.len >= 2 and command_named(operands[0]) == .state and
         std.mem.eql(u8, operands[1], "export");
-    if (!is_export) return unknown_option(diag, argument);
+    const is_import = operands.len >= 1 and command_named(operands[0]) == .import;
+    if (!is_export and !is_import) return unknown_option(diag, argument);
     if (export_file.* != null) return unexpected_argument(diag, .state, argument);
-    if (index.* + 1 == args.len) return missing_option_value(diag, "-o");
+    if (index.* + 1 == args.len) return out_option_value(diag, is_import, .missing);
     index.* += 1;
+    if (args[index.*].len == 0) return out_option_value(diag, is_import, .empty);
     export_file.* = args[index.*];
+}
+
+/// `-o` with no value, or with an empty one (`-o ''` names no file): E0005, with a fix line for
+/// the command it was given to.
+fn out_option_value(diag: *Diag, is_import: bool, value: enum { missing, empty }) ParseError {
+    assert(diag.code == null);
+    diag.raise(.E0005);
+    diag.while_("reading the command line", .{});
+    switch (value) {
+        .missing => diag.cause("-o needs a value, and none follows it", .{}),
+        .empty => diag.cause("-o is given an empty value, which names no file", .{}),
+    }
+    diag.fix(.{
+        .sentence = "give it a file name:",
+        .command = if (is_import)
+            "zbx import -o build/zbx.build.zon"
+        else
+            "zbx state export pgdata -o pgdata.tar.gz",
+        .template = true,
+    });
+    assert(diag.code.? == .E0005);
+    return error.BadOptionValue;
 }
 
 /// The passphrase and key options: `sign` takes `--key` and `--passphrase-file`, `key new` takes
@@ -1346,6 +1442,87 @@ fn take_build_option(
     index.* += 1;
     if (args[index.*].len == 0) return missing_option_value(diag, "-f");
     build_args.file = args[index.*];
+}
+
+/// `import`'s options, which no other command takes.
+fn take_import_option(
+    diag: *Diag,
+    import_args: *import_commands.Args,
+    operands: []const []const u8,
+    args: []const []const u8,
+    index: *usize,
+) ParseError!void {
+    assert(index.* < args.len);
+    const argument = args[index.*];
+    if (operands.len == 0) return unknown_option(diag, argument);
+    if (command_named(operands[0]) != .import) return unknown_option(diag, argument);
+    var option: ImportOption = undefined;
+    var value: []const u8 = "";
+    switch (classify(argument)) {
+        .import_flag => |flag| {
+            if (flag == .force) import_args.force = true else import_args.hermetic = true;
+            return;
+        },
+        .import_inline => |inline_value| {
+            option = inline_value.option;
+            value = inline_value.value;
+        },
+        .import_next => |next| {
+            option = next;
+            if (index.* + 1 == args.len) return missing_option_value(diag, option.flag());
+            index.* += 1;
+            value = args[index.*];
+        },
+        else => unreachable, // The caller matched one of the three.
+    }
+    try set_import_value(diag, import_args, option, value);
+}
+
+fn set_import_value(
+    diag: *Diag,
+    import_args: *import_commands.Args,
+    option: ImportOption,
+    value: []const u8,
+) ParseError!void {
+    assert(option != .hermetic);
+    assert(option != .force);
+    if (value.len == 0) return missing_option_value(diag, option.flag());
+    switch (option) {
+        .context => import_args.context = value,
+        .target => import_args.target = value,
+        .network => {
+            const rule = std.meta.stringToEnum(import_commands.NetworkRule, value) orelse {
+                return bad_import_value(diag, option, "takes detect, all or none");
+            };
+            import_args.network = rule;
+        },
+        .build_arg => {
+            const equals = std.mem.indexOfScalar(u8, value, '=') orelse 0;
+            if (equals == 0) return bad_import_value(diag, option, "takes NAME=VALUE");
+            const at = import_args.build_args_count;
+            if (at == import_args.build_args.len) {
+                return bad_import_value(diag, option, "was given too many times");
+            }
+            import_args.build_args[at] = value;
+            import_args.build_args_count = at + 1;
+        },
+        .hermetic, .force => unreachable, // Asserted above.
+    }
+}
+
+fn bad_import_value(diag: *Diag, option: ImportOption, what: []const u8) ParseError {
+    assert(diag.code == null);
+    assert(what.len > 0);
+    diag.raise(.E0005);
+    diag.while_("reading the command line", .{});
+    diag.cause("{s} {s}", .{ option.flag(), what });
+    diag.fix(.{
+        .sentence = "for example:",
+        .command = "zbx import --network none --build-arg VERSION=1.2",
+        .template = true,
+    });
+    assert(diag.code.? == .E0005);
+    return error.BadOptionValue;
 }
 
 /// `-f` a second time: one build file per build, and the second would be silently ignored.
@@ -2164,10 +2341,11 @@ fn resolve(
     // `bundle` takes at most one operand (a run's name) and checks the rest itself.
     // `run` takes at most one: the digest of the tree to run (or `--rootfs`, checked below).
     const wanted = if (command == .bundle or command == .run) 1 else operands_count(command);
+    const optional = command == .bundle or command == .run or command == .import;
     const given: u32 = @intCast(operands.len - 1);
     if (given > wanted) return unexpected_argument(diag, command, operands[1 + wanted]);
     const lacking = given < wanted and !(command == .push and given == 1);
-    if (lacking and command != .bundle and command != .run) {
+    if (lacking and !optional) {
         const what: Missing = switch (command) {
             .stop, .commit, .logs, .exec => .container,
             .schema => .topic,
@@ -2628,6 +2806,8 @@ fn unexpected_fix(diag: *Diag, command: Command) void {
         });
     } else if (command == .schema) {
         diag.fix(.{ .sentence = "name one command:", .command = "zbx schema ps" });
+    } else if (command == .import) {
+        diag.fix(.{ .sentence = "name one Dockerfile:", .command = "zbx import Dockerfile" });
     } else if (command == .inspect) {
         diag.fix(.{
             .sentence = "inspect one result at a time:",
@@ -2830,23 +3010,31 @@ fn missing_argument(diag: *Diag, command: Command, missing: Missing) ParseError 
 }
 
 /// `--rootfs` or `--name` with no value after it.
+fn import_flag_named(option: []const u8) bool {
+    assert(option.len <= constants.arg_bytes_max);
+    assert(std.enums.values(ImportOption).len > 0);
+    inline for (comptime std.enums.values(ImportOption)) |known| {
+        if (std.mem.eql(u8, option, comptime known.flag())) return true;
+    }
+    return false;
+}
+
 fn missing_option_value(diag: *Diag, option: []const u8) ParseError {
     assert(diag.code == null);
     assert(option.len >= 2);
     diag.raise(.E0005);
     diag.while_("reading the command line", .{});
     diag.cause("{s} needs a value, and none follows it", .{option});
-    const export_option = std.mem.eql(u8, option, "-o");
     const build_option = std.mem.eql(u8, option, "-f");
     const sign_option = std.mem.eql(u8, option, "--key");
     diag.fix(.{
         .sentence = "give it a value:",
-        .command = if (export_option)
-            "zbx state export pgdata -o pgdata.tar.gz"
-        else if (build_option)
+        .command = if (build_option)
             "zbx build --graph -f build/zbx.build.zon"
         else if (sign_option)
             "zbx sign b3:<64 hex> --key release"
+        else if (std.mem.startsWith(u8, option, "--") and import_flag_named(option))
+            "zbx import --target runtime"
         else
             "zbx run --rootfs ./alpine --name web-1 -- /bin/sh",
         .template = true,
@@ -3077,6 +3265,48 @@ fn run_build(
     ) catch |err| return build_error(err);
 }
 
+/// The memory `zbx import` works in: the build workspace's, which no import uses.
+fn import_workspace(storage: *Storage) *import_commands.Workspace {
+    comptime assert(@sizeOf(import_commands.Workspace) <= @sizeOf(build_commands.Workspace));
+    comptime assert(@alignOf(import_commands.Workspace) <= @alignOf(build_commands.Workspace));
+    assert(@intFromPtr(&storage.build) % @alignOf(import_commands.Workspace) == 0);
+    return @ptrCast(@alignCast(&storage.build));
+}
+
+/// `zbx import [<Dockerfile>] [options]`: a Dockerfile as a zbx.build.zon.
+fn run_import(
+    host: Host,
+    invocation: *const Invocation,
+    storage: *Storage,
+    diag: *Diag,
+) RunError!u8 {
+    assert(invocation.command == .import);
+    assert(diag.code == null);
+    const mode = invocation.options.mode();
+    const output: import_commands.Output = .{
+        .mode = mode,
+        .color = mode != .json and host.color_enabled(.stderr),
+        .json = invocation.options.output == .json,
+    };
+    const pulls: import_commands.Pulls = .{
+        .facts = &storage.handle.facts,
+        .pulling = &storage.pull,
+        .importing = &storage.store.import,
+    };
+    import_commands.run(
+        host,
+        &invocation.import,
+        import_workspace(storage),
+        pulls,
+        output,
+        diag,
+    ) catch |err| switch (err) {
+        error.Failed => return error.CommandFailed,
+        error.OutputFailed => return error.OutputFailed,
+    };
+    return constants.exit_ok;
+}
+
 fn run_inspect(
     host: Host,
     invocation: *const Invocation,
@@ -3099,7 +3329,7 @@ fn dispatch(host: Host, invocation: *const Invocation, storage: *Storage, diag: 
     assert(diag.code == null);
     const takes_operand = switch (invocation.command) {
         .explain, .bundle, .schema, .stop, .run, .commit => true,
-        .push, .pull, .lock, .logs, .exec, .inspect, .sign, .policy, .verify => true,
+        .push, .pull, .lock, .logs, .exec, .inspect, .sign, .policy, .verify, .import => true,
         else => false,
     };
     if (invocation.command == .explain) assert(invocation.operand != null);
@@ -3138,6 +3368,7 @@ fn dispatch(host: Host, invocation: *const Invocation, storage: *Storage, diag: 
         .logs => return run_logs(host, invocation, storage, diag),
         .exec => return run_exec(host, invocation, storage, diag),
         .pull => return run_pull(host, invocation, storage, diag),
+        .import => return run_import(host, invocation, storage, diag),
         .commit, .push => return run_store(host, invocation, storage, diag),
         .store => return run_store(host, invocation, storage, diag),
         .state => return run_state(host, invocation, storage, diag),

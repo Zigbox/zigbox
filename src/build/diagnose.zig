@@ -7,6 +7,7 @@
 const std = @import("std");
 const assert = std.debug.assert;
 const constants = @import("../constants.zig");
+const image_user = @import("../image_user.zig");
 const codes = @import("../diag/codes.zig");
 const text_util = @import("../text.zig");
 const file_mod = @import("file.zig");
@@ -1169,20 +1170,108 @@ pub fn network_steps(diag: *Diag, names: []const u8, count: u32) void {
 
 /// `E0817`: a `.user` or `.group` name is not in the `/etc/passwd` or `/etc/group` the step (or
 /// `.image.config`) is looked up in. `where` is what named it, already written, such as
-/// `step "a"`; `name` is the name as written.
-pub fn user_not_found(diag: *Diag, where: []const u8, name: []const u8) void {
+/// `step "a"`; `name` is the name as written. `too_large` is the file that was longer than zbx
+/// reads (`image_user.Workspace.too_large`), so the name was never looked for in it.
+pub fn user_not_found(
+    diag: *Diag,
+    where: []const u8,
+    name: []const u8,
+    too_large: ?[]const u8,
+) void {
     assert(diag.code == null);
     assert(where.len > 0);
     var echo: Echo = undefined;
     const shown = text_util.sanitise(&echo, name);
     diag.raise(.E0817);
     diag.while_("planning the build", .{});
-    diag.cause("{s} .user \"{s}\" is not in /etc/passwd of its base", .{ where, shown });
+    if (too_large) |file| {
+        diag.cause("{s} .user \"{s}\" names a user or group, and {s} of its base is larger " ++
+            "than the {d} KiB zbx reads", .{
+            where, shown, file, @divExact(image_user.bytes_max_of(file), 1024),
+        });
+        diag.context("name", "{s}", .{shown});
+        diag.fix(.{ .sentence = "write the user as numbers, such as 1000:1000" });
+    } else {
+        diag.cause("{s} .user \"{s}\" is not in /etc/passwd of its base", .{ where, shown });
+        diag.context("name", "{s}", .{shown});
+        diag.fix(.{
+            .sentence = "add the user in an earlier step and base this step on it with " ++
+                ".base = \"step:NAME\", or write the id as a number",
+        });
+    }
+    assert(diag.code.? == .E0817);
+}
+
+/// Why a copy's `.chown` is refused under `E0817`.
+pub const OwnerRefusal = union(enum) {
+    /// A name the base's /etc/passwd or /etc/group lacks.
+    missing,
+    /// The id 4294967295, which `chown` reads as "leave it" and no file has.
+    unowned,
+    /// The base's file of this path is longer than zbx reads, so no name in it was looked up.
+    too_large: []const u8,
+};
+
+/// `E0817` for a copy's `.chown` that `refusal` says cannot be used.
+pub fn copy_owner_not_found(
+    diag: *Diag,
+    step: []const u8,
+    text: []const u8,
+    refusal: OwnerRefusal,
+) void {
+    assert(diag.code == null);
+    assert(text.len > 0);
+    var step_echo: Echo = undefined;
+    var echo: Echo = undefined;
+    const step_shown = text_util.sanitise(&step_echo, step);
+    const shown = text_util.sanitise(&echo, text);
+    diag.raise(.E0817);
+    diag.while_("copying files in step \"{s}\"", .{step_shown});
+    switch (refusal) {
+        .unowned => {
+            diag.cause(".copy .chown \"{s}\" gives the id 4294967295, which no file can have", .{
+                shown,
+            });
+            diag.fix(.{ .sentence = "give an owner below 4294967295" });
+        },
+        .missing => {
+            diag.cause(".copy .chown \"{s}\" names a user or group that is not in " ++
+                "/etc/passwd or /etc/group of the step's base", .{shown});
+            diag.fix(.{
+                .sentence = "add the user in an earlier step and base this step on it with " ++
+                    ".base = \"step:NAME\", or write the id as a number",
+            });
+        },
+        .too_large => |file| {
+            diag.cause(".copy .chown \"{s}\" names a user or group, and {s} of the step's " ++
+                "base is larger than the {d} KiB zbx reads", .{
+                shown, file, @divExact(image_user.bytes_max_of(file), 1024),
+            });
+            diag.fix(.{ .sentence = "write the owner as numbers, such as 1000:1000" });
+        },
+    }
+    diag.context("step", "{s}", .{step_shown});
     diag.context("name", "{s}", .{shown});
-    diag.fix(.{
-        .sentence = "add the user in an earlier step and base this step on it with " ++
-            ".base = \"step:NAME\", or write the id as a number",
-    });
+    assert(diag.code.? == .E0817);
+}
+
+/// `E0817` for a copy's `.chown` whose id `id` the store's user namespace does not map: with the
+/// full map it holds ids 0 to `subid_range_min`, and `fchown` to any other is `EINVAL`.
+pub fn copy_owner_unmappable(diag: *Diag, step: []const u8, text: []const u8, id: u32) void {
+    assert(diag.code == null);
+    assert(text.len > 0);
+    assert(id > constants.subid_range_min);
+    var step_echo: Echo = undefined;
+    var echo: Echo = undefined;
+    const step_shown = text_util.sanitise(&step_echo, step);
+    const shown = text_util.sanitise(&echo, text);
+    diag.raise(.E0817);
+    diag.while_("copying files in step \"{s}\"", .{step_shown});
+    diag.cause(".copy .chown \"{s}\" gives the id {d}, which the store's user namespace " ++
+        "does not map: it maps 0 to {d}", .{ shown, id, constants.subid_range_min });
+    diag.fix(.{ .sentence = "give an owner the map holds, from 0 to 65536" });
+    diag.context("step", "{s}", .{step_shown});
+    diag.context("name", "{s}", .{shown});
     assert(diag.code.? == .E0817);
 }
 

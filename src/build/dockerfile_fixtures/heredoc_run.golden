@@ -1,0 +1,24 @@
+// Imported by `zbx import` from Dockerfile: target stage0, --network detect.
+// Edit this file from here on: `zbx build` reads it, not the Dockerfile.
+.{
+    .version = 1,
+    .steps = .{
+        // Dockerfile:3  RUN <<EOT
+        .{
+            .name = "stage0-1",
+            .base = "debian:bookworm-slim",
+            .run = .{ "/bin/sh", "-c", "set -e\necho one > /one\necho two > /two\n" },
+            .output = .root,
+        },
+        // Dockerfile:8  RUN python3 <<'EOF2'
+        .{
+            .name = "stage0-2",
+            .base = "step:stage0-1",
+            .run = .{ "/bin/sh", "-c", "python3 <<'EOF2'\nprint(\"hello\")\nEOF2\n" },
+            .output = .root,
+        },
+    },
+    .image = .{
+        .base = "step:stage0-2",
+    },
+}

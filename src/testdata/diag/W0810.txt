@@ -1,0 +1,5 @@
+warning[ZBX-W0810]: the import has steps that are not hermetic
+  cause  steps not hermetic: "build-2" (net, matched "apk add")
+  fix    pin what each step fetches; zbx import --hermetic refuses such steps
+  more   zbx explain W0810 · rerun with --verbose for the full cause chain
+  docs   https://zigbox.github.io/zigbox/errors/W0810.html

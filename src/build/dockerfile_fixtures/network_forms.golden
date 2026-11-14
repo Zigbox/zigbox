@@ -1,0 +1,33 @@
+// Imported by `zbx import` from Dockerfile: target stage0, --network detect.
+// Edit this file from here on: `zbx build` reads it, not the Dockerfile.
+.{
+    .version = 1,
+    .steps = .{
+        // Dockerfile:3  RUN ["wget", "-O", "/x", "https://example.com/x"]
+        .{
+            .name = "stage0-1",
+            .base = "alpine:3.20",
+            .run = .{ "wget", "-O", "/x", "https://example.com/x" },
+            .network = true,
+            .output = .root,
+        },
+        // Dockerfile:4  RUN wget -O /y https://example.com/y
+        .{
+            .name = "stage0-2",
+            .base = "step:stage0-1",
+            .run = .{ "/bin/sh", "-c", "wget -O /y https://example.com/y" },
+            .network = true,
+            .output = .root,
+        },
+        // Dockerfile:5  RUN ["true"]
+        .{
+            .name = "stage0-3",
+            .base = "step:stage0-2",
+            .run = .{ "true" },
+            .output = .root,
+        },
+    },
+    .image = .{
+        .base = "step:stage0-3",
+    },
+}

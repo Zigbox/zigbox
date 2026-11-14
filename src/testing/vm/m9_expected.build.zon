@@ -1,0 +1,69 @@
+// Imported by `zbx import` from Dockerfile: target stage2, --network detect.
+// Edit this file from here on: `zbx build` reads it, not the Dockerfile.
+.{
+    .version = 1,
+    .exclude = .{ "README.md", "*.tmp" },
+    .steps = .{
+        // Dockerfile:5  COPY go.mod ./
+        .{
+            .name = "build-1",
+            .base = "golang:1.23-alpine",
+            .copy = .{
+                .{ .src = .{ "go.mod" }, .to = "/src/" },
+            },
+        },
+        // Dockerfile:6  COPY *.go ./
+        .{
+            .name = "build-2",
+            .base = "step:build-1",
+            .copy = .{
+                .{ .src = .{ "*.go" }, .to = "/src/" },
+            },
+        },
+        // Dockerfile:8  RUN go build -ldflags="-s -w -buildid=" -o /usr/local/bin/hello .
+        .{
+            .name = "build-3",
+            .base = "step:build-2",
+            .env = .{ "CGO_ENABLED=0", "GOFLAGS=-trimpath -buildvcs=false", "GOPROXY=off" },
+            .run = .{ "/bin/sh", "-c", "go build -ldflags=\"-s -w -buildid=\" -o /usr/local/bin/hello ." },
+            .output = .root,
+            .workdir = "/src",
+        },
+        // Dockerfile:14  RUN adduser -D -u 10001 app
+        .{
+            .name = "stage2-1",
+            .base = "alpine:3.20",
+            .run = .{ "/bin/sh", "-c", "adduser -D -u 10001 app" },
+            .output = .root,
+        },
+        // Dockerfile:15  COPY --from=build /usr/local/bin/hello /usr/local/bin/hello
+        .{
+            .name = "stage2-2",
+            .base = "step:stage2-1",
+            .copy = .{
+                .{ .from = "step:build-3", .src = .{ "/usr/local/bin/hello" }, .to = "/usr/local/bin/hello" },
+            },
+        },
+        // Dockerfile:16  COPY --chown=app:app --chmod=0644 VERSION LICENSE /etc/hello/
+        .{
+            .name = "stage2-3",
+            .base = "step:stage2-2",
+            .copy = .{
+                .{ .src = .{ "VERSION", "LICENSE" }, .to = "/etc/hello/", .chown = "app:app", .chmod = "0644" },
+            },
+        },
+    },
+    .image = .{
+        .base = "step:stage2-3",
+        .config = .{
+            .entrypoint = .{ "/usr/local/bin/hello" },
+            .cmd = .{},
+            .workdir = "/home/app",
+            .user = "app",
+            .labels = .{
+                .{ "org.zigbox.import.expose", "8080" },
+                .{ "org.zigbox.import.healthcheck", "CMD [\"/usr/local/bin/hello\", \"--whoami\"]" },
+            },
+        },
+    },
+}

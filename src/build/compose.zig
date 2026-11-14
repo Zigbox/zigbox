@@ -45,6 +45,8 @@ const schedule = @import("schedule.zig");
 const assemble = @import("assemble.zig");
 const copy_mod = @import("copy.zig");
 const image_user = @import("../image_user.zig");
+const copy_owner = @import("copy_owner.zig");
+const copy_job = @import("copy_job.zig");
 const result_mod = @import("result.zig");
 const roots = @import("../store/roots.zig");
 const pull_lib = @import("../pull.zig");
@@ -104,6 +106,14 @@ pub const Workspace = struct {
     copying: copy_mod.Workspace,
     user_ws: image_user.Workspace,
     copy_keys: [constants.build_copy_entries_max]key_mod.Copy,
+    /// A copy step's `.chown` and `.chmod`: each entry's stamp, its `.to`, and the selection as
+    /// the stamp leaves it (the selection itself when the entry has neither).
+    copy_stamps: [constants.build_copy_entries_max]copy_owner.Stamp,
+    copy_tos: [constants.build_copy_entries_max][]const u8,
+    copy_chowns: [constants.build_copy_entries_max]?[]const u8,
+    copy_stamped: [constants.build_copy_entries_max]Digest,
+    copy_selections: [constants.build_copy_entries_max]Digest,
+    copy_owner: copy_owner.Workspace,
     cache_mounts: [constants.build_step_caches_max]key_mod.CacheMount,
     bind_keys: [constants.build_step_binds_max]key_mod.Bind,
     /// How many users of each tree this build rooted are still at work (`hold`, `unroot`): one
@@ -852,7 +862,12 @@ pub const Context = struct {
                 context.unroot(source);
             };
             const selected = try context.copy_select(index, &entry, source);
-            ws.copy_keys[at] = .{ .source = selected, .to = file.text(entry.to) };
+            ws.copy_keys[at] = .{
+                .source = selected,
+                .to = file.text(entry.to),
+                .chown = if (entry.chown) |text| file.text(text) else null,
+                .chmod = if (entry.chmod) |text| file.text(text) else null,
+            };
             rooted += 1;
             try context.check_interrupt(); // An entry's import and selection can take seconds.
         }
@@ -876,6 +891,10 @@ pub const Context = struct {
                 if (context.loaded.graph.base_step[index] == null) {
                     try context.check_base(file.text(step.base), spec);
                 }
+                // The stamped trees are written under this lock, so `store gc` cannot take them
+                // before the cache entry holds the output they go into.
+                try context.copy_stamp(index, spec.base_tree, entries.len);
+                try context.check_interrupt(); // A restamp of a large selection takes seconds.
                 const made = try context.copy_assemble(spec.base_tree, entries.len);
                 break :blk cache.record(store, &ws.cache, &ws.key, made, &failure) catch
                     return context.cache_failed(&failure);
@@ -1041,13 +1060,59 @@ pub const Context = struct {
             .replace = true,
         };
         var tree = base;
-        for (ws.copy_keys[0..count]) |part| {
-            tree = assemble.merge(merging, tree, part.source) catch {
+        for (ws.copy_keys[0..count], ws.copy_stamped[0..count]) |part, stamped| {
+            tree = assemble.merge(merging, tree, stamped) catch {
                 context.assembly_failed("copy", part.to);
                 return error.Failed;
             };
         }
         return tree;
+    }
+
+    /// Each entry's selection with its `.chown` and `.chmod` applied (`copy_job`), in
+    /// `ws.copy_stamped`. A `.chown` name is looked up in the step's base, as `.user` is.
+    fn copy_stamp(context: *Context, index: u8, base: Digest, count: usize) Error!void {
+        const ws = context.ws;
+        const name = context.loaded.file.text(context.loaded.file.steps[index].name);
+        for (ws.copy_keys[0..count], 0..) |part, at| {
+            ws.copy_selections[at] = part.source;
+            ws.copy_tos[at] = part.to;
+            ws.copy_stamps[at] = .{};
+            if (part.chmod) |text| ws.copy_stamps[at].mode = copy_owner.mode_of(text);
+            ws.copy_chowns[at] = part.chown;
+            const text = part.chown orelse continue;
+            const found = image_user.resolve(context.store, &ws.user_ws, base, text, context.diag);
+            const resolved = found catch {
+                context.diag.reset();
+                const refusal: diagnose.OwnerRefusal = if (ws.user_ws.too_large) |file|
+                    .{ .too_large = file }
+                else
+                    .missing;
+                diagnose.copy_owner_not_found(context.diag, name, text, refusal);
+                return error.Failed;
+            };
+            var owner: copy_owner.Owner = .{ .uid = resolved.user.uid, .gid = resolved.user.gid };
+            // BuildKit: a uid alone, as a number, is its own group, whatever passwd says.
+            if (copy_owner.uid_alone(text)) owner.gid = owner.uid;
+            if (owner.uid == copy_owner.id_unowned or owner.gid == copy_owner.id_unowned) {
+                diagnose.copy_owner_not_found(context.diag, name, text, .unowned);
+                return error.Failed;
+            }
+            ws.copy_stamps[at].owner = owner;
+        }
+        const job: copy_job.Request = .{
+            .host = context.host,
+            .facts = context.facts,
+            .store = context.store,
+            .name = name,
+            .selections = ws.copy_selections[0..count],
+            .tos = ws.copy_tos[0..count],
+            .chowns = ws.copy_chowns[0..count],
+            .stamps = ws.copy_stamps[0..count],
+            .ws = &ws.copy_owner,
+            .stamped = ws.copy_stamped[0..count],
+        };
+        copy_job.restamp(&job, context.diag) catch return error.Failed;
     }
 
     /// Writes the entry under the shared lock, and returns the tree it names.
@@ -1366,7 +1431,7 @@ pub const Context = struct {
             // The name may come from the base image's config, which the file never wrote.
             const set_here = context.loaded.file.image.config.user != null;
             const where = if (set_here) ".image .config" else "the base image's config";
-            diagnose.user_not_found(context.diag, where, text);
+            diagnose.user_not_found(context.diag, where, text, ws.user_ws.too_large);
             return error.Failed;
         };
         var buffer: [24]u8 = undefined;

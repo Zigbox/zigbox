@@ -63,7 +63,7 @@ pub const Output = struct {
 /// library.
 /// The AWS credentials are found here, for a private ECR reference only (`pull_aws.zig`); the
 /// reference in `workspace.library` must already be parsed.
-fn request_of(
+pub fn request_of(
     host: Host,
     text: []const u8,
     workspace: *Workspace,
@@ -88,7 +88,7 @@ fn request_of(
 /// `ZBX_PLATFORM_FALLBACK` names one to use when an image has none for it. The macOS zbx sets
 /// them in the virtual machine (`--platform`, and Rosetta); a value that is not one of the two
 /// is ignored, because nothing but zbx sets them.
-fn platform_of(host: Host) pull_lib.Platform {
+pub fn platform_of(host: Host) pull_lib.Platform {
     const limit: u32 = 32;
     var platform: pull_lib.Platform = .{};
     if (host.environment("ZBX_PLATFORM", limit)) |text| {

@@ -1,0 +1,5 @@
+error[ZBX-E0816]: the build file can't be written
+  cause  'zbx.build.zon' exists, and an import never replaces a file unasked
+  fix    replace it with --force, or write elsewhere with -o:   zbx import -o imported.build.zon
+  more   zbx explain E0816 · rerun with --verbose for the full cause chain
+  docs   https://zigbox.github.io/zigbox/errors/E0816.html

@@ -293,6 +293,7 @@ const roots = [_][]const u8{
     "src/testing/vm/main_m7.zig",
     "src/testing/vm/main_m8.zig",
     "src/testing/vm/main_m8b.zig",
+    "src/testing/vm/main_m9.zig",
     "src/testing/vm/main_m10.zig",
     "src/testing/vm/main_z7.zig",
     "src/testing/vm/main_m8_packages.zig",
@@ -327,6 +328,7 @@ const linux_only = [_][]const u8{
     "src/testing/vm/main_m7.zig",
     "src/testing/vm/main_m8.zig",
     "src/testing/vm/main_m8b.zig",
+    "src/testing/vm/main_m9.zig",
     "src/testing/vm/main_m10.zig",
     "src/testing/vm/main_z7.zig",
     "src/testing/vm/main_m8_packages.zig",
@@ -378,6 +380,7 @@ fn add_test_step(
         module.addAnonymousImport("seccomp_policy", .{
             .root_source_file = b.path("src/runtime/policy/seccomp.zon"),
         });
+        add_m9_cases(b, module);
         if (std.mem.eql(u8, root, macos_root)) link_macos(module, add_vm_image(b, options));
         // The demos are built on the VM module; the module's own root needs no import of itself.
         const needs_vm = std.mem.startsWith(u8, root, "src/testing/vm/main") or
@@ -424,7 +427,13 @@ fn add_tidy_step(b: *std.Build) void {
     const run = b.addRunArtifact(tidy);
     run.setCwd(b.path("."));
     // Formatting is checked alongside the mechanical rules: both must pass before review.
-    const format = b.addFmt(.{ .paths = &.{ b.path("src"), b.path("build.zig") }, .check = true });
+    // The golden import is the bytes `zbx import` writes, which put a one-element tuple in
+    // spaces where `zig fmt` would not (`.{ "go.mod" }`): a golden is not reformatted.
+    const format = b.addFmt(.{
+        .paths = &.{ b.path("src"), b.path("build.zig") },
+        .exclude_paths = &.{b.path("src/testing/vm/m9_expected.build.zon")},
+        .check = true,
+    });
     const step = b.step("tidy", "Check formatting, line and function length, banned patterns");
     step.dependOn(&format.step);
     step.dependOn(&run.step);
@@ -560,6 +569,11 @@ const demos = [_]struct { step: []const u8, root: []const u8, help: []const u8 }
         .help = "Run the M8b demo: --listen hands a loopback listener from the container out",
     },
     .{
+        .step = "demo-m9",
+        .root = "src/testing/vm/main_m9.zig",
+        .help = "Run the M9 demo: zbx import of a Dockerfile, build, the fixtures, two VMs",
+    },
+    .{
         .step = "demo-m10",
         .root = "src/testing/vm/main_m10.zig",
         .help = "Run the M10 demo: --device and --gpu with a fake vendor, doctor, refusals",
@@ -660,6 +674,16 @@ fn add_harness_imports(b: *std.Build, step: []const u8, module: *std.Build.Modul
         });
     }
     if (std.mem.eql(u8, step, "demo-m10")) add_gpu_fixtures(b, module);
+    if (std.mem.eql(u8, step, "demo-m9")) add_m9_cases(b, module);
+}
+
+/// demo-m9's fixtures (the Dockerfiles and their goldens): a harness can embed only files under
+/// `src/testing/vm/`, so the fixtures' own index is handed to it as an import. Data, like the
+/// seccomp policy: the test roots get it too, at no cost to those that do not read it.
+fn add_m9_cases(b: *std.Build, module: *std.Build.Module) void {
+    module.addAnonymousImport("m9_vm_cases", .{
+        .root_source_file = b.path("src/build/dockerfile_fixtures/vm_cases.zig"),
+    });
 }
 
 /// demo-m10's fake driver library (soname `libzbxgpu.so.1`) and the program that needs it, built

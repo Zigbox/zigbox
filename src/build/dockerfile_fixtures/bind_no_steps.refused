@@ -1,0 +1,3 @@
+E0811 Dockerfile:4
+Dockerfile:4 has RUN --mount=type=bind,from=tools, which zbx import does not translate
+add a step to that stage, or bind from one that has steps; the builder binds only a step's output
