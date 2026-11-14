@@ -129,17 +129,24 @@ fn demo(init: std.process.Init, out: *Io.Writer, options: H.Options) !void {
     const extra = [_]@import("zigbox_vm").Route{
         .{ .path = supervisor_route, .body = @embedFile("c4_supervisor") },
     };
+    try out.print("demo-c4: starting the guest\n", .{});
+    try out.flush();
     try session_mod.start(&session, init, out, overlay, accel, .{
         .binary = binary,
         .rootfs = rootfs,
         .extra = &extra,
     });
+    try out.flush();
     defer session.deinit();
     var timer = H.Timer.start();
     try H.provision(&session, out, &timer, options.reuse_overlay);
+    try out.flush();
     try H.install_binary(&session, out, &timer);
+    try out.flush();
     try unpack_rootfs(&session, out);
+    try out.flush();
     try install_fixtures(&session, out);
+    try out.flush();
     for (scripts) |script| try run_script(&session, out, script);
     try session.shutdown();
 }
