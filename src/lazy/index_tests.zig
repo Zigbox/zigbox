@@ -58,7 +58,10 @@ pub const Builder = struct {
             switch (entry.kind) {
                 .symlink => {},
                 .file => try builder.file(&entry),
-                .dir => try builder.visit(entry.subtree, !builder.seen.contains(entry.subtree.bytes)),
+                .dir => {
+                    const first = !builder.seen.contains(entry.subtree.bytes);
+                    try builder.visit(entry.subtree, first);
+                },
             }
         }
     }
@@ -81,7 +84,12 @@ pub const Builder = struct {
             std.mem.writeInt(u64, &name, ordinal, .little);
             const hash = if (count == 1) entry.content else Digest.of(&name);
             var chunk: [index_mod.chunk_record_bytes]u8 = undefined;
-            index_mod.encode_chunk(.{ .hash = hash, .offset = builder.offset, .length = 100 }, &chunk);
+            const chunk_record: index_mod.Chunk = .{
+                .hash = hash,
+                .offset = builder.offset,
+                .length = 100,
+            };
+            index_mod.encode_chunk(chunk_record, &chunk);
             try builder.chunks.appendSlice(gpa, &chunk);
             builder.offset += 100;
             builder.chunk_count += 1;
@@ -166,7 +174,12 @@ fn add_file(writer: *tree_mod.Writer, spec: FileSpec) !void {
 /// A root with a shared subtree (`a/` and `b/` are the same tree), a file whose object repeats,
 /// an empty file, a three-chunk file and a symlink.
 fn fixture_make() !Fixture {
-    var fixture: Fixture = .{ .store = .init(gpa), .root = undefined, .bytes = &.{}, .anchor = undefined };
+    var fixture: Fixture = .{
+        .store = .init(gpa),
+        .root = undefined,
+        .bytes = &.{},
+        .anchor = undefined,
+    };
     errdefer fixture.deinit();
     var buffer: [4096]u8 = undefined;
     var writer = tree_mod.Writer.init(&buffer);
@@ -178,7 +191,8 @@ fn fixture_make() !Fixture {
     try writer.end_dir(leaf);
     try writer.begin("b", .dir, 0o755, 0, 0, &xattrs.empty);
     try writer.end_dir(leaf);
-    try add_file(&writer, .{ .name = "big", .size = 3 * constants.store_chunk_bytes - 1, .fill = 'y' });
+    const big_size = 3 * constants.store_chunk_bytes - 1;
+    try add_file(&writer, .{ .name = "big", .size = big_size, .fill = 'y' });
     try add_file(&writer, .{ .name = "empty", .size = 0, .fill = 0 });
     try add_file(&writer, .{ .name = "same", .size = 5, .fill = 'x' });
     try writer.begin("z", .symlink, 0o777, 0, 0, &xattrs.empty);
@@ -319,7 +333,13 @@ fn small_index(names: u32, ranges: []const [2]u64) ![]u8 {
     try out.appendSlice(gpa, &tree_head);
     try out.appendSlice(gpa, tree);
     var record: [index_mod.object_record_bytes]u8 = undefined;
-    index_mod.encode_object(.{ .id = Digest.of("o"), .size = size, .first_chunk = 0, .chunk_count = count }, &record);
+    const object: index_mod.Object = .{
+        .id = Digest.of("o"),
+        .size = size,
+        .first_chunk = 0,
+        .chunk_count = count,
+    };
+    index_mod.encode_object(object, &record);
     try out.appendSlice(gpa, &record);
     for (ranges) |range| {
         var chunk: [index_mod.chunk_record_bytes]u8 = @splat(0);
@@ -359,7 +379,8 @@ test "parse: an index one byte past its bound is too large" {
     defer gpa.free(bytes);
     @memset(bytes, 0);
     try testing.expectError(error.TooLarge, index_mod.parse(bytes));
-    try testing.expectError(error.Malformed, index_mod.parse(bytes[0..constants.lazy_index_bytes_max]));
+    const most = bytes[0..constants.lazy_index_bytes_max];
+    try testing.expectError(error.Malformed, index_mod.parse(most));
 }
 
 test "parse: chunk counts must fit sizes and run without gaps; trailing bytes are refused" {
@@ -447,7 +468,11 @@ test "inflate_range: each segment written by a fresh compressor inflates alone" 
     var inflate_window: [flate.max_window_len]u8 = undefined;
     var compressed: [64 * 1024]u8 = undefined;
     var sink: std.Io.Writer = .fixed(&compressed);
-    const texts = [_][]const u8{ "the first segment, the first segment", "a second one", &repeated };
+    const texts = [_][]const u8{
+        "the first segment, the first segment",
+        "a second one",
+        &repeated,
+    };
     var ends: [texts.len + 1]usize = undefined;
     ends[0] = 0;
     for (texts, 1..) |text, at| {
@@ -464,7 +489,10 @@ test "inflate_range: each segment written by a fresh compressor inflates alone" 
         try index_mod.inflate_range(&range, length, out[0..text.len], &inflate_window);
         try testing.expectEqualStrings(text, out[0..text.len]);
         // One byte too few or too many is refused.
-        try testing.expectError(error.Malformed, index_mod.inflate_range(&range, length, out[0 .. text.len - 1], &inflate_window));
-        try testing.expectError(error.Malformed, index_mod.inflate_range(&range, length, out[0 .. text.len + 1], &inflate_window));
+        const fewer = out[0 .. text.len - 1];
+        const more = out[0 .. text.len + 1];
+        const inflate = index_mod.inflate_range;
+        try testing.expectError(error.Malformed, inflate(&range, length, fewer, &inflate_window));
+        try testing.expectError(error.Malformed, inflate(&range, length, more, &inflate_window));
     }
 }
