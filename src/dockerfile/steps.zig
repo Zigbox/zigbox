@@ -629,7 +629,8 @@ fn put_copy(
 
 /// A context source as the builder reads it: relative to the project (Docker reads `/x` there
 /// as `x`). The whole context (`.` or `/`) is `*`, every entry at the top of the project, since
-/// a build file refuses a project source of `.` (docs/decisions/2026-11-13-copy-source-refusals.md).
+/// a build file refuses a project source of `.`
+/// (docs/decisions/2026-11-13-copy-source-refusals.md).
 fn project_path(source: []const u8) []const u8 {
     if (is_whole_context(source)) return "*";
     return std.mem.trimStart(u8, source, "/");
