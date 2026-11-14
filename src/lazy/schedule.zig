@@ -408,7 +408,11 @@ pub const Schedule = struct {
         if (entry.state != .fetching) assert(entry.state == .queued);
         assert(!schedule.stopping);
         if (!schedule.has_any_source(entry.object)) {
-            if (entry.state == .queued) schedule.fail(index, .unavailable);
+            // A fetching entry keeps its job's chance to land, but never past its deadline:
+            // a deadline already passed must not become the next wake.
+            if (entry.state == .queued or now >= entry.deadline_ms) {
+                schedule.fail(index, .unavailable);
+            }
             return;
         }
         if (!schedule.has_live_source(entry)) {

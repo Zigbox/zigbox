@@ -988,3 +988,11 @@ test "sim: seeds" {
     var seed: u64 = 0;
     while (seed < 40) : (seed += 1) fuzz_lazy_resolver(seed);
 }
+
+test "sim: regression seeds" {
+    // Goal: seeds that once broke the resolver stay fixed.
+    // Method: run each through the fuzzer's own body. 11207900475674901063 is iteration 2418 of
+    // `zig build fuzz -- lazy_resolver 2087983757`: every source was marked bad for an object
+    // while its entry was fetching, so the entry outlived its deadline and tripped `tick`.
+    fuzz_lazy_resolver(11207900475674901063);
+}
