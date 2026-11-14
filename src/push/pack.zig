@@ -530,7 +530,11 @@ fn write_layer(
     var blob_fail: blobs_mod.Failure = undefined;
     blobs.ensure_directories(&blob_fail) catch return stopped_write(failure, tree, blob_fail.errno);
     const lazy = input.writer_version >= 2;
-    if (lazy) ws.recorder.start(store, ws.names_max) catch return stopped_write(failure, tree, fs.last_errno());
+    if (lazy) {
+        ws.recorder.start(store, ws.names_max) catch {
+            return stopped_write(failure, tree, fs.last_errno());
+        };
+    }
     defer if (lazy) ws.recorder.discard(fs);
     var temporary: PathBuf = undefined;
     const temporary_path = store.tmp_path(&temporary);

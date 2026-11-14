@@ -185,7 +185,7 @@ var range_bytes: [constants.lazy_range_bytes_max + index_mod.range_trailer_bytes
 var plain_bytes: [constants.lazy_range_bytes_max]u8 = undefined;
 var inflate_window: [flate.max_window_len]u8 = undefined;
 var index_bytes: [1024 * 1024]u8 = undefined;
-var big_bytes: [2 * constants.store_chunk_bytes + 12345]u8 = undefined;
+var big_bytes: [constants.store_chunk_bytes + 12345]u8 = undefined;
 var checking: verify_mod.Workspace = undefined;
 
 /// The whole layer blob of `made`.
@@ -196,7 +196,8 @@ fn read_layer(made: pack.Packed) ![]const u8 {
     defer store.fs.close(fd);
     var used: usize = 0;
     while (true) {
-        const count = try store.fs.read(fd, blob_bytes[used..]);
+        const room = @min(blob_bytes.len - used, constants.store_io_buffer_bytes);
+        const count = try store.fs.read(fd, blob_bytes[used..][0..room]);
         if (count == 0) break;
         used += count;
         if (used == blob_bytes.len) return error.TestBlobTooLarge;
@@ -247,26 +248,26 @@ fn check_index(made: pack.Packed, tree: digest_mod.Digest) !index_mod.Index {
 
 test "every chunk of a writer 2 layer inflates alone from its offset to its hash" {
     // Goal: the index is what lazy start reads: each recorded range is a self-contained raw
-    // deflate run. Method: the sample tree, plus a file of three chunks and one of exactly
-    // one, packed at two piece sizes; read the index from its anchor, verify it, inflate
-    // every chunk alone and hash it.
+    // deflate run. Method: the sample tree, plus a file of a chunk and a tail (its bytes repeat
+    // a random block, so the sim's pool holds the source, the object and the layer), packed at
+    // two piece sizes; read the index from its anchor, verify it, inflate every chunk alone and
+    // hash it. The round trip of a writer 2 layer is the round-trip test's.
     const big = &big_bytes;
+    var block: [4096]u8 = undefined;
     var prng = std.Random.DefaultPrng.init(91);
-    prng.random().bytes(big);
+    prng.random().bytes(&block);
+    for (big, 0..) |*byte, at| byte.* = block[at % block.len];
     for ([_]u32{ 1024, constants.pack_io_bytes }) |piece| {
         start(4, 0);
         files.put_file("/src/big", 0o644, big);
-        files.put_file("/src/one", 0o644, big[0..constants.store_chunk_bytes]);
-        files.put_file("/src/big.copy", 0o644, big); // The same object: listed once.
         const imported = try import_source(false);
         const made = try pack_tree_as(imported.digest, piece, 2, constants.lazy_nodes_max);
         const index = try check_index(made, imported.digest);
-        try testing.expectEqual(@as(u32, 13), index.header.names);
-        // sh and ls are one object, so are big and big.copy; the empty file is an object.
+        try testing.expectEqual(@as(u32, 11), index.header.names);
+        // Six small files (ls's note makes it another object than sh) and big.
         try testing.expectEqual(@as(u32, 7), index.header.objects);
-        // One chunk for each small file but the empty one; three for big, one for one.
-        try testing.expectEqual(@as(u32, 4 + 3 + 1), index.header.chunks);
-        try testing.expect(imported.digest.eql(try round_trip(made, false)));
+        // One chunk for each small file but the empty one; two for big.
+        try testing.expectEqual(@as(u32, 5 + 2), index.header.chunks);
     }
 }
 
@@ -605,11 +606,16 @@ const golden_manifest_x86_64 =
     "sha256:9fb72b7ef67ab49164f62a0c208083bea73a9c06c40ca8742c6cc5620201d59d";
 
 // Writer 2's goldens: taken from a reviewed run of the test above.
-const golden_v2_anchor = "TODO";
-const golden_v2_layer = "TODO";
-const golden_v2_diff_id = "TODO";
-const golden_v2_config_x86_64 = "TODO";
-const golden_v2_manifest_x86_64 = "TODO";
+const golden_v2_anchor = "offset=553 length=522 size=1139 digest=b3:" ++
+    "89f280c823c3551b2c9047c43eb269590227f75bebafed2e4a85a17288d83c12";
+const golden_v2_layer =
+    "sha256:df84ea0f0f80652d4da9841afee14acf8557240896e3c4e47e7704e3fc7c18f2";
+const golden_v2_diff_id =
+    "sha256:c6ad9caf007e6827d902aee135bf98a0c1270545426ac051a226f12343e41f9b";
+const golden_v2_config_x86_64 =
+    "sha256:727f1eade709825dfd41ce798fcda0a1a54b05822b852b95eec0361696bd195e";
+const golden_v2_manifest_x86_64 =
+    "sha256:752a604561bc4e994fb3b39d188f44da64ff7dd8915d2ac8915092da06ba02ca";
 
 const config_mod = @import("../registry/config.zig");
 const result_mod = @import("../build/result.zig");

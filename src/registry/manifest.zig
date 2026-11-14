@@ -224,7 +224,12 @@ fn parse_tree_claim(text: []const u8) ?[32]u8 {
 }
 
 /// The manifest's `annotations` member: the `org.zigbox.tree` claim.
-const AnnotationsJson = AnnotationJson(constants.pack_annotation_tree, 128, [32]u8, parse_tree_claim);
+const AnnotationsJson = AnnotationJson(
+    constants.pack_annotation_tree,
+    128,
+    [32]u8,
+    parse_tree_claim,
+);
 
 /// A layer descriptor's `annotations` member: the `org.zigbox.lazy-index` anchor. A wrong
 /// spelling is no index (the image runs eagerly, `W1201`), never a refusal.
@@ -849,7 +854,7 @@ test "a malformed tree annotation never refuses the manifest" {
 test "the first layer's lazy-index annotation is read when exact, and ignored otherwise" {
     // Goal: slice 2's writer puts the anchor on layers[0]; lazy start reads only an exact one,
     // and any other spelling, or an anchor on another layer, runs the image eagerly (W1201).
-    const anchor = "offset=10 length=20 size=72 digest=b3:" ++ repeat('c', 64);
+    const anchor = comptime "offset=10 length=20 size=72 digest=b3:" ++ repeat('c', 64);
     const head = "{\"schemaVersion\":2," ++ config_member ++ ",\"layers\":[";
     const plain = comptime describe(media_oci_layer_gzip, one, 11) ++ "}";
     const noted = comptime describe(media_oci_layer_gzip, one, 11) ++
@@ -866,7 +871,7 @@ test "the first layer's lazy-index annotation is read when exact, and ignored ot
     try testing.expect(resolved.lazy_index == null);
     try read_in(head ++ "]}", &resolved, &problem);
     try testing.expect(resolved.lazy_index == null);
-    const wrong = [_][]const u8{
+    const wrong = comptime [_][]const u8{
         "offset=010 length=20 size=72 digest=b3:" ++ repeat('c', 64),
         "offset=10  length=20 size=72 digest=b3:" ++ repeat('c', 64),
         "offset=10 length=20 size=72 digest=b3:" ++ repeat('C', 64),
@@ -877,8 +882,9 @@ test "the first layer's lazy-index annotation is read when exact, and ignored ot
     };
     for (wrong) |text| {
         var body_buffer: [1024]u8 = undefined;
-        const body = try std.fmt.bufPrint(&body_buffer, "{s}{s},\"annotations\":" ++
-            "{{\"org.zigbox.lazy-index\":\"{s}\"}}}}]}}", .{ head, plain[0 .. plain.len - 1], text });
+        const format = "{s}{s},\"annotations\":{{\"org.zigbox.lazy-index\":\"{s}\"}}}}]}}";
+        const open = plain[0 .. plain.len - 1];
+        const body = try std.fmt.bufPrint(&body_buffer, format, .{ head, open, text });
         try read_in(body, &resolved, &problem);
         try testing.expect(resolved.lazy_index == null);
     }

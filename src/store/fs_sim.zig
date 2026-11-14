@@ -513,6 +513,13 @@ pub const SimFs = struct {
         sim.bytes_live -= 1;
     }
 
+    /// The bytes `append` copies before it writes: none for the file at the pool's end, which
+    /// grows in place, and the whole file for any other.
+    fn moved_bytes(sim: *const SimFs, node: *const Node) u32 {
+        const at_end = node.data_at + node.data_len == sim.pool_len;
+        return if (at_end) 0 else node.data_len;
+    }
+
     fn append(sim: *SimFs, node: *Node, bytes: []const u8) void {
         if (bytes.len == 0) return;
         const at_end = node.data_at + node.data_len == sim.pool_len;
@@ -1047,7 +1054,9 @@ pub const SimFs = struct {
             if (room == 0) return sim.fail(errno_nospc);
             length = @min(length, room);
         }
-        if (sim.pool_len + node.data_len + length > sim.pool.len) return sim.fail(errno_nospc);
+        if (sim.pool_len + sim.moved_bytes(node) + length > sim.pool.len) {
+            return sim.fail(errno_nospc);
+        }
         sim.append(node, bytes[0..length]);
         node.mtime = sim.clock;
         sim.touch(slot.node);

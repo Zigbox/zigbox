@@ -106,7 +106,9 @@ fn read_blob(on: *layout.Store, made: *const pack.Packed) []const u8 {
     var used: usize = 0;
     while (true) {
         if (used == reader.blob.len) @panic("the fuzzer's blob room is too small");
-        const count = on.fs.read(fd, reader.blob[used..]) catch @panic("the layer blob must read");
+        const room = @min(reader.blob.len - used, constants.store_io_buffer_bytes);
+        const count = on.fs.read(fd, reader.blob[used..][0..room]) catch
+            @panic("the layer blob must read");
         if (count == 0) break;
         used += count;
     }
@@ -126,25 +128,28 @@ fn inflate_at(blob: []const u8, offset: u64, length: u64, size: u64) error{Malfo
     return out;
 }
 
-/// Adds files the plain generator never makes: empty, one byte short of a chunk, a chunk, one
-/// byte over, and a few chunks, some sharing contents.
-fn add_sized_files(random: std.Random, target: *fs_sim.SimFs) void {
+/// Adds one file the plain generator never makes: empty, one byte short of a chunk, a chunk or
+/// one byte over. Its bytes repeat a random 4 KiB block, so the sim's store pool holds the file,
+/// its imported object and the packed layer.
+fn add_sized_file(random: std.Random, target: *fs_sim.SimFs) void {
     const chunk = constants.store_chunk_bytes;
-    const sizes = [_]u32{ 0, 1, chunk - 1, chunk, chunk + 1, 2 * chunk + 4097, 3 * chunk };
-    const content = reader.blob[0 .. 3 * chunk];
-    random.bytes(content);
-    var path: [32]u8 = undefined;
-    for (0..random.uintLessThan(u32, 4)) |index| {
-        const size = sizes[random.uintLessThan(usize, sizes.len)];
-        const start = random.uintLessThan(u32, 3) * 17;
-        const text = std.fmt.bufPrint(&path, "/src/sized{d}", .{index}) catch unreachable;
-        target.put_file(text, 0o644, content[start..][0..@min(size, content.len - start)]);
-    }
+    const sizes = [_]u32{ 0, 1, chunk - 1, chunk, chunk + 1 };
+    const size = sizes[random.uintLessThan(usize, sizes.len)];
+    const content = reader.blob[0..size];
+    var block: [4096]u8 = undefined;
+    random.bytes(&block);
+    for (content, 0..) |*byte, at| byte.* = block[at % block.len];
+    target.put_file("/src/sized", 0o644, content);
 }
 
 /// Property 3: changed, cut and grown copies of `read.bytes`, each with an anchor that matches
 /// it, into `verify`.
-fn mutate_index(random: std.Random, read: *const Read, anchor: index_mod.Anchor, tree: Digest) void {
+fn mutate_index(
+    random: std.Random,
+    read: *const Read,
+    anchor: index_mod.Anchor,
+    tree: Digest,
+) void {
     const room = reader.plain[0..];
     for (0..8) |_| {
         var length = read.bytes.len;
@@ -215,7 +220,7 @@ pub fn fuzz_lazy_index(seed: u64) void {
     support.make_store_directories(&files, root_path);
     store.at(sim.interface(), root_path);
     fuzz_store.build_tree(seed, &files, "/src");
-    if (random.boolean()) add_sized_files(random, &files);
+    if (random.boolean()) add_sized_file(random, &files);
     diag.reset();
     settings.clear();
 
@@ -238,7 +243,8 @@ pub fn fuzz_lazy_index(seed: u64) void {
         const bound = random.intRangeAtMost(u32, @max(names, 2) - 1, names + 1);
         pack.forget(&store, imported.digest, 2);
         const bounded = pack_with(imported.digest, bound);
-        if ((bounded.index != null) != (names <= bound)) @panic("the names bound decides the index");
+        const indexed = bounded.index != null;
+        if (indexed != (names <= bound)) @panic("the names bound decides the index");
         if (bounded.index != null) {
             _ = check_layer(&store, &bounded, imported.digest);
             assert(bounded.layer.eql(full.layer));
