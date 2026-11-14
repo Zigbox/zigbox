@@ -74,3 +74,15 @@ test "a refusal exits 1 with its code and writes nothing" {
     try expect_stderr("E0005");
     try testing.expect(files.content_of(output_path) == null);
 }
+
+test "an empty Dockerfile name or output is refused, not a bug" {
+    // Goal: `zbx import ""` and `-o ""` are refusals (E0810, E0005), never B0001 (the cli fuzzer
+    // found both). Method: each run on a world with a Dockerfile; no file is written.
+    world(3, settings_only);
+    try testing.expectEqual(@as(u8, 1), run(&.{ "zbx", "import", "" }));
+    try expect_stderr("E0810");
+    try expect_stderr("name is empty");
+    try testing.expectEqual(@as(u8, 1), run(&(base ++ .{ "-o", "" })));
+    try expect_stderr("E0005");
+    try testing.expect(files.content_of(output_path) == null);
+}

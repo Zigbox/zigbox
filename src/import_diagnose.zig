@@ -63,11 +63,16 @@ pub const ReadFailure = enum { missing, not_file, too_large, unreadable, bad_pat
 /// `E0810`: the Dockerfile (or its `.dockerignore`) cannot be read.
 pub fn read_failed(diag: *Diag, path: []const u8, failure: ReadFailure) void {
     assert(diag.code == null);
-    assert(path.len > 0);
+    if (path.len == 0) assert(failure == .bad_path);
     var echo: Echo = undefined;
     const shown = text_util.sanitise(&echo, path);
     diag.raise(.E0810);
     diag.while_("reading the Dockerfile", .{});
+    if (path.len == 0) {
+        diag.cause("the Dockerfile's name is empty", .{});
+        diag.fix(.{ .sentence = "name the Dockerfile:", .command = "zbx import Dockerfile" });
+        return;
+    }
     const why = switch (failure) {
         .missing => "is not there",
         .not_file => "is not a regular file",

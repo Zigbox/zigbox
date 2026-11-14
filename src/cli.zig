@@ -1183,6 +1183,7 @@ fn take_out_option(
     if (export_file.* != null) return unexpected_argument(diag, .state, argument);
     if (index.* + 1 == args.len) return missing_option_value(diag, "-o");
     index.* += 1;
+    if (args[index.*].len == 0) return missing_option_value(diag, "-o");
     export_file.* = args[index.*];
 }
 

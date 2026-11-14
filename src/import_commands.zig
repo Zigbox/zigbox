@@ -197,7 +197,7 @@ fn read_input(
 ) Error![]const u8 {
     assert(buffer.len > 1);
     var storage: Path = undefined;
-    const text = terminated(&storage, path) orelse {
+    const text = (if (path.len == 0) null else terminated(&storage, path)) orelse {
         import_diagnose.read_failed(diag, path, .bad_path);
         return error.Failed;
     };
