@@ -140,7 +140,9 @@ file that does not use it: the `demo-m7` golden and the M9 import golden stay as
 **Output pins.** A pin is the output digest a network step is expected to produce.
 
 - **`.expect = "b3:<hex>"`** on a step with `network = true` is a pin written by hand. On any
-  other step it is `E0801`: a step without the network is already keyed by what it reads.
+  other step it is `E0801`: a step without the network is already keyed by what it reads. On a
+  step with `.caches` it is also `E0801`, because the step's output depends on a cache that is
+  outside its key (*supervisor, 2026-11-14*); `zbx build --pin` leaves such a step unpinned.
 - **`zbx build --pin`** records, in `zbx.lock`, the output of every network step that has no
   `.expect` and no current pin. A pin is current when its recorded key equals the step's key, so
   a step whose key has changed gets a new pin. The lock is written once, atomically, and only
@@ -164,11 +166,12 @@ file that does not use it: the `demo-m7` golden and the M9 import golden stay as
   runs, and the lock is not changed. Without those flags it is `W0803`, naming the same three:
   the new output is used, every step after it misses and rebuilds, and the pin stays as it was,
   so the warning repeats on every build until the pin is updated. A person accepts drift by
-  deleting the pin and running `zbx build --pin`, or by editing `.expect`.
+  deleting the pin and running `zbx build --pin`, or by editing `.expect`. There is no `--repin`
+  flag (*supervisor, 2026-11-14*).
 - **`.output_exclude`** on a step is a list of absolute paths whose changes are dropped from the
   output before it is hashed. In a root output, an excluded path is left as the base had it. In
   an `/out` output, it is absent. A pinned step without `.output_exclude` gets
-  `.{ "/var/log", "/var/cache", "/tmp" }`. The list, whether written or defaulted, enters the
+  `.{ "/var/log", "/var/cache", "/var/lib/apt/lists", "/tmp" }`. The list, whether written or defaulted, enters the
   step's key, so the first `--pin` of an existing network step re-runs it once. A lock pin is found
 by file and step name, and is current when its key equals the step's key computed with the
 defaults applied, so the defaults never make a pin look stale. Package databases
@@ -183,14 +186,14 @@ usage refusal, `E0005`, and the message names both flags.
 
 **`zbx build --hermetic`** (new on `build`; `zbx import` already has it): `--locked`, plus a
 refusal of any network step without a pin and of any step with `.caches`. It reuses `E0814`,
-naming the step instead of a Dockerfile line. *Supervisor choice, open for the owner*: the ruling
+naming the step instead of a Dockerfile line. *Supervisor choice, 2026-11-14*: the ruling
 names the flag but does not define it. It is cuttable to an alias of `--locked`.
 
 **Mirror snapshots are out of scope** (owner). An apt or apk mirror that publishes a new package
 version changes what a step installs. That is drift, and it is reported loudly by `W0803` or
 `E0822`. It is not prevented.
 
-**Proposed bounds (for owner approval, not yet in `constants.zig`):**
+**Bounds (approved by the owner, 2026-11-14; added to `constants.zig` in slices 3b and 3c):**
 
 | Constant | Value | Reason |
 |---|---|---|
@@ -198,7 +201,7 @@ version changes what a step installs. That is drift, and it is reported loudly b
 | `build_fetch_redirects_max` | 4 | Equals `registry_redirects_max`. GitHub release assets take one redirect and most CDNs take one or two. |
 | URL length | 2048 bytes | Reuses `registry_url_bytes_max`. |
 | Timeouts | 30 s idle | Reuse `net_idle_timeout_ms` (30 s). There is no total-time bound, because a 1 GiB file on a slow link must be able to finish. |
-| `build_output_excludes_max` | 32 | Three defaults, room for one per package manager's log and cache directories. |
+| `build_output_excludes_max` | 32 | Four defaults, room for one per package manager's log and cache directories. |
 | `lock_pins_max` | 256 | Equals `build_steps_max`: a build file cannot pin more steps than it has. |
 
 ### `zbx import`
@@ -311,8 +314,8 @@ the builder's. Registered by the supervisor with this brief.
 
 An import that is refused exits 1 and writes nothing.
 
-**Proposed for fetches and pins (*owner, 2026-11-14*). Each needs the owner's approval before it
-is registered.** They come after the import range (`E0810`–`E0819`). `W0803` is the next free
+**For fetches and pins (approved by the owner, 2026-11-14; registered in slices 3b and 3c).**
+They come after the import range (`E0810`–`E0819`). `W0803` is the next free
 builder warning.
 
 - `E0820` a fetch could not be downloaded: the url, and why (the HTTP status, the network error,
@@ -374,7 +377,7 @@ needs a new code.
    simulator crashes at every write of a fetch and finds no half blob. The `build_file` and
    `dockerfile` fuzzers learn the new forms. The test HTTP server (below) and VM check
    `vm/m9-fetch`: demo step 7. *Mechanical, for Haiku:* the constants and asserts, `E0820`/`E0821`
-   registration once the owner approves them, error pages, explain entries, goldens, the
+   registration, error pages, explain entries, goldens, the
    flags-table rows.
 3c. **Output pins** (after 3b). `.expect` and `.output_exclude` in the parser and key, the
    defaults for pinned steps; lock version 2 with `.pins` (read, write, sort, the version rule:
@@ -385,7 +388,7 @@ needs a new code.
    The simulator learns pins: a crash during the lock write leaves the old lock or the new one,
    never a mix; a drifted step never lets a dependent hit on the old key under `--locked`. A
    `lock_file` fuzzer case for `.pins`. VM check `vm/m9-pins`: demo step 8. *Mechanical:*
-   constants, `E0822`/`W0803` registration once approved, error pages, explain entries, goldens,
+   constants, `E0822`/`W0803` registration, error pages, explain entries, goldens,
    the lock-format test fixtures copied from the recorded run.
 4. **VM, CI and the corpus.** `zig build demo-m9` exactly as below (steps 7 and 8 included), every assertion a
    unit-tested pure function in `checks_m9.zig`; the second VM; the golden import bytes and
@@ -447,7 +450,10 @@ FROM alpine:3.20 AS tools
 RUN --mount=type=cache,target=/var/cache/apk apk add curl
 
 FROM alpine:3.20
-RUN adduser -D -u 10001 app
+RUN echo 'app:x:10001:10001::/home/app:/bin/sh' >> /etc/passwd && \
+    echo 'app:x:10001:' >> /etc/group && \
+    echo 'app:!:3652:0:99999:7:::' >> /etc/shadow && \
+    mkdir -p /home/app && chown 10001:10001 /home/app
 COPY --from=build /usr/local/bin/hello /usr/local/bin/hello
 COPY --chown=app:app --chmod=0644 VERSION LICENSE /etc/hello/
 USER app
@@ -471,7 +477,7 @@ The harness copies it into the guest as the ordinary user's `~/hello`. Images co
 3. **Again.** `zbx build --output json`: every step `hit`, the same digest.
 4. **Globs and excludes.** `echo more >> README.md && zbx build`: all hits, the same digest.
    `cp main.go extra.go` with a second `func` renamed so it compiles, `zbx build`: the
-   `build` stage's copy and compile steps miss, the final stage's `adduser` step hits, a new
+   `build` stage's copy and compile steps miss, the final stage's user step hits, a new
    digest. Remove `extra.go`; `zbx build` gives the first digest with every step a hit.
 5. **A second clean VM.** As `demo-m7`'s step 5: the same project, `zbx import` gives the same
    bytes, `zbx build` gives step 2's digest, which equals the golden in
@@ -602,8 +608,14 @@ For the owner's 2026-11-14 rulings, these details are the supervisor's:
     caches. That matches what `--hermetic` refuses on import.
 12. **Drift without `--locked` keeps the old pin.** The warning repeats until a person accepts
     the new output. A pin that moved by itself would not be a pin.
-13. **Bounds:** 1 GiB per fetch and 4 redirects (see the table under *Pinned fetches*). These
-    await the owner.
+13. **Bounds:** 1 GiB per fetch and 4 redirects (see the table under *Pinned fetches*), approved
+    by the owner on 2026-11-14.
+14. **Picks on the open questions** (*supervisor, 2026-11-14*): a fetch stays a copy source;
+    `--hermetic` on build stays as defined; `/var/lib/apt/lists` joins the default excludes; a pin
+    changes only by deleting it and running `zbx build --pin` (no `--repin`); `.expect` on a step
+    with `.caches` is refused; the demo writes its user's `/etc/passwd`, `/etc/group` and
+    `/etc/shadow` lines directly, and `zbx` normalises nothing in them; `E0820`–`E0822` are blame
+    external, exit 3.
 
 ## Spec notes (flagged, not changed)
 
@@ -614,8 +626,8 @@ For the owner's 2026-11-14 rulings, these details are the supervisor's:
 - **M7's "user is numeric; names are not resolved at build time"** is reversed. The build record
   stays numeric.
 - **DIAGNOSTICS.md** gives `08xx` to build; this brief takes `E0810`–`E0817` and `W0802`,
-  `W0810`, `W0811` from it, and proposes `E0820`–`E0822` and `W0803` (not registered until the
-  owner approves them). It leaves the rest of `08xx` free.
+  `W0810`, `W0811` from it, and `E0820`–`E0822` and `W0803` (approved by the owner,
+  2026-11-14). It leaves the rest of `08xx` free.
 - **What M7's timestamp rules cover, and what they miss** (checked 2026-11-14). M7 fixes
   timestamps in metadata: the store keeps no times, farm mtimes are `SOURCE_DATE_EPOCH`
   (315532800), and every step's environment has `SOURCE_DATE_EPOCH`, `TZ=UTC` and `LC_ALL=C`. It
@@ -631,21 +643,19 @@ For the owner's 2026-11-14 rulings, these details are the supervisor's:
     host, `/var/log/dpkg.log` and apt's history carry timestamps, which `/var/log` covers;
     `/var/cache/debconf` and `/var/cache/ldconfig/aux-cache` are under `/var/cache`;
     `/var/lib/dpkg/status` and `/var/lib/apt/extended_states` hold no dates; but
-    `/var/lib/apt/lists/*InRelease` hold the mirror's `Date:`, and that directory is not in the
-    defaults. *Open for the owner:* add `/var/lib/apt/lists` to the defaults (it is an index, not
-    installed content), or leave it, so that a pinned `apt-get update` drifts whenever the mirror
-    publishes.
+    `/var/lib/apt/lists/*InRelease` hold the mirror's `Date:`. *Decided (supervisor,
+    2026-11-14):* `/var/lib/apt/lists` is in the defaults, since it is an index, not installed
+    content, so a pinned `apt-get update` does not drift merely because the mirror published.
   - *Verified, and a risk to this brief's own golden:* BusyBox `adduser -D -u 10001 app`, the
-    final stage's first step in the demo, writes `app:!:<days since 1970>:0:99999:7:::` to
+    final stage's first step in the brief's first draft of the demo, writes `app:!:<days since 1970>:0:99999:7:::` to
     `/etc/shadow` and ignores `SOURCE_DATE_EPOCH`. That step is not a network step, so pins do not
     apply. Its output, and so the demo's result digest, changes from one day to the next, and
     step 5's golden would fail on any day but the one it was recorded. Neither the slice-2 check
-    nor the earlier steps notice, because they build twice on the same day. *For the supervisor
-    or owner to choose before slice 4:* rewrite the field in the Dockerfile
-    (`RUN adduser -D -u 10001 app && sed -i 's/^app:!:[0-9]*:/app:!:3652:/' /etc/shadow`), write
-    `/etc/passwd`, `/etc/group` and `/etc/shadow` lines directly instead of running `adduser`,
-    or have `zbx` normalise the `lastchg` field of `/etc/shadow` in root outputs (new behaviour,
-    and a new rule to explain).
+    nor the earlier steps notice, because they build twice on the same day. *Decided
+    (supervisor, 2026-11-14):* the demo's Dockerfile writes the `/etc/passwd`, `/etc/group` and
+    `/etc/shadow` lines directly instead of running `adduser`, with `lastchg` fixed at 3652, and
+    `zbx` normalises nothing in those files. The slice-2 check and the fixtures may still run
+    `adduser`, since they never compare across days.
   - *Not verified:* a full Debian install diffed against a second one (no `debootstrap` here);
     Python's `.pyc` files (documented: under `SOURCE_DATE_EPOCH`, `py_compile` writes
     hash-checked `.pyc` files with no time in them); programs that read the clock or a random

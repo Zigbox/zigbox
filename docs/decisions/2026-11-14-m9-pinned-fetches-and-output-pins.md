@@ -1,7 +1,7 @@
 # M9: fetches pinned by hash, and output pins for network steps
 
-*Decided 2026-11-14, by the owner (rulings 1 to 5). The details below them are the supervisor's
-and are marked as such; the codes and bounds await the owner's approval before registration.*
+*Decided 2026-11-14, by the owner (rulings 1 to 5, and the codes and bounds below). The details
+and picks below them are the supervisor's and are marked as such.*
 
 Docker builds fetch files and packages, and the same Dockerfile run a week later can give a
 different image without saying so. M9 refused `ADD <url>` outright and listed hash-pinned fetches
@@ -27,7 +27,8 @@ drift in network steps visible.
    warning names the same three, the new output is used, and everything after it rebuilds.
    `zbx build --locked` means no lock additions and every pin enforced. (No flag of that meaning
    existed on `zbx build` under another name.)
-4. **`.output_exclude`**, per step. Pinned steps default to `/var/log`, `/var/cache` and `/tmp`.
+4. **`.output_exclude`**, per step. Pinned steps default to `/var/log`, `/var/cache` and `/tmp`
+   (and `/var/lib/apt/lists`, the supervisor's pick below).
    The brief says what M7's timestamp rules cover and miss, checked against real package
    managers where that was possible.
 5. **Mirror snapshots for apt and apk are out of scope.** Drift is reported loudly, not
@@ -47,20 +48,33 @@ by `--pin` and refused as stale by `--locked`. Drift without `--locked` leaves t
 `zbx build --hermetic` is `--locked`, plus a refusal (`E0814`) of unpinned network steps and of
 cache steps. `--pin --locked` is `E0005`.
 
-**Awaiting the owner's approval (not registered, not in `constants.zig`).**
+**Approved by the owner, 2026-11-14** (registered and added to `constants.zig` in slices 3b
+and 3c).
 
 - Codes: `E0820` a fetch could not be downloaded; `E0821` the fetched bytes do not match the hash;
   `E0822` a pinned step drifted, or its pin is stale, under `--locked` or `--hermetic`; `W0803` a
-  pinned step drifted and the new output was used. The three errors are proposed as blame
-  external, exit 3.
+  pinned step drifted and the new output was used. The three errors are blame external, exit 3.
 - Bounds: `build_fetch_bytes_max` 1 GiB; `build_fetch_redirects_max` 4 (equal to
   `registry_redirects_max`); fetch URLs within `registry_url_bytes_max` (2048 bytes); the idle
   timeout reused from `net_idle_timeout_ms`; `build_output_excludes_max` 32; `lock_pins_max` 256.
 
-**Found while writing the brief, for a decision before M9 slice 4.** BusyBox `adduser`, which the
-M9 demo runs in its final stage, writes the current day into `/etc/shadow` and ignores
-`SOURCE_DATE_EPOCH`. The demo's second-VM golden digest would therefore change every day. The
-options are listed under *Spec notes* in the brief.
+**Found while writing the brief.** BusyBox `adduser`, which the first draft of the M9 demo ran
+in its final stage, writes the current day into `/etc/shadow` and ignores `SOURCE_DATE_EPOCH`, so
+the demo's second-VM golden digest would change every day.
+
+**The supervisor's picks on the open questions (2026-11-14).**
+
+1. The fetched file is a copy source, as drafted.
+2. `zbx build --hermetic` stays as defined above.
+3. `/var/lib/apt/lists` joins the default `.output_exclude` list, with `/var/log`, `/var/cache`
+   and `/tmp`: it is an index, not installed content, and its `InRelease` files carry the
+   mirror's date.
+4. A pin is changed by deleting it and running `zbx build --pin`. There is no `--repin` flag.
+5. `.expect` on a step with `.caches` is refused (`E0801`); its output depends on a cache outside
+   its key.
+6. The demo's Dockerfile writes the `/etc/passwd`, `/etc/group` and `/etc/shadow` lines directly
+   instead of running `adduser`. `zbx` normalises nothing in those files.
+7. `E0820`–`E0822` are external errors, exit 3.
 
 Detail: `docs/briefs/M9-dockerfile-import.md` (*Pinned fetches and output pins*, the mapping
 table, *Diagnostics*, slices 3b and 3c, demo steps 7 and 8, *Spec notes*),

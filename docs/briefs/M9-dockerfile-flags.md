@@ -76,7 +76,7 @@ The flag-by-flag companion to `M9-dockerfile-import.md`, from Docker's Dockerfil
 | ADD | git URL source | Clones a git repository | Refused | E0811 | Mapping, ADD git row |
 | ADD | `--keep-git-dir=<bool>` | Keeps `.git` when adding a git repo | Refused (git sources are refused) | E0811 | Supervisor, 2026-11-11 |
 | ADD | `--checksum=<hash>` on a local file | Verifies a commit SHA or `sha256:` digest | Refused (Docker allows it only for URLs) | E0811 | Supervisor, 2026-11-11 |
-| ADD | `--checksum=sha256:<hex>` on a URL | Verifies a fetched URL's digest | Supported: a `copy` step with `.fetch = .{ .url, .sha256 }`, downloaded by the parent, keyed by the hash and not the URL, mode `0600` and owner `0:0` unless `--chmod`/`--chown`; not flagged, accepted under `--hermetic` | — (supported); E0820, E0821 at build (proposed) | Pinned fetches; owner, 2026-11-14 |
+| ADD | `--checksum=sha256:<hex>` on a URL | Verifies a fetched URL's digest | Supported: a `copy` step with `.fetch = .{ .url, .sha256 }`, downloaded by the parent, keyed by the hash and not the URL, mode `0600` and owner `0:0` unless `--chmod`/`--chown`; not flagged, accepted under `--hermetic` | — (supported); E0820, E0821 at build | Pinned fetches; owner, 2026-11-14 |
 | ADD | `--checksum=sha384:`/`sha512:` on a URL | Verifies with another algorithm | Refused: only SHA-256 is kept in the store | E0811 | Pinned fetches; owner, 2026-11-14 |
 | ADD | `--unpack=true` on a URL | Extracts a fetched archive | Refused: a fetch is never unpacked | E0811 | Pinned fetches; owner, 2026-11-14 |
 | ADD | `--chmod` | Permissions, as COPY | Supported: `.chmod` | — | Mapping, ADD row (as COPY) |
