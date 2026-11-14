@@ -118,6 +118,11 @@ read, so a concurrent change to the formula makes it fail, never overwrite.
   the signing step, in mode-600 files that are deleted in the step, and in a temporary keychain
   under `$RUNNER_TEMP`, deleted in an `always()` step. The `release` environment's approval and its
   `main`-only policy are what stop a pull request from reaching them.
+- The `.p12` holds only the leaf certificate, so Apple's public Developer ID intermediates (G2,
+  and the original CA) are fetched over HTTPS in a step before the secrets, pinned by SHA-256,
+  and imported into the temporary keychain; `mac-test` does the same. The decrypted `.p12` is
+  re-wrapped through a mode-600 PEM file, not a pipe: macOS `openssl` (LibreSSL) `pkcs12 -export`
+  reads `-in` twice, and a pipe is empty the second time.
 - The temporary keychain is put on the user search list for the signing step, because `codesign`
   needs it there to resolve the chain; the `always()` step restores the list the job found. Both
   steps are the same in `mac-test`.
