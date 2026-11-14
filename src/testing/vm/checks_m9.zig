@@ -174,14 +174,18 @@ pub fn check_owner(stdout: []const u8) Error!void {
 }
 
 /// Step 6: the `tools` stage's report flags its one step with the match and the cache, and
-/// W0810 is printed. (W0811 for `# syntax` follows it, so W0810 is not the last line.)
+/// stderr carries W0810 and then W0811 (the brief has W0810 last; the dropped parts follow it).
 pub fn check_tools(stdout: []const u8, stderr: []const u8, status: u8) Error!void {
     if (status != 0) return error.ImportWrong;
     const line = "tools-1  Dockerfile:11  run  net (matched \"apk add\")  cache";
     if (!has_line(stdout, line)) return error.ImportWrong;
     if (count_step_lines(stdout) != 1) return error.ImportWrong;
     if (std.mem.indexOf(u8, stdout, "; 1 flagged") == null) return error.ImportWrong;
-    if (std.mem.indexOf(u8, stderr, "warning[ZBX-W0810]: ") == null) return error.ImportWrong;
+    const w0810 = std.mem.indexOf(u8, stderr, "warning[ZBX-W0810]: ") orelse
+        return error.ImportWrong;
+    const w0811 = std.mem.indexOf(u8, stderr, "warning[ZBX-W0811]: ") orelse
+        return error.ImportWrong;
+    if (w0810 > w0811) return error.ImportWrong;
     if (std.mem.indexOf(u8, stderr, "error[") != null) return error.ImportWrong;
 }
 
@@ -428,9 +432,9 @@ test "inspect shows the user, the workdir and the labels; its tree runs the stat
     try testing.expectError(error.InspectWrong, check_owner("10001:10001 755\n"));
 }
 
-test "the tools stage: flagged with its match and cache, W0810 printed" {
-    // Goal: step 6's import check. Method: the recorded output, then without the flag and
-    // without the warning.
+test "the tools stage: flagged with its match and cache, W0810 then W0811" {
+    // Goal: step 6's import check. Method: the recorded output, then without the flag, without
+    // either warning and with the two warnings swapped.
     const stdout = "tools-1  Dockerfile:11  run  net (matched \"apk add\")  cache\n" ++
         "imported 1 steps from 1 stages (target tools) to tools.build.zon; 1 flagged\n";
     const stderr = "warning[ZBX-W0810]: the import has steps that are not hermetic\n" ++
@@ -440,6 +444,10 @@ test "the tools stage: flagged with its match and cache, W0810 printed" {
     try testing.expectError(error.ImportWrong, check_tools(bare, stderr, 0));
     const no_w0810 = stderr[std.mem.indexOf(u8, stderr, "warning[ZBX-W0811]").?..];
     try testing.expectError(error.ImportWrong, check_tools(stdout, no_w0810, 0));
+    const no_w0811 = stderr[0..std.mem.indexOf(u8, stderr, "warning[ZBX-W0811]").?];
+    try testing.expectError(error.ImportWrong, check_tools(stdout, no_w0811, 0));
+    const swapped = "warning[ZBX-W0811]: parts\nwarning[ZBX-W0810]: steps\n";
+    try testing.expectError(error.ImportWrong, check_tools(stdout, swapped, 0));
     const both = "warning[ZBX-W0801]: a\nwarning[ZBX-W0802]: b\n";
     try check_warnings(both, &.{ "ZBX-W0801", "ZBX-W0802" });
     const one = "warning[ZBX-W0801]: a\n";

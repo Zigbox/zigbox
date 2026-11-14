@@ -9,8 +9,8 @@
 //!   3. Again, as JSON: all hits, the same digest.
 //!   4. README.md (excluded) edited: all hits. `extra.go` added: the build stage's `*.go` copy
 //!      and compile miss, `adduser` hits, a new digest; removed, the first digest, all hits.
-//!   6. The `tools` stage: flagged `net` and `cache` with W0810; `--hermetic` refuses it
-//!      (E0814, Dockerfile:11, nothing written); built with W0801 and W0802, curl runs.
+//!   6. The `tools` stage: flagged `net` and `cache`, W0810 then W0811; `--hermetic` refuses
+//!      it (E0814, Dockerfile:11, nothing written); built with W0801 and W0802, curl runs.
 //!   5. (Second VM) the same import bytes and step 2's digest, the golden of `m9_expected.zon`.
 //!
 //! Every assertion is a function of checks_m9.zig with a unit test; this file runs the commands.
