@@ -429,6 +429,10 @@ pub const World = struct {
     fork_errno: ?u16,
     kill_errno: ?u16,
     immortal: bool,
+    /// One-shot, for the PID-reuse race: the next `open_namespace` of this pid first finds the
+    /// pid reused. The container's PID 1 ended and an ordinary process of the host, PID 1 of
+    /// no namespace but in network and user namespaces of its own, now has its number.
+    reuse_pid_at_open: ?u32,
     /// How long a container's PID 1 takes to exit after SIGKILL, in milliseconds of the clock.
     /// Zero: it is a zombie at once. Otherwise it is exiting meanwhile, as the kernel's PID 1 is
     /// while `zap_pid_ns_processes` waits for the namespace's other processes to be reaped: they
@@ -540,6 +544,7 @@ pub const World = struct {
         world.fork_errno = null;
         world.kill_errno = null;
         world.immortal = false;
+        world.reuse_pid_at_open = null;
         world.pid1_exit_ms = 0;
         world.exiting_pid = 0;
         world.exiting_until_ms = 0;
@@ -1801,6 +1806,9 @@ pub const World = struct {
         pid: u32,
         kind: host.NamespaceKind,
     ) union(enum) { handle: ?host.Handle, errno: u16 } {
+        if (world.reuse_pid_at_open) |reused| {
+            if (reused == pid) world.reuse_pid(pid);
+        }
         const target = world.find_process(pid) orelse return .{ .errno = errno_noent };
         switch (target.state) {
             .running, .command, .pending => {},
@@ -1821,6 +1829,29 @@ pub const World = struct {
             .pid_namespace = target.pid_namespace,
         };
         return .{ .handle = namespace_handle_base + @as(u32, @intCast(slot)) };
+    }
+
+    /// The process `pid` becomes a stranger with the same number: not PID 1 of its namespace
+    /// (`NSpid` has one entry), in the host's PID namespace and no cgroup of the container's,
+    /// with namespaces of its own that are not the container's.
+    fn reuse_pid(world: *World, pid: u32) void {
+        assert(world.reuse_pid_at_open.? == pid);
+        world.reuse_pid_at_open = null;
+        const process = world.find_process(pid).?;
+        assert(process.state == .command);
+        process.pid_namespace = 0;
+        process.children_pid_namespace = 0;
+        var path: [48]u8 = undefined;
+        var text: [64]u8 = undefined;
+        // Cannot fail: a short path and a short line with a pid of at most ten digits.
+        const status = std.fmt.bufPrint(&path, "/proc/{d}/status", .{pid}) catch unreachable;
+        const line = std.fmt.bufPrint(&text, "State:\tS (sleeping)\nNSpid:\t{d}\n", .{pid}) catch
+            unreachable; // Same bound as above.
+        world.put_raw(status, line);
+        // Cannot fail: as above.
+        const cgroup = std.fmt.bufPrint(&path, "/proc/{d}/cgroup", .{pid}) catch unreachable;
+        world.put_raw(cgroup, "0::/user.slice/stranger.scope\n");
+        assert(world.reuse_pid_at_open == null);
     }
 
     pub fn close_namespace(world: *World, handle: host.Handle) void {

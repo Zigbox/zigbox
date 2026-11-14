@@ -143,6 +143,39 @@ test "an unknown or ended container is refused with E0402 or E0220" {
     try testing.expectEqual(@as(u32, 0), sim.world.open_listeners());
 }
 
+test "a pid reused between the lookup and the namespace opens is E0220, not a stranger's socket" {
+    // Goal: the recheck after `open_namespace`. Method: the lookup finds `web` running; at the
+    // first namespace open its PID 1 has ended and an ordinary host process holds the pid, in
+    // namespaces of its own. The opens succeed (they name the stranger's namespaces), so only
+    // the recheck can tell; the call must be E0220, fork no helper and leave nothing open.
+    var sim: HostSim = undefined;
+    try supervisor_starts(&sim, 81, .none);
+    const children = sim.world.unreaped_children();
+    const slots_before = used_process_slots(&sim);
+    const open_before = sim.open_count();
+    sim.world.reuse_pid_at_open = sim.world.processes[1].pid;
+    var diag: Diag = undefined;
+    diag.reset();
+    try testing.expectError(error.SocketFailed, make(&sim, &diag));
+    try testing.expectEqual(codes.Code.E0220, diag.code.?);
+    // The hook fired: the opens ran against the reused pid.
+    try testing.expect(sim.world.reuse_pid_at_open == null);
+    try testing.expectEqual(children, sim.world.unreaped_children());
+    try testing.expectEqual(slots_before, used_process_slots(&sim));
+    try testing.expectEqual(open_before, sim.open_count());
+    try testing.expectEqual(@as(u32, 0), sim.world.open_listeners());
+    for (sim.world.namespace_handles) |entry| try testing.expect(entry == null);
+}
+
+/// Process slots in use: a forked helper takes one and keeps it until it is reaped and gone.
+fn used_process_slots(sim: *const HostSim) u32 {
+    var count: u32 = 0;
+    for (&sim.world.processes) |*process| {
+        if (process.state != .unused) count += 1;
+    }
+    return count;
+}
+
 test "every step of the helper failing is E0611, names the step, and leaks nothing" {
     // Goal: the helper's four steps. Method: fail the first call of each step in turn with
     // EPERM; the call is E0611, the diagnostic names the step, the helper is reaped, and the
