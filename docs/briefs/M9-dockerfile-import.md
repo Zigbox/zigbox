@@ -55,7 +55,9 @@ changes to a whole root file system. M9 adds what that needs, and nothing else:
 - **`.copy` steps.** A step with `copy` and no `run` puts files into its base's tree, with
   Docker's rules: later files replace earlier ones, a source directory's contents are copied (not
   the directory), a destination ending in `/` is a directory, missing parents are created
-  `0755 0:0`. Each entry is `.{ .from = "<input path>" | "step:<name>" | "<locked ref>",
+  `0755`, owned by the entry's `.chown` owner (0:0 with none) as Docker gives them; a parent the
+  base already has keeps its own mode and owner
+  (`docs/decisions/2026-11-14-m9-copy-chown-rulings.md`). Each entry is `.{ .from = "<input path>" | "step:<name>" | "<locked ref>",
   .src = .{ ... }, .to = "/abs/path", .chown = "...", .chmod = "0644" }`. Sources from a step or
   an image may use globs (`*`, `?`, `[...]`), matched at build time against that tree. `chown`
   names are resolved as `.user` is, against the destination tree. An entry may give `.exclude`, as

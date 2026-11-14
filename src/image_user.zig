@@ -10,7 +10,9 @@
 //!
 //! A number is never looked up for itself (it need not be in the file); a name that is not found
 //! is `E0521`, naming the file. Supplementary groups are not set: a process of the container
-//! has its one group.
+//! has its one group. A passwd past `passwd_bytes_max`, or a group past `file_bytes_max`, is
+//! not read; `Workspace.too_large` names it, so a refusal says why the name was not found. A
+//! copy's `.chown` reads "1000" as BuildKit does, 1000:1000 (`build/copy_owner.uid_alone`).
 
 const std = @import("std");
 const assert = std.debug.assert;
