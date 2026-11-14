@@ -87,9 +87,6 @@ pub const sig_tag = struct {
     pub const sha256: u32 = 273;
 };
 
-/// The build host every package names, so that the file does not depend on the machine.
-pub const build_host = "zigbox-build";
-
 const region_signatures: u32 = 62;
 const region_immutable: u32 = 63;
 const header_magic = [8]u8{ 0x8e, 0xad, 0xe8, 0x01, 0, 0, 0, 0 };
@@ -362,6 +359,7 @@ fn dependency_tags(h: *Header, memory: Allocator, package: *const model.Package)
 fn main_header(
     memory: Allocator,
     package: *const model.Package,
+    build_host: []const u8,
     files: *const Files,
     payload: Payload,
 ) Error![]u8 {
@@ -502,6 +500,24 @@ pub fn split(bytes: []const u8) ?Parts {
     };
 }
 
+/// The build host a main header names (a string tag, type 6); null when it is absent, damaged
+/// or not NUL-terminated inside the data store.
+pub fn build_host_of(header: []const u8) ?[]const u8 {
+    const length = header_length(header) orelse return null;
+    const entries = std.mem.readInt(u32, header[8..12], .big);
+    const data = header[16 + @as(usize, entries) * 16 .. length];
+    for (0..entries) |index| {
+        const entry = header[16 + index * 16 ..][0..16];
+        if (std.mem.readInt(u32, entry[0..4], .big) != tag.build_host) continue;
+        if (std.mem.readInt(u32, entry[4..8], .big) != tag_type.string) return null;
+        const offset: usize = std.mem.readInt(u32, entry[8..12], .big);
+        if (offset >= data.len) return null;
+        const end = std.mem.indexOfScalarPos(u8, data, offset, 0) orelse return null;
+        return data[offset..end];
+    }
+    return null;
+}
+
 /// The bytes of a binary tag (type 7) in a header, such as the OpenPGP signature (268) in a
 /// signature header; null when the tag is absent or the header is damaged.
 pub fn binary_tag(header: []const u8, wanted: u32) ?[]const u8 {
@@ -522,6 +538,9 @@ pub fn binary_tag(header: []const u8, wanted: u32) ?[]const u8 {
 }
 
 pub const Options = struct {
+    /// The build host the header names (`RPMTAG_BUILDHOST`, dnf's `rpm:buildhost`): a fixed name
+    /// of the publisher's, not the machine's, so the file does not depend on where it was built.
+    build_host: []const u8,
     /// An OpenPGP signature (binary packet) over `header_bytes`, to place in the signature header.
     header_signature: ?[]const u8 = null,
 };
@@ -533,15 +552,21 @@ pub fn file_name(memory: Allocator, package: *const model.Package) Error![]u8 {
     }) catch return error.OutOfMemory;
 }
 
-/// The main header's bytes: the data a header signature covers.
-pub fn header_bytes(memory: Allocator, package: *const model.Package) Error![]u8 {
-    const parts = split(try write(memory, package, .{})).?;
+/// The main header's bytes: the data a header signature covers. `build_host` is the one the
+/// signed rpm will name (`Options.build_host`).
+pub fn header_bytes(
+    memory: Allocator,
+    package: *const model.Package,
+    build_host: []const u8,
+) Error![]u8 {
+    const parts = split(try write(memory, package, .{ .build_host = build_host })).?;
     return memory.dupe(u8, parts.main_header) catch return error.OutOfMemory;
 }
 
 /// The whole `.rpm`, for a validated package.
 pub fn write(memory: Allocator, package: *const model.Package, options: Options) Error![]u8 {
     try model.validate(package);
+    try model.check_line(options.build_host);
     const files = try file_arrays(memory, package);
     const cpio = try archive.cpio_write(memory, files.cpio);
     const compressed = try archive.gzip(memory, cpio);
@@ -549,6 +574,7 @@ pub fn write(memory: Allocator, package: *const model.Package, options: Options)
     const main = try main_header(
         memory,
         package,
+        options.build_host,
         &files,
         .{ .cpio_bytes = cpio.len, .digest_hex = digest },
     );
@@ -564,13 +590,16 @@ pub fn write(memory: Allocator, package: *const model.Package, options: Options)
     return std.mem.concat(memory, u8, &parts) catch return error.OutOfMemory;
 }
 
+/// The options the golden `testdata/sample.rpm` was written with.
+const sample_options: Options = .{ .build_host = "zigbox-build" };
+
 test "the sample rpm matches the golden bytes captured from rpm 4.18" {
     // Goal: pin the whole file. `testdata/sample.rpm` was written by this module, then checked in
     // this container with `rpm -K` (digests OK), `rpm -qpi`, `rpm -qp --dump`, and an install
     // under `--root` followed by `rpm -V`; their output is in `testdata/sample.rpm.txt`.
     var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
     defer arena.deinit();
-    const bytes = try write(arena.allocator(), &@import("deb.zig").sample, .{});
+    const bytes = try write(arena.allocator(), &@import("deb.zig").sample, sample_options);
     try std.testing.expectEqualSlices(u8, @embedFile("testdata/sample.rpm"), bytes);
 }
 
@@ -613,8 +642,8 @@ test "two builds are byte-identical" {
     // Goal: reproducibility; no clock, no hash-map order, no allocator address in the output.
     var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
     defer arena.deinit();
-    const first = try write(arena.allocator(), &@import("deb.zig").sample, .{});
-    const second = try write(arena.allocator(), &@import("deb.zig").sample, .{});
+    const first = try write(arena.allocator(), &@import("deb.zig").sample, sample_options);
+    const second = try write(arena.allocator(), &@import("deb.zig").sample, sample_options);
     try std.testing.expectEqualSlices(u8, first, second);
 }
 
@@ -624,9 +653,10 @@ test "a header signature leaves the main header and its digest unchanged" {
     var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
     defer arena.deinit();
     const memory = arena.allocator();
-    const plain = split(try write(memory, &@import("deb.zig").sample, .{})).?;
+    const plain = split(try write(memory, &@import("deb.zig").sample, sample_options)).?;
     const fake_signature: [70]u8 = @splat(0xaa);
     const signed_bytes = try write(memory, &@import("deb.zig").sample, .{
+        .build_host = sample_options.build_host,
         .header_signature = &fake_signature,
     });
     const signed = split(signed_bytes).?;
@@ -643,4 +673,24 @@ test "a header signature leaves the main header and its digest unchanged" {
 pub fn archive_bytes(memory: Allocator, package: *const model.Package) Error!u64 {
     const files = try file_arrays(memory, package);
     return (try archive.cpio_write(memory, files.cpio)).len;
+}
+
+test "the build host is the caller's, read back from the header, and must be one line" {
+    // Goal: a second publisher's rpm names its own build host, `build_host_of` reads it back for
+    // dnf, and a value that is not one line within the bound is refused, at the bound and past.
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const memory = arena.allocator();
+    const sample = &@import("deb.zig").sample;
+    const own = split(try write(memory, sample, .{ .build_host = "cube-build" })).?;
+    try std.testing.expectEqualStrings("cube-build", build_host_of(own.main_header).?);
+    const golden = split(@embedFile("testdata/sample.rpm")).?;
+    try std.testing.expectEqualStrings("zigbox-build", build_host_of(golden.main_header).?);
+    try std.testing.expect(build_host_of(golden.signature_header) == null);
+    const longest: [constants.package_summary_bytes_max]u8 = @splat('h');
+    _ = try write(memory, sample, .{ .build_host = &longest });
+    for ([_][]const u8{ "", longest ++ "h", "a\nb" }) |bad| {
+        try std.testing.expectError(error.BadText, write(memory, sample, .{ .build_host = bad }));
+        try std.testing.expectError(error.BadText, header_bytes(memory, sample, bad));
+    }
 }
