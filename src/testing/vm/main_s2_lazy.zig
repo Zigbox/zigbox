@@ -160,7 +160,12 @@ const lazy_served =
     \\ZP=$(pgrep -o -f "^$Z run --lazy")
     \\echo "lazy: zbx pid ${ZP:-none}, container pid ${SP:-none}"
     \\if [ -n "$SP" ] && [ -n "$ZP" ]; then
-    \\  ls -l /proc/$ZP/fd | grep -q -- '-> /dev/fuse$' && ok "zbx holds /dev/fuse" ||
+    \\  # By device number (misc 10:229): the setup child opened it in the container's mount
+    \\  # namespace, so the link's path is the one seen from there.
+    \\  FD=""; for f in /proc/$ZP/fd/*; do
+    \\    [ "$(stat -L -c '%F %t:%T' "$f" 2>/dev/null)" = "character special file a:e5" ] && FD=$f
+    \\  done
+    \\  [ -n "$FD" ] && ok "zbx holds /dev/fuse ($FD)" ||
     \\    fail "zbx holds /dev/fuse" "$(ls -l /proc/$ZP/fd)"
     \\  N=$(conns); [ $N -gt $BASE ] && ok "a FUSE connection ($BASE -> $N)" ||
     \\    fail "a FUSE connection" "$BASE -> $N"
@@ -213,7 +218,7 @@ const lazy_compare =
     \\  fail "the eager run materialized" "nothing in $CACHE"
     \\$U $Z run --lazy $D -- sh /s2-list.sh > /tmp/lazy.list 2>&1; S=$?
     \\[ $S = 0 ] && ok "lazy listing" || fail "lazy listing" "exit $S: $(tail -3 /tmp/lazy.list)"
-    \\echo "lazy: listing: $(wc -l < /tmp/lazy.list) entries" \\
+    \\echo "lazy: listing: $(wc -l < /tmp/lazy.list) entries" \
     \\  "$(grep -c ' -> ' /tmp/lazy.list) links"
     \\grep '^/big\|^/cold\|^/etc/alpine-release' /tmp/lazy.list | sed 's/^/lazy: lazy: /'
     \\cmp -s /tmp/eager.list /tmp/lazy.list && ok "the whole tree is the same eager and lazy" || {

@@ -389,8 +389,8 @@ test "a lazy run serves the tree: nothing is materialized, the lower layer is th
 
 test "a lazy run refused: by its server, by the kernel's FUSE, or by a serve that fails" {
     // Goal: every refusal is a coded start failure with nothing left open. Method: a prepare
-    // that refuses (its own code, and nothing spawned), a kernel without FUSE (the mount step's
-    // diagnostic, never served), and a serve that fails (the serving step's diagnostic).
+    // that refuses (its own code, and nothing spawned), a kernel without FUSE (E0205 naming the
+    // mount step, never served), and a serve that fails (E0205 naming the serving step and why).
     var diag: Diag = undefined;
     {
         const digest = try setup(41);
@@ -411,7 +411,12 @@ test "a lazy run refused: by its server, by the kernel's FUSE, or by a serve tha
         const text = digest.text();
         const spec = spec_for(&text, "lazy-3", false);
         try testing.expectError(error.StartFailed, start_lazy(&spec, &fake, &diag));
-        try testing.expect(diag.code != null);
+        try testing.expectEqual(@as(?codes.Code, .E0205), diag.code);
+        try testing.expectEqual(@as(u32, 1), diag.causes.count);
+        try testing.expectEqualStrings(
+            "mounting the image's tree over FUSE failed: operation not permitted (EPERM)",
+            diag.last_cause().?,
+        );
         try testing.expectEqual(@as(u32, 0), fake.served);
         try testing.expect(!sim.world.listener_leaked);
         try testing.expectEqual(@as(u32, 0), sim.open_count());
@@ -423,7 +428,13 @@ test "a lazy run refused: by its server, by the kernel's FUSE, or by a serve tha
         const text = digest.text();
         const spec = spec_for(&text, "lazy-4", false);
         try testing.expectError(error.StartFailed, start_lazy(&spec, &fake, &diag));
-        try testing.expect(diag.code != null);
+        try testing.expectEqual(@as(?codes.Code, .E0205), diag.code);
+        try testing.expectEqual(@as(u32, 1), diag.causes.count);
+        try testing.expectEqualStrings(
+            "serving the image's tree to the container over FUSE failed: the kernel's FUSE is " ++
+                "older than protocol 7.31, or its first request was not INIT",
+            diag.last_cause().?,
+        );
         try testing.expectEqual(@as(u32, 1), fake.served);
         try testing.expect(!sim.world.listener_leaked);
         try testing.expectEqual(@as(u32, 0), sim.open_count());
@@ -460,8 +471,17 @@ test "a lazy run with a failure at every host call ends coded, with nothing left
             };
         }
         sim.faults.fail_call_index = null;
-        if (sim.world.unreaped_children() != 0) continue; // A faulted final wait.
-        testing.expect(!sim.world.listener_leaked and sim.open_count() == 0) catch |failure| {
+        // A faulted final wait leaves its one child unreaped (the model has no retry); the
+        // parent's descriptors, the FUSE one included, are closed all the same.
+        testing.expect(sim.world.unreaped_children() <= 1) catch |failure| {
+            std.debug.print("call {d}: {d} unreaped\n", .{ index, sim.world.unreaped_children() });
+            return failure;
+        };
+        testing.expect(!sim.world.listener_leaked) catch |failure| {
+            std.debug.print("call {d}: listener leaked\n", .{index});
+            return failure;
+        };
+        testing.expectEqual(@as(u32, 0), sim.open_count()) catch |failure| {
             std.debug.print("call {d}: leaked\n", .{index});
             return failure;
         };
