@@ -83,11 +83,15 @@ pub fn check_import(stdout: []const u8, stderr: []const u8, status: u8) Error!vo
     if (!has_line(stdout, footer)) return error.ImportWrong;
     if (!std.mem.startsWith(u8, stderr, "warning[ZBX-W0811]: ")) return error.ImportWrong;
     if (std.mem.indexOf(u8, stderr, "error[") != null) return error.ImportWrong;
-    const wants = [_][]const u8{
-        "EXPOSE:19 (label org.zigbox.import.expose)",
-        "HEALTHCHECK:20 (label org.zigbox.import.healthcheck)",
+    // W0811's cause is cut after a few entries, so the labels are read from the report's list
+    // of what did not carry over, which W0811 summarizes.
+    const labels = [_][]const u8{
+        "  Dockerfile:19  EXPOSE: label org.zigbox.import.expose",
+        "  Dockerfile:20  HEALTHCHECK: label org.zigbox.import.healthcheck",
     };
-    if (!contains_all(stderr, &wants)) return error.ImportWrong;
+    for (labels) |label| {
+        if (!has_line(stdout, label)) return error.ImportWrong;
+    }
 }
 
 /// A file the guest wrote is the golden, byte for byte.
@@ -323,6 +327,7 @@ const testing = std.testing;
 const digest_a = "b3:" ++ @as([64]u8, @splat('a'));
 const digest_b = "b3:" ++ @as([64]u8, @splat('b'));
 
+/// Recorded from the binary on 2026-11-14 (slice 3 and the copy chown work merged).
 const import_stdout =
     "build-1  Dockerfile:5  copy\n" ++
     "build-2  Dockerfile:6  copy\n" ++
@@ -332,15 +337,17 @@ const import_stdout =
     "stage2-3  Dockerfile:16  copy\n" ++
     "not carried over as instructions:\n" ++
     "  Dockerfile:1  # syntax: ignored: zbx reads the file\n" ++
+    "  Dockerfile:16  COPY --chown: kept, but zbx build refuses it (E0802) for now\n" ++
+    "  Dockerfile:16  COPY --chmod: kept, but zbx build refuses it (E0802) for now\n" ++
     "  Dockerfile:19  EXPOSE: label org.zigbox.import.expose\n" ++
     "  Dockerfile:20  HEALTHCHECK: label org.zigbox.import.healthcheck\n" ++
     footer ++ "\n";
 
 const import_stderr =
     "warning[ZBX-W0811]: parts of the Dockerfile did not carry over\n" ++
-    "  cause  not carried over: # syntax:1 (ignored: zbx reads the file), EXPOSE:19\n" ++
-    "         (label org.zigbox.import.expose), HEALTHCHECK:20 (label\n" ++
-    "         org.zigbox.import.healthcheck)\n" ++
+    "  cause  not carried over: # syntax:1 (ignored: zbx reads the file), COPY\n" ++
+    "         --chown:16 (kept, but zbx build refuses it (E0802) for now), COPY\n" ++
+    "         --chmod:16 (kept, but zbx build refuses it (E0802) for now)...\n" ++
     "  fix    nothing to do unless one matters; the report says what became of each\n";
 
 test "the import report: each step with its line, the footer, W0811 naming the labels" {
@@ -356,8 +363,9 @@ test "the import report: each step with its line, the footer, W0811 naming the l
     const lost = import_stdout["build-1  Dockerfile:5  copy\n".len..];
     try testing.expectError(error.ImportWrong, check_import(lost, import_stderr, 0));
     try testing.expectError(error.ImportWrong, check_import(import_stdout, "", 0));
-    const no_health = import_stderr[0..std.mem.indexOf(u8, import_stderr, "HEALTH").?];
-    try testing.expectError(error.ImportWrong, check_import(import_stdout, no_health, 0));
+    const health = comptime std.mem.indexOf(u8, import_stdout, "  Dockerfile:20").?;
+    const no_health = import_stdout[0..health] ++ footer ++ "\n";
+    try testing.expectError(error.ImportWrong, check_import(no_health, import_stderr, 0));
 }
 
 const row_names = [_][]const u8{
