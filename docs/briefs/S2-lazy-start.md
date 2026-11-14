@@ -1,8 +1,8 @@
 # Brief: S2 · Lazy start (`zbx run --lazy`)
 
-*Draft for review (2026-11-14). The supervisor reviews it; the owner rules on the open questions at
-the end. Codes and bounds below are proposals until the owner approves them. The owner approved
-S2 as a goal on 2026-11-14; the brief does not schedule it against S1.*
+*Decided (2026-11-14). The owner approved S2 as a goal, and all thirteen owner's calls at the end as
+recommended, on 2026-11-14. Codes and bounds below are approved as those calls. Sequencing: S2 (lazy
+start) is built after Zigbox 0.5.2, and S1 (microVM isolation) is deferred until S2 ships.*
 
 Read these first:
 - `AGENTS.md`, `REVIEW.md`, `docs/STYLE.md` and `DIAGNOSTICS.md`.
@@ -417,7 +417,7 @@ earlier demo green (`vm/all-*`), the release binary still under its size limit, 
 - **gc.** As in decision 6: partial images are rooted, their present objects and chunks kept, the
   missing ones not damage.
 
-## Open questions for the owner (each with a recommendation)
+## Owner's calls (approved 2026-11-14, as recommended)
 
 1. **Mechanism for namespace containers.** *Recommendation:* rootless FUSE with a server in Zig on
    `/dev/fuse`, mounted by `mount(2)` in the run's namespaces; no `fusermount3`.

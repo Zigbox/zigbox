@@ -1,11 +1,13 @@
-# S2 lazy start: the brief's design, proposed for the owner's ruling
+# S2 lazy start: the brief's design, approved by the owner
 
-*Decided 2026-11-14, by the S2 brief session, as proposals; the owner rules on each in a later
-decision file, which supersedes the matching item here.*
+*Decided 2026-11-14, by the S2 brief session. A later decision file supersedes the matching item here.*
 
-The owner approved S2 (lazy start) as a goal on 2026-11-14. The brief is
+The owner approved S2 (lazy start) as a goal on 2026-11-14. The owner approved all thirteen owner's
+calls as recommended on 2026-11-14. The brief is
 [docs/briefs/S2-lazy-start.md](../briefs/S2-lazy-start.md); it holds the detail and the reasons.
-The proposals:
+The decided design:
+
+**Sequencing.** The owner ruled on 2026-11-14 that S2 (lazy start) is built after Zigbox 0.5.2, and that S1 (microVM isolation) is deferred until S2 ships. Call 2's split of S1's EROFS writer is done when S1 starts, not now. Call 13 stands: Zigcube's supervisor checks the `zigbox.lazy.Source` interface against Zigcube's swarm before slice 3.
 
 1. **Namespace containers use rootless FUSE**, a read-only server written in Zig against
    `/dev/fuse` (no libc, no libfuse, no `fusermount3`), mounted with `mount(2)` by the setup child
@@ -28,7 +30,7 @@ The proposals:
 5. **Sources**: local store, then peers (a `zigbox.lazy.Source` interface Zigcube's agent supplies
    in-process; Zigbox never imports Zigcube), then the registry by `Range` on **layer writer
    version 2** (fully flushed deflate at chunk boundaries, the index after the tar's end-of-archive,
-   one gzip member), proposed as the default for every push. Images without an index are pulled
+   one gzip member), the default for every push. Images without an index are pulled
    whole with `W1201`.
 6. **UI and state**: `--lazy` opt-in and experimental; a background fill; image records version 4
    (`partial`); a lazy run's record takes the next free run record version; gc roots partial images.
