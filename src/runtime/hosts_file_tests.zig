@@ -23,8 +23,8 @@ fn no_leak(sim: *const HostSim, before: *const sim_run.Baseline) !void {
 /// `zbx run --net NET --hosts-file PATH`, with a file at `hosts_path`.
 fn run_with(sim: *HostSim, net: [:0]const u8, path: [:0]const u8) u8 {
     const args = [_][:0]const u8{
-        "zbx", "run", "--rootfs", rootfs, "--net", net, "--hosts-file", path,
-        "--name", "box-1", "--", "sh",
+        "zbx",    "run",   "--rootfs", rootfs, "--net", net, "--hosts-file", path,
+        "--name", "box-1", "--",       "sh",
     };
     return sim_run.run_cli(sim, &args);
 }
@@ -81,5 +81,5 @@ test "--hosts-file: every refusal is E0612 on one line and starts nothing" {
         try testing.expect(!sim.world.processes[1].execd);
         try no_leak(&sim, &before);
     }
-    try testing.expect(@intFromEnum(codes.Code.E0612) != 0);
+    try testing.expect(@backingInt(codes.Code.E0612) != 0);
 }

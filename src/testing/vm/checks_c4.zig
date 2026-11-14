@@ -16,6 +16,8 @@ pub const Error = error{
     NetWrong,
     /// The workload reached the supervisor, or could write the hosts file.
     HostileWrong,
+    /// A hosts file given with `--hosts-file` was not read, followed in place, or refused.
+    HostsWrong,
     /// A refusal is missing, not coded, or not one line.
     RefusalWrong,
 };
@@ -103,6 +105,28 @@ pub fn check_hostile(output: []const u8) Error!void {
     if (!expect_value(output, "SUPERVISOR:", "PONG")) return wrong;
     if (!expect_value(output, "CONTAINER:", "1")) return wrong;
     if (!is_failure(output, "WRITE-ETC-HOSTS:")) return wrong;
+}
+
+/// `--hosts-file` (ZB-6): bound read-only, an in-place rewrite is seen inside, a rename over the
+/// path is not (the bind holds the old file), and three bad paths are refused with E0612.
+pub fn check_hosts(output: []const u8) Error!void {
+    const wrong = error.HostsWrong;
+    if (!expect_value(output, "HOSTS-RC:", "0")) return wrong;
+    if (!expect_value(output, "HOSTS-ERR:", "")) return wrong;
+    const cat = value_of(output, "HOSTS-CAT:") orelse return wrong;
+    if (!std.mem.eql(u8, cat, "127.0.0.1 localhost|10.9.9.9 svc.mesh|")) return wrong;
+    if (!expect_value(output, "HOSTS-GETENT:", "['10.9.9.9']")) return wrong;
+    if (!expect_value(output, "HOSTS-INPLACE:", "['10.9.9.10']")) return wrong;
+    if (!expect_value(output, "HOSTS-RENAMED:", "['10.9.9.10']")) return wrong;
+    if (!is_failure(output, "HOSTS-WRITE:")) return wrong;
+    const keys = [_][]const u8{
+        "HOSTS-REFUSED-NET:", "HOSTS-REFUSED-MISSING:", "HOSTS-REFUSED-DIR:",
+    };
+    for (keys) |key| {
+        const rest = value_of(output, key) orelse return wrong;
+        if (std.mem.indexOf(u8, rest, "error[ZBX-E0612]") == null) return wrong;
+        if (std.mem.indexOf(u8, rest, "errno") != null) return wrong;
+    }
 }
 
 const Refusal = struct { label: []const u8, code: []const u8 };

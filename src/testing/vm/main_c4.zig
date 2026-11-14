@@ -74,6 +74,12 @@ const scripts = [_]Script{
         .text = @embedFile("c4/refuse.py"),
         .check = checks.check_refusals,
     },
+    .{
+        .title = "STEP 7: a given hosts file at /etc/hosts, read-only (ZB-6)",
+        .name = "hosts",
+        .text = @embedFile("c4/hosts.py"),
+        .check = checks.check_hosts,
+    },
 };
 
 pub fn main(init: std.process.Init) !u8 {
@@ -198,7 +204,7 @@ test "every guest script fits a put_file" {
 
 test "the scripts print the markers the checks look for" {
     const markers = [_][]const u8{
-        "START-RC", "LISTEN-A", "DIAL", "OTHER-EXEC", "KILL-ALL", "REFUSED",
+        "START-RC", "LISTEN-A", "DIAL", "OTHER-EXEC", "KILL-ALL", "REFUSED", "HOSTS-RC",
     };
     for (scripts, markers) |script, marker| {
         try std.testing.expect(std.mem.indexOf(u8, script.text, marker) != null);
