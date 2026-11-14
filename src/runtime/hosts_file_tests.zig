@@ -5,6 +5,7 @@
 
 const std = @import("std");
 const codes = @import("../diag/codes.zig");
+const constants = @import("../constants.zig");
 const host_sim = @import("../host_sim.zig");
 const sim_run = @import("sim_run.zig");
 
@@ -32,6 +33,7 @@ fn run_with(sim: *HostSim, net: [:0]const u8, path: [:0]const u8) u8 {
 const host_files = sim_run.files ++ [_]host_sim.File{
     .{ .path = hosts_path, .content = "127.0.0.1 localhost\n" },
     .{ .path = "/srv/mesh/dir", .content = "", .mode = 0o040755 },
+    .{ .path = "/srv/mesh/locked", .content = "127.0.0.1 localhost\n", .readable = false },
 };
 
 fn prepared(sim: *HostSim, seed: u64) void {
@@ -39,6 +41,7 @@ fn prepared(sim: *HostSim, seed: u64) void {
     sim.world.add_node("/srv/mesh", .dir);
     sim.world.add_node(hosts_path, .file);
     sim.world.add_node("/srv/mesh/dir", .dir);
+    sim.world.add_node("/srv/mesh/locked", .file);
 }
 
 test "--hosts-file: the file is bound read-only at /etc/hosts and nothing is staged for it" {
@@ -64,13 +67,15 @@ test "--hosts-file: the file is bound read-only at /etc/hosts and nothing is sta
 }
 
 test "--hosts-file: every refusal is E0612 on one line and starts nothing" {
-    // Goal: the refusals. Method: a container with a network, a relative path, a missing file
-    // and a directory are each refused with the code; no process is started and nothing leaks.
+    // Goal: the refusals. Method: a container with a network, a relative path, a missing file,
+    // a directory and a file this user cannot read are each refused with the code; no process
+    // is started and nothing leaks.
     const cases = [_]struct { net: [:0]const u8, path: [:0]const u8 }{
         .{ .net = "host", .path = hosts_path },
         .{ .net = "none", .path = "mesh/hosts" },
         .{ .net = "none", .path = "/srv/mesh/absent" },
         .{ .net = "none", .path = "/srv/mesh/dir" },
+        .{ .net = "none", .path = "/srv/mesh/locked" },
     };
     for (cases) |case| {
         var sim: HostSim = undefined;
@@ -83,4 +88,32 @@ test "--hosts-file: every refusal is E0612 on one line and starts nothing" {
         try no_leak(&sim, &before);
     }
     try testing.expect(@backingInt(codes.Code.E0612) != 0);
+}
+
+test "--hosts-file: a bind of the given file that fails is a failed start, not a note" {
+    // Goal: the hosts bind is not tolerant, unlike the generated files' steps. Method: fail the
+    // first call of each plan step in turn until the failure lands on the bind of the given file
+    // (`-v` names the step); that run is an error, exit 125, starts no command and leaks nothing.
+    const args = [_][:0]const u8{
+        "zbx",    "-v",    "run", "--rootfs", rootfs, "--net", "none", "--hosts-file", hosts_path,
+        "--name", "box-1", "--",  "sh",
+    };
+    var found = false;
+    for (0..constants.plan_steps_max) |index| {
+        var sim: HostSim = undefined;
+        prepared(&sim, 83);
+        const before = sim_run.baseline(&sim);
+        sim.faults.fail_step = @intCast(index);
+        sim.faults.fail_step_errno = 1;
+        const code = sim_run.run_cli(&sim, &args);
+        const err = sim.stderr();
+        if (std.mem.indexOf(u8, err, "step   bind_etc_file") == null) continue;
+        if (!std.mem.startsWith(u8, err, "error[")) continue; // A generated file's note.
+        try testing.expectEqual(@as(u8, 125), code);
+        try testing.expect(!sim.world.processes[1].execd);
+        try no_leak(&sim, &before);
+        found = true;
+        break;
+    }
+    try testing.expect(found);
 }

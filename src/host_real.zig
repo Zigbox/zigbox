@@ -67,7 +67,10 @@ pub threadlocal var errno_last: u16 align(16) = 0;
 
 pub const HostReal = struct {
     /// Files opened and not yet closed. Pair assertion for the simulator's handle table: a
-    /// close without a matching open is a programmer error.
+    /// close without a matching open is a programmer error. Changed only atomically
+    /// (`count_open`, `count_close`), so that a `HostReal` shared by mistake between threads
+    /// keeps a true count instead of tripping an assertion. Sharing is still not supported:
+    /// the rule is one `HostReal` per thread (src/zigbox.zig).
     open_count: u32 = 0,
     /// Directory under which the overlay probe makes its scratch directory.
     scratch_parent: [:0]const u8 = "/tmp",
@@ -181,6 +184,26 @@ pub const HostReal = struct {
         return @ptrCast(@alignCast(context));
     }
 
+    /// Counts `count` newly opened descriptors.
+    pub fn count_open(self: *HostReal, count: u32) void {
+        assert(count > 0);
+        assert(count <= 2);
+        const before = @atomicRmw(u32, &self.open_count, .Add, count, .monotonic);
+        assert(before < std.math.maxInt(u32) - count);
+    }
+
+    /// Counts one closed descriptor; a close with nothing open is a programmer error.
+    pub fn count_close(self: *HostReal) void {
+        const before = @atomicRmw(u32, &self.open_count, .Sub, 1, .monotonic);
+        assert(before > 0);
+        assert(before != std.math.maxInt(u32));
+    }
+
+    /// The descriptors open now, read atomically.
+    pub fn opened_now(self: *const HostReal) u32 {
+        return @atomicLoad(u32, &self.open_count, .monotonic);
+    }
+
     fn open_read(context: *anyopaque, path: [:0]const u8) host.Error!host.Handle {
         const self = from_context(context);
         assert(path.len > 0);
@@ -189,7 +212,7 @@ pub const HostReal = struct {
         const result = linux.open(path.ptr, flags, 0);
         try check(result);
         assert(result <= std.math.maxInt(i32)); // A descriptor, not an errno-shaped value.
-        self.open_count += 1;
+        self.count_open(1);
         const descriptor: i32 = @intCast(result);
         return @intCast(descriptor);
     }
@@ -197,7 +220,7 @@ pub const HostReal = struct {
     fn read(context: *anyopaque, handle: host.Handle, buffer: []u8) host.Error!u32 {
         const self = from_context(context);
         // Descriptor 0 is standard input (`--password-stdin`), which no open_read produced.
-        if (handle != 0) assert(self.open_count > 0);
+        if (handle != 0) assert(self.opened_now() > 0);
         assert(buffer.len > 0);
         assert(buffer.len <= constants.file_bytes_max);
         const descriptor: i32 = @intCast(handle);
@@ -209,8 +232,8 @@ pub const HostReal = struct {
 
     fn close(context: *anyopaque, handle: host.Handle) void {
         const self = from_context(context);
-        assert(self.open_count > 0);
-        self.open_count -= 1;
+        assert(self.opened_now() > 0);
+        self.count_close();
         assert(handle <= std.math.maxInt(i32)); // A descriptor, as open_read produced it.
         const descriptor: i32 = @intCast(handle);
         // A close error on a read-only descriptor loses no data and cannot be acted on.
@@ -353,7 +376,7 @@ pub const HostReal = struct {
         const self = from_context(context);
         var descriptors: [2]i32 = undefined;
         try check(linux.pipe2(&descriptors, .{ .CLOEXEC = true }));
-        self.open_count += 2;
+        self.count_open(2);
         assert(descriptors[0] >= 0);
         assert(descriptors[1] >= 0);
         return .{ .read = @intCast(descriptors[0]), .write = @intCast(descriptors[1]) };
@@ -376,7 +399,7 @@ pub const HostReal = struct {
             errno_last = errno_connect; // The close must not hide why the connect failed.
             return err;
         };
-        self.open_count += 1;
+        self.count_open(1);
         return @intCast(descriptor);
     }
 
@@ -389,7 +412,7 @@ pub const HostReal = struct {
         timeout_ms: u32,
     ) host.Error!u32 {
         const self = from_context(context);
-        assert(self.open_count > 0);
+        assert(self.opened_now() > 0);
         assert(buffer.len > 0);
         const descriptor: i32 = @intCast(handle);
         var poll_set = [1]linux.pollfd{.{ .fd = descriptor, .events = linux.POLL.IN }};
@@ -668,7 +691,7 @@ pub const HostReal = struct {
         var descriptors: [2]i32 = undefined;
         const kind = linux.SOCK.STREAM | linux.SOCK.CLOEXEC;
         try check(linux.socketpair(linux.AF.UNIX, kind, 0, &descriptors));
-        self.open_count += 2;
+        self.count_open(2);
         assert(descriptors[0] >= 0);
         assert(descriptors[1] >= 0);
         return .{ .read = @intCast(descriptors[0]), .write = @intCast(descriptors[1]) };
@@ -693,7 +716,7 @@ pub const HostReal = struct {
         check(linux.listen(descriptor, constants.listen_backlog)) catch |err| {
             return close_failed(descriptor, err);
         };
-        self.open_count += 1;
+        self.count_open(1);
         return @intCast(descriptor);
     }
 
@@ -703,7 +726,7 @@ pub const HostReal = struct {
         const self = from_context(context);
         const created = linux.socket(linux.AF.INET, linux.SOCK.STREAM | linux.SOCK.CLOEXEC, 0);
         try check(created);
-        self.open_count += 1;
+        self.count_open(1);
         const descriptor: i32 = @intCast(created);
         assert(descriptor >= 0);
         return @intCast(descriptor);
@@ -792,7 +815,7 @@ pub const HostReal = struct {
             return error.IoFailed;
         }
         assert(control.fd >= 0);
-        self.open_count += 1;
+        self.count_open(1);
         return @intCast(control.fd);
     }
 
@@ -1453,7 +1476,7 @@ pub const HostReal = struct {
         if (theirs.ino == ours.ino) return null;
         const opened = linux.open(target.ptr, .{ .ACCMODE = .RDONLY, .CLOEXEC = true }, 0);
         try check(opened);
-        self.open_count += 1;
+        self.count_open(1);
         return @intCast(opened);
     }
 
@@ -1499,7 +1522,7 @@ pub const HostReal = struct {
             errno_last = errno_peer; // The close must not hide why the peer could not be had.
             return err;
         };
-        self.open_count += 2;
+        self.count_open(2);
         return .{ .master = @intCast(master), .peer = @intCast(peer) };
     }
 

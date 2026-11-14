@@ -110,8 +110,10 @@ pub const exec_signal = exec.signal;
 /// (`docs/decisions/2026-11-14-zigcube-c4-requests.md`): `container_socket(host, name, .tcp4,
 /// &diag)` returns a close-on-exec descriptor the caller owns, or `error.SocketFailed` with the
 /// diagnostic in `diag`. Callable from any thread, many times, by a process that did not start
-/// the container; it needs the same state directory and uid as `exec_start`. The container must
-/// have a network of its own (`--net none` or the default pasta one), not `--net host`.
+/// the container; it needs the same state directory and uid as `exec_start`. Threads: each
+/// thread passes a `Host` of its own (one `HostReal` per thread); a `Host` is not shared. The
+/// container must have been started with `--net none` (the default): `--net host` and
+/// `--net user` (pasta) are refused with E0610.
 pub const container_socket_module = @import("runtime/container_socket.zig");
 pub const container_socket = container_socket_module.open;
 pub const ContainerSocketKind = container_socket_module.Kind;

@@ -20,6 +20,8 @@ const constants = @import("../constants.zig");
 const host_mod = @import("../host.zig");
 const Diag = @import("../diag/diag.zig").Diag;
 const exec = @import("exec.zig");
+const exec_diagnose = @import("exec_diagnose.zig");
+const lifecycle = @import("lifecycle.zig");
 const records = @import("records.zig");
 const socket_diagnose = @import("socket_diagnose.zig");
 const sync = @import("sync.zig");
@@ -35,7 +37,8 @@ pub const Kind = enum { tcp4 };
 /// What the helper needs, in the caller's memory; the fork gives it its own copy.
 const Context = struct {
     host: Host,
-    user: host_mod.Handle,
+    /// Null when the container shares the caller's user namespace: nothing to join.
+    user: ?host_mod.Handle,
     net: host_mod.Handle,
     /// The caller's end is `read`, the helper's `write`.
     channel: host_mod.Pipe,
@@ -45,14 +48,21 @@ const Context = struct {
 };
 
 /// Makes a socket in the running container `name` and returns it: a descriptor of the caller's,
-/// close-on-exec, that the caller owns and closes. Safe to call from any thread and many times;
-/// each call forks and reaps one helper, and leaves nothing open on success or failure.
+/// close-on-exec, that the caller owns and closes. Callable from any thread, many times, each
+/// thread with a `Host` of its own; each call forks and reaps one helper, and leaves nothing
+/// open on success or failure.
 pub fn open(host: Host, name: []const u8, kind: Kind, diag: *Diag) Error!host_mod.Handle {
     assert(diag.code == null);
     assert(name.len > 0);
     assert(kind == .tcp4);
     var record: records.Parsed = undefined;
     exec.find_running(host, name, &record, diag) catch return error.SocketFailed;
+    // A record that predates the network field (null) is judged by its namespaces below.
+    if (record.network) |network| switch (network) {
+        .none => {},
+        .host => return refuse(diag, name, .host),
+        .user => return refuse(diag, name, .user),
+    };
     const user = host.open_namespace(record.pid, .user) catch |err| {
         step_diag(diag, name, .join_user, host, err);
         return error.SocketFailed;
@@ -63,11 +73,22 @@ pub fn open(host: Host, name: []const u8, kind: Kind, diag: *Diag) Error!host_mo
         return error.SocketFailed;
     };
     defer if (net) |opened| host.close(opened);
-    if (user == null or net == null) {
-        socket_diagnose.shares_host_network(diag, name);
+    // The pid was the container's PID 1 when the lookup ran; it could have ended and the pid
+    // been reused before the namespace files were opened. Asked again now that they are open
+    // (they pin the namespaces they name), a yes means they are the container's.
+    if (!lifecycle.alive(host, record.pid, record.scope_slice())) {
+        exec_diagnose.not_running(diag, name, false, &record);
         return error.SocketFailed;
     }
-    return run_helper(host, name, user.?, net.?, diag);
+    const opened_net = net orelse return refuse(diag, name, .host);
+    return run_helper(host, name, user, opened_net, diag);
+}
+
+fn refuse(diag: *Diag, name: []const u8, why: socket_diagnose.NoNetwork) Error {
+    assert(diag.code == null);
+    socket_diagnose.no_socket_network(diag, name, why);
+    assert(diag.code.? == .E0610);
+    return error.SocketFailed;
 }
 
 fn step_diag(diag: *Diag, name: []const u8, step: Step, host: Host, err: host_mod.Error) void {
@@ -79,19 +100,19 @@ fn step_diag(diag: *Diag, name: []const u8, step: Step, host: Host, err: host_mo
 fn run_helper(
     host: Host,
     name: []const u8,
-    user: host_mod.Handle,
+    user: ?host_mod.Handle,
     net: host_mod.Handle,
     diag: *Diag,
 ) Error!host_mod.Handle {
-    assert(user != net);
+    if (user) |opened| assert(opened != net);
     const channel = host.channel() catch |err| {
-        step_diag(diag, name, .make_socket, host, err);
+        step_diag(diag, name, .start_helper, host, err);
         return error.SocketFailed;
     };
     const report = host.pipe() catch |err| {
         host.close(channel.read);
         host.close(channel.write);
-        step_diag(diag, name, .make_socket, host, err);
+        step_diag(diag, name, .start_helper, host, err);
         return error.SocketFailed;
     };
     var context: Context = .{
@@ -104,7 +125,7 @@ fn run_helper(
     };
     const pid = host.fork_child(false, helper_entry, &context) catch |err| {
         close_all(host, &context);
-        step_diag(diag, name, .make_socket, host, err);
+        step_diag(diag, name, .start_helper, host, err);
         return error.SocketFailed;
     };
     // The helper has its own copies of its ends: ours would keep the ends from ever closing.
@@ -131,18 +152,19 @@ fn collect(
 ) Error!host_mod.Handle {
     defer host.close(context.channel.read);
     defer host.close(context.report.read);
-    const status = host.wait_for(pid) catch |err| {
-        step_diag(diag, name, .send_socket, host, err);
+    const status = reap(host, pid) catch |err| {
+        step_diag(diag, name, .reap_helper, host, err);
         return error.SocketFailed;
     };
-    const failed = read_failure(host, context.report.read);
-    if (failed == null and status == .exited and status.exited == constants.exit_ok) {
-        return host.receive_handle(context.channel.read) catch |err| {
-            step_diag(diag, name, .send_socket, host, err);
-            return error.SocketFailed;
-        };
+    if (status == .exited) {
+        if (status.exited == constants.exit_ok) {
+            return host.receive_handle(context.channel.read) catch |err| {
+                step_diag(diag, name, .send_socket, host, err);
+                return error.SocketFailed;
+            };
+        }
     }
-    const record = failed orelse sync.Record{
+    const record = read_failure(host, context.report.read) orelse sync.Record{
         .kind = .failure,
         .step = @backingInt(Step.send_socket),
         .errno = constants.errno_io,
@@ -153,14 +175,26 @@ fn collect(
     return error.SocketFailed;
 }
 
-/// The failure record the helper wrote, if it wrote one. The write end is closed, so a helper
-/// that wrote nothing is end of file.
+/// Waits for the helper. A wait that fails is tried once more, so that a passing fault does not
+/// leave the helper a zombie; one that fails twice is a real error, such as `ECHILD` when the
+/// caller ignores SIGCHLD and the kernel reaped the helper itself.
+fn reap(host: Host, pid: host_mod.Pid) host_mod.Error!host_mod.ExitStatus {
+    assert(pid > 0);
+    return host.wait_for(pid) catch return host.wait_for(pid);
+}
+
+/// The failure record the helper wrote, if it wrote one. Read only after the helper failed and
+/// was reaped, so its record, if any, is already in the pipe: the read never waits for end of
+/// file, which a copy of the write end in another thread's child (forked between our `pipe`
+/// and its `exec`, or never exec'ing) could hold off for as long as that child lives.
 fn read_failure(host: Host, report_read: host_mod.Handle) ?sync.Record {
     var bytes: [constants.sync_record_bytes]u8 = undefined;
     var length: usize = 0;
     for (0..bytes.len + constants.eintr_retries_max) |_| {
         if (length == bytes.len) break;
-        const count = host.read_some(report_read, bytes[length..]) catch return null;
+        const count = host.read_timeout(report_read, bytes[length..], report_wait_ms) catch {
+            return null;
+        };
         if (count == 0) return null;
         length += count;
     }
@@ -170,6 +204,9 @@ fn read_failure(host: Host, report_read: host_mod.Handle) ?sync.Record {
     return record;
 }
 
+/// How long the read of a reaped helper's record may wait: its bytes are there or never come.
+const report_wait_ms: u32 = 1;
+
 /// The helper's body: a failure is a record, then exit code `child_exit_setup_failed`.
 fn helper_entry(raw: *anyopaque) u8 {
     const context: *Context = @ptrCast(@alignCast(raw));
@@ -178,7 +215,7 @@ fn helper_entry(raw: *anyopaque) u8 {
     // The caller's ends: closed here so that end of file reaches both sides.
     host.close(context.channel.read);
     host.close(context.report.read);
-    for (std.enums.values(Step)) |step| {
+    for (socket_diagnose.helper_steps) |step| {
         host.begin_step(@backingInt(step));
         helper_step(context, step) catch {
             fail(context, step, host.last_errno());
@@ -192,9 +229,10 @@ fn helper_entry(raw: *anyopaque) u8 {
 
 fn helper_step(context: *Context, step: Step) host_mod.Error!void {
     const host = context.host;
-    assert(context.user != context.net);
+    if (context.user) |user| assert(user != context.net);
     switch (step) {
-        .join_user => try host.join_namespace(context.user, .user),
+        // A container in the caller's own user namespace: nothing to join.
+        .join_user => if (context.user) |user| try host.join_namespace(user, .user),
         .join_net => try host.join_namespace(context.net, .net),
         .make_socket => {
             context.socket = try host.tcp4_socket();
@@ -203,6 +241,7 @@ fn helper_step(context: *Context, step: Step) host_mod.Error!void {
             try host.send_handle(context.channel.write, context.socket);
             host.close(context.socket);
         },
+        .start_helper, .reap_helper => unreachable, // Not in `helper_steps`: the caller's.
     }
 }
 

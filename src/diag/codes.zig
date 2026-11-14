@@ -3131,13 +3131,15 @@ pub const registry = [_]Entry{
         .code = .E0610,
         .severity = .@"error",
         .blame = .user,
-        .summary = "the container has no network of its own to make a socket in",
+        .summary = "a socket can be made only in a container with --net none",
         .explanation =
-        \\A socket made for a container lives in the container's network namespace. A
-        \\container started with --net host shares the host's network namespace, so a
-        \\socket made "in" it would be the host's: that would open a port on the host
-        \\under the container's name, and zbx refuses it. Only --net none and the
-        \\default pasta network give a container a namespace of its own.
+        \\A socket made for a container lives in the container's network namespace.
+        \\zbx makes one only in a container started with --net none (the default),
+        \\whose namespace holds nothing but its own loopback. A container started with
+        \\--net host shares the host's network namespace, so a socket made "in" it
+        \\would be the host's: that would open a port on the host under the
+        \\container's name. A container with --net user reaches the outside through
+        \\pasta, and sockets in it are not offered.
         \\
         \\Start the container with --net none (or without --net) and ask again.
         ,
@@ -3153,7 +3155,9 @@ pub const registry = [_]Entry{
         \\with SCM_RIGHTS. One of those steps failed; the step and the system error
         \\are in the message. Usual causes: the caller is not the user that started
         \\the container (joining its user namespace is then refused), the container
-        \\ended while the helper ran, or the caller has no free descriptor.
+        \\ended while the helper ran, or the caller has no free descriptor. A caller
+        \\that ignores SIGCHLD has its helper reaped by the kernel, and the wait for
+        \\it fails with ECHILD: leave SIGCHLD at its default to use this call.
         \\
         \\The helper is a child of the caller and never enters the container's PID
         \\namespace, so nothing inside the container can see or signal it.
@@ -3169,12 +3173,15 @@ pub const registry = [_]Entry{
         \\one zbx generates. It is refused for a container with a network (a
         \\container with --net user or --net host resolves names through DNS, and a
         \\hosts file would shadow it), for a path that is not absolute, and for a
-        \\path that is missing, unreadable or not a regular file when the container
-        \\starts.
+        \\path that is missing, not a regular file, or not readable by you when the
+        \\container starts.
         \\
         \\The file itself is bound, not a copy: rewriting it in place is seen inside
-        \\at once, replacing it by renaming another file over it is not.
-        \\/etc/resolv.conf and /etc/hostname are generated as before.
+        \\at once, replacing it by renaming another file over it is not. The path is
+        \\not kept in the container's run record, so nothing that reads the record
+        \\(zbx ps, a bundle, an agent that adopts the container) learns it, and a
+        \\container run again gets it only if it is given again. /etc/resolv.conf and
+        \\/etc/hostname are generated as before.
         ,
     },
     .{

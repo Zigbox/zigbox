@@ -806,7 +806,7 @@ const build_cases = [_]Case{
     .{ .code = .E0801, .args = &build_graph_args, .prepare = prepare_build_missing, .exit = 1 },
     .{ .code = .E0802, .args = &build_graph_args, .prepare = prepare_build_cycle, .exit = 1 },
     .{ .code = .E0803, .args = &build_graph_args, .prepare = prepare_build_escape, .exit = 1 },
-    .{ .code = .E0610, .args = &.{}, .direct = socket_shares_host_network, .exit = 1 },
+    .{ .code = .E0610, .args = &.{}, .direct = socket_no_network, .exit = 1 },
     .{ .code = .E0611, .args = &.{}, .direct = socket_step_failed, .exit = 1 },
     .{ .code = .E0612, .args = &.{}, .direct = hosts_file_missing, .exit = 1 },
     .{ .code = .E0804, .args = &.{}, .direct = build_base_not_locked, .exit = 1 },
@@ -2577,8 +2577,8 @@ fn build_network_steps(diag: *Diag) void {
     build_diagnose.network_steps(diag, "fetch, vendor", 2);
 }
 
-fn socket_shares_host_network(diag: *Diag) void {
-    socket_diagnose.shares_host_network(diag, "web");
+fn socket_no_network(diag: *Diag) void {
+    socket_diagnose.no_socket_network(diag, "web", .host);
 }
 
 fn socket_step_failed(diag: *Diag) void {

@@ -276,9 +276,16 @@ pub fn listen_options_problem(network: Network, send_given: bool) ?ListenOptions
     return null;
 }
 
-/// What is wrong with a `--hosts-file` (ZBX-E0612). The first two are known from the options
+/// What is wrong with a `--hosts-file` (ZBX-E0612). The first three are known from the options
 /// alone; the rest from looking at the host.
-pub const HostsFileProblem = enum { network_not_none, not_absolute, too_long, missing, not_a_file };
+pub const HostsFileProblem = enum {
+    network_not_none,
+    not_absolute,
+    too_long,
+    missing,
+    not_a_file,
+    unreadable,
+};
 
 /// The problems of a hosts file path that need no look at the host.
 pub fn hosts_file_problem(network: Network, path: []const u8) ?HostsFileProblem {
@@ -298,6 +305,8 @@ test "hosts_file_problem names the network first, then the path" {
     @memset(&long, 'a');
     long[0] = '/';
     try testing.expectEqual(HostsFileProblem.too_long, hosts_file_problem(.none, &long).?);
+    // At the bound exactly, the path is accepted; one byte past it (above), it is not.
+    try testing.expect(hosts_file_problem(.none, long[0..constants.mount_path_bytes_max]) == null);
     try testing.expect(hosts_file_problem(.none, "/srv/mesh/hosts") == null);
 }
 

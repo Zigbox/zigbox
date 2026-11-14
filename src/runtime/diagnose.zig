@@ -1321,8 +1321,9 @@ pub fn hosts_file_invalid(diag: *Diag, problem: spec.HostsFileProblem, path: []c
         .too_long => diag.cause("--hosts-file '{s}' is longer than {d} bytes", .{
             echo, constants.mount_path_bytes_max,
         }),
-        .missing => diag.cause("--hosts-file '{s}' does not exist or cannot be read", .{echo}),
+        .missing => diag.cause("--hosts-file '{s}' does not exist", .{echo}),
         .not_a_file => diag.cause("--hosts-file '{s}' is not a regular file", .{echo}),
+        .unreadable => diag.cause("--hosts-file '{s}' cannot be read by this user", .{echo}),
     }
     diag.fix(.{
         .sentence = "give the absolute path of a hosts file you own, with --net none:",

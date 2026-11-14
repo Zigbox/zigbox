@@ -979,22 +979,36 @@ fn check_rootfs(host: Host, rootfs: []const u8, handle: *Handle, diag: *Diag) Er
     handle.rootfs_len = @intCast(rootfs.len);
 }
 
-/// A run with `--hosts-file` (ZB-6): `--net none`, an absolute path, and a regular file now. The
-/// plan binds the path at /etc/hosts, so a failure there is a failed start, not a note.
+/// A run with `--hosts-file` (ZB-6): `--net none`, an absolute path, and a regular file this
+/// user can read now. The plan binds the path at /etc/hosts, so a failure there is a failed
+/// start, not a note.
 fn check_hosts_file(host: Host, container: *const Spec, diag: *Diag) Error!void {
     assert(diag.code == null);
     const path = container.hosts_file;
     if (path.len == 0) return;
-    const problem = spec_mod.hosts_file_problem(container.network, path) orelse blk: {
-        const found = host.stat(path) catch break :blk spec_mod.HostsFileProblem.missing;
-        const regular = found.mode & 0o170000 == 0o100000;
-        break :blk if (regular) null else spec_mod.HostsFileProblem.not_a_file;
-    };
+    const problem = spec_mod.hosts_file_problem(container.network, path) orelse
+        hosts_file_look(host, path);
     if (problem) |found| {
         diagnose.hosts_file_invalid(diag, found, path);
         return error.StartFailed;
     }
     assert(container.network == .none);
+}
+
+/// What the host says about a well-formed hosts file path: there, a regular file, readable. The
+/// first byte is read (an empty file reads none), which never blocks on a regular file; a FIFO
+/// would, and is refused before the read as not a regular file.
+fn hosts_file_look(host: Host, path: []const u8) ?spec_mod.HostsFileProblem {
+    assert(path.len > 0);
+    assert(path.len <= constants.mount_path_bytes_max);
+    const found = host.stat(path) catch |err| switch (err) {
+        error.NotFound => return .missing,
+        else => return .unreadable, // A directory on the path this user cannot search.
+    };
+    if (found.mode & 0o170000 != 0o100000) return .not_a_file;
+    var first: [1]u8 = undefined;
+    _ = host.read_prefix(path, &first) catch return .unreadable;
+    return null;
 }
 
 /// A run with `--listen`: it needs `--net none`, and no forwards (which imply `--net user`). The
