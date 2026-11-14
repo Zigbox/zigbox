@@ -415,8 +415,8 @@ fn sample(fixture: *fixture_mod.Fixture) !Digest {
     return fixture.finish_root(.{ .mode = 0o750, .uid = 7, .gid = 8, .xattrs = &xattrs.empty });
 }
 
-fn built(region_out: *[]align(8) u8, nodes_room: u32, limit: u32, root: Digest) BuildError!Table {
-    const held = fixture_mod.table_memory(testing.allocator, nodes_room, limit) catch unreachable;
+fn built(region_out: *[]align(8) u8, nodes_room: u32, limit: u32, root: Digest) !Table {
+    const held = try fixture_mod.table_memory(testing.allocator, nodes_room, limit);
     region_out.* = held.region;
     var table: Table = undefined;
     table.init(held.memory);
@@ -497,7 +497,12 @@ test "a tree that lies about a file, or names a missing tree, is refused" {
     region = &.{};
 
     const content = Digest.of("hello");
-    const id = object.object_id(content, .{ .mode = 0o644, .uid = 0, .gid = 0, .xattrs = &xattrs.empty });
+    const id = object.object_id(content, .{
+        .mode = 0o644,
+        .uid = 0,
+        .gid = 0,
+        .xattrs = &xattrs.empty,
+    });
     writer = fixture.begin();
     try writer.begin("a", .file, 0o644, 0, 0, &xattrs.empty);
     try writer.end_file(5, content, id);

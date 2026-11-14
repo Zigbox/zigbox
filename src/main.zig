@@ -155,6 +155,12 @@ test {
     _ = @import("pull.zig");
     _ = @import("pull_report.zig");
     _ = @import("fuzz_pull_report.zig");
+    _ = @import("fuzz_fuse.zig");
+    _ = @import("fuse/abi.zig");
+    _ = @import("fuse/nodes.zig");
+    _ = @import("fuse/ops.zig");
+    _ = @import("fuse/resolver.zig");
+    _ = @import("fuse/fixture.zig");
     _ = @import("layer/reader.zig");
     _ = @import("layer/tar.zig");
     _ = @import("layer/apply.zig");

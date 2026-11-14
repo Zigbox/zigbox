@@ -13,6 +13,7 @@ const tree = @import("../store/tree.zig");
 const xattrs = @import("../store/xattrs.zig");
 const nodes = @import("nodes.zig");
 const ops = @import("ops.zig");
+const abi = @import("abi.zig");
 
 const Digest = digest_mod.Digest;
 
@@ -152,7 +153,7 @@ pub const Fixture = struct {
         return error.NotFound;
     }
 
-    fn read(context: *anyopaque, id: Digest, index: u32, out: []u8) ops.ChunkError!usize {
+    fn read(context: *anyopaque, id: Digest, index: u32, out: []u8) ops.ChunkError!u32 {
         const fixture: *Fixture = @ptrCast(@alignCast(context));
         assert(out.len >= fixture.chunk_bytes);
         fixture.chunk_reads += 1;
@@ -162,7 +163,7 @@ pub const Fixture = struct {
         const bytes = fixture.content_of(id) orelse return error.Unavailable;
         const start = @as(u64, index) * fixture.chunk_bytes;
         if (start >= bytes.len) return error.Unavailable;
-        const length: usize = @intCast(@min(bytes.len - start, fixture.chunk_bytes));
+        const length: u32 = @intCast(@min(bytes.len - start, fixture.chunk_bytes));
         @memcpy(out[0..length], bytes[@intCast(start)..][0..length]);
         return length;
     }
@@ -177,4 +178,40 @@ pub fn table_memory(
     const bytes: usize = @intCast(nodes.memory_bytes(nodes_room, arena_limit));
     const region = try allocator.alignedAlloc(u8, .@"8", bytes);
     return .{ .region = region, .memory = nodes.carve(region, nodes_room, arena_limit) };
+}
+
+/// A request of `opcode` for `nodeid`, its body the concatenation of `parts`, written into `out`.
+pub fn request(
+    out: []u8,
+    opcode: abi.Opcode,
+    nodeid: u64,
+    unique: u64,
+    parts: []const []const u8,
+) []u8 {
+    assert(out.len >= @sizeOf(abi.InHeader));
+    var length: u32 = @sizeOf(abi.InHeader);
+    for (parts) |part| {
+        assert(length + part.len <= out.len);
+        @memcpy(out[length..][0..part.len], part);
+        length += @intCast(part.len);
+    }
+    const header: abi.InHeader = .{
+        .len = length,
+        .opcode = @backingInt(opcode),
+        .unique = unique,
+        .nodeid = nodeid,
+        .uid = 0,
+        .gid = 0,
+        .pid = 1,
+        .total_extlen = 0,
+        .padding = 0,
+    };
+    @memcpy(out[0..@sizeOf(abi.InHeader)], std.mem.asBytes(&header));
+    return out[0..length];
+}
+
+/// The out-header of a reply.
+pub fn reply_header(reply: []const u8) abi.OutHeader {
+    assert(reply.len >= @sizeOf(abi.OutHeader));
+    return std.mem.bytesToValue(abi.OutHeader, reply[0..@sizeOf(abi.OutHeader)]);
 }
