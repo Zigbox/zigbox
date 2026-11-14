@@ -7,7 +7,7 @@ rc, o, e = zx("run", "-d", "--rootfs", R, "--name", "c4m", "--net", "none",
 say("HOSTS-RC", rc)
 say("HOSTS-ERR", e)
 def hx(*a):
-    return S.run([Z, "exec", "c4m", "--", *a], capture_output=True, text=True, timeout=60)
+    return S.run([Z, "exec", "c4m", "--", *a], capture_output=True, text=True, timeout=20, stdin=S.DEVNULL)
 say("HOSTS-CAT", hx("cat", "/etc/hosts").stdout.replace("\n", "|"))
 say("HOSTS-GETENT", hx("getent", "hosts", "svc.mesh").stdout.split()[:1])
 open(H, "w").write("127.0.0.1 localhost\n10.9.9.10 svc.mesh\n")

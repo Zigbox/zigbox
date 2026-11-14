@@ -2,7 +2,7 @@ import subprocess as S
 Z = "/home/demo/zbx"
 R = "/home/demo/alpine"
 def zx(*a):
-    r = S.run([Z, *a], capture_output=True, text=True, timeout=90)
+    r = S.run([Z, *a], capture_output=True, text=True, timeout=20, stdin=S.DEVNULL)
     return r.returncode, r.stdout.strip(), r.stderr.strip()
 def ex(*a):
     return zx("exec", "c4", "--", *a)
