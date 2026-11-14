@@ -36,13 +36,24 @@ inherit it unless the caller clears the flag.
   namespace files are opened by that pid. Then the container is checked alive again (PID 1 is
   still the container's, by its PID namespace and cgroup): the open files pin the namespaces,
   so a pid that ended and was reused between the lookup and the opens is caught, and the call
-  is E0220. Without the check a reused pid could hand out a socket in a stranger's namespace. Zigbox starts no thread and does no namespace
-  work in a thread. The helper has no `PR_SET_PDEATHSIG` (it fires on the exit of the creating
-  *thread*) and cannot block: three system calls and a send into an empty socketpair.
+  is E0220. Without the check a reused pid could hand out a socket in a stranger's namespace.
+  A simulator test reuses the pid at the first namespace open and expects E0220 and no helper.
+  **Known limit, hosts with no cgroup scope** (no delegated cgroup v2, so the record has no
+  scope): the check can then only ask that the pid be PID 1 of *some* PID namespace and not a
+  zombie. A pid reused by another container's PID 1, of the same uid (the namespace files of
+  another uid's process cannot be opened), passes it, and the socket is made in that
+  container. The same holds for `exec` on such hosts, whose lookup this is. Closing it means
+  pinning the process start time (`/proc/PID/stat` field 22) in the run record, a record
+  format change (a version bump read by older and newer releases) left to its own change; on
+  a host with a scope, the cgroup check already rules out another container.
+  Zigbox starts no thread and does no namespace work in a thread. The helper has no
+  `PR_SET_PDEATHSIG` (it fires on the exit of the creating *thread*) and cannot block: three
+  system calls and a send into an empty socketpair.
 - **The workload cannot reach it.** The helper is not in the container's PID namespace, so
   `kill`, `ptrace` and `/proc` inside the container never see it. It lives for microseconds.
   The demo's step 5 tries `kill` and `ptrace` on the supervisor's pid from inside (ESRCH both)
-  and samples `/proc` inside while 3000 helpers come and go (the count never changes).
+  and samples `/proc` inside while 3000 helpers come and go (the count never changes); at
+  least three samples must start after the first helper and end before the last.
 - **fd ownership.** The returned descriptor is the caller's alone, close-on-exec; Zigbox keeps
   nothing. It stays valid after the container's PID 1 exits (a socket in a dead namespace, as
   any socket is), and across the caller's adoption by a restarted agent: it is an ordinary
