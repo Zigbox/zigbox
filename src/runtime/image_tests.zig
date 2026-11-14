@@ -321,3 +321,149 @@ test "removing a container's layers takes everything and is no error when there 
     try image.remove_container(sim.interface(), &handle.facts, &image_ws, "never", &diag);
     try testing.expectEqual(@as(u32, 0), sim.open_count());
 }
+
+/// A lazy run's server in the model: counts the calls, and closes the descriptor it is given.
+const FakeLazy = struct {
+    prepared: u32 = 0,
+    served: u32 = 0,
+    tree: ?Digest = null,
+    refuse_prepare: bool = false,
+    refuse_serve: bool = false,
+
+    fn lazy(fake: *FakeLazy) lib.Lazy {
+        return .{ .context = fake, .prepare = prepare, .serve = serve };
+    }
+
+    fn prepare(context: *anyopaque, tree: Digest, diag: *Diag) bool {
+        const fake: *FakeLazy = @ptrCast(@alignCast(context));
+        fake.prepared += 1;
+        fake.tree = tree;
+        if (!fake.refuse_prepare) return true;
+        diag.raise(.E0422);
+        diag.cause("the fake refuses", .{});
+        return false;
+    }
+
+    fn serve(context: *anyopaque, device: @import("../host.zig").Handle) !void {
+        const fake: *FakeLazy = @ptrCast(@alignCast(context));
+        fake.served += 1;
+        sim.interface().close(device);
+        if (fake.refuse_serve) return error.Unsupported;
+    }
+};
+
+fn start_lazy(spec: *const lib.Spec, fake: *FakeLazy, diag: *Diag) !void {
+    diag.reset();
+    const options: lib.StartOptions = .{ .image_workspace = &image_ws, .lazy = fake.lazy() };
+    try lib.start(sim.interface(), spec, options, &handle, diag);
+}
+
+test "a lazy run serves the tree: nothing is materialized, the lower layer is the mount point" {
+    // Goal: S2 slice 4's run path. Method: the server is prepared with the tree's digest and
+    // served once, the farm is never made, the container has a lower directory, and the overlay
+    // is mounted; the run ends with nothing left open.
+    const digest = try setup(40);
+    world_dirs("lazy-1");
+    var fake: FakeLazy = .{};
+    var diag: Diag = undefined;
+    const text = digest.text();
+    const spec = spec_for(&text, "lazy-1", false);
+    try start_lazy(&spec, &fake, &diag);
+    try testing.expectEqual(@as(u32, 1), fake.prepared);
+    try testing.expectEqual(@as(u32, 1), fake.served);
+    try testing.expect(fake.tree.?.eql(digest));
+    const hex = digest.hex();
+    var farm: [200]u8 = undefined;
+    const cache = std.fmt.bufPrint(&farm, support.user_store ++ "/cache/{s}", .{&hex});
+    try testing.expect(files.kind_of(cache catch unreachable) == null); // Short.
+    try testing.expectEqual(
+        @as(?@import("../store/fs.zig").FileKind, .dir),
+        files.kind_of(state ++ "/lazy-1/lower"),
+    );
+    const child = &sim.world.processes[1];
+    try testing.expect(sim.world.tables[child.table].has(.overlay, state ++ "/lazy-1/merged"));
+    _ = lib.wait(&handle);
+    try testing.expect(!sim.world.listener_leaked);
+    try testing.expectEqual(@as(u32, 0), sim.open_count());
+}
+
+test "a lazy run refused: by its server, by the kernel's FUSE, or by a serve that fails" {
+    // Goal: every refusal is a coded start failure with nothing left open. Method: a prepare
+    // that refuses (its own code, and nothing spawned), a kernel without FUSE (the mount step's
+    // diagnostic, never served), and a serve that fails (the serving step's diagnostic).
+    var diag: Diag = undefined;
+    {
+        const digest = try setup(41);
+        world_dirs("lazy-2");
+        var fake: FakeLazy = .{ .refuse_prepare = true };
+        const text = digest.text();
+        const spec = spec_for(&text, "lazy-2", false);
+        try testing.expectError(error.StartFailed, start_lazy(&spec, &fake, &diag));
+        try testing.expectEqual(@as(?codes.Code, .E0422), diag.code);
+        try testing.expectEqual(@as(u32, 0), fake.served);
+        try testing.expectEqual(@as(u32, 0), sim.open_count());
+    }
+    {
+        const digest = try setup(42);
+        world_dirs("lazy-3");
+        sim.world.fuse_refused = true;
+        var fake: FakeLazy = .{};
+        const text = digest.text();
+        const spec = spec_for(&text, "lazy-3", false);
+        try testing.expectError(error.StartFailed, start_lazy(&spec, &fake, &diag));
+        try testing.expect(diag.code != null);
+        try testing.expectEqual(@as(u32, 0), fake.served);
+        try testing.expect(!sim.world.listener_leaked);
+        try testing.expectEqual(@as(u32, 0), sim.open_count());
+    }
+    {
+        const digest = try setup(43);
+        world_dirs("lazy-4");
+        var fake: FakeLazy = .{ .refuse_serve = true };
+        const text = digest.text();
+        const spec = spec_for(&text, "lazy-4", false);
+        try testing.expectError(error.StartFailed, start_lazy(&spec, &fake, &diag));
+        try testing.expect(diag.code != null);
+        try testing.expectEqual(@as(u32, 1), fake.served);
+        try testing.expect(!sim.world.listener_leaked);
+        try testing.expectEqual(@as(u32, 0), sim.open_count());
+    }
+}
+
+test "a lazy run with a failure at every host call ends coded, with nothing left open" {
+    // Goal: no leak on any path of the lazy plan. Method: count a good run's calls, then fail
+    // each in turn: the start fails with a code or the run ends, and no descriptor stays open.
+    var fake: FakeLazy = .{};
+    var diag: Diag = undefined;
+    const digest = try setup(44);
+    world_dirs("lazy-5");
+    const text = digest.text();
+    const spec = spec_for(&text, "lazy-5", false);
+    const calls_before = sim.call_count;
+    try start_lazy(&spec, &fake, &diag);
+    _ = lib.wait(&handle);
+    const calls = sim.call_count - calls_before;
+    try testing.expect(calls > 10);
+    var index: u32 = 0;
+    while (index < calls) : (index += 1) {
+        _ = try setup(44);
+        world_dirs("lazy-5");
+        fake = .{};
+        sim.faults.fail_call_index = sim.call_count + index;
+        sim.faults.fail_call_error = error.IoFailed;
+        if (start_lazy(&spec, &fake, &diag)) {
+            _ = lib.wait(&handle);
+        } else |_| {
+            testing.expect(diag.code != null) catch |failure| {
+                std.debug.print("call {d}: no code\n", .{index});
+                return failure;
+            };
+        }
+        sim.faults.fail_call_index = null;
+        if (sim.world.unreaped_children() != 0) continue; // A faulted final wait.
+        testing.expect(!sim.world.listener_leaked and sim.open_count() == 0) catch |failure| {
+            std.debug.print("call {d}: leaked\n", .{index});
+            return failure;
+        };
+    }
+}

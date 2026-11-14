@@ -195,9 +195,8 @@ fn run_step(child: *const Context, step: *const Step, state: *State) Error!void 
         .remove_mount_stage_dir, .remove_mount_stage_file, .mount_user_tmpfs => unreachable,
         .make_pipes, .spawn, .deny_setgroups, .write_gid_map, .write_uid_map => unreachable,
         .run_newuidmap, .run_newgidmap, .spawn_keeper, .start_scope => unreachable,
-        .start_pasta, .await_pasta => unreachable, // The parent's steps.
-        .release_child, .await_report, .reap => unreachable, // The parent's steps.
-        .receive_listener, .serve_fuse => unreachable, // The parent's step.
+        .start_pasta, .await_pasta, .release_child, .await_report, .reap => unreachable,
+        .receive_listener, .serve_fuse => unreachable, // These two lines: the parent's steps.
     }
 }
 

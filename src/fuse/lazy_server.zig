@@ -79,6 +79,7 @@ pub const Server = struct {
 
     pub fn lazy(server: *Server) run.Lazy {
         assert(server.state == .idle);
+        assert(server.fd == -1);
         return .{ .context = server, .prepare = prepare, .serve = serve };
     }
 
@@ -100,6 +101,7 @@ pub const Server = struct {
     fn prepare(context: *anyopaque, tree: Digest, diag: *Diag) bool {
         const server: *Server = @ptrCast(@alignCast(context));
         assert(server.state == .idle);
+        assert(server.fd == -1);
         assert(diag.code == null);
         const store = &server.store;
         if (!store.locate(server.host)) {
@@ -119,6 +121,8 @@ pub const Server = struct {
             store_diagnose.tree_damaged(diag, tree, build_failure(err));
             return false;
         };
+        assert(store.chunk_bytes > 0);
+        assert(store.chunk_bytes <= constants.store_chunk_bytes);
         server.cache.init(server.threaded.io(), &server.cache_memory, store.chunk_bytes);
         server.server = .{
             .table = &server.table,
@@ -152,6 +156,8 @@ pub const Server = struct {
         assert(server.state == .prepared);
         assert(server.fd == -1);
         server.fd = @intCast(device);
+        assert(server.fd >= 0);
+        assert(server.store.chunk_bytes > 0);
         for (&server.threads, &server.sources) |*thread, *source| {
             thread.real = .{};
             thread.store.at(thread.real.interface(), server.store.root_text());
@@ -159,6 +165,7 @@ pub const Server = struct {
             thread.store.owners = .{ .outside = server.owners };
             thread.chunks = resolver.StoreChunks.init(&thread.store, &thread.io, &thread.scratch);
             source.* = thread.chunks.chunks();
+            assert(thread.store.chunk_bytes == server.server.chunk_bytes);
         }
         server.serving = serve_mod.Serving.init(
             &server.server,

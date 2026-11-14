@@ -3833,7 +3833,9 @@ fn lazy_of(refusing: *RefusingLazy) runtime.Lazy {
 }
 
 fn lazy_finish() void {
-    if (lazy_server) |server| server.finish();
+    const server = lazy_server orelse return;
+    server.finish();
+    assert(server.fd == -1);
 }
 
 /// The server of a lazy run without `main`'s: it builds no table and refuses the descriptor,
@@ -3842,18 +3844,21 @@ const RefusingLazy = struct {
     host: Host,
 
     fn lazy(refusing: *RefusingLazy) runtime.Lazy {
+        assert(lazy_server == null);
         return .{ .context = refusing, .prepare = prepare, .serve = serve };
     }
 
     fn prepare(context: *anyopaque, tree: digest_prefix.Digest, diag: *Diag) bool {
         _ = context;
         _ = tree;
+        assert(lazy_server == null);
         assert(diag.code == null);
         return true;
     }
 
     fn serve(context: *anyopaque, device: host_mod.Handle) host_mod.Error!void {
         const refusing: *RefusingLazy = @ptrCast(@alignCast(context));
+        assert(lazy_server == null);
         refusing.host.close(device);
         return error.Unsupported;
     }

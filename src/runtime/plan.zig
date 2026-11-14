@@ -2002,6 +2002,39 @@ test "a run of a tree mounts the overlay where a rootfs is bound, and has as man
     );
 }
 
+test "a lazy run mounts FUSE on the lower layer and serves it before the overlay is mounted" {
+    // Goal: S2 slice 4's order. Method: a lazy plan has `lazy_steps_count` steps more than the
+    // plain one; the child mounts FUSE on the lower layer and sends the descriptor before the
+    // overlay, and the parent serves it after the go-ahead and before it waits for the report.
+    var plain: Plan = undefined;
+    plain.build(&overlay_input(false));
+    var input = overlay_input(false);
+    input.lazy = true;
+    var plan: Plan = undefined;
+    plan.build(&input);
+    try testing.expect(plan.lazy and plan.has_channel());
+    try testing.expectEqual(plain.count + lazy_steps_count, plan.count);
+    var at: [4]?u32 = @splat(null);
+    const kinds = [_]Kind{ .mount_fuse, .send_fuse, .mount_overlay, .serve_fuse };
+    for (plan.steps[0..plan.count], 0..) |step, index| {
+        for (kinds, &at) |kind, *slot| {
+            if (step.kind == kind) slot.* = @intCast(index);
+        }
+    }
+    try testing.expect(at[0].? < at[1].? and at[1].? < at[2].?);
+    const mount = plan.steps[at[0].?];
+    try testing.expectEqualStrings(store_cache, plan.text(mount.target));
+    var release: ?u32 = null;
+    var report: ?u32 = null;
+    for (plan.steps[0..plan.count], 0..) |step, index| {
+        if (step.kind == .release_child) release = @intCast(index);
+        if (step.kind == .await_report) report = @intCast(index);
+    }
+    try testing.expect(release.? < at[3].? and at[3].? < report.?);
+    try testing.expectEqual(Side.parent, side_of(.serve_fuse));
+    try testing.expectEqual(Side.child, side_of(.mount_fuse));
+}
+
 test "a read-only run of a tree has no upper layer, and a second empty lower one" {
     // Goal: `--read-only` with a digest is an overlay without an upper. Method: the data has
     // two lower layers and neither upperdir nor workdir.

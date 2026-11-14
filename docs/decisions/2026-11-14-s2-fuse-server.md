@@ -96,3 +96,35 @@ ordinal: an index whose object order disagrees with its own tree is refused befo
 
 `ops.Chunks.read` returns a `u32`. The adapter asserts that `Resolver.read`'s `usize` result is at
 most `out.len` before it casts.
+
+## Run integration (slice 4)
+
+The order of a lazy plan is: the setup child mounts `/dev/fuse` on the overlay's lower layer
+(`mount_fuse`) and sends the descriptor to `zbx` (`send_fuse`). Then it makes the overlay mount,
+which the kernel holds until `INIT` is answered. The parent's `serve_fuse` comes after the
+go-ahead and before `await_report`. It receives the descriptor, answers `INIT` on the calling
+thread, and starts the serving threads.
+
+- **No second go-ahead.** An earlier draft had the child wait for the parent's word after
+  sending (`await_fuse`). The kernel already gives that ordering, since the overlay's lookups
+  wait for `INIT`. The simulator also cannot interleave a two-way handshake in the middle of a
+  run, because it runs a pending child to completion inside the parent's blocking call. So the
+  step was dropped.
+- **One channel, two descriptors.** A lazy run with `--listen` sends the FUSE descriptor and
+  then the listener over the same channel. The model's channel queues two, in order.
+- **A child that ended early.** When the child has already ended, `serve_fuse` sees end of file
+  (`EPIPE`) and does nothing, so `await_report` diagnoses the child's own record.
+- **The server reads the store from outside its namespace** (`outside_owners`). Each serving
+  thread has its own `HostReal` and `Store`, so the open count and the scratch space are never
+  shared. The node table, the cache and the thread buffers are static in `main`, about
+  100 MiB of bss that costs nothing until a lazy run.
+- **The net layer's `etc`.** A lazy run's lower directory is an empty mount point when the
+  container's directory is made, so the net layer's `etc` gets the default mode 0755, owned by
+  root, rather than the tree's `etc` attributes. Slice 5 can read them from the node table.
+- **Codes.** Slice 4 adds no code; the supervisor was asked. A refused mount or serve is the
+  generic setup failure, with the step's phrase. A tree the table cannot hold is reported as
+  E0422 with a cause naming the bound. `--lazy` with `-d` or `--rootfs` is E0003. Slice 5 maps
+  these to E1201, E1204, E1207 and E1208.
+- **Only `main` serves.** `cli.lazy_server` is null for tests, fuzzers and library callers. A
+  lazy run there gets a server that builds nothing and refuses the descriptor, so it fails at
+  the serving step and never claims a run it did not serve.
