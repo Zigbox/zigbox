@@ -1,7 +1,7 @@
 //! The fixtures that `demo-m9`'s ACCEPT part translates through the binary, in the guest, with
 //! the demo project's `zbx.lock` (alpine:3.20 and golang:1.23-alpine). The harness module cannot
 //! embed files outside `src/testing/vm/`, so build.zig hands it this file as the anonymous import
-//! `m9_fixtures`, and this file embeds its neighbours.
+//! `m9_vm_cases`, and this file embeds its neighbours.
 //!
 //! Only the fixtures whose translation needs no image beyond that lock run here: the rest name
 //! node, python, debian, nginx, golang:1.22, quay.io or mcr.microsoft.com bases, gigabytes of

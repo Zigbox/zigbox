@@ -1,0 +1,6 @@
+.{
+    // The result digest of the demo project (src/testing/vm/m9_project, imported from its
+    // Dockerfile), as a recorded run of `zig build demo-m9` prints it in the clean VM. Empty until
+    // the first green run: the run prints the line to put here.
+    .digest = "",
+}
