@@ -3,9 +3,10 @@
 //! `rpm.binary_tag`, and refuses any that is not, byte for byte, the rpm `rpm.write` makes for the
 //! package beside it (`ForeignRpm`).
 //!
-//! Each iteration writes the sample package's rpm, unsigned or with a random header signature,
-//! damages it (a cut, flipped bytes, a header length pushed to an extreme, random bytes, a byte
-//! appended) and writes a dnf tree of it. Properties:
+//! Each iteration writes the sample package's rpm for a random architecture, unsigned or with a
+//! random header signature, damages it (a cut, flipped bytes, a header length pushed to an
+//! extreme, random bytes, a byte appended) and writes a dnf tree of it, half the time beside an
+//! undamaged rpm of a second package (another version), before or after it. Properties:
 //!   1. No input panics or reads out of bounds: the answer is a tree or `ForeignRpm`.
 //!   2. The undamaged rpm, signed or not, is accepted, and its tree is the same bytes twice.
 //!   3. Damaged bytes that differ from the rpm anywhere (the lead, either header, the build host,
@@ -50,10 +51,26 @@ fn damage(random: std.Random, original: []const u8) []const u8 {
     return damaged[0..length];
 }
 
-fn tree(bytes: []const u8) model.Error![]model.TreeFile {
+/// The packages of one iteration: the damaged one, and maybe an undamaged companion.
+const Case = struct {
+    package: *const model.Package,
+    companion: ?model.Built,
+    companion_first: bool,
+};
+
+fn tree(case: *const Case, bytes: []const u8) model.Error![]model.TreeFile {
     var arena: std.heap.FixedBufferAllocator = .init(&scratch);
-    const built = [_]model.Built{.{ .package = sample, .bytes = bytes }};
-    return dnf.write(arena.allocator(), .x86_64, &built);
+    const damaged_built: model.Built = .{ .package = case.package, .bytes = bytes };
+    const companion = case.companion orelse {
+        const built = [_]model.Built{damaged_built};
+        return dnf.write(arena.allocator(), case.package.architecture, &built);
+    };
+    assert(companion.package.architecture == case.package.architecture);
+    const built = if (case.companion_first)
+        [_]model.Built{ companion, damaged_built }
+    else
+        [_]model.Built{ damaged_built, companion };
+    return dnf.write(arena.allocator(), case.package.architecture, &built);
 }
 
 /// Whether `broken` is `good` but for bytes in `start..end`.
@@ -77,19 +94,31 @@ pub fn fuzz_dnf(seed: u64) void {
         .build_host = "fuzz-build",
         .header_signature = if (random.boolean()) signature[0..signature_bytes] else null,
     };
-    const good = rpm.write(arena.allocator(), sample, options) catch
+    var package = sample.*;
+    package.architecture = random.enumValue(model.Architecture);
+    var other = package;
+    other.version = "1.2.4";
+    const good = rpm.write(arena.allocator(), &package, options) catch
         unreachable; // The sample is valid and small; 256 KiB holds its rpm.
+    var case: Case = .{ .package = &package, .companion = null, .companion_first = false };
+    if (random.boolean()) {
+        const companion_bytes = rpm.write(arena.allocator(), &other, .{
+            .build_host = "fuzz-companion",
+        }) catch unreachable; // As above; 256 KiB holds both rpms.
+        case.companion = .{ .package = &other, .bytes = companion_bytes };
+        case.companion_first = random.boolean();
+    }
     // Property 2.
-    const once = tree(good) catch unreachable; // The rpm `rpm.write` just made is dnf's own.
+    const once = tree(&case, good) catch unreachable; // `rpm.write` just made it: dnf's own.
     const repomd = once[once.len - 1].bytes;
     var repomd_copy: [4096]u8 = undefined;
     assert(repomd.len <= repomd_copy.len);
     @memcpy(repomd_copy[0..repomd.len], repomd);
-    const twice = tree(good) catch unreachable; // As above.
+    const twice = tree(&case, good) catch unreachable; // As above.
     assert(std.mem.eql(u8, repomd_copy[0..repomd.len], twice[twice.len - 1].bytes));
 
     const broken = damage(random, good);
-    const result = tree(broken);
+    const result = tree(&case, broken);
     // Property 1: a tree or ForeignRpm, nothing else.
     if (result) |_| {} else |err| assert(err == error.ForeignRpm);
     // Property 3. The header signature's own bytes are opaque here (`check_tree` reads them), so
