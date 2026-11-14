@@ -64,6 +64,7 @@ pub const Rig = struct {
             .tree = result.digest,
             .settings = &rig.settings,
             .labels = null,
+            .writer_version = constants.layer_writer_version,
         };
         var failure: pack.Failure = undefined;
         rig.packing.piece = 4096;

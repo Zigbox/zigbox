@@ -1901,7 +1901,7 @@ comptime {
 
 /// The version of the layer writer: the tar form and the gzip stream a pack produces. The same
 /// tree and config give the same bytes for one version. A change to either is a new version.
-pub const layer_writer_version: u32 = 1;
+pub const layer_writer_version: u32 = 2;
 
 /// Annotation keys of a packed manifest.
 pub const pack_annotation_tree = "org.zigbox.tree";
@@ -2004,4 +2004,5 @@ comptime {
     assert(lazy_nodes_max > 0);
     assert(std.math.isPowerOfTwo(lazy_nodes_max));
     assert(lazy_range_bytes_max >= 2 * store_chunk_bytes);
+    assert(layer_writer_version == 2);
 }

@@ -46,8 +46,14 @@ const pieces = [_]u32{ 1024, 1500, 4099, 65536, constants.pack_io_bytes };
 fn pack_at(tree: @import("store/digest.zig").Digest, piece: u32) pack.Packed {
     var made: pack.Packed = undefined;
     var failure: pack.Failure = undefined;
-    const input: pack.Input = .{ .tree = tree, .settings = &settings, .labels = null };
+    const input: pack.Input = .{
+        .tree = tree,
+        .settings = &settings,
+        .labels = null,
+        .writer_version = constants.layer_writer_version,
+    };
     packing.piece = piece;
+    packing.names_max = constants.lazy_nodes_max;
     pack.pack_pieces(&store, &packing, input, &made, &failure) catch
         @panic("a whole tree must pack");
     return made;
@@ -142,7 +148,7 @@ pub fn fuzz_pack(seed: u64) void {
 
     const first = pack_at(imported.digest, pieces[random.uintLessThan(usize, pieces.len)]);
     // Drop the record, or the second pack would recall the first and compare it with itself.
-    pack.forget(&store, imported.digest);
+    pack.forget(&store, imported.digest, constants.layer_writer_version);
     const other = pack_at(imported.digest, pieces[random.uintLessThan(usize, pieces.len)]);
     assert(!first.cached);
     assert(!other.cached);

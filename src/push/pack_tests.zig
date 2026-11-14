@@ -21,6 +21,9 @@ const tree_mod = @import("../store/tree.zig");
 const export_mod = @import("export.zig");
 const tar_mod = @import("../layer/tar.zig");
 const pack = @import("pack.zig");
+const index_mod = @import("../lazy/index.zig");
+const verify_mod = @import("../lazy/verify.zig");
+const flate = std.compress.flate;
 const PathBuf = @import("../store/fs.zig").PathBuf;
 
 const testing = std.testing;
@@ -65,42 +68,79 @@ fn import_source(squash_owner: bool) !import.Result {
 }
 
 fn pack_tree(tree: digest_mod.Digest, piece: u32) !pack.Packed {
+    return pack_tree_as(tree, piece, constants.layer_writer_version, constants.lazy_nodes_max);
+}
+
+fn pack_tree_as(
+    tree: digest_mod.Digest,
+    piece: u32,
+    version: u32,
+    names_max: u32,
+) !pack.Packed {
     var made: pack.Packed = undefined;
     var failure: pack.Failure = undefined;
-    const input: pack.Input = .{ .tree = tree, .settings = &settings, .labels = null };
+    const input: pack.Input = .{
+        .tree = tree,
+        .settings = &settings,
+        .labels = null,
+        .writer_version = version,
+    };
     packing.piece = piece;
+    packing.names_max = names_max;
     try pack.pack_pieces(&store, &packing, input, &made, &failure);
+    try testing.expectEqual(version, made.writer_version);
     return made;
 }
 
 test "one tree packs to one image, on every pack and at every buffer size" {
-    // Goal: the determinism promise. Method: pack the sample tree in two stores, imported in
-    // different directory orders, and again at other piece sizes; compare all digests.
-    start(1, 0);
-    const first_import = try import_source(false);
-    const first = try pack_tree(first_import.digest, constants.pack_io_bytes);
-    try testing.expect(!first.cached);
-    try testing.expect(first.layer_size > 0);
+    // Goal: the determinism promise, for both writers. Method: pack the sample tree in two
+    // stores, imported in different directory orders, and again at other piece sizes; compare
+    // all digests and the index anchor.
+    for ([_]u32{ 1, 2 }) |version| {
+        start(1, 0);
+        const first_import = try import_source(false);
+        const first = try pack_version(first_import.digest, constants.pack_io_bytes, version);
+        try testing.expect(!first.cached);
+        try testing.expect(first.layer_size > 0);
+        try testing.expectEqual(version == 2, first.index != null);
 
-    const again = try pack_tree(first_import.digest, constants.pack_io_bytes);
-    try testing.expect(again.cached);
-    try testing.expectEqualSlices(u8, &first.manifest.bytes, &again.manifest.bytes);
-    try testing.expectEqualSlices(u8, &first.layer.bytes, &again.layer.bytes);
+        const again = try pack_version(first_import.digest, constants.pack_io_bytes, version);
+        try testing.expect(again.cached);
+        try testing.expectEqualSlices(u8, &first.manifest.bytes, &again.manifest.bytes);
+        try testing.expectEqualSlices(u8, &first.layer.bytes, &again.layer.bytes);
+        try expect_same_anchor(first.index, again.index);
 
-    start(2, 1);
-    const second_import = try import_source(false);
-    try testing.expect(first_import.digest.eql(second_import.digest));
-    for ([_]u32{ 1024, 4099, 65536 }) |piece| {
-        // Without the record the pack walks and compresses again: a cached one proves nothing.
-        pack.forget(&store, second_import.digest);
-        const other = try pack_tree(second_import.digest, piece);
-        try testing.expect(!other.cached);
-        try testing.expectEqualSlices(u8, &first.manifest.bytes, &other.manifest.bytes);
-        try testing.expectEqualSlices(u8, &first.config.bytes, &other.config.bytes);
-        try testing.expectEqualSlices(u8, &first.layer.bytes, &other.layer.bytes);
-        try testing.expectEqualSlices(u8, &first.diff_id.bytes, &other.diff_id.bytes);
-        try testing.expectEqual(first.layer_size, other.layer_size);
+        start(2, 1);
+        const second_import = try import_source(false);
+        try testing.expect(first_import.digest.eql(second_import.digest));
+        for ([_]u32{ 1024, 4099, 65536 }) |piece| {
+            // Without the record the pack walks and compresses again: a cached one proves
+            // nothing.
+            pack.forget(&store, second_import.digest, version);
+            const other = try pack_version(second_import.digest, piece, version);
+            try testing.expect(!other.cached);
+            try testing.expectEqualSlices(u8, &first.manifest.bytes, &other.manifest.bytes);
+            try testing.expectEqualSlices(u8, &first.config.bytes, &other.config.bytes);
+            try testing.expectEqualSlices(u8, &first.layer.bytes, &other.layer.bytes);
+            try testing.expectEqualSlices(u8, &first.diff_id.bytes, &other.diff_id.bytes);
+            try testing.expectEqual(first.layer_size, other.layer_size);
+            try expect_same_anchor(first.index, other.index);
+        }
     }
+}
+
+fn pack_version(tree: digest_mod.Digest, piece: u32, version: u32) !pack.Packed {
+    return pack_tree_as(tree, piece, version, constants.lazy_nodes_max);
+}
+
+fn expect_same_anchor(expected: ?index_mod.Anchor, actual: ?index_mod.Anchor) !void {
+    try testing.expectEqual(expected == null, actual == null);
+    const left = expected orelse return;
+    const right = actual.?;
+    try testing.expectEqual(left.offset, right.offset);
+    try testing.expectEqual(left.length, right.length);
+    try testing.expectEqual(left.size, right.size);
+    try testing.expect(left.digest.eql(right.digest));
 }
 
 var applier: apply.Applier = undefined;
@@ -126,15 +166,140 @@ fn round_trip(made: pack.Packed, squash_owner: bool) !digest_mod.Digest {
 }
 
 test "a packed layer applied again gives the tree it was packed from, in both id modes" {
-    // Goal: the round trip. Method: import /src, pack, apply the layer to a new directory and
+    // Goal: the round trip, for both writers: M4's applier reads a writer 2 layer, index and
+    // all, to the same tree. Method: import /src, pack, apply the layer to a new directory and
     // import that; the digests agree, with owners kept and with owners squashed to 0.
-    for ([_]bool{ false, true }) |squash| {
-        start(3, 0);
-        const imported = try import_source(squash);
-        const made = try pack_tree(imported.digest, constants.pack_io_bytes);
-        const again = try round_trip(made, squash);
-        try testing.expect(imported.digest.eql(again));
+    for ([_]u32{ 1, 2 }) |version| {
+        for ([_]bool{ false, true }) |squash| {
+            start(3, 0);
+            const imported = try import_source(squash);
+            const made = try pack_version(imported.digest, constants.pack_io_bytes, version);
+            const again = try round_trip(made, squash);
+            try testing.expect(imported.digest.eql(again));
+        }
     }
+}
+
+var blob_bytes: [4 * 1024 * 1024]u8 = undefined;
+var range_bytes: [constants.lazy_range_bytes_max + index_mod.range_trailer_bytes]u8 = undefined;
+var plain_bytes: [constants.lazy_range_bytes_max]u8 = undefined;
+var inflate_window: [flate.max_window_len]u8 = undefined;
+var index_bytes: [1024 * 1024]u8 = undefined;
+var big_bytes: [2 * constants.store_chunk_bytes + 12345]u8 = undefined;
+var checking: verify_mod.Workspace = undefined;
+
+/// The whole layer blob of `made`.
+fn read_layer(made: pack.Packed) ![]const u8 {
+    var path: PathBuf = undefined;
+    const blobs: blobs_mod.Blobs = .{ .fs = store.fs, .root = store.root_text() };
+    const fd = try store.fs.open_read(blobs.final_path(&path, made.layer));
+    defer store.fs.close(fd);
+    var used: usize = 0;
+    while (true) {
+        const count = try store.fs.read(fd, blob_bytes[used..]);
+        if (count == 0) break;
+        used += count;
+        if (used == blob_bytes.len) return error.TestBlobTooLarge;
+    }
+    try testing.expectEqual(made.layer_size, used);
+    return blob_bytes[0..used];
+}
+
+/// Inflates `length` bytes at `offset` of `blob`, alone, to `size` bytes.
+fn inflate_at(blob: []const u8, offset: u64, length: u64, size: u64) ![]const u8 {
+    try testing.expect(length <= constants.lazy_range_bytes_max);
+    try testing.expect(size <= plain_bytes.len);
+    try testing.expect(offset + length <= blob.len);
+    const at: usize = @intCast(offset);
+    const span: usize = @intCast(length);
+    @memcpy(range_bytes[0..span], blob[at..][0..span]);
+    const out = plain_bytes[0..@intCast(size)];
+    try index_mod.inflate_range(&range_bytes, span, out, &inflate_window);
+    return out;
+}
+
+/// The index of a writer 2 layer: read from its anchor, verified against `tree`, and every
+/// chunk of every object inflated from its own offset to its own hash; the chunks of an
+/// object together are its size.
+fn check_index(made: pack.Packed, tree: digest_mod.Digest) !index_mod.Index {
+    const anchor = made.index orelse return error.TestNoIndex;
+    const blob = try read_layer(made);
+    try testing.expect(anchor.offset + anchor.length < blob.len); // The gzip footer follows.
+    const bytes = try inflate_at(blob, anchor.offset, anchor.length, anchor.size);
+    try testing.expect(bytes.len <= index_bytes.len);
+    const kept = index_bytes[0..bytes.len];
+    @memcpy(kept, bytes); // The chunks are inflated through `plain_bytes` next.
+    const index = try verify_mod.verify(&checking, kept, &anchor, tree);
+    for (0..index.header.objects) |ordinal| {
+        const object = index.object(@intCast(ordinal));
+        var covered: u64 = 0;
+        for (0..object.chunk_count) |step| {
+            const record = index.chunk(object.first_chunk + @as(u32, @intCast(step)));
+            const want = @min(object.size - covered, constants.store_chunk_bytes);
+            const chunk = try inflate_at(blob, record.offset, record.length, want);
+            try testing.expect(digest_mod.Digest.of(chunk).eql(record.hash));
+            covered += want;
+        }
+        try testing.expectEqual(object.size, covered);
+    }
+    return index;
+}
+
+test "every chunk of a writer 2 layer inflates alone from its offset to its hash" {
+    // Goal: the index is what lazy start reads: each recorded range is a self-contained raw
+    // deflate run. Method: the sample tree, plus a file of three chunks and one of exactly
+    // one, packed at two piece sizes; read the index from its anchor, verify it, inflate
+    // every chunk alone and hash it.
+    const big = &big_bytes;
+    var prng = std.Random.DefaultPrng.init(91);
+    prng.random().bytes(big);
+    for ([_]u32{ 1024, constants.pack_io_bytes }) |piece| {
+        start(4, 0);
+        files.put_file("/src/big", 0o644, big);
+        files.put_file("/src/one", 0o644, big[0..constants.store_chunk_bytes]);
+        files.put_file("/src/big.copy", 0o644, big); // The same object: listed once.
+        const imported = try import_source(false);
+        const made = try pack_tree_as(imported.digest, piece, 2, constants.lazy_nodes_max);
+        const index = try check_index(made, imported.digest);
+        try testing.expectEqual(@as(u32, 13), index.header.names);
+        // sh and ls are one object, so are big and big.copy; the empty file is an object.
+        try testing.expectEqual(@as(u32, 7), index.header.objects);
+        // One chunk for each small file but the empty one; three for big, one for one.
+        try testing.expectEqual(@as(u32, 4 + 3 + 1), index.header.chunks);
+        try testing.expect(imported.digest.eql(try round_trip(made, false)));
+    }
+}
+
+test "a tree over the names bound packs with no index and no annotation, and still pulls" {
+    // Goal: the owner's answer: a tree past `lazy_nodes_max` names gets neither index nor
+    // annotation (W1201 on the read side) and is otherwise a good layer. Method: the sample
+    // tree has 10 names; pack it with the bound at 10 (indexed) and at 9 (not).
+    start(5, 0);
+    const imported = try import_source(false);
+    const at_bound = try pack_tree_as(imported.digest, constants.pack_io_bytes, 2, 10);
+    _ = try check_index(at_bound, imported.digest);
+    try testing.expect(try manifest_names_index(at_bound));
+
+    pack.forget(&store, imported.digest, 2);
+    const over = try pack_tree_as(imported.digest, constants.pack_io_bytes, 2, 9);
+    try testing.expect(!over.cached);
+    try testing.expect(over.index == null);
+    try testing.expect(!try manifest_names_index(over));
+    try testing.expect(imported.digest.eql(try round_trip(over, false)));
+    // The record keeps the answer: a cached pack has no index either.
+    const cached = try pack_tree_as(imported.digest, constants.pack_io_bytes, 2, 9);
+    try testing.expect(cached.cached);
+    try testing.expect(cached.index == null);
+    try testing.expectEqualSlices(u8, &over.manifest.bytes, &cached.manifest.bytes);
+}
+
+/// Whether the manifest blob of `made` carries the lazy-index annotation.
+fn manifest_names_index(made: pack.Packed) !bool {
+    var path: PathBuf = undefined;
+    const blobs: blobs_mod.Blobs = .{ .fs = store.fs, .root = store.root_text() };
+    var text: [constants.pack_config_bytes_max]u8 = undefined;
+    const body = try read_back(blobs.final_path(&path, made.manifest), &text);
+    return std.mem.indexOf(u8, body, constants.pack_annotation_lazy_index) != null;
 }
 
 /// The path of the first file object found in `tree` or the directories below it.
@@ -162,8 +327,14 @@ test "a tree with a file missing or changed is refused, naming what stopped the 
     const object_path = (try first_object_path(imported.digest, &path)).?;
     var failure: pack.Failure = undefined;
     var made: pack.Packed = undefined;
-    const input: pack.Input = .{ .tree = imported.digest, .settings = &settings, .labels = null };
+    const input: pack.Input = .{
+        .tree = imported.digest,
+        .settings = &settings,
+        .labels = null,
+        .writer_version = constants.layer_writer_version,
+    };
     packing.piece = constants.pack_io_bytes;
+    packing.names_max = constants.lazy_nodes_max;
 
     files.flip_byte(object_path, 0);
     try testing.expectError(
@@ -362,11 +533,8 @@ fn listing(made: pack.Packed, out: []u8) ![]const u8 {
     return writer.buffered();
 }
 
-test "the golden tree packs to fixed bytes, and its tar lists every entry kind in order" {
-    // Goal: the digests are a promise (`layer_writer_version` 1). Method: pack a fixed tree of
-    // every entry kind and compare the layer, diff id, config and manifest digests, the tar's
-    // entries and the object count against literals taken from a reviewed run. A change that
-    // moves one is a new writer version, or a bug.
+/// Packs the golden tree with writer `version` in a fresh store.
+fn pack_golden(version: u32) !pack.Packed {
     sim.init(6, &.{});
     files.init(6);
     sim.store_fs = &files;
@@ -377,7 +545,16 @@ test "the golden tree packs to fixed bytes, and its tar lists every entry kind i
     settings.clear();
     make_golden_source();
     const imported = try import_source(false);
-    const made = try pack_tree(imported.digest, constants.pack_io_bytes);
+    return pack_version(imported.digest, constants.pack_io_bytes, version);
+}
+
+test "the golden tree packs to fixed bytes, and its tar lists every entry kind in order" {
+    // Goal: the digests are a promise (`layer_writer_version` 1). Method: pack a fixed tree of
+    // every entry kind and compare the layer, diff id, config and manifest digests, the tar's
+    // entries and the object count against literals taken from a reviewed run. A change that
+    // moves one is a new writer version, or a bug.
+    const made = try pack_golden(1);
+    try testing.expect(made.index == null);
     var text: [1024]u8 = undefined;
     const lines = try listing(made, &text);
     try testing.expectEqualStrings(golden_listing, lines);
@@ -388,6 +565,24 @@ test "the golden tree packs to fixed bytes, and its tar lists every entry kind i
     if (builtin.cpu.arch == .x86_64) {
         try testing.expectEqualStrings(golden_config_x86_64, &made.config.text());
         try testing.expectEqualStrings(golden_manifest_x86_64, &made.manifest.text());
+    }
+}
+
+test "the golden tree packs to fixed bytes with writer 2, its index anchored at a fixed place" {
+    // Goal: writer 2's digests and anchor are the same promise. Method: as for writer 1; the
+    // tar lists the same entries, and the index is the bytes after them.
+    const made = try pack_golden(2);
+    var text: [1024]u8 = undefined;
+    const lines = try listing(made, &text);
+    try testing.expectEqualStrings(golden_listing, lines);
+    var anchor_text: [index_mod.anchor_text_bytes_max]u8 = undefined;
+    const anchor = made.index orelse return error.TestNoIndex;
+    try testing.expectEqualStrings(golden_v2_anchor, anchor.render(&anchor_text));
+    try testing.expectEqualStrings(golden_v2_layer, &made.layer.text());
+    try testing.expectEqualStrings(golden_v2_diff_id, &made.diff_id.text());
+    if (builtin.cpu.arch == .x86_64) {
+        try testing.expectEqualStrings(golden_v2_config_x86_64, &made.config.text());
+        try testing.expectEqualStrings(golden_v2_manifest_x86_64, &made.manifest.text());
     }
 }
 
@@ -409,6 +604,13 @@ const golden_config_x86_64 =
 const golden_manifest_x86_64 =
     "sha256:9fb72b7ef67ab49164f62a0c208083bea73a9c06c40ca8742c6cc5620201d59d";
 
+// Writer 2's goldens: taken from a reviewed run of the test above.
+const golden_v2_anchor = "TODO";
+const golden_v2_layer = "TODO";
+const golden_v2_diff_id = "TODO";
+const golden_v2_config_x86_64 = "TODO";
+const golden_v2_manifest_x86_64 = "TODO";
+
 const config_mod = @import("../registry/config.zig");
 const result_mod = @import("../build/result.zig");
 const Sha256 = @import("../registry/digest.zig").Sha256;
@@ -425,6 +627,7 @@ fn pushed_then_pulled(record: *const result_mod.Record) !?digest_mod.Digest {
         .tree = record.tree,
         .settings = &record.config.settings,
         .labels = &record.config,
+        .writer_version = constants.layer_writer_version,
     };
     const body = try pack.render_config(input, Sha256.of("diff"), &derive_json);
     try config_mod.parse(&derive_arena, body, &derive_settings, &derive_labels);

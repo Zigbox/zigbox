@@ -161,6 +161,7 @@ test {
     _ = @import("layer/tar_write.zig");
     _ = @import("push/pack.zig");
     _ = @import("fuzz_pack.zig");
+    _ = @import("fuzz_lazy_index.zig");
     _ = @import("push/pack_tests.zig");
     _ = @import("lazy/index.zig");
     _ = @import("lazy/seen.zig");

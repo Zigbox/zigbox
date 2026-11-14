@@ -174,7 +174,7 @@ fn blob_damaged(
     var from: PathBuf = undefined;
     const blobs: blobs_mod.Blobs = .{ .fs = store.fs, .root = store.root_text() };
     store.fs.unlink(blobs.final_path(&from, digest)) catch {}; // Best effort; a gc finds it too.
-    pack.forget(store, made.tree);
+    pack.forget(store, made.tree, made.writer_version);
     failure.* = .{ .stop = .damaged, .errno = 0, .digest = digest };
     return error.Stopped;
 }

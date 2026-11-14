@@ -9,14 +9,25 @@
 //! made of a tree that is not whole. The second and later names of one object are hard links
 //! (until the table of them is full; then the bytes are repeated, which is the same tree).
 //!
+//! Layer writer 2 (`docs/decisions/2026-11-14-s2-index-format.md`) writes the same tar into one
+//! gzip member whose deflate stream is cut into segments: each cut flushes the compressor to a
+//! byte boundary and starts a fresh one, so no back-reference crosses it. Cuts sit before every
+//! file body, after each `store_chunk_bytes` of it, and before the lazy index, which follows the
+//! tar's end-of-archive in the same stream (`pack_index.zig` records it during the walk). The
+//! layer descriptor's `org.zigbox.lazy-index` annotation points at the index.
+//!
 //! The pack record `pack/<tree hex>-<version>` remembers the layer's digest, its tar's digest and
-//! its length, so a second pack of the same tree writes nothing it already has.
+//! its length (and for version 2 the index's anchor), so a second pack of the same tree writes
+//! nothing it already has.
 
 const std = @import("std");
 const assert = std.debug.assert;
 const builtin = @import("builtin");
 const Io = std.Io;
 const constants = @import("../constants.zig");
+
+/// The layer writer version a pack writes by default.
+pub const layer_writer_version = constants.layer_writer_version;
 const blobs_mod = @import("../registry/blobs.zig");
 const oci = @import("../registry/digest.zig");
 const result_mod = @import("../build/result.zig");
@@ -28,6 +39,8 @@ const tree_mod = @import("../store/tree.zig");
 const trees = @import("../store/trees.zig");
 const json = @import("../trust/json.zig");
 const tar_write = @import("../layer/tar_write.zig");
+const index_mod = @import("../lazy/index.zig");
+const pack_index = @import("pack_index.zig");
 
 const flate = std.compress.flate;
 const Digest = digest_mod.Digest;
@@ -89,6 +102,10 @@ pub const Packed = struct {
     layer: Sha256,
     layer_size: u64,
     diff_id: Sha256,
+    /// The layer writer version the layer was written with.
+    writer_version: u32,
+    /// Where the lazy index is (writer 2, a tree within the index's bounds), or null.
+    index: ?index_mod.Anchor,
     /// The layer was already in the blob cache (a pack record and its blob).
     cached: bool,
 };
@@ -99,6 +116,9 @@ pub const Input = struct {
     settings: *const images.Settings,
     /// The labels of a build result; an image's own are not kept.
     labels: ?*const result_mod.Config,
+    /// The layer writer version to write: `constants.layer_writer_version`, or 1 (its goldens
+    /// and older registries' tests).
+    writer_version: u32,
 };
 
 const Link = struct {
@@ -120,6 +140,9 @@ const Frame = struct {
 const Stage = struct {
     writer: Io.Writer,
     hasher: std.crypto.hash.sha2.Sha256,
+    /// The gzip footer's CRC-32 and length, kept by the tar stage of writer 2 (whose compressor
+    /// is raw deflate, so keeps none).
+    crc: flate.Container.Hasher,
     bytes: u64,
     next: ?*Io.Writer,
     fs: Fs,
@@ -131,6 +154,7 @@ const Stage = struct {
         stage.* = .{
             .writer = .{ .buffer = buffer, .vtable = &.{ .drain = drain } },
             .hasher = std.crypto.hash.sha2.Sha256.init(.{}),
+            .crc = .init(.gzip),
             .bytes = 0,
             .next = next,
             .fs = fs,
@@ -144,6 +168,7 @@ const Stage = struct {
         if (data.len == 0) return;
         if (stage.failed) return error.WriteFailed;
         stage.hasher.update(data);
+        stage.crc.update(data);
         stage.bytes += data.len;
         if (stage.next) |next| return next.writeAll(data);
         stage.fs.write_all(stage.fd, data) catch {
@@ -175,7 +200,8 @@ const Stage = struct {
     }
 };
 
-/// The memory a pack works in: about 8 MiB, kept by the caller.
+/// The memory a pack works in: about 30 MiB (most of it the index's seen set), kept by the
+/// caller.
 pub const Workspace = struct {
     tree: [constants.store_tree_bytes_max]u8,
     path: [constants.path_bytes_max + 1]u8,
@@ -194,8 +220,11 @@ pub const Workspace = struct {
     gzip: flate.Compress,
     json: [constants.pack_config_bytes_max]u8,
     walk: Walk,
+    recorder: pack_index.Recorder,
     /// The size of the pieces the file reads and the writers' buffers use (tests vary it).
     piece: u32,
+    /// The most names a tree with an index has: `lazy_nodes_max` (tests lower it to reach it).
+    names_max: u32,
 };
 
 const Walk = struct {
@@ -206,8 +235,12 @@ const Walk = struct {
     failure: *Failure,
     current: Digest,
     decoder: tree_mod.Decoder,
+    /// The bytes of the tree `current`, in `ws.tree`.
+    tree_bytes: []const u8,
     path_len: u32,
     depth: u32,
+    /// Writer 2: the stream is cut around file bodies and an index is recorded.
+    lazy: bool,
 
     fn stop(walk: *Walk, reason: Stop, digest: Digest) Error {
         walk.failure.* = .{ .stop = reason, .errno = walk.fs.last_errno(), .digest = digest };
@@ -230,6 +263,24 @@ const Walk = struct {
         };
         walk.decoder.init(bytes) catch return walk.stop(.tree_damaged, digest);
         walk.current = digest;
+        walk.tree_bytes = bytes;
+    }
+
+    fn spill_failed(walk: *Walk) Error {
+        return walk.stop(.write, walk.current);
+    }
+
+    /// Ends a segment of writer 2's stream: everything written so far reaches the file's
+    /// buffer as whole deflate blocks ending on a byte, and the next byte starts a compressor
+    /// with no history. Returns the blob offset where the next segment starts.
+    fn cut(walk: *Walk) Error!u64 {
+        const ws = walk.ws;
+        assert(walk.lazy);
+        ws.tar_tee.writer.flush() catch return walk.write_failed();
+        ws.gzip.writer.flush() catch return walk.write_failed();
+        ws.gzip = flate.Compress.init(&ws.file_sink.writer, &ws.window, .raw, .default) catch
+            return walk.write_failed();
+        return ws.file_sink.bytes + ws.file_sink.writer.end;
     }
 
     fn write_failed(walk: *Walk) Error {
@@ -293,8 +344,11 @@ fn link_find_or_add(ws: *Workspace, object: Digest, path: []const u8) ?[]const u
     return null;
 }
 
-/// Writes the bytes of a file's object after its header, checking them against the tree.
-fn write_body(walk: *Walk, entry: *const tree_mod.Entry) Error!void {
+/// Writes the bytes of a file's object after its header, checking them against the tree. For
+/// writer 2, the stream is cut before the body and after each chunk of it, and the chunks are
+/// recorded when `record` (the object's first appearance).
+fn write_body(walk: *Walk, entry: *const tree_mod.Entry, record: bool) Error!void {
+    assert(!record or walk.lazy);
     const fs = walk.fs;
     var path_storage: PathBuf = undefined;
     const path = walk.store.object_path(&path_storage, entry.object);
@@ -304,19 +358,43 @@ fn write_body(walk: *Walk, entry: *const tree_mod.Entry) Error!void {
     };
     defer fs.close(fd);
     var hasher = digest_mod.Hasher.init();
+    var chunk = digest_mod.Hasher.init();
+    var chunk_left: u64 = constants.store_chunk_bytes;
+    var chunk_start: u64 = if (walk.lazy and entry.size > 0) try walk.cut() else 0;
     var total: u64 = 0;
     while (true) {
-        const count = fs.read(fd, walk.ws.io[0..walk.ws.piece]) catch
+        var room: u64 = walk.ws.piece;
+        if (walk.lazy) room = @min(room, chunk_left);
+        const count = fs.read(fd, walk.ws.io[0..@intCast(room)]) catch
             return walk.stop(.unreadable, entry.object);
         if (count == 0) break;
         total += count;
         if (total > entry.size) return walk.stop(.object_changed, entry.object);
         hasher.update(walk.ws.io[0..count]);
         walk.archive.writeAll(walk.ws.io[0..count]) catch return walk.write_failed();
+        if (!walk.lazy) continue;
+        chunk.update(walk.ws.io[0..count]);
+        chunk_left -= count;
+        if (chunk_left > 0 and total < entry.size) continue;
+        const end = try walk.cut();
+        if (record) try record_chunk(walk, chunk.final(), chunk_start, end);
+        chunk = digest_mod.Hasher.init();
+        chunk_left = constants.store_chunk_bytes;
+        chunk_start = end;
     }
     if (total != entry.size) return walk.stop(.object_changed, entry.object);
     if (!hasher.final().eql(entry.content)) return walk.stop(.object_changed, entry.object);
     tar_write.pad(walk.archive, total) catch return walk.write_failed();
+}
+
+fn record_chunk(walk: *Walk, hash: Digest, start: u64, end: u64) Error!void {
+    assert(end > start);
+    assert(end - start <= constants.lazy_range_bytes_max);
+    walk.ws.recorder.chunk(walk.fs, .{
+        .hash = hash,
+        .offset = start,
+        .length = @intCast(end - start),
+    }) catch return walk.spill_failed();
 }
 
 fn write_entry(walk: *Walk, entry: *const tree_mod.Entry) Error!void {
@@ -354,8 +432,19 @@ fn write_entry(walk: *Walk, entry: *const tree_mod.Entry) Error!void {
             item.link = first;
         }
     }
+    var first_appearance = false;
+    if (walk.lazy) {
+        ws.recorder.name();
+        if (entry.kind == .file) {
+            first_appearance = ws.recorder.object(walk.fs, entry.object, entry.size) catch
+                return walk.spill_failed();
+        }
+    }
+    // The first name of an object always carries its bytes: the link table finds only names
+    // after it.
+    assert(!first_appearance or item.kind == .file);
     try walk.write_header(item);
-    if (item.kind == .file) try write_body(walk, entry);
+    if (item.kind == .file) try write_body(walk, entry, first_appearance);
     if (entry.kind == .dir) {
         assert(walk.depth < constants.store_depth_max);
         ws.frames[walk.depth] = .{
@@ -367,6 +456,8 @@ fn write_entry(walk: *Walk, entry: *const tree_mod.Entry) Error!void {
         walk.depth += 1;
         walk.path_len = length;
         try walk.open_tree(entry.subtree);
+        if (walk.lazy) ws.recorder.tree(walk.fs, entry.subtree, walk.tree_bytes) catch
+            return walk.spill_failed();
     }
 }
 
@@ -399,6 +490,8 @@ fn walk_tree(walk: *Walk, root: Digest) Error!void {
         .xattrs = own.xattrs,
     });
     try walk.open_tree(root);
+    if (walk.lazy) walk.ws.recorder.tree(walk.fs, root, walk.tree_bytes) catch
+        return walk.spill_failed();
     walk.depth = 0;
     walk.path_len = 0;
     while (true) {
@@ -427,49 +520,26 @@ fn blob_path(store: *const Store, buffer: *PathBuf, digest: Sha256) [:0]const u8
 fn write_layer(
     store: *Store,
     ws: *Workspace,
-    tree: Digest,
+    input: Input,
     out: *Packed,
     failure: *Failure,
 ) Error!void {
     const fs = store.fs;
+    const tree = input.tree;
     const blobs: blobs_mod.Blobs = .{ .fs = fs, .root = store.root_text() };
     var blob_fail: blobs_mod.Failure = undefined;
     blobs.ensure_directories(&blob_fail) catch return stopped_write(failure, tree, blob_fail.errno);
+    const lazy = input.writer_version >= 2;
+    if (lazy) ws.recorder.start(store, ws.names_max) catch return stopped_write(failure, tree, fs.last_errno());
+    defer if (lazy) ws.recorder.discard(fs);
     var temporary: PathBuf = undefined;
     const temporary_path = store.tmp_path(&temporary);
     const fd = fs.create(temporary_path, 0o644) catch {
         failure.* = .{ .stop = .write, .errno = fs.last_errno(), .digest = tree };
         return error.Stopped;
     };
-    ws.file_sink.init(ws.out[0..ws.piece], null, fs, fd);
-    ws.gzip = flate.Compress.init(&ws.file_sink.writer, &ws.window, .gzip, .default) catch {
-        return abandon(
-            fs,
-            fd,
-            temporary_path,
-            .{ .stop = .write, .errno = 0, .digest = tree },
-            failure,
-        );
-    };
-    ws.tar_tee.init(ws.tar_buffer[0..@min(ws.piece, ws.tar_buffer.len)], &ws.gzip.writer, fs, fd);
-    ws.walk = .{
-        .fs = fs,
-        .store = store,
-        .ws = ws,
-        .archive = &ws.tar_tee.writer,
-        .failure = failure,
-        .current = tree,
-        .decoder = undefined,
-        .path_len = 0,
-        .depth = 0,
-    };
-    walk_tree(&ws.walk, tree) catch return abandon(fs, fd, temporary_path, failure.*, failure);
-    const flushed = ws.tar_tee.writer.flush();
-    const finished = ws.gzip.finish();
-    const drained = ws.file_sink.writer.flush();
-    flushed catch return abandon(fs, fd, temporary_path, wrote(ws, tree), failure);
-    finished catch return abandon(fs, fd, temporary_path, wrote(ws, tree), failure);
-    drained catch return abandon(fs, fd, temporary_path, wrote(ws, tree), failure);
+    write_stream(store, ws, tree, lazy, fd, out, failure) catch
+        return abandon(fs, fd, temporary_path, failure.*, failure);
     fs.fsync(fd) catch return abandon(fs, fd, temporary_path, wrote(ws, tree), failure);
     fs.close(fd);
     out.diff_id = ws.tar_tee.digest();
@@ -481,6 +551,81 @@ fn write_layer(
         failure.* = .{ .stop = .write, .errno = fs.last_errno(), .digest = tree };
         return error.Stopped;
     };
+}
+
+/// Walks the tree into the open layer file `fd`: the gzip header, the deflate stream of the
+/// tar (and for writer 2 its index), the footer. Sets `out.index`.
+fn write_stream(
+    store: *Store,
+    ws: *Workspace,
+    tree: Digest,
+    lazy: bool,
+    fd: fs_mod.Fd,
+    out: *Packed,
+    failure: *Failure,
+) Error!void {
+    const fs = store.fs;
+    ws.file_sink.init(ws.out[0..ws.piece], null, fs, fd);
+    // Writer 1 lets std write the header and footer; writer 2 writes them around raw deflate,
+    // since each cut starts a new compressor.
+    if (lazy) ws.file_sink.writer.writeAll(flate.Container.gzip.header()) catch
+        return stopped_write(failure, tree, ws.file_sink.errno);
+    const container: flate.Container = if (lazy) .raw else .gzip;
+    ws.gzip = flate.Compress.init(&ws.file_sink.writer, &ws.window, container, .default) catch
+        return stopped_write(failure, tree, ws.file_sink.errno);
+    ws.tar_tee.init(ws.tar_buffer[0..@min(ws.piece, ws.tar_buffer.len)], &ws.gzip.writer, fs, fd);
+    ws.walk = .{
+        .fs = fs,
+        .store = store,
+        .ws = ws,
+        .archive = &ws.tar_tee.writer,
+        .failure = failure,
+        .current = tree,
+        .decoder = undefined,
+        .tree_bytes = &.{},
+        .path_len = 0,
+        .depth = 0,
+        .lazy = lazy,
+    };
+    try walk_tree(&ws.walk, tree);
+    out.index = null;
+    if (lazy) out.index = try write_index(&ws.walk, tree);
+    const flushed = ws.tar_tee.writer.flush();
+    const finished = ws.gzip.finish();
+    flushed catch return failed(failure, wrote(ws, tree));
+    finished catch return failed(failure, wrote(ws, tree));
+    if (out.index) |*anchor| {
+        anchor.length = ws.file_sink.bytes + ws.file_sink.writer.end - anchor.offset;
+        anchor.check() catch unreachable; // The recorder kept the index within its bounds.
+    }
+    if (lazy) ws.tar_tee.crc.writeFooter(&ws.file_sink.writer) catch
+        return failed(failure, wrote(ws, tree));
+    ws.file_sink.writer.flush() catch return failed(failure, wrote(ws, tree));
+}
+
+/// Cuts the stream after the tar and, when the tree is within the index's bounds, writes the
+/// index through the tar stage (so the config's `diff_id` covers it). The anchor's `length` is
+/// set once the stream is finished.
+fn write_index(walk: *Walk, tree: Digest) Error!?index_mod.Anchor {
+    const ws = walk.ws;
+    assert(walk.lazy);
+    const offset = try walk.cut();
+    if (!ws.recorder.recording) return null;
+    assert(ws.recorder.index_bytes() <= constants.lazy_index_bytes_max);
+    var hasher = digest_mod.Hasher.init();
+    const before = ws.tar_tee.bytes + ws.tar_tee.writer.end;
+    ws.recorder.emit(walk.fs, tree, walk.archive, &hasher, ws.io[0..ws.piece]) catch |err| {
+        if (err == error.WriteFailed) return walk.write_failed();
+        return walk.spill_failed();
+    };
+    const size = ws.tar_tee.bytes + ws.tar_tee.writer.end - before;
+    assert(size == ws.recorder.index_bytes());
+    return .{ .offset = offset, .length = 1, .size = size, .digest = hasher.final() };
+}
+
+fn failed(failure: *Failure, what: Failure) Error {
+    failure.* = what;
+    return error.Stopped;
 }
 
 fn wrote(ws: *const Workspace, tree: Digest) Failure {
@@ -586,8 +731,15 @@ fn descriptor(
     media: []const u8,
     digest: Sha256,
     size: u64,
+    index: ?*const index_mod.Anchor,
 ) json.WriteError!void {
     if (name.len > 0) try writer.member_object(name) else try writer.begin_object();
+    if (index) |anchor| {
+        var text: [index_mod.anchor_text_bytes_max]u8 = undefined;
+        try writer.member_object("annotations");
+        try writer.member_string(constants.pack_annotation_lazy_index, anchor.render(&text));
+        try writer.end_object();
+    }
     try writer.member_string("digest", &digest.text());
     try writer.member_string("mediaType", media);
     try writer.member_unsigned("size", size);
@@ -599,7 +751,10 @@ pub fn render_manifest(made: *const Packed, out: []u8) json.WriteError![]const u
     var writer = json.Writer.init(out);
     try writer.begin_object();
     try writer.member_object("annotations");
-    try writer.member_string(constants.pack_annotation_writer, version_text());
+    var version: [10]u8 = undefined;
+    const version_text = std.fmt.bufPrint(&version, "{d}", .{made.writer_version}) catch
+        unreachable; // A u32 has at most ten digits.
+    try writer.member_string(constants.pack_annotation_writer, version_text);
     try writer.member_string(constants.pack_annotation_tree, &made.tree.text());
     try writer.end_object();
     try descriptor(
@@ -608,9 +763,18 @@ pub fn render_manifest(made: *const Packed, out: []u8) json.WriteError![]const u
         constants.oci_config_media_type,
         made.config,
         made.config_size,
+        null,
     );
     try writer.member_array("layers");
-    try descriptor(&writer, "", constants.oci_layer_media_type, made.layer, made.layer_size);
+    const layer_index: ?*const index_mod.Anchor = if (made.index) |*anchor| anchor else null;
+    try descriptor(
+        &writer,
+        "",
+        constants.oci_layer_media_type,
+        made.layer,
+        made.layer_size,
+        layer_index,
+    );
     try writer.end_array();
     try writer.member_string("mediaType", constants.oci_manifest_media_type);
     try writer.member_unsigned("schemaVersion", 2);
@@ -618,31 +782,48 @@ pub fn render_manifest(made: *const Packed, out: []u8) json.WriteError![]const u
     return writer.finish();
 }
 
-fn version_text() []const u8 {
-    return std.fmt.comptimePrint("{d}", .{constants.layer_writer_version});
-}
-
 // ---- The pack record ------------------------------------------------------------------------
 
-fn record_path(store: *const Store, buffer: *PathBuf, tree: Digest) [:0]const u8 {
+fn record_path(store: *const Store, buffer: *PathBuf, tree: Digest, version: u32) [:0]const u8 {
+    assert(version >= 1);
+    assert(version <= constants.layer_writer_version);
     const hex = tree.hex();
     var name: [constants.store_digest_hex_bytes + 16]u8 = undefined;
-    const text = std.fmt.bufPrint(&name, "/pack/{s}-{d}", .{
-        &hex,
-        constants.layer_writer_version,
-    }) catch unreachable; // Sized.
+    const text = std.fmt.bufPrint(&name, "/pack/{s}-{d}", .{ &hex, version }) catch
+        unreachable; // Sized.
     return store.path(buffer, &.{text});
 }
 
-const Remembered = struct { layer: Sha256, diff_id: Sha256, size: u64 };
+const Remembered = struct {
+    layer: Sha256,
+    diff_id: Sha256,
+    size: u64,
+    index: ?index_mod.Anchor,
+};
 
-fn record_text(made: *const Packed, out: []u8) []const u8 {
-    return std.fmt.bufPrint(out, "layer {s}\ndiff {s}\nsize {d}\n", .{
-        &made.layer.text(), &made.diff_id.text(), made.layer_size,
-    }) catch unreachable; // Sized by the caller.
+/// The longest pack record: three lines of version 1 and the index line of version 2.
+const record_bytes_max: u32 = 512;
+
+comptime {
+    assert(record_bytes_max >= "layer \ndiff \nsize \nindex \n".len + 2 * 71 + 20 +
+        index_mod.anchor_text_bytes_max);
 }
 
-fn parse_record(text: []const u8) ?Remembered {
+fn record_text(made: *const Packed, out: *[record_bytes_max]u8) []const u8 {
+    var writer: Io.Writer = .fixed(out);
+    writer.print("layer {s}\ndiff {s}\nsize {d}\n", .{
+        &made.layer.text(), &made.diff_id.text(), made.layer_size,
+    }) catch unreachable; // Sized by `record_bytes_max`.
+    if (made.writer_version >= 2) {
+        var text: [index_mod.anchor_text_bytes_max]u8 = undefined;
+        const index = if (made.index) |*anchor| anchor.render(&text) else "none";
+        writer.print("index {s}\n", .{index}) catch unreachable; // Same bound.
+    }
+    return writer.buffered();
+}
+
+fn parse_record(text: []const u8, version: u32) ?Remembered {
+    assert(version >= 1);
     var lines = std.mem.splitScalar(u8, text, '\n');
     const layer_line = lines.next() orelse return null;
     const diff_line = lines.next() orelse return null;
@@ -654,14 +835,26 @@ fn parse_record(text: []const u8) ?Remembered {
     const diff_id = Sha256.parse(diff_line["diff ".len..]) orelse return null;
     const size = std.fmt.parseInt(u64, size_line["size ".len..], 10) catch return null;
     if (size == 0) return null;
-    return .{ .layer = layer, .diff_id = diff_id, .size = size };
+    var found: Remembered = .{ .layer = layer, .diff_id = diff_id, .size = size, .index = null };
+    if (version >= 2) {
+        const index_line = lines.next() orelse return null;
+        if (!std.mem.startsWith(u8, index_line, "index ")) return null;
+        const value = index_line["index ".len..];
+        if (!std.mem.eql(u8, value, "none")) {
+            const anchor = index_mod.Anchor.parse(value) orelse return null;
+            anchor.check() catch return null;
+            found.index = anchor;
+        }
+    }
+    return found;
 }
 
-fn recall(store: *const Store, tree: Digest) ?Remembered {
+fn recall(store: *const Store, tree: Digest, version: u32) ?Remembered {
     var path: PathBuf = undefined;
-    var bytes: [256]u8 = undefined;
-    const text = store.fs.read_whole(record_path(store, &path, tree), &bytes) catch return null;
-    const found = parse_record(text) orelse return null;
+    var bytes: [record_bytes_max]u8 = undefined;
+    const text = store.fs.read_whole(record_path(store, &path, tree, version), &bytes) catch
+        return null;
+    const found = parse_record(text, version) orelse return null;
     const blobs: blobs_mod.Blobs = .{ .fs = store.fs, .root = store.root_text() };
     if (!blobs.has(found.layer, found.size)) return null;
     return found;
@@ -669,9 +862,10 @@ fn recall(store: *const Store, tree: Digest) ?Remembered {
 
 /// Drops the pack record of `tree`, so the next pack walks and compresses again (tests and the
 /// fuzzer use it to compare two real packs; a missing record is no error).
-pub fn forget(store: *const Store, tree: Digest) void {
+pub fn forget(store: *const Store, tree: Digest, version: u32) void {
     var path: PathBuf = undefined;
-    store.fs.unlink(record_path(store, &path, tree)) catch |err| assert(err == error.NotFound);
+    const record = record_path(store, &path, tree, version);
+    store.fs.unlink(record) catch |err| assert(err == error.NotFound);
 }
 
 fn remember(store: *Store, made: *const Packed, failure: *Failure) Error!void {
@@ -679,14 +873,14 @@ fn remember(store: *Store, made: *const Packed, failure: *Failure) Error!void {
     store.fs.make_directory(store.directory_path(&directory, "pack"), true) catch {
         return stopped_write(failure, made.tree, store.fs.last_errno());
     };
-    var bytes: [256]u8 = undefined;
+    var bytes: [record_bytes_max]u8 = undefined;
     const text = record_text(made, &bytes);
     var temporary: PathBuf = undefined;
     var final: PathBuf = undefined;
     var fail: fs_mod.Failure = undefined;
     store.fs.write_atomic(
         store.tmp_path(&temporary),
-        record_path(store, &final, made.tree),
+        record_path(store, &final, made.tree, made.writer_version),
         directory.text(),
         text,
         0o644,
@@ -707,11 +901,12 @@ pub fn pack(
     failure: *Failure,
 ) Error!void {
     ws.piece = constants.pack_io_bytes;
+    ws.names_max = constants.lazy_nodes_max;
     return pack_pieces(store, ws, input, out, failure);
 }
 
 /// `pack` with the pieces `ws.piece` bytes long (at least 1024): the output must not depend
-/// on it, which the tests check.
+/// on it, which the tests check. `ws.names_max` is set by the caller as well.
 pub fn pack_pieces(
     store: *Store,
     ws: *Workspace,
@@ -722,18 +917,24 @@ pub fn pack_pieces(
     assert(store.root_len > 1);
     assert(ws.piece >= 1024);
     assert(ws.piece <= constants.pack_io_bytes);
+    assert(ws.names_max >= 1);
+    assert(ws.names_max <= constants.lazy_nodes_max);
+    assert(input.writer_version >= 1);
+    assert(input.writer_version <= constants.layer_writer_version);
     out.tree = input.tree;
+    out.writer_version = input.writer_version;
     ws.links_count = 0;
     ws.link_used = 0;
     @memset(&ws.links, .{ .object = undefined, .at = 0, .len = 0, .used = false });
     out.cached = false;
-    if (recall(store, input.tree)) |found| {
+    if (recall(store, input.tree, input.writer_version)) |found| {
         out.layer = found.layer;
         out.diff_id = found.diff_id;
         out.layer_size = found.size;
+        out.index = found.index;
         out.cached = true;
     } else {
-        try write_layer(store, ws, input.tree, out, failure);
+        try write_layer(store, ws, input, out, failure);
         try remember(store, out, failure);
     }
     const config = render_config(input, out.diff_id, &ws.json) catch {
