@@ -276,8 +276,8 @@ const pipe_bytes_max: u32 =
 
 const SimPipe = struct {
     used: bool,
-    /// A listener sent over this pipe (as a channel) and not yet received.
-    listener: ?u8 = null,
+    /// Listeners sent over this pipe (as a channel) and not yet received, oldest first.
+    listener: [2]?u8 = .{ null, null },
     data: [pipe_bytes_max]u8,
     written: u32,
     consumed: u32,
@@ -362,6 +362,8 @@ pub const World = struct {
     devpts_refused: bool,
     /// The kernel refuses overlay mounts (no module, a policy).
     overlay_refused: bool,
+    /// The kernel refuses the lazy plan's FUSE mount (no `/dev/fuse`, a policy).
+    fuse_refused: bool,
     broken_pipe_ignored: bool,
     /// Listener `i` is on its way through a channel: made, sent, not yet received.
     listener_in_flight: [constants.sim_listeners_max]bool,
@@ -503,6 +505,7 @@ pub const World = struct {
         world.command_exit = .{ .exited = 0 };
         world.devpts_refused = false;
         world.overlay_refused = false;
+        world.fuse_refused = false;
         world.broken_pipe_ignored = false;
         world.listener_in_flight = @splat(false);
         world.listener_leaked = false;
@@ -816,8 +819,10 @@ pub const World = struct {
         assert(world.processes[world.current].listener_holds[slot]);
         const pipe = &world.pipes[index / 2];
         if (!world.reader_exists(index / 2)) return errno_pipe;
-        if (pipe.listener != null) return errno_nomem; // One at a time.
-        pipe.listener = @intCast(slot);
+        // Two at most: a FUSE descriptor, then a listener.
+        if (pipe.listener[1] != null) return errno_nomem;
+        const at: u32 = @intFromBool(pipe.listener[0] != null);
+        pipe.listener[at] = @intCast(slot);
         world.listener_in_flight[slot] = true;
         return null;
     }
@@ -827,9 +832,15 @@ pub const World = struct {
         const index = end_index(channel);
         assert(index % 2 == 0); // The parent's end.
         assert(world.processes[world.current].holds[index]);
-        const pipe = &world.pipes[index / 2];
-        const slot = pipe.listener orelse return null;
-        pipe.listener = null;
+        const pipe_index = index / 2;
+        const pipe = &world.pipes[pipe_index];
+        // A receive that waits for a child runs it first, as `read_pipe` does.
+        while (pipe.listener[0] == null) {
+            if (!world.writer_exists(pipe_index)) return null;
+            if (!world.run_next_pending()) return null;
+        }
+        const slot = pipe.listener[0].?;
+        pipe.listener = .{ pipe.listener[1], null };
         world.listener_in_flight[slot] = false;
         world.processes[world.current].listener_holds[slot] = true;
         return listener_handle_base + slot;

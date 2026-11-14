@@ -387,6 +387,7 @@ pub const wait_interrupts_max: u32 = 1024;
 pub const child_exit_setup_failed: u8 = 125;
 /// EIO: the errno that stands for a failure with none (an error made inside host.zig).
 pub const errno_io: u16 = 5;
+pub const errno_pipe: u16 = 32;
 /// SIGKILL, the same number on x86_64 and aarch64.
 pub const signal_kill: u8 = 9;
 /// SIGINT (Ctrl-C), the same number on x86_64 and aarch64.

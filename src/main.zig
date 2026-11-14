@@ -5,6 +5,7 @@
 const std = @import("std");
 const assert = std.debug.assert;
 const cli = @import("cli.zig");
+const lazy_server_mod = @import("fuse/lazy_server.zig");
 const constants = @import("constants.zig");
 const guest_serve = @import("guest_serve.zig");
 const host_real = @import("host_real.zig");
@@ -45,12 +46,18 @@ var gc_tables: [constants.store_gc_tables_bytes]u8 align(8) = @splat(0);
 /// The real network's memory (`host_real_net.Memory`, about 2.4 MiB): static, so it is in bss.
 var network_memory: host_real_net.Memory = undefined;
 
+/// The FUSE server of `zbx run --lazy` (S2): the node table, the chunk cache and the serving
+/// threads' buffers, about 100 MiB, static so it is in bss and costs nothing until a lazy run.
+var lazy_server: lazy_server_mod.Server = undefined;
+
 pub fn main(init: std.process.Init.Minimal) u8 {
     if (guest_command(init)) |code| return code;
     network_memory.init();
     var real: HostReal = .{ .environ = init.environ, .network_memory = &network_memory };
     var iterator = init.args.iterate();
     storage.gc_tables = &gc_tables;
+    lazy_server.init(real.interface());
+    cli.lazy_server = &lazy_server;
     const code = cli.run_with(real.interface(), &iterator, &storage);
     assert(real.open_count == 0); // Every file the CLI opened was closed.
     return code;

@@ -11,6 +11,7 @@ const constants = @import("constants.zig");
 const host = @import("host.zig");
 const host_real_fs = @import("host_real_fs.zig");
 const host_real_net = @import("host_real_net.zig");
+const host_real_fuse = @import("host_real_fuse.zig");
 const registry_net = @import("registry/net.zig");
 const store_fs = @import("store/fs.zig");
 
@@ -120,6 +121,7 @@ pub const HostReal = struct {
         .bring_up_loopback = bring_up_loopback,
         .channel = channel,
         .listen_loopback = listen_loopback,
+        .mount_fuse = mount_fuse,
         .send_handle = send_handle,
         .receive_handle = receive_handle,
         .is_unix_stream = is_unix_stream,
@@ -692,6 +694,22 @@ pub const HostReal = struct {
         check(linux.listen(descriptor, constants.listen_backlog)) catch |err| {
             return close_failed(descriptor, err);
         };
+        self.open_count += 1;
+        return @intCast(descriptor);
+    }
+
+    /// `open` of `/dev/fuse`, then the mount (`host_real_fuse.mount`). A refused mount closes
+    /// the descriptor and keeps the mount's errno.
+    fn mount_fuse(context: *anyopaque, target: [:0]const u8) host.Error!host.Handle {
+        const self = from_context(context);
+        const opened = linux.open("/dev/fuse", .{ .ACCMODE = .RDWR, .CLOEXEC = true }, 0);
+        try check(opened);
+        const descriptor: i32 = @intCast(opened);
+        const mounted = host_real_fuse.mount(descriptor, target);
+        errno_last = @backingInt(mounted);
+        if (mounted != .SUCCESS) {
+            return close_failed(descriptor, host.error_for_errno(@backingInt(mounted)));
+        }
         self.open_count += 1;
         return @intCast(descriptor);
     }

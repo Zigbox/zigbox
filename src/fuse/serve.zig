@@ -58,17 +58,19 @@ pub const thread_memory_bytes: u32 = constants.fuse_request_bytes + constants.fu
 pub const Serving = struct {
     server: *const ops.Server,
     device: Device,
-    chunks: ops.Chunks,
+    /// One chunk source per serving thread; the handshake uses the first.
+    chunks: *const [constants.lazy_fuse_threads]ops.Chunks,
     memory: []align(8) u8,
     threads: [constants.lazy_fuse_threads]std.Thread,
     started: u32,
 
     /// `memory` holds `lazy_fuse_threads` threads' buffers (`thread_memory_bytes` each).
-    /// `chunks` must be safe to call from every serving thread at once.
+    /// Thread `i` reads chunks only through `chunks[i]`, so a source may keep its scratch space
+    /// for one thread; one source may stand in every slot if it is safe from every thread.
     pub fn init(
         server: *const ops.Server,
         device: Device,
-        chunks: ops.Chunks,
+        chunks: *const [constants.lazy_fuse_threads]ops.Chunks,
         memory: []align(8) u8,
     ) Serving {
         assert(memory.len == @as(usize, constants.lazy_fuse_threads) * thread_memory_bytes);
@@ -148,7 +150,7 @@ pub const Serving = struct {
         const at = @as(usize, index) * thread_memory_bytes;
         const bytes = serving.memory[at..][0..constants.fuse_reply_bytes];
         const reply: []align(8) u8 = @alignCast(bytes);
-        return ops.Worker.init(serving.chunks, reply);
+        return ops.Worker.init(serving.chunks[index], reply);
     }
 
     fn request_buffer(serving: *const Serving, index: u32) []u8 {

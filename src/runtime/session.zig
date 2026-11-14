@@ -29,8 +29,8 @@ const Open = struct {
     ready_write: bool,
     report_read: bool,
     report_write: bool,
-    /// The listener's channel (a plan with a listener): the parent's end, and the child's until
-    /// the child has its own copy.
+    /// The channel (`Plan.has_channel`): the parent's end, and the child's until the child has
+    /// its own copy.
     channel_read: bool,
     channel_write: bool,
 
@@ -40,6 +40,14 @@ const Open = struct {
             open.report_write;
         return pipes or open.channel_read or open.channel_write;
     }
+};
+
+/// The caller's server for a lazy plan's FUSE connection (`serve_fuse`). `serve` takes the
+/// descriptor, which it owns from then on whether it succeeds or not: it answers `INIT` and
+/// starts the serving threads. The caller joins them after the container has ended.
+pub const Fuse = struct {
+    context: *anyopaque,
+    serve: *const fn (context: *anyopaque, device: host_mod.Handle) host_mod.Error!void,
 };
 
 /// How a helper ended, kept for the diagnostic.
@@ -118,6 +126,8 @@ pub const Session = struct {
     output_write: [2]?host_mod.Handle,
     /// The listener the child made, once received; the caller owns it (`take_listener`).
     listener: ?host_mod.Handle,
+    /// The server of a lazy plan, set by the caller (`serve_with`) before `execute`.
+    fuse: ?Fuse,
 
     pub fn start(
         session: *Session,
@@ -139,6 +149,7 @@ pub const Session = struct {
             .channel = undefined,
         };
         session.listener = null;
+        session.fuse = null;
         session.pid = null;
         session.open = .{
             .ready_read = false,
@@ -262,6 +273,7 @@ pub const Session = struct {
             .await_pasta => try session.await_pasta(),
             .release_child => try session.release_child(),
             .await_report => try session.await_report(),
+            .serve_fuse => try session.serve_fuse(),
             .receive_listener => try session.receive_listener(),
             .reap => unreachable, // `wait` does it.
             else => unreachable, // The child's steps.
@@ -288,7 +300,7 @@ pub const Session = struct {
             .channel_read = false,
             .channel_write = false,
         };
-        if (session.plan.has_listener) {
+        if (session.plan.has_channel()) {
             session.make_channel() catch |err| {
                 session.close_all();
                 return err;
@@ -302,7 +314,7 @@ pub const Session = struct {
     }
 
     fn make_channel(session: *Session) host_mod.Error!void {
-        assert(session.plan.has_listener);
+        assert(session.plan.has_channel());
         assert(!session.open.channel_read);
         session.child.channel = try session.host.channel();
         session.open.channel_read = true;
@@ -320,6 +332,39 @@ pub const Session = struct {
         session.listener = try session.host.receive_handle(session.child.channel.read);
         session.host.close(session.child.channel.read);
         session.open.channel_read = false;
+    }
+
+    /// The server a lazy plan's `serve_fuse` step hands the FUSE descriptor to.
+    pub fn serve_with(session: *Session, fuse: Fuse) void {
+        assert(session.plan.lazy);
+        assert(session.pid == null);
+        assert(session.fuse == null);
+        session.fuse = fuse;
+    }
+
+    /// Takes the FUSE descriptor the child sent and hands it to the caller's server, which
+    /// answers `INIT` and starts serving. A child that failed before sending it has closed its
+    /// end of the channel: nothing comes, and this step does nothing, so that `await_report`
+    /// diagnoses the child's own failure from its record. The channel stays open for the
+    /// listener when one follows.
+    fn serve_fuse(session: *Session) host_mod.Error!void {
+        assert(session.plan.lazy);
+        assert(session.open.channel_read);
+        const fuse = session.fuse.?;
+        const host = session.host;
+        const received = host.receive_handle(session.child.channel.read);
+        // Only the end of file says the child ended; anything else fails the step (the channel
+        // is closed with the rest), and the child, which would wait in its overlay mount for an
+        // `INIT` nobody answers, is killed with it.
+        if (received) |_| {} else |err| {
+            if (err != error.IoFailed or host.last_errno() != constants.errno_pipe) return err;
+        }
+        if (!session.plan.has_listener) {
+            host.close(session.child.channel.read);
+            session.open.channel_read = false;
+        }
+        const device = received catch return;
+        try fuse.serve(fuse.context, device);
     }
 
     /// Hands the listener to the caller, who owns it from here: null if the plan has none or it
@@ -405,7 +450,7 @@ pub const Session = struct {
         session.open.ready_read = false;
         host.close(session.child.report.write);
         session.open.report_write = false;
-        if (session.plan.has_listener) {
+        if (session.plan.has_channel()) {
             // The child sends over its own copy of its end; ours would keep the receiver from
             // seeing the end of file if the child ends without sending.
             host.close(session.child.channel.write);
