@@ -57,6 +57,7 @@ const logs_commands = @import("logs_commands.zig");
 const exec_commands = @import("exec_commands.zig");
 const pull_commands = @import("pull_commands.zig");
 const build_commands = @import("build_commands.zig");
+const pin_mode = @import("build/pin.zig");
 const import_commands = @import("import_commands.zig");
 const lifecycle = @import("runtime/lifecycle.zig");
 const Sha256 = @import("registry/digest.zig").Sha256;
@@ -284,12 +285,11 @@ const help_text =
     \\  directory), or <file>, which must be inside it; checks it, its graph and its inputs, and
     \\  prints the steps in build order, then the image, running nothing
     \\  (--output json: nodes and edges, see zbx schema build-graph)
-    \\  zbx build [-f <file>] [--clear-caches]
+    \\  zbx build [-f <file>] [--clear-caches] [--pin|--locked|--hermetic]
     \\  builds the steps, then the image: one row per step (hit or miss, time, net, cache)
-    \\  and the result digest; --output json: one zbx.build/1
-    \\  line per step (see zbx schema build). --clear-caches first empties the cache
-    \\  directories. With --verbose each step's output also goes to stderr, a line at a time
-    \\  behind "<step> | ".
+    \\  and the result digest; --output json: one zbx.build/1 line per step (zbx schema build).
+    \\  --clear-caches empties the cache dirs first; --verbose streams step output to stderr
+    \\  behind "<step> | "; on pins: zbx explain E0822.
     \\  zbx run <result digest> runs the result as its config says; zbx inspect <result digest>
     \\  prints its tree and config (zbx schema inspect); zbx inspect --provenance <result
     \\  digest> prints the build's provenance record (zbx schema inspect-provenance)
@@ -572,6 +572,9 @@ pub const BuildArgs = struct {
     file: ?[]const u8 = null,
     /// `--clear-caches`: empty the build file's cache directories first.
     clear_caches: bool = false,
+    /// `--pin`, `--locked` or `--hermetic` (M9 slice 3c); `--hermetic` with `--locked` is
+    /// `--hermetic`, which enforces every pin as `--locked` does.
+    pins: pin_mode.Mode = .plain,
 };
 
 pub const Invocation = struct {
@@ -683,6 +686,9 @@ const Token = union(enum) {
     file_next,
     /// `--clear-caches`: `build`'s.
     clear_caches,
+    /// `--pin` and `--locked`: `build`'s (`--hermetic` is an `import_flag`, `build`'s too).
+    pin,
+    locked,
     /// `--no-passphrase`, and `--passphrase-file` with its value next or after an `=`: `key new`'s.
     no_passphrase,
     passphrase_file_next,
@@ -821,6 +827,8 @@ fn classify(argument: []const u8) Token {
     if (std.mem.eql(u8, argument, "-o")) return .out_next;
     if (std.mem.eql(u8, argument, "--graph")) return .graph;
     if (std.mem.eql(u8, argument, "--clear-caches")) return .clear_caches;
+    if (std.mem.eql(u8, argument, "--pin")) return .pin;
+    if (std.mem.eql(u8, argument, "--locked")) return .locked;
     if (std.mem.eql(u8, argument, "-f")) return .file_next;
     if (std.mem.eql(u8, argument, "--no-passphrase")) return .no_passphrase;
     if (std.mem.eql(u8, argument, "--passphrase-file")) return .passphrase_file_next;
@@ -946,6 +954,7 @@ pub fn scan_options(args: []const []const u8) Options {
             .username_inline, .password_file_inline, .password_stdin => {},
             .password_refused => {},
             .confirm_inline, .trash, .resolve_only, .by_image, .graph, .clear_caches, .oci => {},
+            .pin, .locked => {},
             .dry_run => {},
             .no_passphrase, .passphrase_file_inline, .key_inline, .provenance => {},
             .strict, .require_provenance, .public_inline, .apply => {},
@@ -1045,9 +1054,16 @@ pub fn parse(
             .provenance => try take_provenance(diag, &invocation.provenance, given, argument),
             .resolve_only => try take_pull_option(diag, &p.pull, given, argument),
             .out_next => try take_out_option(diag, &export_file, given, args, &index),
-            .import_next, .import_inline, .import_flag => {
+            .import_flag => |flag| if (flag == .hermetic and builds(given)) {
+                try take_pin_mode(diag, &p.build, .hermetic);
+            } else {
                 try take_import_option(diag, &p.import, given, args, &index);
             },
+            .import_next, .import_inline => {
+                try take_import_option(diag, &p.import, given, args, &index);
+            },
+            .pin => try take_build_pins(diag, &p.build, given, argument, .pin),
+            .locked => try take_build_pins(diag, &p.build, given, argument, .locked),
             .graph, .clear_caches, .file_next => {
                 try take_build_option(diag, &p.build, given, args, &index);
             },
@@ -1520,6 +1536,62 @@ fn bad_import_value(diag: *Diag, option: ImportOption, what: []const u8) ParseEr
         .sentence = "for example:",
         .command = "zbx import --network none --build-arg VERSION=1.2",
         .template = true,
+    });
+    assert(diag.code.? == .E0005);
+    return error.BadOptionValue;
+}
+
+/// Whether the command named so far is `build`: `--hermetic` is `build`'s there, else `import`'s.
+fn builds(operands: []const []const u8) bool {
+    if (operands.len == 0) return false;
+    return command_named(operands[0]) == .build;
+}
+
+/// `--pin` or `--locked`, which only `build` takes.
+fn take_build_pins(
+    diag: *Diag,
+    build_args: *BuildArgs,
+    operands: []const []const u8,
+    argument: []const u8,
+    mode: pin_mode.Mode,
+) ParseError!void {
+    assert(mode == .pin or mode == .locked);
+    assert(argument.len > 0);
+    if (!builds(operands)) return unknown_option(diag, argument);
+    try take_pin_mode(diag, build_args, mode);
+}
+
+/// Sets the build's pin mode. `--pin` records pins and the others enforce them, so `--pin` with
+/// `--locked` or `--hermetic` is E0005; `--hermetic` holds `--locked`, so the two are one.
+fn take_pin_mode(diag: *Diag, build_args: *BuildArgs, mode: pin_mode.Mode) ParseError!void {
+    assert(mode != .plain);
+    const was = build_args.pins;
+    if (was == .plain or was == mode) {
+        build_args.pins = mode;
+        return;
+    }
+    if (was != .pin and mode != .pin) {
+        build_args.pins = .hermetic;
+        return;
+    }
+    const other: pin_mode.Mode = if (mode == .pin) was else mode;
+    assert(other == .locked or other == .hermetic);
+    return pin_conflict(diag, if (other == .locked) "--locked" else "--hermetic");
+}
+
+/// `--pin` with `--locked` or `--hermetic`: one records pins, the other refuses to change them.
+fn pin_conflict(diag: *Diag, other: []const u8) ParseError {
+    assert(diag.code == null);
+    assert(other.len > 0);
+    diag.raise(.E0005);
+    diag.while_("reading the command line", .{});
+    diag.cause("--pin and {s} were both given; --pin records pins and {s} only checks them", .{
+        other, other,
+    });
+    diag.context("cmd", "{s}", .{"build"});
+    diag.fix(.{
+        .sentence = "pin first, then check the pins in a later build:",
+        .command = "zbx build --pin && zbx build --locked",
     });
     assert(diag.code.? == .E0005);
     return error.BadOptionValue;
@@ -3259,6 +3331,7 @@ fn run_build(
             .json = invocation.options.output == .json,
             .verbose = invocation.options.verbose,
             .clear_caches = invocation.build.clear_caches,
+            .pins = invocation.build.pins,
         },
         &storage.handle.facts,
         diag,
@@ -6276,4 +6349,40 @@ test "the gate's subject: tree and binding by what was run, and a text `zbx sign
     var parsed: reference_mod.Reference = undefined;
     try reference_mod.parse(image.text, &parsed);
     try testing.expect(parsed.digest.?.eql(manifest));
+}
+
+test "build takes --pin, --locked and --hermetic, and --pin with either is E0005" {
+    // Goal: the pin modes are `build`'s alone; --pin records and the others enforce, so --pin
+    // with either is a usage refusal, while --hermetic holds --locked and the two are one.
+    // Method: each spelling parsed; the mode read back, or the code of the refusal.
+    var invocation: Invocation = undefined;
+    const Case = struct { args: []const []const u8, mode: pin_mode.Mode };
+    const cases = [_]Case{
+        .{ .args = &.{"build"}, .mode = .plain },
+        .{ .args = &.{ "build", "--pin" }, .mode = .pin },
+        .{ .args = &.{ "build", "--pin", "--pin" }, .mode = .pin },
+        .{ .args = &.{ "build", "--locked" }, .mode = .locked },
+        .{ .args = &.{ "build", "--hermetic" }, .mode = .hermetic },
+        .{ .args = &.{ "build", "--locked", "--hermetic" }, .mode = .hermetic },
+        .{ .args = &.{ "build", "--hermetic", "--locked" }, .mode = .hermetic },
+    };
+    for (cases) |case| {
+        try testing.expectEqual(@as(?codes.Code, null), try parse_case(case.args, &invocation));
+        try testing.expectEqual(case.mode, invocation.build.pins);
+    }
+    const refused = [_][]const []const u8{
+        &.{ "build", "--pin", "--locked" },
+        &.{ "build", "--locked", "--pin" },
+        &.{ "build", "--hermetic", "--pin" },
+    };
+    for (refused) |args| {
+        try testing.expectEqual(@as(?codes.Code, .E0005), try parse_case(args, &invocation));
+    }
+    // Elsewhere they are unknown options, and --hermetic stays `import`'s.
+    const unknown: ?codes.Code = .E0004;
+    try testing.expectEqual(unknown, try parse_case(&.{ "ps", "--pin" }, &invocation));
+    try testing.expectEqual(unknown, try parse_case(&.{ "ps", "--locked" }, &invocation));
+    const imported = try parse_case(&.{ "import", "--hermetic" }, &invocation);
+    try testing.expectEqual(@as(?codes.Code, null), imported);
+    try testing.expect(invocation.import.hermetic);
 }

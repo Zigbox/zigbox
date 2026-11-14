@@ -3835,6 +3835,12 @@ pub const registry = [_]Entry{
         \\pin, the two keys. Run zbx build without --locked to see the new output. To
         \\accept it, delete the step's pin from zbx.lock and run zbx build --pin, or
         \\edit .expect.
+        \\
+        \\zbx build --pin records the output of each network step that has no pin
+        \\and no .caches, once the build succeeds. --locked adds no pin and enforces
+        \\each one. --hermetic is --locked that also refuses, before anything runs, a
+        \\step with .caches or a network step with no pin (ZBX-E0814). --pin with
+        \\either of the others is refused (ZBX-E0005).
         ,
     },
     .{
