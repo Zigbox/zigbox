@@ -1,0 +1,3 @@
+E0811 Dockerfile:4
+Dockerfile:4 has ADD --checksum of https://example.org/tool-1.2.tar.gz, a URL built from an ARG
+write the URL out in full, so the build file names what the hash pins
