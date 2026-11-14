@@ -69,6 +69,7 @@ fn demo(init: std.process.Init, out: *Io.Writer, options: H.Options) !void {
     var session: Session = undefined;
     const extra = [_]@import("zigbox_vm").Route{
         .{ .path = "/s2/lazy.sh", .body = lazy_script },
+        .{ .path = "/s2/fuse-kernel-test", .body = @embedFile("fuse_kernel_test") },
     };
     try session_mod.start(&session, init, out, overlay, accel, .{
         .binary = binary,
@@ -81,6 +82,8 @@ fn demo(init: std.process.Init, out: *Io.Writer, options: H.Options) !void {
     try H.install_binary(&session, out, &timer);
     try step_lazy(&session, out);
     try timer.lap(out, "lazy");
+    try step_kernel_test(&session, out);
+    try timer.lap(out, "kernel test");
     try session.shutdown();
 }
 
@@ -101,6 +104,27 @@ fn step_lazy(session: *Session, out: *Io.Writer) !void {
     if (result.status != 0 or std.mem.indexOf(u8, result.output, "lazy: all ok") == null) {
         try out.print("demo-s2-lazy: the lazy run FAILED\n", .{});
         return error.LazyFailed;
+    }
+}
+
+fn step_kernel_test(session: *Session, out: *Io.Writer) !void {
+    // As `demo`, as zbx serves: the test makes its own user namespace, mounts `/dev/fuse` there
+    // and serves it (src/fuse/kernel_tests.zig). It skips where it cannot mount; here it must not.
+    const command = try std.fmt.allocPrint(
+        session.scratch_allocator(),
+        "curl -fsS -o /tmp/fuse-kernel-test http://10.0.2.2:{d}/s2/fuse-kernel-test && " ++
+            "chmod 755 /tmp/fuse-kernel-test && cd /tmp && " ++
+            H.as_demo ++ "/tmp/fuse-kernel-test 2>&1",
+        .{session.server.port},
+    );
+    assert(command.len < limits.command_bytes_max);
+    const result = try session.run(command, limits.command_timeout_kvm_s);
+    try H.show(out, "the FUSE server against the guest's kernel, as demo", result);
+    // The runner prints the test's name and then OK, SKIP or FAIL.
+    const passed = std.mem.indexOf(u8, result.output, "xattrs and EIO...OK") != null;
+    if (result.status != 0 or !passed) {
+        try out.print("demo-s2-lazy: the FUSE kernel test FAILED or skipped\n", .{});
+        return error.KernelTestFailed;
     }
 }
 

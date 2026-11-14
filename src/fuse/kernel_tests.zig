@@ -1,8 +1,10 @@
 //! The server against a real kernel: a child process makes a user and mount namespace, mounts
 //! `/dev/fuse` there (`host_real_fuse.mount`, as the setup child does), and sends the descriptor
 //! to this process over a channel; this process answers `INIT` and serves on its threads, and
-//! the child reads the tree through the mount and checks every byte. Skipped where `/dev/fuse`
-//! cannot be opened or a namespace cannot be made (a container without them).
+//! the child reads the tree through the mount and checks every byte, the attributes, the
+//! listing, the extended attributes and the error of a chunk that cannot be read. Skipped where
+//! `/dev/fuse` cannot be opened or a namespace cannot be made (a container without them). The VM
+//! demo `demo-s2-lazy` runs it as root in the guest, where it must pass, not skip.
 
 const std = @import("std");
 const assert = std.debug.assert;
@@ -18,6 +20,7 @@ const ops = @import("ops.zig");
 const cache_mod = @import("cache.zig");
 const serve = @import("serve.zig");
 const fixture_mod = @import("fixture.zig");
+const Digest = @import("../store/digest.zig").Digest;
 
 var kernel_fixture: fixture_mod.Fixture = undefined;
 const chunk_bytes = 64 * 1024;
@@ -33,21 +36,28 @@ const direct_bytes = 1024 * 1024;
 /// A small pread at an offset aligned to nothing: one 4 KiB `READ` there.
 const small_offset = 12345;
 const small_bytes = 4096;
+/// "b" carries one user xattr and one `user.overlay.*` one, which the server never shows.
+const b_section = "\x02" ++ "\x06\x00user.a" ++ "\x03\x00one" ++
+    "\x13\x00user.overlay.opaque" ++ "\x01\x00y";
+const b_content = "the file with attributes\n";
+/// "c"'s one chunk cannot be read (`fixture.failing`): a read of it gets EIO.
+const c_content = "the file whose chunk is lost\n";
+/// Every name the root lists, "." and ".." included.
+const root_names = [_][]const u8{ ".", "..", "a", "b", "c", "l" };
 var direct_buffer: [direct_bytes]u8 align(4096) = undefined;
 var sequential_buffer: [256 * 1024]u8 = undefined;
 
-test "a real kernel mount serves a tree: reads through it match, byte for byte" {
+test "a real kernel mount serves a tree: reads, attributes, listing, xattrs and EIO" {
+    // Goal: the server answers a real kernel the way the unit tests say it answers the fake
+    // device. Method: a mount in a child's namespaces, served here; the child reads a 48-chunk
+    // file buffered, direct and sequentially, follows a link, stats, lists the root, reads the
+    // xattrs and reads a file whose chunk fails, and exits with the number of the failed step.
     const fixture = &kernel_fixture;
     fixture.init(chunk_bytes);
     const content = try testing.allocator.alloc(u8, file_bytes);
     defer testing.allocator.free(content);
     for (content, 0..) |*byte, index| byte.* = @truncate(index *% 13 +% index / 997);
-    _ = fixture.begin();
-    _ = try fixture.file("a", content, 0o644, &xattrs.empty);
-    _ = try fixture.symlink("l", "a");
-    const root = try fixture.finish_root(
-        .{ .mode = 0o755, .uid = 0, .gid = 0, .xattrs = &xattrs.empty },
-    );
+    const root = try fill(fixture, content);
     const held = try fixture_mod.table_memory(testing.allocator, 8, 4096);
     defer testing.allocator.free(held.region);
     var table: nodes.Table = undefined;
@@ -100,6 +110,19 @@ test "a real kernel mount serves a tree: reads through it match, byte for byte" 
     // The child's namespace is gone with it, and with it the mount: the connection ends.
     serving.wait();
     try testing.expectEqual(@as(u32, 0), status);
+}
+
+/// The root: "a" (`content`), "b" (xattrs), "c" (its chunk lost: `fixture.failing`), "l" -> a.
+fn fill(fixture: *fixture_mod.Fixture, content: []const u8) !Digest {
+    assert(content.len == file_bytes);
+    _ = fixture.begin();
+    _ = try fixture.file("a", content, 0o644, &xattrs.empty);
+    _ = try fixture.file("b", b_content, 0o600, b_section);
+    const lost = try fixture.file("c", c_content, 0o644, &xattrs.empty);
+    _ = try fixture.symlink("l", "a");
+    fixture.failing = lost;
+    assert(fixture.failing != null);
+    return fixture.finish_root(.{ .mode = 0o755, .uid = 0, .gid = 0, .xattrs = &xattrs.empty });
 }
 
 /// Waits for the child: its exit status, or 128 plus its signal.
@@ -156,7 +179,98 @@ fn child(channel: u32, target: [:0]const u8, content: []const u8) u8 {
     const missing = std.mem.printSentinel(&path, "{s}/nope", .{target}, 0) catch unreachable;
     const opened = linux.open(missing, .{ .ACCMODE = .RDONLY }, 0);
     if (linux.errno(opened) != .NOENT) return 5;
+    return metadata(target);
+}
+
+/// The steps after the reads: attributes (8), the listing (9), xattrs (10, 11), EIO (12).
+fn metadata(target: [:0]const u8) u8 {
+    assert(target.len > 0);
+    assert(target.len < 64);
+    var path: [96]u8 = undefined;
+    const a = std.mem.printSentinel(&path, "{s}/a", .{target}, 0) catch unreachable; // 96 bytes.
+    if (!attributes_match(a)) return 8;
+    if (!listing_matches(target)) return 9;
+    var other: [96]u8 = undefined;
+    const b = std.mem.printSentinel(&other, "{s}/b", .{target}, 0) catch unreachable; // 96 bytes.
+    if (!xattrs_match(b)) return 10;
+    var names: [64]u8 = undefined;
+    if (linux.listxattr(a, &names, names.len) != 0) return 11;
+    const c = std.mem.printSentinel(&path, "{s}/c", .{target}, 0) catch unreachable; // 96 bytes.
+    if (!read_fails(c)) return 12;
     return 0;
+}
+
+/// "a": a regular file of mode 0644, `file_bytes` long, one link, owned by root.
+fn attributes_match(path: [:0]const u8) bool {
+    assert(path.len > 0);
+    var got: linux.Statx = undefined;
+    var mask: linux.STATX = .{ .TYPE = true, .MODE = true, .NLINK = true, .UID = true };
+    mask.GID = true;
+    mask.SIZE = true;
+    if (linux.errno(linux.statx(linux.AT.FDCWD, path, 0, mask, &got)) != .SUCCESS) return false;
+    assert(got.mask.TYPE);
+    if (got.mode != linux.S.IFREG | 0o644) return false;
+    if (got.size != file_bytes) return false;
+    if (got.nlink != 1) return false;
+    return got.uid == 0 and got.gid == 0;
+}
+
+/// The root lists exactly `root_names`, each once.
+fn listing_matches(target: [:0]const u8) bool {
+    const opened = linux.open(target, .{ .ACCMODE = .RDONLY, .DIRECTORY = true }, 0);
+    if (linux.errno(opened) != .SUCCESS) return false;
+    const fd: linux.fd_t = @intCast(opened);
+    defer _ = linux.close(fd);
+    var buffer: [4096]u8 align(8) = undefined;
+    var seen: [root_names.len]bool = @splat(false);
+    var count: u32 = 0;
+    while (true) {
+        const got = linux.getdents64(fd, &buffer, buffer.len);
+        if (linux.errno(got) != .SUCCESS) return false;
+        if (got == 0) break;
+        assert(got <= buffer.len);
+        var at: usize = 0;
+        while (at < got) {
+            const length = std.mem.readInt(u16, buffer[at + 16 ..][0..2], .little);
+            const name = std.mem.sliceTo(buffer[at + 19 ..], 0);
+            at += length;
+            count += 1;
+            const index = for (root_names, 0..) |known, index| {
+                if (std.mem.eql(u8, known, name)) break index;
+            } else return false;
+            if (seen[index]) return false;
+            seen[index] = true;
+        }
+    }
+    return count == root_names.len;
+}
+
+/// "b": `user.a` is "one", the list names only it, and the overlay xattr is not there.
+fn xattrs_match(path: [:0]const u8) bool {
+    assert(path.len > 0);
+    var value: [16]u8 = undefined;
+    const got = linux.getxattr(path, "user.a", &value, value.len);
+    if (linux.errno(got) != .SUCCESS) return false;
+    if (!std.mem.eql(u8, value[0..got], "one")) return false;
+    const hidden = linux.getxattr(path, "user.overlay.opaque", &value, value.len);
+    if (linux.errno(hidden) != .NODATA) return false;
+    var names: [64]u8 = undefined;
+    const listed = linux.listxattr(path, &names, names.len);
+    if (linux.errno(listed) != .SUCCESS) return false;
+    assert(listed <= names.len);
+    return std.mem.eql(u8, names[0..listed], "user.a\x00");
+}
+
+/// A read of `path` (its one chunk lost) fails with EIO and returns no data.
+fn read_fails(path: [:0]const u8) bool {
+    assert(path.len > 0);
+    const opened = linux.open(path, .{ .ACCMODE = .RDONLY }, 0);
+    if (linux.errno(opened) != .SUCCESS) return false;
+    const fd: linux.fd_t = @intCast(opened);
+    defer _ = linux.close(fd);
+    var buffer: [64]u8 = undefined;
+    const got = linux.read(fd, &buffer, buffer.len);
+    return linux.errno(got) == .IO;
 }
 
 fn write_file(path: [:0]const u8, text: []const u8) bool {
@@ -213,6 +327,6 @@ fn read_matches(path: [:0]const u8, expected: []const u8) bool {
 comptime {
     assert(file_bytes > 47 * chunk_bytes);
     assert(file_bytes > direct_offset + direct_bytes);
-    assert(file_bytes <= fixture_mod.content_bytes);
+    assert(file_bytes + b_content.len + c_content.len <= fixture_mod.content_bytes);
     assert(@sizeOf(abi.InHeader) == 40);
 }

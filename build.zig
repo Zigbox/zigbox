@@ -631,7 +631,7 @@ fn add_demo_step(
             }),
         });
         harness.dependOn(&vm.step);
-        add_harness_imports(b, demo.step, vm.root_module);
+        add_harness_imports(b, options, demo.step, vm.root_module);
         const run = b.addRunArtifact(vm);
         run.setCwd(b.path("."));
         run.addArgs(&.{ "--accel", @tagName(accel) });
@@ -659,7 +659,12 @@ fn add_demo_step(
 }
 
 /// What one demo's harness embeds beyond the VM module.
-fn add_harness_imports(b: *std.Build, step: []const u8, module: *std.Build.Module) void {
+fn add_harness_imports(
+    b: *std.Build,
+    options: *std.Build.Step.Options,
+    step: []const u8,
+    module: *std.Build.Module,
+) void {
     // The top-20 run tells a seccomp refusal from another EPERM by the allowlist itself.
     if (std.mem.eql(u8, step, "top20")) {
         module.addAnonymousImport("seccomp_policy", .{
@@ -667,6 +672,34 @@ fn add_harness_imports(b: *std.Build, step: []const u8, module: *std.Build.Modul
         });
     }
     if (std.mem.eql(u8, step, "demo-m10")) add_gpu_fixtures(b, module);
+    if (std.mem.eql(u8, step, "demo-s2-lazy")) add_fuse_kernel_test(b, options, module);
+}
+
+/// demo-s2-lazy's FUSE kernel test (`src/fuse/kernel_tests.zig`) as a test binary for the guest
+/// (x86_64, static, no libc, ReleaseSafe), embedded in the harness, which serves it: the guest
+/// runs it as `demo` against its own kernel, where it must pass, not skip.
+fn add_fuse_kernel_test(
+    b: *std.Build,
+    options: *std.Build.Step.Options,
+    harness_module: *std.Build.Module,
+) void {
+    const target = b.resolveTargetQuery(.{ .cpu_arch = .x86_64, .os_tag = .linux });
+    const module = b.createModule(.{
+        .root_source_file = b.path("src/fuse_kernel_test_root.zig"),
+        .target = target,
+        .optimize = .ReleaseSafe,
+        .link_libc = false,
+        .imports = &.{.{ .name = "build_options", .module = options.createModule() }},
+    });
+    // The test's imports bring their own files' tests along; the guest runs this one alone.
+    const binary = b.addTest(.{
+        .root_module = module,
+        .use_llvm = true,
+        .filters = &.{"a real kernel mount serves a tree"},
+    });
+    harness_module.addAnonymousImport("fuse_kernel_test", .{
+        .root_source_file = binary.getEmittedBin(),
+    });
 }
 
 /// demo-m10's fake driver library (soname `libzbxgpu.so.1`) and the program that needs it, built
