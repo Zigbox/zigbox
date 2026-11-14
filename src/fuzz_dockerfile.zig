@@ -22,6 +22,8 @@ const render = @import("build/render.zig");
 const translate = @import("dockerfile/translate.zig");
 
 const text_bytes_max = 4096;
+/// A SHA-256 for `ADD --checksum`: any 64 lowercase hex digits.
+const pinned = "5607b439e7580027cf8f2a5b34606ba5cc1079988db4cf213e0beeaf03269a62";
 const fragments = [_][]const u8{
     "FROM alpine:3.20\n",
     "FROM alpine:3.20 AS base\n",
@@ -53,6 +55,12 @@ const fragments = [_][]const u8{
     "RUN cat <<EOF > /etc/x\nhi\nEOF\n",
     "\xef\xbb\xbf",
     "ADD https://example.com/x /x\n",
+    "ADD --checksum=sha256:" ++ pinned ++ " https://example.com/x /x\n",
+    "ADD --checksum=sha256:" ++ pinned ++ " --chmod=0644 http://127.0.0.1:8080/h.txt /o/\n",
+    "ADD --chown=1:1 --checksum=sha256:" ++ pinned ++ " [\"https://e.org/t.gz\", \"t\"]\n",
+    "ADD --checksum=sha512:" ++ pinned ++ " https://example.com/x /x\n",
+    "ADD --checksum=sha256:" ++ pinned ++ " https://e.org/$VERSION/x /x\n",
+    "ADD --checksum=sha256:" ++ pinned ++ " file /x\n",
     "RUN echo $VERSION > /v\n",
     "RUN apk add curl && make\n",
     "RUN --mount=type=cache,target=/c go build\n",
@@ -121,6 +129,7 @@ fn options_of(
     text: []const u8,
     args: []const translate.BuildArg,
     target: ?[]const u8,
+    hermetic: bool,
     context: *u8,
 ) translate.Options {
     assert(text.len <= text_bytes_max);
@@ -132,7 +141,7 @@ fn options_of(
         .target = target,
         .platform = .{ .os = "linux", .architecture = "amd64", .variant = "" },
         .network = .detect,
-        .hermetic = false,
+        .hermetic = hermetic,
         .resolver = .{ .context = context, .resolve = Table.resolve },
     };
 }
@@ -172,7 +181,10 @@ pub fn fuzz_dockerfile(seed: u64) void {
     const with_args = random.boolean();
     const target: ?[]const u8 = if (random.boolean()) "base" else null;
     var context: u8 = 0;
-    const options = options_of(text, if (with_args) &args else &.{}, target, &context);
+    // `--hermetic` refuses a step with the network or a cache, and takes a pinned fetch.
+    const hermetic = random.uintLessThan(u8, 4) == 0;
+    const given_args: []const translate.BuildArg = if (with_args) &args else &.{};
+    const options = options_of(text, given_args, target, hermetic, &context);
     const result = translate.translate(ws, &options);
     if (result) |bytes| {
         check_accepted(bytes);

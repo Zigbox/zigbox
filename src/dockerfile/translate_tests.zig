@@ -93,6 +93,12 @@ pub const cases = [_]Case{
     .{ .dockerfile = "network_forms", .golden = "network_forms" },
     .{ .dockerfile = "bind_hermetic", .golden = "bind_hermetic", .hermetic = true },
     .{ .dockerfile = "copy_dot_spellings", .golden = "copy_dot_spellings" },
+    .{ .dockerfile = "add_checksum", .golden = "add_checksum" },
+    .{ .dockerfile = "add_checksum", .golden = "add_checksum", .hermetic = true },
+    .{ .dockerfile = "add_checksum_sha512", .golden = "add_checksum_sha512" },
+    .{ .dockerfile = "add_checksum_local", .golden = "add_checksum_local" },
+    .{ .dockerfile = "add_checksum_git", .golden = "add_checksum_git" },
+    .{ .dockerfile = "add_checksum_arg", .golden = "add_checksum_arg" },
 };
 
 pub fn options_of(case: *const Case, dockerfile: []const u8, table: *Table) translate.Options {
@@ -186,6 +192,7 @@ fn golden(comptime name: []const u8) []const u8 {
 
 /// Whether the golden is a translation: the refusal goldens are listed here.
 fn exists(comptime name: []const u8) bool {
+    @setEvalBranchQuota(4000);
     const refusals = [_][]const u8{
         "arg_from_no_default",
         "add_url",
@@ -200,6 +207,10 @@ fn exists(comptime name: []const u8) bool {
         "from_mount_stage_arg",
         "copy_several",
         "bind_no_steps",
+        "add_checksum_sha512",
+        "add_checksum_local",
+        "add_checksum_git",
+        "add_checksum_arg",
     };
     for (refusals) |refused| {
         if (std.mem.eql(u8, refused, name)) return false;

@@ -37,6 +37,7 @@ const cache = @import("cache.zig");
 const step_mod = @import("step.zig");
 const input_tree = @import("input_tree.zig");
 const input_job = @import("input_job.zig");
+const fetch_tree = @import("fetch_tree.zig");
 const inputs_mod = @import("inputs.zig");
 const diagnose = @import("diagnose.zig");
 const graph_mod = @import("graph.zig");
@@ -55,6 +56,9 @@ const manifest = @import("../registry/manifest.zig");
 const digest_sha = @import("../registry/digest.zig");
 const trust_gate = @import("../trust/gate.zig");
 const trust_record = @import("../trust/record.zig");
+const fetch_mod = @import("fetch.zig");
+const blobs_mod = @import("../registry/blobs.zig");
+const registry_diagnose = @import("../registry/diagnose.zig");
 
 const Host = host_mod.Host;
 const Digest = digest_mod.Digest;
@@ -122,7 +126,18 @@ pub const Workspace = struct {
     holds: [constants.build_root_holds_max]Hold,
     holds_count: u32,
     copy_patterns: [constants.build_copy_sources_max][]const u8,
+    /// The download of each `.fetch` whose blob the store lacks, before any step runs.
+    fetcher: fetch_mod.Fetcher,
+    /// A fetch entry's `.to` with the URL's file name added when it ends in `/`, by entry.
+    fetch_tos: [constants.build_copy_entries_max][fetch_to_bytes_max]u8,
 };
+
+/// The longest resolved `.to` of a fetch: a `.to` and the last segment of a URL.
+const fetch_to_bytes_max = constants.build_string_bytes_max + constants.registry_url_bytes_max;
+
+/// The source digest a fetch entry's key part holds until its selection is made: the key never
+/// reads it (`key.Copy.fetch`), and it is never dropped.
+const fetch_placeholder: Digest = .{ .bytes = @splat(0) };
 
 const Hold = struct { digest: Digest, users: u32 };
 
@@ -211,6 +226,7 @@ pub fn run_steps(
     try context.header();
     context.warn_network();
     context.warn_caches();
+    try context.download_fetches();
     make_plan(loaded, &ws.plan);
     const executor: schedule.Executor = .{
         .context = &context,
@@ -852,8 +868,16 @@ pub const Context = struct {
         assert(entries.len <= ws.copy_keys.len);
         // Each selection is rooted by `copy_select` and dropped when this step is done with it.
         var rooted: usize = 0;
-        defer for (ws.copy_keys[0..rooted]) |part| context.drop(part.source);
+        defer for (ws.copy_keys[0..rooted]) |part| {
+            if (!part.source.eql(fetch_placeholder)) context.drop(part.source);
+        };
         for (entries, 0..) |entry, at| {
+            if (entry.fetch) |fetch| {
+                if (at == 0) ws.step_inputs[index] = fetch_placeholder;
+                ws.copy_keys[at] = context.fetch_key(@intCast(at), &entry, fetch);
+                rooted += 1;
+                continue;
+            }
             const source = try context.copy_source(index, @intCast(at), &entry);
             if (at == 0) ws.step_inputs[index] = source;
             // A project source was rooted by its import; the selection is what the key keeps.
@@ -893,6 +917,7 @@ pub const Context = struct {
                 }
                 // The stamped trees are written under this lock, so `store gc` cannot take them
                 // before the cache entry holds the output they go into.
+                try context.fetch_selections(index, entries);
                 try context.copy_stamp(index, spec.base_tree, entries.len);
                 try context.check_interrupt(); // A restamp of a large selection takes seconds.
                 const made = try context.copy_assemble(spec.base_tree, entries.len);
@@ -904,6 +929,99 @@ pub const Context = struct {
         ws.outputs[index] = output;
         try context.report(index, hit, output);
         return .hit;
+    }
+
+    /// The key part of fetch entry `at`: its hash and where the file lands, `.to` with the URL's
+    /// file name added when `.to` ends in `/` (Docker's remote `ADD`). Its tree is made only on a
+    /// miss (`fetch_selections`).
+    fn fetch_key(
+        context: *Context,
+        at: u32,
+        entry: *const file_mod.CopyEntry,
+        fetch: file_mod.Fetch,
+    ) key_mod.Copy {
+        const file = &context.loaded.file;
+        const sha256 = digest_sha.Sha256.from_hex(file.text(fetch.sha256)).?; // Checked at load.
+        const to = file.text(entry.to);
+        assert(to.len > 0);
+        var resolved: []const u8 = to;
+        if (to[to.len - 1] == '/') {
+            const name = file_mod.fetch_name(file.text(fetch.url)).?; // Checked at load.
+            const storage = &context.ws.fetch_tos[at];
+            resolved = std.fmt.bufPrint(storage, "{s}{s}", .{ to, name }) catch unreachable;
+        }
+        return .{
+            .source = fetch_placeholder,
+            .to = resolved,
+            .chown = if (entry.chown) |text| file.text(text) else null,
+            .chmod = if (entry.chmod) |text| file.text(text) else null,
+            .fetch = sha256.bytes,
+        };
+    }
+
+    /// On a miss, under the store's shared lock: each fetch entry's blob read into a one-file
+    /// tree (`fetch_tree`, in the store's namespace) and laid at its resolved `.to`. The
+    /// selection takes the placeholder's place in `copy_keys`, rooted and held as `copy_select`
+    /// holds a selection, so the step's drop removes it.
+    fn fetch_selections(
+        context: *Context,
+        index: u8,
+        entries: []const file_mod.CopyEntry,
+    ) Error!void {
+        const ws = context.ws;
+        assert(entries.len <= ws.copy_keys.len);
+        assert(ws.copy_keys[0].to.len > 0);
+        for (entries, 0..) |entry, at| {
+            if (entry.fetch == null) continue;
+            const part = &ws.copy_keys[at];
+            assert(part.source.eql(fetch_placeholder));
+            const job: input_job.Request = .{
+                .host = context.host,
+                .facts = context.facts,
+                .store = context.store,
+                .loaded = context.loaded,
+                .step = index,
+                .entry = @intCast(at),
+                .fetch = .{
+                    .sha256 = .{ .bytes = part.fetch.? },
+                    .name = fetch_tree.name_default,
+                },
+                .ws = &ws.input,
+                .problem = &ws.input_problem,
+            };
+            const tree = input_job.import(&job, context.diag) catch return error.Failed;
+            part.source = try context.fetch_select(index, tree, part.to);
+            if (at == 0) ws.step_inputs[index] = tree;
+        }
+    }
+
+    /// The one file of a fetch's tree, laid at `to`. The caller holds the shared lock.
+    fn fetch_select(context: *Context, index: u8, tree: Digest, to: []const u8) Error!Digest {
+        const ws = context.ws;
+        const store = context.store;
+        assert(to.len > 1);
+        assert(to[to.len - 1] != '/');
+        const name = context.loaded.file.text(context.loaded.file.steps[index].name);
+        const assembling: assemble.Context = .{
+            .store = store,
+            .ws = &ws.copying.assemble,
+            .failure = &ws.assembly_failure,
+        };
+        ws.copy_patterns[0] = fetch_tree.name_default;
+        const picked = copy_mod.select(assembling, &ws.copying, tree, ws.copy_patterns[0..1], to);
+        // The import rooted the one-file tree; the selection is what the step keeps.
+        defer context.unroot(tree);
+        const selected = picked catch |err| {
+            switch (err) {
+                error.Failed => context.assembly_failed(name, to),
+                // One file, matched by its own name, laid at a path that names a file.
+                error.PoolFull, error.NoMatch, error.ManyToOne => unreachable,
+            }
+            return error.Failed;
+        };
+        if (!input_job.root_tree(store, selected, name, context.diag)) return error.Failed;
+        context.hold(selected);
+        return selected;
     }
 
     /// The tree entry `at` of step `index` takes from: the project's matched paths, imported, or
@@ -1236,6 +1354,57 @@ pub const Context = struct {
             context.loaded.shown(), file.steps_count + 1,
         }) catch unreachable; // `row_bytes` holds a shown path and a count.
         return context.emit(line);
+    }
+
+    /// Every `.fetch` whose blob the store lacks is downloaded here, before any step runs, and
+    /// checked against its `.sha256` (`fetch.zig`). A blob already there (an earlier build, a
+    /// pull) is not asked for, so a warm store builds with no network.
+    pub fn download_fetches(context: *Context) Error!void {
+        const file = &context.loaded.file;
+        const store = context.store;
+        const fetcher = &context.ws.fetcher;
+        const blobs: blobs_mod.Blobs = .{ .fs = store.fs, .root = store.root_text() };
+        assert(blobs.root.len > 0);
+        for (file.steps_slice()) |*step| {
+            for (file.copy_entries(step)) |entry| {
+                const fetch = entry.fetch orelse continue;
+                const sha256 = digest_sha.Sha256.from_hex(file.text(fetch.sha256)).?; // Load.
+                fetcher.init(blobs, context.host.network());
+                if (fetcher.has(sha256)) continue;
+                const url = file.text(fetch.url);
+                _ = fetcher.fetch(url, sha256) catch {
+                    context.fetch_failed(file.text(step.name), url, sha256);
+                    return error.Failed;
+                };
+                try context.check_interrupt();
+            }
+        }
+    }
+
+    /// The diagnostic for `ws.fetcher.reason`: a cache write is E0416/E0417 as a pull's is, a
+    /// hash that differs E0821, anything else E0820.
+    fn fetch_failed(
+        context: *Context,
+        step: []const u8,
+        url: []const u8,
+        expected: digest_sha.Sha256,
+    ) void {
+        const diag = context.diag;
+        assert(diag.code == null);
+        assert(url.len > 0);
+        switch (context.ws.fetcher.reason) {
+            .io => |*failure| registry_diagnose.cache_failed(
+                diag,
+                context.store.root_text(),
+                failure,
+            ),
+            .mismatch => |received| {
+                const expected_hex = expected.hex();
+                const received_hex = received.hex();
+                diagnose.fetch_mismatch(diag, step, url, &expected_hex, &received_hex);
+            },
+            else => |reason| diagnose.fetch_failed(diag, step, url, reason),
+        }
     }
 
     /// `W0801` once, on stderr, before any step runs, when the build file has steps with

@@ -454,9 +454,11 @@ const CopyFlags = struct {
     unpack: bool = true,
     excludes: [words.flags_max][]const u8 = undefined,
     excludes_count: u32 = 0,
-    /// `ADD --checksum` or `--keep-git-dir`: refused after the sources, so that `ADD
-    /// --checksum=... <url>` is refused for its URL.
+    /// `ADD --keep-git-dir`: refused after the sources, so that `ADD --keep-git-dir <url>` is
+    /// refused for its URL.
     remote_flag: ?[]const u8 = null,
+    /// `ADD --checksum`: the source is a pinned fetch (`add_fetch`).
+    checksum: ?[]const u8 = null,
 };
 
 fn copy_flags(
@@ -486,9 +488,9 @@ fn copy_flags(
             t.drop(line, "COPY --link", "ignored: a copy step has its meaning already");
         } else if (add and std.mem.eql(u8, name, "unpack") and std.mem.eql(u8, value, "false")) {
             result.unpack = false;
-        } else if (add and (std.mem.eql(u8, name, "checksum") or
-            std.mem.eql(u8, name, "keep-git-dir")))
-        {
+        } else if (add and std.mem.eql(u8, name, "checksum")) {
+            result.checksum = value;
+        } else if (add and std.mem.eql(u8, name, "keep-git-dir")) {
             if (result.remote_flag == null) result.remote_flag = name;
         } else {
             return unsupported(t, line, "--", name, "remove the flag");
@@ -543,6 +545,10 @@ pub fn copy(t: *Translator, instruction: *const Instruction) Error!void {
         });
     }
     const sources = items[0 .. items.len - 1];
+    if (given.checksum) |checksum| {
+        const fetch: Fetch = .{ .checksum = checksum, .raw = flags.rest, .sources = sources };
+        return add_fetch(t, instruction, &given, &fetch, items[items.len - 1]);
+    }
     if (instruction.keyword == .add) try add_sources(t, line, sources, given.unpack);
     if (given.remote_flag) |flag| return unsupported(t, line, "ADD --", flag, "remove the flag");
     const written_to = items[items.len - 1];
@@ -605,14 +611,7 @@ fn put_copy(
     }
     try t.put(" }, .to = ");
     try t.put_string(to);
-    if (given.chown) |chown| {
-        try t.put(", .chown = ");
-        try t.put_string(chown);
-    }
-    if (given.chmod) |chmod| {
-        try t.put(", .chmod = ");
-        try t.put_string(chmod);
-    }
+    try put_owner(t, given);
     if (given.excludes_count > 0) {
         try t.put(", .exclude = .{");
         for (given.excludes[0..given.excludes_count], 0..) |pattern, index| {
@@ -622,6 +621,19 @@ fn put_copy(
         try t.put(" }");
     }
     try t.put(" },\n" ++ indent ++ "},\n");
+}
+
+/// `.chown` and `.chmod`, when the flags gave them.
+fn put_owner(t: *Translator, given: *const CopyFlags) Refused!void {
+    assert(given.excludes_count <= given.excludes.len);
+    if (given.chown) |chown| {
+        try t.put(", .chown = ");
+        try t.put_string(chown);
+    }
+    if (given.chmod) |chmod| {
+        try t.put(", .chmod = ");
+        try t.put_string(chmod);
+    }
 }
 
 /// A context source as the builder reads it: relative to the project, in plain parts. Docker
@@ -644,6 +656,86 @@ fn project_path(t: *Translator, line: u32, source: []const u8) Refused![]const u
     return result;
 }
 
+/// What `ADD --checksum` gave: the flag's value, the text after the flags as written (before
+/// any `ARG` is expanded), and the sources.
+const Fetch = struct {
+    checksum: []const u8,
+    raw: []const u8,
+    sources: []const []const u8,
+};
+
+/// `ADD --checksum=sha256:<hex> <url> <dest>`: a copy step with one `.fetch` entry, which keeps
+/// `--chown` and `--chmod`. It is neither flagged nor refused under `--hermetic`: the bytes are
+/// pinned, so the build gets the same file twice. Any other hash, a local source, a git
+/// repository or a URL built from an `ARG` is E0811.
+fn add_fetch(
+    t: *Translator,
+    instruction: *const Instruction,
+    given: *const CopyFlags,
+    fetch: *const Fetch,
+    written_to: []const u8,
+) Error!void {
+    const line = instruction.line;
+    assert(instruction.keyword == .add);
+    assert(fetch.sources.len > 0);
+    if (fetch.sources.len > 1) {
+        return refuse(t.refusal(), .E0811, line, "Dockerfile:{d} has ADD --checksum of {d} " ++
+            "sources, and a checksum pins one", .{ line, fetch.sources.len }, "write one ADD " ++
+            "--checksum per URL", .{});
+    }
+    const url = fetch.sources[0];
+    try fetch_url(t, line, url, fetch.raw);
+    const sha256 = try sha256_of(t, line, fetch.checksum);
+    const to = try translate.absolute(t, line, t.state().directory(), written_to, true);
+    const name = try begin(t, instruction, .copy);
+    try t.put(indent ++ ".copy = .{\n" ++ indent ++ "    .{ .fetch = .{ .url = ");
+    try t.put_string(url);
+    try t.put(", .sha256 = ");
+    try t.put_string(sha256);
+    try t.put(" }, .to = ");
+    try t.put_string(to);
+    try put_owner(t, given);
+    try t.put(" },\n" ++ indent ++ "},\n");
+    try end(t, name);
+}
+
+/// The URL of an `ADD --checksum`: http or https, not a git repository, written out in full.
+/// The build file's own checks (https, or http to a loopback host) run on the translation.
+fn fetch_url(t: *Translator, line: u32, url: []const u8, raw: []const u8) Refused!void {
+    assert(line > 0);
+    const what = "Dockerfile:{d} has ADD --checksum of {s}, ";
+    const http = std.mem.startsWith(u8, url, "https://") or std.mem.startsWith(u8, url, "http://");
+    if (!http) {
+        return refuse(t.refusal(), .E0811, line, what ++ "which is not an http or https URL", .{
+            line, url,
+        }, "COPY a file of the context; a checksum pins a download", .{});
+    }
+    if (std.mem.indexOf(u8, url, ".git#") != null or std.mem.endsWith(u8, url, ".git")) {
+        return refuse(t.refusal(), .E0811, line, what ++ "a git repository", .{ line, url },
+            "clone it in a RUN at a pinned commit", .{});
+    }
+    var words_raw = std.mem.tokenizeAny(u8, raw, " \t");
+    const first = words_raw.next() orelse "";
+    if (std.mem.indexOfScalar(u8, first, '$') != null) {
+        return refuse(t.refusal(), .E0811, line, what ++ "a URL built from an ARG", .{
+            line, url,
+        }, "write the URL out in full, so the build file names what the hash pins", .{});
+    }
+}
+
+/// The hex of `sha256:<64 lowercase hex>`; any other hash is E0811.
+fn sha256_of(t: *Translator, line: u32, checksum: []const u8) Refused![]const u8 {
+    assert(line > 0);
+    const prefix = "sha256:";
+    if (std.mem.startsWith(u8, checksum, prefix)) {
+        const hex = checksum[prefix.len..];
+        if (file_mod.is_sha256_hex(hex)) return hex;
+    }
+    return refuse(t.refusal(), .E0811, line, "Dockerfile:{d} has ADD --checksum={s}, which " ++
+        "is not sha256:<64 lowercase hex>", .{ line, checksum }, "pin it with its SHA-256, " ++
+        "the only hash a fetch takes: sha256sum <file>", .{});
+}
+
 const archives = [_][]const u8{
     ".tar", ".tar.gz", ".tgz", ".tar.bz2", ".tbz2", ".tar.xz", ".txz", ".tar.zst",
 };
@@ -655,10 +747,15 @@ fn add_sources(t: *Translator, line: u32, sources: []const []const u8, unpack: b
         const remote = std.mem.indexOf(u8, source, "://") != null or
             std.mem.startsWith(u8, source, "git@");
         if (remote) {
-            const fix = "fetch it in a RUN with a checksum: `RUN curl -fsSLo /f <url> && " ++
-                "echo \"<sha256>  /f\" | sha256sum -c`";
-            return refuse(t.refusal(), .E0811, line, "Dockerfile:{d} has ADD {s}, which " ++
-                "fetches at build time", .{ line, source }, fix, .{});
+            const git = std.mem.indexOf(u8, source, ".git#") != null or
+                std.mem.endsWith(u8, source, ".git") or std.mem.startsWith(u8, source, "git@");
+            const what = "Dockerfile:{d} has ADD {s}, which fetches at build time";
+            if (git) {
+                return refuse(t.refusal(), .E0811, line, what, .{ line, source }, "clone it " ++
+                    "in a RUN at a pinned commit", .{});
+            }
+            return refuse(t.refusal(), .E0811, line, what, .{ line, source }, "pin it: ADD " ++
+                "--checksum=sha256:<64 hex> <url> <destination>, the URL written in full", .{});
         }
         if (!unpack) continue;
         for (archives) |suffix| {
