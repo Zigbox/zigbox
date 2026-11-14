@@ -51,11 +51,11 @@ run:
   --read-only     mount the root read-only, with a tmpfs at /tmp and /run
   --net <mode>    none (the default: a network of its own, only lo), host (share the host's)
                   or user (the network through pasta, as the user: apt install passt)
-  --publish <h:c> forward TCP port h of this machine to port c of the container (repeatable;
-                  implies --net user)
-  --listen <addr:port>  make a TCP listener on the container's loopback (only 127.0.0.1;
-                  --net none only) and hand it to the caller with --listen-send
+  --publish <h:c> forward TCP port h here to port c inside (repeatable; --net user)
+  --listen <addr:port>  a TCP listener on the container's loopback (127.0.0.1, --net none),
+                  handed to the caller over --listen-send
   --listen-send <fd>  the inherited Unix socket the listener goes over (SCM_RIGHTS)
+  --hosts-file <path>  this file, read-only, as /etc/hosts (--net none only)
   -e <name>[=<value>]  set a variable in the container, over the image's (repeatable): with
                   =<value> that value, without it zbx's own (an error if unset there).
                   A value is never stored or printed; only the name is shown
