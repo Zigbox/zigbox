@@ -294,6 +294,7 @@ const roots = [_][]const u8{
     "src/testing/vm/main_m8.zig",
     "src/testing/vm/main_m8b.zig",
     "src/testing/vm/main_m10.zig",
+    "src/testing/vm/main_c4.zig",
     "src/testing/vm/main_z7.zig",
     "src/testing/vm/main_m8_packages.zig",
     "src/testing/vm/main_top20.zig",
@@ -328,6 +329,7 @@ const linux_only = [_][]const u8{
     "src/testing/vm/main_m8.zig",
     "src/testing/vm/main_m8b.zig",
     "src/testing/vm/main_m10.zig",
+    "src/testing/vm/main_c4.zig",
     "src/testing/vm/main_z7.zig",
     "src/testing/vm/main_m8_packages.zig",
     "src/testing/vm/main_top20.zig",
@@ -565,6 +567,11 @@ const demos = [_]struct { step: []const u8, root: []const u8, help: []const u8 }
         .help = "Run the M10 demo: --device and --gpu with a fake vendor, doctor, refusals",
     },
     .{
+        .step = "demo-c4",
+        .root = "src/testing/vm/main_c4.zig",
+        .help = "Run the C4 demo: container_socket, exec's network, an adopted socket (0.5.2)",
+    },
+    .{
         .step = "demo-z7",
         .root = "src/testing/vm/main_z7.zig",
         .help = "Run the Z7 check: a host port forwarded into the guest (docs/vm-module.md)",
@@ -660,6 +667,35 @@ fn add_harness_imports(b: *std.Build, step: []const u8, module: *std.Build.Modul
         });
     }
     if (std.mem.eql(u8, step, "demo-m10")) add_gpu_fixtures(b, module);
+    if (std.mem.eql(u8, step, "demo-c4")) add_c4_supervisor(b, module);
+}
+
+/// demo-c4's stand-in for Zigcube's per-replica supervisor: a multi-threaded program that links
+/// the `zigbox` module, built for the guest (x86_64, static, no libc) and served to it.
+fn add_c4_supervisor(b: *std.Build, harness_module: *std.Build.Module) void {
+    const target = b.resolveTargetQuery(.{ .cpu_arch = .x86_64, .os_tag = .linux });
+    const options = b.addOptions();
+    options.addOption([]const u8, "version", "0.0.0-demo");
+    const library = b.createModule(.{
+        .root_source_file = b.path("src/zigbox.zig"),
+        .target = target,
+        .optimize = .ReleaseSafe,
+        .link_libc = false,
+        .imports = &.{.{ .name = "build_options", .module = options.createModule() }},
+    });
+    const supervisor = b.addExecutable(.{
+        .name = "c4-supervisor",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/testing/vm/c4_fixture/supervisor.zig"),
+            .target = target,
+            .optimize = .ReleaseSafe,
+            .link_libc = false,
+            .imports = &.{.{ .name = "zigbox", .module = library }},
+        }),
+    });
+    harness_module.addAnonymousImport("c4_supervisor", .{
+        .root_source_file = supervisor.getEmittedBin(),
+    });
 }
 
 /// demo-m10's fake driver library (soname `libzbxgpu.so.1`) and the program that needs it, built

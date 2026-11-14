@@ -1,0 +1,11 @@
+from lib import *
+s = Sup()
+say("PROCS", ex("sh", "-c", "ls /proc | grep -c '^[0-9]'")[1])
+cmd = "kill -9 %s 2>&1; echo kill-rc=$?; ls /proc/%s 2>&1" % (s.pid, s.pid)
+say("KILL-SUPERVISOR", ex("sh", "-c", cmd)[1].replace("\n", " | "))
+ex("sh", "-c", "kill -9 -1")
+say("KILL-ALL", "ran")
+say("SUPERVISOR", s.do("ping"))
+say("CONTAINER", int("c4" in zx("ps")[1]))
+say("WRITE-ETC-HOSTS", ex("sh", "-c", "echo x >> /etc/hosts")[0])
+s.end()
