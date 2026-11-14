@@ -644,7 +644,7 @@ fn request_following(
     assert(target[0] == '/');
     assert(receiver.body_bytes_max > 0);
     assert(origin.port != 0);
-    var host_storage: [256]u8 = undefined;
+    var host_storage: [constants.registry_host_bytes_max]u8 = undefined;
     var target_storage: [constants.registry_url_bytes_max]u8 = undefined;
     var current = origin;
     var current_target = target;
@@ -694,7 +694,7 @@ pub const Next = struct { origin: Origin, target: []const u8 };
 pub fn follow(
     current: Origin,
     location: []const u8,
-    host_storage: *[256]u8,
+    host_storage: *[constants.registry_host_bytes_max]u8,
     target_storage: *[constants.registry_url_bytes_max]u8,
 ) ?Next {
     assert(location.len <= constants.registry_url_bytes_max);
@@ -727,7 +727,7 @@ pub fn follow(
 test "a redirect target is followed only when it can go into a request line" {
     // Goal: relative targets keep the origin and are checked byte by byte; absolute ones may not
     // downgrade from https; protocol-relative ones are refused.
-    var host: [256]u8 = undefined;
+    var host: [constants.registry_host_bytes_max]u8 = undefined;
     var target: [constants.registry_url_bytes_max]u8 = undefined;
     const secure: Origin = .{ .scheme = .https, .host = "registry.test", .port = 443 };
     const relative = follow(secure, "/v2/x/blobs/sha256:ab?sig=1", &host, &target).?;

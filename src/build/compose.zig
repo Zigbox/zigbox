@@ -25,7 +25,7 @@ const lock_file = @import("../lock_file.zig");
 const image_diagnose = @import("../image_diagnose.zig");
 const Diag = @import("../diag/diag.zig").Diag;
 const layout = @import("../store/layout.zig");
-const open = @import("../store/open.zig");
+const PathBuf = @import("../store/fs.zig").PathBuf;
 const images = @import("../store/images.zig");
 const lock = @import("../store/lock.zig");
 const store_diagnose = @import("../store/diagnose.zig");
@@ -127,7 +127,7 @@ pub const Workspace = struct {
     holds: [constants.build_root_holds_max]Hold,
     holds_count: u32,
     copy_patterns: [constants.build_copy_sources_max][]const u8,
-    /// The download of each `.fetch` whose blob the store lacks, before any step runs.
+    /// The download of a `.fetch` whose blob the store lacks, on its copy step's miss.
     fetcher: fetch_mod.Fetcher,
     /// A fetch entry's `.to` with the URL's file name added when it ends in `/`, by entry.
     fetch_tos: [constants.build_copy_entries_max][fetch_to_bytes_max]u8,
@@ -139,6 +139,15 @@ const fetch_to_bytes_max = constants.build_string_bytes_max + constants.registry
 /// The source digest a fetch entry's key part holds until its selection is made: the key never
 /// reads it (`key.Copy.fetch`), and it is never dropped.
 const fetch_placeholder: Digest = .{ .bytes = @splat(0) };
+
+/// The input a copy step whose first entry is a fetch records: the pinned SHA-256.
+fn fetch_input(sha256_hex: []const u8) Digest {
+    const sha256 = digest_sha.Sha256.from_hex(sha256_hex).?; // Checked at load.
+    const input: Digest = .{ .bytes = sha256.bytes };
+    assert(!input.eql(fetch_placeholder));
+    assert(input.bytes.len == sha256.bytes.len);
+    return input;
+}
 
 const Hold = struct { digest: Digest, users: u32 };
 
@@ -227,7 +236,6 @@ pub fn run_steps(
     try context.header();
     context.warn_network();
     context.warn_caches();
-    try context.download_fetches();
     make_plan(loaded, &ws.plan);
     const executor: schedule.Executor = .{
         .context = &context,
@@ -874,7 +882,10 @@ pub const Context = struct {
         };
         for (entries, 0..) |entry, at| {
             if (entry.fetch) |fetch| {
-                if (at == 0) ws.step_inputs[index] = fetch_placeholder;
+                // The step's input is the pinned SHA-256, on a hit and on a miss alike: the
+                // tree made from the blob exists only on a miss, and provenance must not
+                // depend on which it was.
+                if (at == 0) ws.step_inputs[index] = fetch_input(file.text(fetch.sha256));
                 ws.copy_keys[at] = context.fetch_key(@intCast(at), &entry, fetch);
                 rooted += 1;
                 continue;
@@ -938,6 +949,7 @@ pub const Context = struct {
         if (context.loaded.graph.base_step[index] == null) {
             try context.check_base(file.text(file.steps[index].base), spec);
         }
+        try context.download_entries(index, entries);
         try context.fetch_selections(index, entries);
         try context.copy_stamp(index, spec.base_tree, entries.len);
         try context.check_interrupt(); // A restamp of a large selection takes seconds.
@@ -1008,7 +1020,6 @@ pub const Context = struct {
             };
             const tree = input_job.import(&job, context.diag) catch return error.Failed;
             part.source = try context.fetch_select(index, tree, part.to);
-            if (at == 0) ws.step_inputs[index] = tree;
         }
     }
 
@@ -1373,35 +1384,42 @@ pub const Context = struct {
         return context.emit(line);
     }
 
-    /// Every `.fetch` whose blob the store lacks is downloaded here, before any step runs, and
-    /// checked against its `.sha256` (`fetch.zig`). A blob already there (an earlier build, a
-    /// pull) is not asked for, so a warm store builds with no network. The first download makes
-    /// the store if there is none yet, as a pull does: in a fresh store it comes before the base.
-    pub fn download_fetches(context: *Context) Error!void {
+    /// On a miss, under the shared lock: each fetch entry's blob downloaded if the store lacks
+    /// it, and checked against its `.sha256` (`fetch.zig`). A hit never gets here, so a warm
+    /// store builds with no network even when a blob has gone, and `store gc`, which takes the
+    /// lock whole, cannot remove a blob before the cache entry holds the output made from it.
+    fn download_entries(
+        context: *Context,
+        index: u8,
+        entries: []const file_mod.CopyEntry,
+    ) Error!void {
         const file = &context.loaded.file;
         const store = context.store;
         const fetcher = &context.ws.fetcher;
         const blobs: blobs_mod.Blobs = .{ .fs = store.fs, .root = store.root_text() };
-        assert(blobs.root.len > 0);
-        var store_ready = false;
-        for (file.steps_slice()) |*step| {
-            for (file.copy_entries(step)) |entry| {
-                const fetch = entry.fetch orelse continue;
-                const sha256 = digest_sha.Sha256.from_hex(file.text(fetch.sha256)).?; // Load.
-                fetcher.init(blobs, context.host.network());
-                if (fetcher.has(sha256)) continue;
-                if (!store_ready) {
-                    _ = open.check(store, .create, context.diag) catch return error.Failed;
-                    store_ready = true;
-                }
-                const url = file.text(fetch.url);
-                _ = fetcher.fetch(url, sha256) catch {
-                    context.fetch_failed(file.text(step.name), url, sha256);
-                    return error.Failed;
-                };
-                try context.check_interrupt();
-            }
+        assert(blobs.root.len > 1);
+        assert(entries.len > 0);
+        const interrupt: fetch_mod.Interrupt = .{ .context = context, .signal = interrupt_of };
+        for (entries) |entry| {
+            const fetch = entry.fetch orelse continue;
+            const sha256 = digest_sha.Sha256.from_hex(file.text(fetch.sha256)).?; // Load.
+            fetcher.init(blobs, context.host.network(), interrupt);
+            // A name of this process's own: two builds fetching one pin never share a file.
+            var partial: PathBuf = undefined;
+            const partial_text = store.tmp_path(&partial);
+            const url = file.text(fetch.url);
+            _ = fetcher.fetch(url, sha256, partial_text) catch {
+                context.fetch_failed(file.text(file.steps[index].name), url, sha256);
+                return error.Failed;
+            };
+            try context.check_interrupt();
         }
+    }
+
+    fn interrupt_of(pointer: *anyopaque) u8 {
+        const context: *Context = @ptrCast(@alignCast(pointer));
+        assert(@intFromPtr(context.ws) != 0);
+        return context.host.interrupt_signal();
     }
 
     /// The diagnostic for `ws.fetcher.reason`: a cache write is E0416/E0417 as a pull's is, a
@@ -1421,6 +1439,7 @@ pub const Context = struct {
                 context.store.root_text(),
                 failure,
             ),
+            .interrupted => |signal| diagnose.build_interrupted(diag, signal),
             .mismatch => |received| {
                 const expected_hex = expected.hex();
                 const received_hex = received.hex();
