@@ -157,7 +157,8 @@ fn log(line: []const u8) void {
 }
 
 fn say(fd: i32, text: []const u8) void {
-    assert(fd == 1 or fd == 2);
+    assert(fd >= 1);
+    assert(fd <= 2);
     assert(text.len > 0);
     _ = linux.write(fd, text.ptr, text.len);
 }

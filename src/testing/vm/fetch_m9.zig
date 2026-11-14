@@ -147,14 +147,14 @@ fn first_build(session: *Session, out: *Io.Writer) !void {
     first_length = report.digest.len;
     try expect_requests(session, out, 1);
     const digest = first_storage[0..first_length];
-    const stat = try common.format(session, "{s} run {s} -- /bin/stat -c '%u:%g %a' /opt/hello.txt", .{
-        zf, digest,
-    });
+    const stat_pattern = "{s} run {s} -- /bin/stat -c '%u:%g %a' /opt/hello.txt";
+    const stat = try common.format(session, stat_pattern, .{ zf, digest });
     const owner = try state.expect_long_split(session, out, stat, 0, hello.short_s);
     checks.check_owner(owner.streams.stdout) catch |err| {
         return fail_step(out, step7, "expected /opt/hello.txt owned 0:0, mode 0600", err);
     };
-    const cat = try common.format(session, "{s} run {s} -- /bin/cat /opt/hello.txt", .{ zf, digest });
+    const cat_pattern = "{s} run {s} -- /bin/cat /opt/hello.txt";
+    const cat = try common.format(session, cat_pattern, .{ zf, digest });
     const bytes = try state.expect_long_split(session, out, cat, 0, hello.short_s);
     m7.check_stdout_is(bytes.streams.stdout, "hello, fetch") catch |err| {
         return fail_step(out, step7, "expected hello.txt's bytes", err);

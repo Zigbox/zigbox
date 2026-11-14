@@ -711,8 +711,9 @@ fn fetch_url(t: *Translator, line: u32, url: []const u8, raw: []const u8) Refuse
         }, "COPY a file of the context; a checksum pins a download", .{});
     }
     if (std.mem.indexOf(u8, url, ".git#") != null or std.mem.endsWith(u8, url, ".git")) {
-        return refuse(t.refusal(), .E0811, line, what ++ "a git repository", .{ line, url },
-            "clone it in a RUN at a pinned commit", .{});
+        const fix = "clone it in a RUN at a pinned commit";
+        const args = .{ line, url };
+        return refuse(t.refusal(), .E0811, line, what ++ "a git repository", args, fix, .{});
     }
     var words_raw = std.mem.tokenizeAny(u8, raw, " \t");
     const first = words_raw.next() orelse "";

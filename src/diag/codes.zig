@@ -3705,21 +3705,21 @@ pub const registry = [_]Entry{
         .blame = .user,
         .summary = "a Dockerfile instruction or flag is not supported",
         .explanation =
-        \\zbx import translates what a build file can say the same way, and refuses the
-        \\rest rather than guess: ADD from a URL without --checksum=sha256:<hex> (with
-        \\it, the URL written in full, it is a pinned fetch), a git repository or a
-        \\local archive, a RUN --mount of a secret, an ssh agent or a tmpfs, a bind
-        \\from the context or an image, --network=host, --security=insecure, --device,
-        \\ONBUILD, COPY heredocs and --parents, FROM --platform for another platform,
-        \\FROM scratch with steps, and the pattern forms of variable substitution
-        \\(${X#p} and the like).
+        \\zbx import translates what a build file can say the same way, and refuses
+        \\the rest rather than guess: ADD from a URL without --checksum=sha256:<hex>
+        \\(with it, the URL written in full, it is a pinned fetch), a git repository
+        \\or a local archive, a RUN --mount of a secret, an ssh agent or a tmpfs, a
+        \\bind from the context or an image, --network=host, --security=insecure,
+        \\--device, ONBUILD, COPY heredocs and --parents, FROM --platform for another
+        \\platform, FROM scratch with steps, and the pattern forms of variable
+        \\substitution (${X#p} and the like).
         \\
         \\The cause names the instruction or flag and its line; the fix says what to
-        \\write instead, often a RUN that fetches with a checksum. Where zbx differs
-        \\from Docker: steps run rootless, with a fixed environment and timestamps;
-        \\there is no daemon cache, only the store's; a RUN with no detected fetch has
-        \\no network; and image references are pinned once in zbx.lock and never
-        \\re-resolved by a build.
+        \\write instead, often an ADD --checksum or a RUN that fetches with a
+        \\checksum. Where zbx differs from Docker: steps run rootless, with a fixed
+        \\environment and timestamps; there is no daemon cache, only the store's; a
+        \\RUN with no detected fetch has no network; and image references are pinned
+        \\once in zbx.lock and never re-resolved by a build.
         ,
     },
     .{

@@ -912,23 +912,38 @@ pub const Context = struct {
             .hit => |existing| existing,
             .miss => blk: {
                 hit = false;
-                if (context.loaded.graph.base_step[index] == null) {
-                    try context.check_base(file.text(step.base), spec);
-                }
-                // The stamped trees are written under this lock, so `store gc` cannot take them
-                // before the cache entry holds the output they go into.
-                try context.fetch_selections(index, entries);
-                try context.copy_stamp(index, spec.base_tree, entries.len);
-                try context.check_interrupt(); // A restamp of a large selection takes seconds.
-                const made = try context.copy_assemble(spec.base_tree, entries.len);
-                break :blk cache.record(store, &ws.cache, &ws.key, made, &failure) catch
-                    return context.cache_failed(&failure);
+                break :blk try context.copy_miss(index, spec, entries);
             },
         };
         context.unroot(output);
         ws.outputs[index] = output;
         try context.report(index, hit, output);
         return .hit;
+    }
+
+    /// A copy step's miss, under the shared lock: its base checked, the fetched files and the
+    /// selections stamped, the tree assembled and recorded. The stamped trees are written under
+    /// this lock, so `store gc` cannot take them before the cache entry holds their output.
+    fn copy_miss(
+        context: *Context,
+        index: u8,
+        spec: *key_mod.Spec,
+        entries: []const file_mod.CopyEntry,
+    ) Error!Digest {
+        const ws = context.ws;
+        const file = &context.loaded.file;
+        assert(entries.len > 0);
+        assert(entries.len <= ws.copy_keys.len);
+        if (context.loaded.graph.base_step[index] == null) {
+            try context.check_base(file.text(file.steps[index].base), spec);
+        }
+        try context.fetch_selections(index, entries);
+        try context.copy_stamp(index, spec.base_tree, entries.len);
+        try context.check_interrupt(); // A restamp of a large selection takes seconds.
+        const made = try context.copy_assemble(spec.base_tree, entries.len);
+        var failure: cache.Failure = undefined;
+        return cache.record(context.store, &ws.cache, &ws.key, made, &failure) catch
+            return context.cache_failed(&failure);
     }
 
     /// The key part of fetch entry `at`: its hash and where the file lands, `.to` with the URL's
@@ -948,6 +963,7 @@ pub const Context = struct {
         if (to[to.len - 1] == '/') {
             const name = file_mod.fetch_name(file.text(fetch.url)).?; // Checked at load.
             const storage = &context.ws.fetch_tos[at];
+            // `fetch_tos` holds the longest `.to` and the longest URL, so the name fits.
             resolved = std.fmt.bufPrint(storage, "{s}{s}", .{ to, name }) catch unreachable;
         }
         return .{
