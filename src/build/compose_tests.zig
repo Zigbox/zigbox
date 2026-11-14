@@ -1843,7 +1843,10 @@ test "a write the child cannot make is E0417 naming it, recording nothing" {
     var path: @import("../store/fs.zig").PathBuf = undefined;
     _ = try owned_selection_kept(&path);
     const gate = files.faults.owner_gate;
-    files.faults.owner_gate = .{ .context = &sim, .in_new_user_namespace = never_in_user_namespace };
+    files.faults.owner_gate = .{
+        .context = &sim,
+        .in_new_user_namespace = never_in_user_namespace,
+    };
     try testing.expectError(error.Failed, context.begin(1));
     try testing.expectEqual(codes.Code.E0417, diag.code.?);
     const cause = diag.causes.slice()[0].slice();

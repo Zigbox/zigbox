@@ -352,7 +352,8 @@ fn check_stamps(plan: *const Plan, expected: *const [steps_max + 2]Digest) void 
         if (step.root) continue;
         if (!step.stamp.changes()) continue;
         const to = destinations[step.to];
-        const selected = (select(source, step.mask, to) catch unreachable) orelse continue;
+        const taken = select(source, step.mask, to) catch unreachable; // A clean file system.
+        const selected = taken orelse continue;
         const once = restamp(selected, to, step.stamp) catch unreachable; // Clean.
         const twice = restamp(once, to, step.stamp) catch unreachable; // Clean.
         assert(once.eql(twice));
