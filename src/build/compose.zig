@@ -943,6 +943,10 @@ pub const Context = struct {
                     const from = if (entry.from) |text| file.text(text) else "the project";
                     diagnose.copy_nothing(context.diag, name, patterns[0], from);
                 },
+                error.ManyToOne => {
+                    const count = ws.copying.items_count;
+                    diagnose.copy_many_to_one(context.diag, name, to, count);
+                },
                 error.Failed => context.assembly_failed(name, to),
             }
             return error.Failed;
@@ -1007,6 +1011,7 @@ pub const Context = struct {
                 error.PoolFull => diagnose.glob_pool_full(context.diag, source),
                 error.NoMatch => diagnose.bind_nothing(context.diag, name, source, from),
                 error.Failed => context.assembly_failed(name, "/"),
+                error.ManyToOne => unreachable, // `to` is "/", which ends in `/`.
             }
             return error.Failed;
         };

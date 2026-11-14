@@ -112,7 +112,7 @@ jobs:
           app-id: ${{ vars.RELEASE_APP_ID }}
           private-key: ${{ secrets.RELEASE_APP_PRIVATE_KEY }}
           owner: Zigbox
-          repositories: zigbox.github.io
+          repositories: website
           permission-contents: write
           permission-actions: read
       - name: Dispatch the site deploy and wait for it
@@ -120,7 +120,7 @@ jobs:
           GH_TOKEN: ${{ steps.app.outputs.token }}
         run: |
           set -euo pipefail
-          site=Zigbox/zigbox.github.io
+          site=Zigbox/website
           since=$(date -u -d '30 seconds ago' +%Y-%m-%dT%H:%M:%SZ)
           gh api -X POST "repos/$site/dispatches" -f event_type=site
           run_id=""

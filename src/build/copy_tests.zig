@@ -3,6 +3,7 @@
 
 const std = @import("std");
 const assemble = @import("assemble.zig");
+const constants = @import("../constants.zig");
 const copy = @import("copy.zig");
 const digest_mod = @import("../store/digest.zig");
 const fs_sim = @import("../store/fs_sim.zig");
@@ -163,6 +164,35 @@ test "nothing matched is NoMatch" {
     const source = try source_tree();
     const none = copy.select(context, &ws, source, &.{"src/*.rs"}, "/x/");
     try testing.expectError(error.NoMatch, none);
+}
+
+test "several matches to a destination without a slash are ManyToOne" {
+    // Goal: Docker refuses more than one source into a path that is not a directory; before
+    // 0.5.1 the later match silently won. Method: a glob with two matches, then two plain
+    // sources, each to `/app`; the same with `/app/` is taken; one match to `/app` is renamed.
+    const context = start();
+    const source = try source_tree();
+    const globbed = copy.select(context, &ws, source, &.{"src/*.go"}, "/app");
+    try testing.expectError(error.ManyToOne, globbed);
+    const listed = copy.select(context, &ws, source, &.{ "README", "src/a.go" }, "/app");
+    try testing.expectError(error.ManyToOne, listed);
+    const into = try copy.select(context, &ws, source, &.{ "README", "src/a.go" }, "/app/");
+    var text: [64]u8 = undefined;
+    try testing.expectEqualStrings("README a.go", try names_at(into, &.{"app"}, &text));
+    const one = try copy.select(context, &ws, source, &.{"src/a*.go"}, "/app");
+    try testing.expectEqualStrings("app", try names_at(one, &.{}, &text));
+}
+
+test "a file renamed to a name past the bound is bad_name, not too_deep" {
+    // Goal: the refusal names the length (0.5.1: it read as too deep). Method: README to
+    // `/etc/<255 bytes>` is laid; to `/etc/<256 bytes>` fails with `bad_name`.
+    const context = start();
+    const source = try source_tree();
+    const at_bound = "/etc/" ++ @as([constants.store_name_bytes_max]u8, @splat('n'));
+    _ = try copy.select(context, &ws, source, &.{"README"}, at_bound);
+    const past = copy.select(context, &ws, source, &.{"README"}, at_bound ++ "n");
+    try testing.expectError(error.Failed, past);
+    try testing.expect(failure == .bad_name);
 }
 
 test "a later copy replaces a file and merges a directory; a plain add still conflicts" {
