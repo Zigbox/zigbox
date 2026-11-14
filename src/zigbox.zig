@@ -106,6 +106,18 @@ pub const ExecExit = exec.Exit;
 pub const exec_start = exec.start;
 pub const exec_wait = exec.wait;
 pub const exec_signal = exec.signal;
+/// A new, unconnected IPv4 TCP socket made inside a running container's network namespace
+/// (`docs/decisions/2026-11-14-zigcube-c4-requests.md`): `container_socket(host, name, .tcp4,
+/// &diag)` returns a close-on-exec descriptor the caller owns, or `error.SocketFailed` with the
+/// diagnostic in `diag`. Callable from any thread, many times, by a process that did not start
+/// the container; it needs the same state directory and uid as `exec_start`. Threads: each
+/// thread passes a `Host` of its own (one `HostReal` per thread); a `Host` is not shared. The
+/// container must have been started with `--net none` (the default): `--net host` and
+/// `--net user` (pasta) are refused with E0610.
+pub const container_socket_module = @import("runtime/container_socket.zig");
+pub const container_socket = container_socket_module.open;
+pub const ContainerSocketKind = container_socket_module.Kind;
+pub const ContainerSocketError = container_socket_module.Error;
 /// The recent execs of a container, as `zbx bundle` shows them.
 pub const exec_history = @import("runtime/exec_history.zig");
 
@@ -273,6 +285,7 @@ test "the module's surface is what the contract names" {
     _ = LogReader;
     _ = exec_start;
     _ = exec_wait;
+    _ = container_socket;
     _ = pull.pull;
     _ = pull.Workspace;
     _ = aws_credentials_resolve;
