@@ -5,8 +5,9 @@
 //! `pull_library_tests.zig` uses). They check that two callers on two threads share nothing and
 //! agree on every key, that a refusal is a position and not a crash, that the scheduler runs a
 //! caller's own executor, and that two callers on two threads each run a step with
-//! `build.step.run_step` on a simulated store of their own, stream its output, and agree on the
-//! tree it made.
+//! `run_step` on a simulated store of their own, stream its output, and agree on the tree it
+//! made. `run_step` is not exported (it starts its base ungated: `zigbox.zig`), so that test
+//! reaches it through `build/step.zig`, as the command line does.
 
 const std = @import("std");
 const assert = std.debug.assert;
@@ -14,6 +15,7 @@ const zigbox = @import("zigbox.zig");
 const sim_run = @import("runtime/sim_run.zig");
 const sim_world = @import("sim_world.zig");
 const support = @import("store/test_support.zig");
+const step_file = @import("build/step.zig");
 
 const testing = std.testing;
 const build = zigbox.build;
@@ -296,7 +298,7 @@ const StepCaller = struct {
         unreachable; // The step's `out` exists when its command has ended.
     }
 
-    /// The caller's whole job: one step through `build.step.run_step`, streaming.
+    /// The caller's whole job: one step through `run_step`, streaming.
     fn work(caller: *StepCaller, seed: u64) void {
         caller.setup(seed);
         const chunks = [_]sim_world.OutChunk{
@@ -330,7 +332,7 @@ const StepCaller = struct {
             .stream = true,
         };
         caller.diag.reset();
-        build.step.run_step(&request, &caller.workspace, &caller.result, &caller.diag) catch return;
+        step_file.run_step(&request, &caller.workspace, &caller.result, &caller.diag) catch return;
         caller.ok = true;
     }
 };
@@ -344,7 +346,7 @@ fn step_on(caller: *StepCaller, seed: u64) void {
 }
 
 test "two callers on two threads each run a step on a store of their own and agree on its tree" {
-    // Goal: `build.step.run_step` works for a caller that is not the command line, and shares
+    // Goal: `run_step` works for a caller that is not the command line, and shares
     // nothing between callers. Method: two callers, two threads, a simulated host and store each
     // (different seeds, so different container names); each streams the step, which writes the
     // same three entries to `/out`. Each must succeed, show its output on its own stderr behind
