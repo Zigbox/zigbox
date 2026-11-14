@@ -26,7 +26,9 @@ pub const step_names = [_][]const u8{ "stage0-1", "stage0-2" };
 pub fn check_import(stdout: []const u8, stderr: []const u8, status: u8) Error!void {
     if (status != 0) return error.ImportWrong;
     if (stdout.len != 0) return error.ImportWrong;
-    if (std.mem.indexOf(u8, stderr, "; 0 flagged\n") == null) return error.ImportWrong;
+    // The harness may drop the stream's last newline: the report's last line ends it.
+    const trimmed = std.mem.trimEnd(u8, stderr, "\n");
+    if (!std.mem.endsWith(u8, trimmed, "; 0 flagged")) return error.ImportWrong;
     if (std.mem.indexOf(u8, stderr, "warning[") != null) return error.ImportWrong;
     if (std.mem.indexOf(u8, stderr, "error[") != null) return error.ImportWrong;
 }
@@ -37,11 +39,16 @@ pub fn check_entry(build_file: []const u8) Error!void {
     if (std.mem.indexOf(u8, build_file, entry) == null) return error.ImportWrong;
 }
 
-/// The server's log holds `want` requests, one line each.
+/// The server's log holds `want` requests, one `GET /` line each. The harness may drop the
+/// stream's last newline, so lines are counted, not newlines.
 pub fn check_requests(log: []const u8, want: u32) Error!void {
-    const lines: usize = std.mem.count(u8, log, "\n");
+    var lines: u32 = 0;
+    var split = std.mem.tokenizeScalar(u8, log, '\n');
+    while (split.next()) |line| {
+        if (!std.mem.startsWith(u8, line, "GET /")) return error.ReportWrong;
+        lines += 1;
+    }
     if (lines != want) return error.ReportWrong;
-    if (log.len > 0 and log[log.len - 1] != '\n') return error.ReportWrong;
 }
 
 /// Both steps of the build: `hit` says whether each was a hit.
@@ -82,6 +89,7 @@ test "the import: nothing flagged, no warning" {
     try testing.expectError(error.ImportWrong, check_import(report, "", 0));
     const flagged = "imported 2 steps from 1 stage (target stage0) to zbx.build.zon; 1 flagged\n";
     try testing.expectError(error.ImportWrong, check_import("", flagged, 0));
+    try check_import("", report[0 .. report.len - 1], 0);
     const warned = "warning[ZBX-W0811]: EXPOSE\n" ++ report;
     try testing.expectError(error.ImportWrong, check_import("", warned, 0));
 }
@@ -96,9 +104,10 @@ test "the entry names the URL and the hash" {
 test "requests are counted by lines" {
     try check_requests("", 0);
     try check_requests("GET /hello.txt HTTP/1.1\n", 1);
+    try check_requests("GET /hello.txt HTTP/1.1", 1);
     try testing.expectError(error.ReportWrong, check_requests("GET /hello.txt HTTP/1.1\n", 0));
-    try testing.expectError(error.ReportWrong, check_requests("a\nb\n", 1));
-    try testing.expectError(error.ReportWrong, check_requests("GET /hello.txt HTTP/1.1", 0));
+    try testing.expectError(error.ReportWrong, check_requests("GET /a\nGET /b", 1));
+    try testing.expectError(error.ReportWrong, check_requests("HEAD /hello.txt HTTP/1.1", 1));
 }
 
 fn report_of(first: bool, second: bool) Report {
