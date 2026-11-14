@@ -7,7 +7,8 @@ server as 128 KiB READs, which is false.*
 The slice 1 probe (`zig build demo-s2-probe`; the guest script is in
 `src/testing/vm/main_s2_probe.zig`, the throwaway server in `src/testing/vm/s2_probe/`) passed on
 CI's KVM runner on 2026-11-14:
-[run 43626834366](https://github.com/Zigbox/zigbox/actions/runs/43626834366), and again after the review fixes in RUN_FIX. It confirms item 1 of
+[run 43626834366](https://github.com/Zigbox/zigbox/actions/runs/43626834366), and again after the review fixes,
+[run 43636460487](https://github.com/Zigbox/zigbox/actions/runs/43636460487). It confirms item 1 of
 [2026-11-14-s2-lazy-start-brief.md](2026-11-14-s2-lazy-start-brief.md) on Ubuntu 24.04 (kernel
 6.8.0, FUSE 7.39, `/dev/fuse` 0666). As user `demo` in a user and mount namespace with the full
 subordinate id map, a no-libc server mounted FUSE with `mount(2)`, a `userxattr` overlay stacked
@@ -45,11 +46,14 @@ Four points are recorded:
    still speaks 7.31, the brief's floor, which Ubuntu 24.04 (7.39) meets; slice 4 may lower the
    floor to 7.28 if it needs nothing newer.
 
-3. **The page cache does not outlive the server.** After `kill -9` of the server, a new open of a
-   file whose pages were all cached, opened with `FOPEN_KEEP_CACHE`, fails with `ENOTCONN`: the
-   open itself goes to the dead connection (measured by the review on 6.18; the VM run RUN_FIX
-   records RESULT_NEW_OPEN). A descriptor opened before the kill: RESULT_OLD_FD in the same run.
-   Slice 4's "if the server dies first" handling must not assume that cached files stay readable.
+3. **The page cache does not outlive the server.** After `kill -9` of the server, a new open of
+   `big.bin`, every page of it cached and opened with `FOPEN_KEEP_CACHE`, fails with `ENOTCONN`
+   ("Transport endpoint is not connected"): the open itself goes to the dead connection. This was
+   measured by the review on 6.18 and recorded in the VM by run 43636460487. A descriptor opened
+   before the kill still read all 16 MiB from the cache in that run, but closing it failed with
+   `ENOTCONN` (the FLUSH goes to the dead connection). Slice 4's "if the server dies first"
+   handling must not assume that cached files stay readable: only already-open descriptors read,
+   and only what is cached.
 
 4. **AppArmor's userns restriction was off.** The probe ran with
    `kernel.apparmor_restrict_unprivileged_userns=0`, which the harness's provisioning sets for

@@ -115,8 +115,8 @@ test "a missing check, a FAIL, a missing report or a non-zero exit is refused" {
     try std.testing.expectError(error.ReportMissing, check_probe(no_reports, 0));
 }
 
-/// What the probe printed in the first passing VM run
-/// (https://github.com/Zigbox/zigbox/actions/runs/43626834366), with the `ls` lines dropped and
+/// What the probe printed in the VM run after the review fixes
+/// (https://github.com/Zigbox/zigbox/actions/runs/43636460487), with the `ls` lines dropped and
 /// each line cut to 92 bytes and its trailing spaces dropped, for the line rules.
 const recorded_output =
     \\probe: kernel: 6.8.0-147-generic
@@ -138,7 +138,7 @@ const recorded_output =
     \\probe: read as uid 1000 through the overlay: ok
     \\probe: read as uid 1000 on the FUSE mount: ok
     \\probe: id as 1000: uid=1000(demo) gid=1000(demo) groups=1000(demo)
-    \\probe: O_DIRECT 1 MiB reads on the FUSE mount: 2097152 bytes (2.1 MB, 2.0 MiB) copied, 0.003
+    \\probe: O_DIRECT 1 MiB reads on the FUSE mount: 2097152 bytes (2.1 MB, 2.0 MiB) copied, 0.002
     \\probe: READ requests for other.bin (count size):  32 131072 2 1048576
     \\probe: copy-up: ok
     \\probe: lower unchanged: ok
@@ -150,6 +150,8 @@ const recorded_output =
     \\probe: cat after kill: cat: /tmp/s2probe/merged/sub/nested.txt: Transport endpoint is not co
     \\probe: ENOTCONN after kill: ok
     \\probe: ls on the FUSE mount after kill: ls: cannot open directory '/tmp/s2probe/lower': Tran
+    \\probe: new open of cached big.bin: cat: /tmp/s2probe/merged/big.bin: Transport endpoint is n
+    \\probe: fd opened before the kill: 16777216 bytes of big.bin cat: closing standard input: Tra
     \\probe: server log: fuse_probe: mounted fuse on /tmp/s2probe/lower with fd=3,rootmode=40000,u
     \\probe: server log: fuse_probe: server: INIT from kernel 7.39, max_readahead 131072, flags 0x
     \\probe: server log: fuse_probe: server: INIT answered 7.31, max_pages 256, flags 0x442001
