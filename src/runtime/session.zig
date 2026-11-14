@@ -128,6 +128,9 @@ pub const Session = struct {
     listener: ?host_mod.Handle,
     /// The server of a lazy plan, set by the caller (`serve_with`) before `execute`.
     fuse: ?Fuse,
+    /// The FUSE server refused the connection (`serve_fuse`): its error says why, and the host's
+    /// last errno is not its (the server closed the descriptor after).
+    fuse_refused: bool,
 
     pub fn start(
         session: *Session,
@@ -150,6 +153,7 @@ pub const Session = struct {
         };
         session.listener = null;
         session.fuse = null;
+        session.fuse_refused = false;
         session.pid = null;
         session.open = .{
             .ready_read = false,
@@ -197,7 +201,7 @@ pub const Session = struct {
                 const failure: diagnose.Failure = .{
                     .step = @intCast(index),
                     .err = err,
-                    .errno = host.last_errno(),
+                    .errno = if (session.fuse_refused) 0 else host.last_errno(),
                 };
                 host.begin_step(host_mod.step_none);
                 session.abandon();
@@ -364,7 +368,11 @@ pub const Session = struct {
             session.open.channel_read = false;
         }
         const device = received catch return;
-        try fuse.serve(fuse.context, device);
+        fuse.serve(fuse.context, device) catch |err| {
+            session.fuse_refused = true;
+            return err;
+        };
+        assert(!session.fuse_refused);
     }
 
     /// Hands the listener to the caller, who owns it from here: null if the plan has none or it

@@ -84,13 +84,19 @@ pub const Server = struct {
         return .{ .context = server, .prepare = prepare, .serve = serve };
     }
 
-    /// After the run (or a start that failed): joins the serving threads, which return once the
-    /// container's mount namespace is gone, and closes the descriptor.
+    /// After the run (or a start that failed): stops the serving threads, joins them, and
+    /// closes the descriptor. Bounded whatever holds the mount: each thread sees the stop within
+    /// a poll (`fuse_poll_ms`) and its request in hand, and once the descriptor is closed the
+    /// kernel ends the connection, so a holder outside gets `ENOTCONN`
+    /// (docs/decisions/2026-11-14-s2-lazy-teardown.md).
     pub fn finish(server: *Server) void {
         switch (server.state) {
             .idle, .prepared => {},
             .serving => {
+                server.serving.stop();
                 server.serving.wait();
+                // Each thread closed every chunk file it opened.
+                for (&server.threads) |*thread| assert(thread.real.open_count == 0);
                 // Through the host, which counted the descriptor when it was received.
                 server.host.close(@intCast(server.fd));
                 server.fd = -1;
@@ -112,18 +118,27 @@ pub const Server = struct {
         }
         server.owners = store_namespace.outside_owners(server.host, &server.facts).map;
         store.owners = .{ .outside = server.owners };
+        var trees: resolver.StoreTrees = .{ .store = store, .errno = 0 };
+        return server.prepare_from(trees.source(), tree, diag);
+    }
+
+    /// `prepare`'s table and cache, with the trees read from `source` (the store's, or a test's).
+    pub fn prepare_from(server: *Server, source: nodes.TreeSource, tree: Digest, diag: *Diag) bool {
+        assert(server.state == .idle);
+        assert(diag.code == null);
+        const store = &server.store;
         const memory = nodes.carve(
             &server.table_region,
             constants.lazy_nodes_max,
             constants.lazy_index_bytes_max,
         );
         server.table.init(memory);
-        var trees: resolver.StoreTrees = .{ .store = store, .errno = 0 };
-        server.table.build(trees.source(), tree) catch |err| {
+        server.table.build(source, tree) catch |err| {
             switch (err) {
-                error.TooManyNodes, error.TooLarge => diagnose.too_large(diag, tree, bound(err)),
+                error.TooManyNodes, error.TooLarge => diagnose.too_large(diag, tree, bound_of(err)),
                 else => store_diagnose.tree_damaged(diag, tree, build_failure(err)),
             }
+            assert(diag.code != null);
             return false;
         };
         assert(store.chunk_bytes > 0);
@@ -138,28 +153,21 @@ pub const Server = struct {
         return true;
     }
 
+    fn bound_of(err: nodes.BuildError) []const u8 {
+        return switch (err) {
+            error.TooManyNodes => diagnose.bound(.entries),
+            error.TooLarge => diagnose.bound(.index),
+            else => unreachable, // E0422, `build_failure`.
+        };
+    }
+
     fn build_failure(err: nodes.BuildError) []const u8 {
         return switch (err) {
             error.NotFound => "cannot be served lazily: a directory of it is not in the store",
             error.Damaged => "cannot be served lazily: a directory of it does not hash to its id",
             error.Unreadable => "cannot be served lazily: a directory of it cannot be read",
             error.Malformed => "cannot be served lazily: a directory of it does not decode",
-            error.TooManyNodes, error.TooLarge => unreachable, // E1207, `bound`.
-        };
-    }
-
-    /// The bound of the node table that a tree too large for it passed (E1207).
-    fn bound(err: nodes.BuildError) []const u8 {
-        return switch (err) {
-            error.TooManyNodes => std.fmt.comptimePrint(
-                "has more than {d} entries",
-                .{constants.lazy_nodes_max},
-            ),
-            error.TooLarge => std.fmt.comptimePrint(
-                "has more than {d} MiB of directory listings",
-                .{constants.lazy_index_bytes_max / (1024 * 1024)},
-            ),
-            else => unreachable, // E0422, `build_failure`.
+            error.TooManyNodes, error.TooLarge => unreachable, // E1207, `bound_of`.
         };
     }
 
@@ -180,9 +188,15 @@ pub const Server = struct {
             source.* = thread.chunks.chunks();
             assert(thread.store.chunk_bytes == server.server.chunk_bytes);
         }
+        const device_fuse = host_real_fuse.device(&server.fd) catch {
+            server.host.close(@intCast(server.fd));
+            server.fd = -1;
+            server.state = .idle;
+            return error.IoFailed;
+        };
         server.serving = serve_mod.Serving.init(
             &server.server,
-            host_real_fuse.device(&server.fd),
+            device_fuse,
             &server.sources,
             &server.thread_memory,
         );
@@ -193,11 +207,13 @@ pub const Server = struct {
             return switch (err) {
                 error.Ended => error.IoFailed,
                 error.Refused => error.Unsupported,
+                error.TimedOut => error.TimedOut,
             };
         };
         server.state = .serving;
-        // Threads already started go on serving, and `finish` joins them.
+        // Threads already started go on serving, and `finish` stops and joins them.
         server.serving.start() catch return error.OutOfMemory;
+        assert(server.serving.started == threads_count);
     }
 };
 

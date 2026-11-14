@@ -7,10 +7,13 @@
 //! before any serving thread starts, so a kernel the server cannot serve is refused before the
 //! run goes on. The kernel holds every other request until `INIT` is answered.
 //!
-//! Teardown: the connection ends when the mount's last user is gone, that is, when the container's
-//! mount namespace ends with its last process. The kernel then answers every read with `ENODEV`,
-//! each thread returns, and `wait` joins them. After a server dies with the mount still there,
-//! a read the page cache cannot answer gets `ENOTCONN` (the probe, 2026-11-14).
+//! Teardown: once the container has exited, `stop` sets a flag each thread looks at between
+//! requests and at least every `fuse_poll_ms` (the device's wait), and `wait` joins them. A thread
+//! also returns when the kernel ends the connection (`ENODEV`: the mount's last user is gone).
+//! Nothing outside the run can keep the threads, so a holder of the mount outside (a descriptor
+//! passed out of the container) cannot hang `zbx`: once the server closes its descriptor, the
+//! kernel ends the connection and that holder gets `ENOTCONN`
+//! (docs/decisions/2026-11-14-s2-lazy-teardown.md).
 
 const std = @import("std");
 const assert = std.debug.assert;
@@ -31,13 +34,15 @@ comptime {
 
 /// What a read of the device gives.
 pub const ReceiveError = error{
-    /// Nothing this time (`EINTR`, `EAGAIN`, or `ENOENT` for a request the kernel took back).
+    /// Nothing this time: no request within `fuse_poll_ms`, or `EINTR`, `EAGAIN`, or `ENOENT`
+    /// for a request the kernel took back.
     Again,
     /// The connection is over (`ENODEV`, or anything else the device says).
     Ended,
 };
 
-/// `/dev/fuse` as the server uses it: one request per read, one reply per write. A reply the
+/// `/dev/fuse` as the server uses it: one request per read, one reply per write. A read waits
+/// at most `fuse_poll_ms` for a request. A reply the
 /// kernel refuses (`ENOENT`, its request was interrupted) is dropped: nobody waits for it.
 pub const Device = struct {
     context: *anyopaque,
@@ -50,7 +55,12 @@ pub const HandshakeError = error{
     Ended,
     /// The first request was not `INIT`, or `INIT` was refused (a kernel older than 7.31).
     Refused,
+    /// No request came within `fuse_init_timeout_ms`.
+    TimedOut,
 };
+
+/// The device reads `handshake` makes before giving up: each waits at most `fuse_poll_ms`.
+pub const handshake_polls_max: u32 = constants.fuse_init_timeout_ms / constants.fuse_poll_ms;
 
 /// One serving thread's buffers: a request and a reply.
 pub const thread_memory_bytes: u32 = constants.fuse_request_bytes + constants.fuse_reply_bytes;
@@ -63,6 +73,8 @@ pub const Serving = struct {
     memory: []align(8) u8,
     threads: [constants.lazy_fuse_threads]std.Thread,
     started: u32,
+    /// Set by `stop`: each thread returns at its next look.
+    stopping: std.atomic.Value(bool),
 
     /// `memory` holds `lazy_fuse_threads` threads' buffers (`thread_memory_bytes` each).
     /// Thread `i` reads chunks only through `chunks[i]`, so a source may keep its scratch space
@@ -82,15 +94,20 @@ pub const Serving = struct {
             .memory = memory,
             .threads = undefined,
             .started = 0,
+            .stopping = .init(false),
         };
     }
 
     /// Answers the connection's `INIT` (more than one if the kernel asks again in our major).
     pub fn handshake(serving: *Serving) HandshakeError!void {
         assert(serving.started == 0);
+        assert(!serving.stopping.load(.acquire));
         var thread_worker = serving.worker(0);
         const request = serving.request_buffer(0);
+        var polls: u32 = 0;
         while (true) {
+            if (polls == handshake_polls_max) return error.TimedOut;
+            polls += 1;
             const got = serving.device.receive(serving.device.context, request) catch |err| {
                 switch (err) {
                     error.Again => continue,
@@ -106,7 +123,8 @@ pub const Serving = struct {
             serving.device.send(serving.device.context, reply);
             const out = std.mem.bytesToValue(abi.OutHeader, reply[0..@sizeOf(abi.OutHeader)]);
             if (out.@"error" != 0) return error.Refused;
-            const in = std.mem.bytesToValue(abi.InitIn, bytes[@sizeOf(abi.InHeader)..][0..8]);
+            const body = bytes[@sizeOf(abi.InHeader)..];
+            const in = std.mem.bytesToValue(abi.InitIn, body[0..@sizeOf(abi.InitIn)]);
             // A newer major got ours back and asks again in it.
             if (in.major == abi.major_version) return;
         }
@@ -121,25 +139,38 @@ pub const Serving = struct {
             serving.threads[index] = try std.Thread.spawn(.{}, run, .{ serving, index });
             serving.started += 1;
         }
+        assert(serving.started == constants.lazy_fuse_threads);
     }
 
-    /// Returns once every started thread has seen the connection end.
+    /// Tells every thread to return at its next look (within `fuse_poll_ms` and its request in
+    /// hand). The connection itself ends when the descriptor is closed after `wait`.
+    pub fn stop(serving: *Serving) void {
+        assert(serving.started <= constants.lazy_fuse_threads);
+        serving.stopping.store(true, .release);
+        assert(serving.stopping.load(.acquire));
+    }
+
+    /// Returns once every started thread has returned: after `stop`, or once the connection ends.
     pub fn wait(serving: *Serving) void {
         assert(serving.started <= constants.lazy_fuse_threads);
         for (serving.threads[0..serving.started]) |thread| thread.join();
         serving.started = 0;
+        assert(serving.started == 0);
     }
 
     fn run(serving: *Serving, index: u32) void {
+        // Not `started`: the spawning thread counts this one only after the spawn returns.
+        assert(index < constants.lazy_fuse_threads);
         var thread_worker = serving.worker(index);
         const request = serving.request_buffer(index);
-        while (true) {
+        while (!serving.stopping.load(.acquire)) {
             const got = serving.device.receive(serving.device.context, request) catch |err| {
                 switch (err) {
                     error.Again => continue,
                     error.Ended => return,
                 }
             };
+            assert(got <= request.len);
             const reply = ops.handle(serving.server, &thread_worker, request[0..got]);
             if (reply.len > 0) serving.device.send(serving.device.context, reply);
         }

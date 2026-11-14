@@ -1987,8 +1987,9 @@ comptime {
 // `lazy_index_bytes_max` are the S2 brief's bounds, approved by the owner on 2026-11-14; the rest
 // follow from them and from the store's chunk size.
 
-/// The FUSE node table, fixed at start: one node per directory, per symlink and per file object
-/// (a file's hard links share a node). A tree with more entries is not served lazily.
+/// The FUSE node table, fixed at start: room for this many entries below the root (each name in
+/// a directory: a file's hard links are entries that share one node). A tree with more entries
+/// is not served lazily. The table has a node more, the root's.
 pub const lazy_nodes_max: u32 = 262_144;
 /// Server threads reading `/dev/fuse`.
 pub const lazy_fuse_threads: u32 = 4;
@@ -2010,6 +2011,11 @@ pub const fuse_valid_seconds: u64 = 365 * 24 * 60 * 60;
 /// FUSE requests the kernel keeps in flight to the server, and when it starts to throttle.
 pub const fuse_max_background: u16 = 64;
 pub const fuse_congestion_threshold: u16 = 48;
+/// How long a serving thread waits on `/dev/fuse` before it looks at the stop flag again: the
+/// most `finish` waits for an idle thread after the container is gone.
+pub const fuse_poll_ms: u32 = 100;
+/// How long `serve` waits for the kernel's `INIT` on a new connection before refusing the run.
+pub const fuse_init_timeout_ms: u32 = 10_000;
 
 comptime {
     assert(lazy_nodes_max > 0);
@@ -2025,6 +2031,10 @@ comptime {
     assert(fuse_request_bytes >= 40 + 1024 + 1); // A lookup of the longest name the kernel sends.
     assert(fuse_reply_bytes > fuse_read_bytes_max);
     assert(fuse_congestion_threshold < fuse_max_background);
+    assert(fuse_poll_ms > 0);
+    assert(fuse_poll_ms <= 1000);
+    assert(fuse_init_timeout_ms % fuse_poll_ms == 0);
+    assert(fuse_init_timeout_ms >= 10 * fuse_poll_ms);
 }
 
 // Lazy start (S2): the chunk resolver (`src/lazy/`). The values are the brief's, approved by the

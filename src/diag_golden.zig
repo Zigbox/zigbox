@@ -831,7 +831,7 @@ const lazy_cases = [_]Case{
 
 fn lazy_too_large(diag: *Diag) void {
     const tree_digest = Digest.parse("b3:" ++ test_util.repeat('7', 64)).?;
-    lazy_diagnose.too_large(diag, tree_digest, "has more than 262144 entries");
+    lazy_diagnose.too_large(diag, tree_digest, lazy_diagnose.bound(.entries));
 }
 
 const key_directory = "/home/alice/.config/zbx/keys";

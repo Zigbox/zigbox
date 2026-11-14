@@ -114,7 +114,11 @@ pub const Table = struct {
         assert(memory.nodes.len > 0);
         assert(memory.nodes.len < std.math.maxInt(u32));
         assert(std.math.isPowerOfTwo(memory.slots.len));
-        assert(memory.slots.len >= 2 * memory.nodes.len);
+        // The map always has a free slot, and is at most about half full: the nodes are the
+        // entries plus the root, the slots at least twice the entries (`slots_for`).
+        assert(memory.slots.len > memory.nodes.len);
+        assert(memory.slots.len >= 2 * (memory.nodes.len - 1));
+        assert(memory.children.len == memory.nodes.len - 1);
         // The arena is the trees' room plus one tree, read whole before it is found too large.
         assert(memory.arena.len == @as(u64, memory.arena_limit) + constants.store_tree_bytes_max);
         assert(memory.arena.len < std.math.maxInt(u32));
@@ -442,32 +446,43 @@ pub const Table = struct {
     }
 };
 
-/// Bytes of memory a table with room for `nodes` nodes and `arena_limit` bytes of directories
-/// takes, laid out by `carve`.
-pub fn memory_bytes(nodes: u32, arena_limit: u32) u64 {
-    assert(nodes > 0);
-    assert(arena_limit > 0);
-    const slots = std.math.ceilPowerOfTwoAssert(u64, 2 * @as(u64, nodes));
-    return @as(u64, nodes) * @sizeOf(Node) + @as(u64, nodes) * @sizeOf(Child) +
-        slots * @sizeOf(u32) + arena_limit + constants.store_tree_bytes_max;
+/// Map slots for a table of `entries` entries: at least twice them, and four, so the map always
+/// keeps a free slot for the root's node too.
+fn slots_for(entries: u32) u64 {
+    assert(entries > 0);
+    const slots = std.math.ceilPowerOfTwoAssert(u64, @max(2 * @as(u64, entries), 4));
+    assert(slots > @as(u64, entries) + 1);
+    return slots;
 }
 
-/// Lays a table's memory out in one region of `memory_bytes(nodes, arena_limit)` bytes. A
-/// directory has an entry per child, so a table's children are at most its nodes.
-pub fn carve(region: []align(8) u8, nodes: u32, arena_limit: u32) Memory {
-    assert(region.len >= memory_bytes(nodes, arena_limit));
-    assert(nodes > 0);
-    const slots: usize = @intCast(std.math.ceilPowerOfTwoAssert(u64, 2 * @as(u64, nodes)));
+/// Bytes of memory a table with room for `entries` entries below the root and `arena_limit`
+/// bytes of directories takes, laid out by `carve`.
+pub fn memory_bytes(entries: u32, arena_limit: u32) u64 {
+    assert(entries > 0);
+    assert(arena_limit > 0);
+    const node_room = @as(u64, entries) + 1;
+    return node_room * @sizeOf(Node) + @as(u64, entries) * @sizeOf(Child) +
+        slots_for(entries) * @sizeOf(u32) + arena_limit + constants.store_tree_bytes_max;
+}
+
+/// Lays a table's memory out in one region of `memory_bytes(entries, arena_limit)` bytes. The
+/// bound counts entries below the root: a table has a child per entry and a node per entry at
+/// most (hard links share one), plus the root's node.
+pub fn carve(region: []align(8) u8, entries: u32, arena_limit: u32) Memory {
+    assert(region.len >= memory_bytes(entries, arena_limit));
+    assert(entries > 0);
+    const slots: usize = @intCast(slots_for(entries));
     var at: usize = 0;
-    const node_bytes = @as(usize, nodes) * @sizeOf(Node);
+    const node_bytes = (@as(usize, entries) + 1) * @sizeOf(Node);
     const nodes_slice: []Node = @alignCast(std.mem.bytesAsSlice(Node, region[at..][0..node_bytes]));
     at += node_bytes;
-    const child_bytes = @as(usize, nodes) * @sizeOf(Child);
+    const child_bytes = @as(usize, entries) * @sizeOf(Child);
     const children: []Child = @alignCast(std.mem.bytesAsSlice(Child, region[at..][0..child_bytes]));
     at += child_bytes;
     const slots_slice: []u32 = @alignCast(std.mem.bytesAsSlice(u32, region[at..][0 .. slots * 4]));
     at += slots * 4;
     const arena = region[at..][0 .. arena_limit + constants.store_tree_bytes_max];
+    assert(nodes_slice.len == children.len + 1);
     return .{
         .nodes = nodes_slice,
         .children = children,
@@ -483,9 +498,9 @@ comptime {
     assert(@alignOf(Node) <= 8);
     // The fixed part at its bound is the approved 25 MiB (a node, a child and two map slots per
     // node); the arena is the trees section on top (docs/decisions/2026-11-14-s2-fuse-server.md).
-    const slots_max = std.math.ceilPowerOfTwoAssert(u64, 2 * @as(u64, constants.lazy_nodes_max));
-    assert(@as(u64, constants.lazy_nodes_max) * (@sizeOf(Node) + @sizeOf(Child)) +
-        slots_max * @sizeOf(u32) <= 25 * 1024 * 1024);
+    // The root's node is one more than the entries the bound counts.
+    const fixed = memory_bytes(constants.lazy_nodes_max, 1) - 1 - constants.store_tree_bytes_max;
+    assert(fixed <= 25 * 1024 * 1024 + @sizeOf(Node));
     assert(@as(u64, constants.lazy_index_bytes_max) + constants.store_tree_bytes_max <
         std.math.maxInt(u32));
 }
@@ -551,8 +566,9 @@ test "a tree becomes a table: links share a node, directories count their subdir
 }
 
 test "the node bound: a tree of exactly the room builds, one more node is refused" {
-    // Goal: `TooManyNodes` is reached at the bound, not before. Method: the sample has five
-    // nodes and six children; room for five builds, room for four is refused.
+    // Goal: `TooManyNodes` is reached at the bound, not before; the bound counts entries below
+    // the root. Method: the sample has five entries (a, d, l, x, y) and five nodes with the
+    // root; room for five entries builds, room for four is refused.
     const root = try sample(&test_fixture);
     var region: []align(8) u8 = &.{};
     defer testing.allocator.free(region);

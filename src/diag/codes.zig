@@ -4317,9 +4317,9 @@ pub const registry = [_]Entry{
         .explanation =
         \\zbx run --lazy starts a container before its image is all on disk,
         \\serving the files from the store as the container reads them. The server
-        \\runs in the zbx process that runs the container, so the run must stay in
-        \\the foreground (not -d), and it needs an image (not --rootfs, which runs
-        \\a directory as it is).
+        \\runs in the zbx process that runs the container, so for now the run must
+        \\stay in the foreground: -d with --lazy is not yet supported. It also needs
+        \\an image (not --rootfs, which runs a directory as it is).
         \\
         \\The cause names the option. Nothing was started. Leave out --lazy, or
         \\the other option.

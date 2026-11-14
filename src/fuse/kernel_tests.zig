@@ -92,7 +92,8 @@ test "a real kernel mount serves a tree: reads through it match, byte for byte" 
     defer testing.allocator.free(memory);
     // The fixture's chunks are safe from every thread: one source in every slot.
     const chunks: [constants.lazy_fuse_threads]ops.Chunks = @splat(fixture.chunks());
-    var serving = serve.Serving.init(&server, host_real_fuse.device(&fd), &chunks, memory);
+    const device = try host_real_fuse.device(&fd);
+    var serving = serve.Serving.init(&server, device, &chunks, memory);
     try serving.handshake();
     try serving.start();
     const status = reap(@intCast(forked));
