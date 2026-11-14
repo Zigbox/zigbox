@@ -114,3 +114,54 @@ test "a missing check, a FAIL, a missing report or a non-zero exit is refused" {
     const no_reports = good[latency + latency_line.len ..];
     try std.testing.expectError(error.ReportMissing, check_probe(no_reports, 0));
 }
+
+/// What the probe printed in the first passing VM run
+/// (https://github.com/Zigbox/zigbox/actions/runs/43626834366), with the `ls` lines dropped and
+/// each line cut to 92 bytes and its trailing spaces dropped, for the line rules.
+const recorded_output =
+    \\probe: kernel: 6.8.0-147-generic
+    \\probe: /dev/fuse: 666 root:root
+    \\probe: apparmor_restrict_unprivileged_userns: 0
+    \\probe: user: 1000 demo
+    \\probe: subordinate ids: uid 100000 gid 100000, 65536 each
+    \\probe: uid_map:  0 1000 1; 1 100000 65536;
+    \\probe: gid_map:  0 1000 1; 1 100000 65536;
+    \\probe: fuse mount: ok
+    \\probe: mountinfo: 409 260 0:47 / /tmp/s2probe/lower ro,nosuid,nodev,relatime - fuse zbxprobe
+    \\probe: overlay mount: ok
+    \\probe: mountinfo: 412 260 0:48 / /tmp/s2probe/merged rw,relatime - overlay overlay rw,lowerd
+    \\probe: read as uid 0 through the overlay: ok
+    \\probe: 16 MiB read through the overlay: ok
+    \\probe: latency uncached: fuse_probe: read /tmp/s2probe/merged/big.bin: 16777216 bytes in 16
+    \\probe: latency cached: fuse_probe: read /tmp/s2probe/merged/big.bin: 16777216 bytes in 16 re
+    \\probe: READ requests for big.bin (count size):  128 131072
+    \\probe: read as uid 1000 through the overlay: ok
+    \\probe: read as uid 1000 on the FUSE mount: ok
+    \\probe: id as 1000: uid=1000(demo) gid=1000(demo) groups=1000(demo)
+    \\probe: O_DIRECT 1 MiB reads on the FUSE mount: 2097152 bytes (2.1 MB, 2.0 MiB) copied, 0.003
+    \\probe: READ requests for other.bin (count size):  32 131072 2 1048576
+    \\probe: copy-up: ok
+    \\probe: lower unchanged: ok
+    \\probe: new file in the upper: ok
+    \\probe: touch on the FUSE mount: touch: cannot touch '/tmp/s2probe/lower/x': Read-only file s
+    \\probe: lower is read-only: ok
+    \\probe: cat broken.bin: cat: /tmp/s2probe/merged/broken.bin: Input/output error
+    \\probe: EIO reaches cat: ok
+    \\probe: cat after kill: cat: /tmp/s2probe/merged/sub/nested.txt: Transport endpoint is not co
+    \\probe: ENOTCONN after kill: ok
+    \\probe: ls on the FUSE mount after kill: ls: cannot open directory '/tmp/s2probe/lower': Tran
+    \\probe: server log: fuse_probe: mounted fuse on /tmp/s2probe/lower with fd=3,rootmode=40000,u
+    \\probe: server log: fuse_probe: server: INIT from kernel 7.39, max_readahead 131072, flags 0x
+    \\probe: server log: fuse_probe: server: INIT answered 7.31, max_pages 256, flags 0x442001
+    \\probe: all ok
+    \\
+;
+
+test "the output recorded in a real VM run passes, and fails once a check is gone" {
+    // Goal: the check reads the text the guest script really prints, not text written from what
+    // it is believed to print. Method: the recorded run passes; the same run without its last
+    // line, `probe: all ok`, does not.
+    try check_probe(recorded_output, 0);
+    const last = std.mem.lastIndexOf(u8, recorded_output, "probe: all ok").?;
+    try std.testing.expectError(error.CheckFailed, check_probe(recorded_output[0..last], 0));
+}
