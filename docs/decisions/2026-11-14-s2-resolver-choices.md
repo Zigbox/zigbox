@@ -51,4 +51,21 @@ questions before choosing. The rulings:
   bytes after its entry failed on the deadline is named (`lied`) and not asked for that object
   again, like any other lie.
 
+
+## How reads reach the resolver (supervisor's correction, 2026-11-14)
+
+A FUSE READ has the reader's size and offset, up to `max_pages` × 4 KiB: 128 KiB for a buffered
+`cat`, 256 KiB with `POSIX_FADV_SEQUENTIAL`, 4 KiB for a small `pread` at any offset, 1 MiB for
+`O_DIRECT`; one READ may cross a chunk boundary. The resolver never sees READs. It serves
+whole chunks (`Resolver.read(object, chunk, out)`); slice 4 turns a READ into one call per chunk
+it touches, in order, and caches what it resolved. So:
+
+- Sequential access is seen from where reads land, chunk by chunk (`Schedule.note_read`): the next
+  chunk after the last one is a step forward, the same chunk again leaves the streak as it was,
+  any other chunk starts over. Request size plays no part.
+- A chunk already resolved is read from the store, with no fetch and no pending entry, and still
+  counts as a read for readahead.
+- Tests in `src/lazy/sim.zig`: a small unaligned read, a read across two chunks, a sequential run
+  of quarter-chunk reads (256 KiB of 1 MiB), and repeat reads of every resolved chunk.
+
 Detail: `docs/briefs/S2-lazy-start.md`, sections 4 and 5.

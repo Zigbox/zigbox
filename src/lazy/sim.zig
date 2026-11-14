@@ -27,6 +27,7 @@ const support = @import("../store/test_support.zig");
 const xattrs = @import("../store/xattrs.zig");
 const lazy = @import("lazy.zig");
 const resolver_mod = @import("resolver.zig");
+const Schedule = @import("schedule.zig").Schedule;
 const land = @import("land.zig");
 const chunks_mod = @import("../store/chunks.zig");
 
@@ -864,6 +865,59 @@ test "schedule: a chunk read again keeps the sequential streak" {
     var queued: u32 = 0;
     for (&schedule.pending) |*entry| queued += @intFromBool(entry.state == .queued);
     try std.testing.expect(queued > 0); // Readahead started.
+}
+
+/// A FUSE READ of any size at any offset, as slice 4 passes it on: one read per chunk it
+/// touches, in order. Sequential access is seen from where reads start, never from their size.
+fn fuse_read(schedule: *Schedule, object: u32, offset: u64, length: u64) void {
+    assert(length > 0);
+    assert(offset + length <= schedule.catalog.objects[object].wanted.size);
+    var chunk = offset / chunk_bytes;
+    while (chunk <= (offset + length - 1) / chunk_bytes) : (chunk += 1) {
+        schedule.note_read(object, @intCast(chunk), 0);
+    }
+}
+
+fn queued_count(schedule: *const Schedule) u32 {
+    var count: u32 = 0;
+    for (&schedule.pending) |*entry| count += @intFromBool(entry.state == .queued);
+    assert(count <= schedule.pending.len);
+    return count;
+}
+
+test "schedule: a small unaligned read starts no readahead" {
+    setup(&sim_state, 29, honest_scenario(1, false, false));
+    defer teardown_unrun(&sim_state);
+    const schedule = &sim_state.resolver.schedule;
+    const object = longest_object(&sim_state);
+    fuse_read(schedule, object, chunk_bytes + 37, 4);
+    fuse_read(schedule, object, 5, 4);
+    try std.testing.expectEqual(@as(u8, 1), schedule.objects[object].streak);
+    try std.testing.expectEqual(@as(u32, 0), queued_count(schedule));
+}
+
+test "schedule: a read across two chunks counts as a step forward" {
+    setup(&sim_state, 31, honest_scenario(1, false, false));
+    defer teardown_unrun(&sim_state);
+    const schedule = &sim_state.resolver.schedule;
+    const object = longest_object(&sim_state);
+    fuse_read(schedule, object, chunk_bytes - 4, 8);
+    try std.testing.expectEqual(@as(u8, 2), schedule.objects[object].streak);
+    try std.testing.expect(queued_count(schedule) > 0);
+}
+
+test "schedule: a sequential run of quarter-chunk reads starts readahead on the second chunk" {
+    setup(&sim_state, 37, honest_scenario(1, false, false));
+    defer teardown_unrun(&sim_state);
+    const schedule = &sim_state.resolver.schedule;
+    const object = longest_object(&sim_state);
+    const quarter = chunk_bytes / 4; // 256 KiB of a 1 MiB chunk.
+    var offset: u64 = 0;
+    while (offset < chunk_bytes) : (offset += quarter) fuse_read(schedule, object, offset, quarter);
+    try std.testing.expectEqual(@as(u32, 0), queued_count(schedule));
+    fuse_read(schedule, object, offset, quarter);
+    try std.testing.expectEqual(@as(u8, 2), schedule.objects[object].streak);
+    try std.testing.expect(queued_count(schedule) > 0);
 }
 
 test "sim: seeds" {
