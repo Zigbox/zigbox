@@ -74,11 +74,16 @@ pub fn check_listen(output: []const u8) Error!void {
 pub fn check_connect(output: []const u8) Error!void {
     const wrong = error.ConnectWrong;
     if (!expect_value(output, "HOLD:", "HELD 3")) return wrong;
+    // An agent adopted the container and was killed with SIGKILL (-9 as Python reports it).
+    if (!expect_value(output, "AGENT-ADOPT:", "ADOPTED c4 running")) return wrong;
+    if (!expect_value(output, "AGENT-KILLED:", "-9")) return wrong;
+    // The supervisor re-executed itself: same process, a new image, only slot 3 kept.
+    if (!expect_value(output, "RESTARTED-SAME-PID:", "1")) return wrong;
+    if (!expect_value(output, "RESTART:", "INHERITED 3")) return wrong;
     if (!expect_value(output, "ADOPT:", "ADOPTED c4 running")) return wrong;
     if (!expect_value(output, "SERVER-UP:", "1")) return wrong;
     if (!expect_value(output, "DIAL:", "DIAL-REPLY 3 pong-from-inside")) return wrong;
     if (!expect_value(output, "SERVER-GOT:", "ping-from-supervisor")) return wrong;
-    if (!expect_value(output, "SOCKET-AFTER:", "HELD 3")) return wrong;
 }
 
 /// ZB-7: a second `exec` connected to the first one's listener on 127.0.0.1, which the host
@@ -90,8 +95,9 @@ pub fn check_net(output: []const u8) Error!void {
     if (!expect_value(output, "ADDRS:", "1")) return error.NetWrong;
 }
 
-/// From inside: the supervisor's pid is not there and cannot be signalled, `kill -1` leaves the
-/// supervisor and the container alive, and `/etc/hosts` is not writable.
+/// From inside: the supervisor's pid is not there and can be neither signalled nor traced, no
+/// helper ever shows in /proc while thousands are made, `kill -1` leaves the supervisor and the
+/// container alive, and `/etc/hosts` is not writable.
 pub fn check_hostile(output: []const u8) Error!void {
     const wrong = error.HostileWrong;
     const kill = value_of(output, "KILL-SUPERVISOR:") orelse return wrong;
@@ -101,6 +107,13 @@ pub fn check_hostile(output: []const u8) Error!void {
     const procs = value_of(output, "PROCS:") orelse return wrong;
     const count = std.fmt.parseInt(u32, procs, 10) catch return wrong;
     if (count == 0 or count > 5) return wrong;
+    const traced = value_of(output, "PTRACE-SUPERVISOR:") orelse return wrong;
+    if (!std.mem.startsWith(u8, traced, "PTRACE ")) return wrong;
+    if (!std.mem.endsWith(u8, traced, " SRCH")) return wrong;
+    const churned = value_of(output, "CHURN:") orelse return wrong;
+    if (!std.mem.eql(u8, churned, "CHURNED 5 3000")) return wrong;
+    if (!expect_value(output, "PROCS-DURING-CHURN:", procs)) return wrong;
+    if (!expect_value(output, "PROCS-STEADY:", "1")) return wrong;
     if (!expect_value(output, "KILL-ALL:", "ran")) return wrong;
     if (!expect_value(output, "SUPERVISOR:", "PONG")) return wrong;
     if (!expect_value(output, "CONTAINER:", "1")) return wrong;
@@ -108,7 +121,8 @@ pub fn check_hostile(output: []const u8) Error!void {
 }
 
 /// `--hosts-file` (ZB-6): bound read-only, an in-place rewrite is seen inside, a rename over the
-/// path is not (the bind holds the old file), and three bad paths are refused with E0612.
+/// path is not (the bind holds the old file), and a container with a network, a missing path, a
+/// directory and a file this user cannot read are each refused with E0612.
 pub fn check_hosts(output: []const u8) Error!void {
     const wrong = error.HostsWrong;
     if (!expect_value(output, "HOSTS-RC:", "0")) return wrong;
@@ -120,7 +134,10 @@ pub fn check_hosts(output: []const u8) Error!void {
     if (!expect_value(output, "HOSTS-RENAMED:", "['10.9.9.10']")) return wrong;
     if (!is_failure(output, "HOSTS-WRITE:")) return wrong;
     const keys = [_][]const u8{
-        "HOSTS-REFUSED-NET:", "HOSTS-REFUSED-MISSING:", "HOSTS-REFUSED-DIR:",
+        "HOSTS-REFUSED-NET:",
+        "HOSTS-REFUSED-MISSING:",
+        "HOSTS-REFUSED-DIR:",
+        "HOSTS-REFUSED-UNREADABLE:",
     };
     for (keys) |key| {
         const rest = value_of(output, key) orelse return wrong;
@@ -214,11 +231,14 @@ test "listen fails when a listener is missing, answered after close, or reached 
 
 const connect_good =
     \\HOLD: HELD 3
+    \\AGENT-ADOPT: ADOPTED c4 running
+    \\AGENT-KILLED: -9
+    \\RESTARTED-SAME-PID: 1
+    \\RESTART: INHERITED 3
     \\ADOPT: ADOPTED c4 running
     \\SERVER-UP: 1
     \\DIAL: DIAL-REPLY 3 pong-from-inside
     \\SERVER-GOT: ping-from-supervisor
-    \\SOCKET-AFTER: HELD 3
     \\
 ;
 
@@ -226,16 +246,23 @@ test "connect holds on the right output" {
     try check_connect(connect_good);
 }
 
-test "connect fails on a failed dial, adoption or a server that heard nothing" {
-    const bad = [_][]const u8{
-        "",
-        "HOLD: HOLD-FAILED error[ZBX-E0611]: x\n",
-        "HOLD: HELD 3\nADOPT: ADOPT-FAILED NoSuchContainer\n",
-        "HOLD: HELD 3\nADOPT: ADOPTED c4 running\nSERVER-UP: 1\nDIAL: DIAL-FAILED 3 CONNREFUSED\n",
-        "HOLD: HELD 3\nADOPT: ADOPTED c4 running\nSERVER-UP: 1\n" ++
-            "DIAL: DIAL-REPLY 3 pong-from-inside\nSERVER-GOT:\n",
+test "connect fails on a failed dial, adoption, restart or a server that heard nothing" {
+    const swaps = [_][2][]const u8{
+        .{ "HOLD: HELD 3", "HOLD: HOLD-FAILED error[ZBX-E0611]: x" },
+        .{ "AGENT-ADOPT: ADOPTED c4 running", "AGENT-ADOPT: ADOPT-FAILED NoSuchContainer" },
+        .{ "AGENT-KILLED: -9", "AGENT-KILLED: 0" },
+        .{ "RESTARTED-SAME-PID: 1", "RESTARTED-SAME-PID: 0" },
+        .{ "RESTART: INHERITED 3", "RESTART: INHERITED" },
+        .{ "\nADOPT: ADOPTED c4 running", "\nADOPT: ADOPT-FAILED NoSuchContainer" },
+        .{ "DIAL: DIAL-REPLY 3 pong-from-inside", "DIAL: DIAL-FAILED 3 CONNREFUSED" },
+        .{ "SERVER-GOT: ping-from-supervisor", "SERVER-GOT:" },
     };
-    for (bad) |text| try std.testing.expectError(error.ConnectWrong, check_connect(text));
+    try std.testing.expectError(error.ConnectWrong, check_connect(""));
+    for (swaps) |swap| {
+        const text = try swapped(connect_good, swap);
+        defer std.testing.allocator.free(text);
+        try std.testing.expectError(error.ConnectWrong, check_connect(text));
+    }
 }
 
 test "net holds on the right output and fails on the host's reach or a second address" {
@@ -253,6 +280,10 @@ test "net holds on the right output and fails on the host's reach or a second ad
 const hostile_good =
     \\PROCS: 2
     \\KILL-SUPERVISOR: kill: (4242) - No such process | kill-rc=1 | ls: /proc/4242: No such file
+    \\PTRACE-SUPERVISOR: PTRACE 4242 SRCH
+    \\CHURN: CHURNED 5 3000
+    \\PROCS-DURING-CHURN: 2
+    \\PROCS-STEADY: 1
     \\KILL-ALL: ran
     \\SUPERVISOR: PONG
     \\CONTAINER: 1
@@ -264,7 +295,7 @@ test "hostile holds on the right output" {
     try check_hostile(hostile_good);
 }
 
-test "hostile fails when the supervisor is visible, killed, or the hosts file is writable" {
+test "hostile fails on a visible, killed or traced supervisor, a helper seen, or a writable hosts" {
     const swaps = [_][2][]const u8{
         .{ "No such process", "Operation not permitted" },
         .{ "kill-rc=1", "kill-rc=0" },
@@ -272,6 +303,10 @@ test "hostile fails when the supervisor is visible, killed, or the hosts file is
         .{ "CONTAINER: 1", "CONTAINER: 0" },
         .{ "WRITE-ETC-HOSTS: 1", "WRITE-ETC-HOSTS: 0" },
         .{ "PROCS: 2", "PROCS: 40" },
+        .{ "PTRACE 4242 SRCH", "PTRACE 4242 SUCCESS" },
+        .{ "CHURNED 5 3000", "CHURNED 5 12" },
+        .{ "PROCS-DURING-CHURN: 2", "PROCS-DURING-CHURN: 2 3" },
+        .{ "PROCS-STEADY: 1", "PROCS-STEADY: 0" },
     };
     for (swaps) |swap| {
         const text = try swapped(hostile_good, swap);
@@ -298,5 +333,35 @@ test "refusals hold on one coded line each and fail on a wrong code or an errno"
         const text = try swapped(refusals_good, swap);
         defer std.testing.allocator.free(text);
         try std.testing.expectError(error.RefusalWrong, check_refusals(text));
+    }
+}
+
+const hosts_good =
+    \\HOSTS-RC: 0
+    \\HOSTS-ERR:
+    \\HOSTS-CAT: 127.0.0.1 localhost|10.9.9.9 svc.mesh|
+    \\HOSTS-GETENT: ['10.9.9.9']
+    \\HOSTS-INPLACE: ['10.9.9.10']
+    \\HOSTS-RENAMED: ['10.9.9.10']
+    \\HOSTS-WRITE: 1
+    \\HOSTS-REFUSED-NET: error[ZBX-E0612]: the hosts file cannot be bound at /etc/hosts
+    \\HOSTS-REFUSED-MISSING: error[ZBX-E0612]: the hosts file cannot be bound at /etc/hosts
+    \\HOSTS-REFUSED-DIR: error[ZBX-E0612]: the hosts file cannot be bound at /etc/hosts
+    \\HOSTS-REFUSED-UNREADABLE: error[ZBX-E0612]: the hosts file cannot be bound at /etc/hosts
+    \\
+;
+
+test "the hosts file holds when bound read-only and fails on a rename seen or a refusal lost" {
+    try check_hosts(hosts_good);
+    const swaps = [_][2][]const u8{
+        .{ "HOSTS-RC: 0", "HOSTS-RC: 125" },
+        .{ "HOSTS-RENAMED: ['10.9.9.10']", "HOSTS-RENAMED: ['10.9.9.11']" },
+        .{ "HOSTS-WRITE: 1", "HOSTS-WRITE: 0" },
+        .{ "UNREADABLE: error[ZBX-E0612]", "UNREADABLE: errno 13" },
+    };
+    for (swaps) |swap| {
+        const text = try swapped(hosts_good, swap);
+        defer std.testing.allocator.free(text);
+        try std.testing.expectError(error.HostsWrong, check_hosts(text));
     }
 }

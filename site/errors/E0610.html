@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <title>ZBX-E0610 · Zigbox</title>
-<meta name="description" content="the container has no network of its own to make a socket in">
+<meta name="description" content="a socket can be made only in a container with --net none">
 <link rel="canonical" href="https://zigbox.github.io/zigbox/errors/E0610.html">
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Familjen+Grotesk:wght@500;700&amp;family=IBM+Plex+Sans:wght@400;500;600&amp;family=IBM+Plex+Mono:wght@400;500&amp;display=swap">
@@ -73,10 +73,10 @@ footer{border-top:1px solid var(--line);padding-block:24px;color:var(--muted);
 <main class="wrap">
 <p class="eyebrow">Diagnostic code</p>
 <h1>ZBX-E0610</h1>
-<p class="summary">the container has no network of its own to make a socket in</p>
+<p class="summary">a socket can be made only in a container with --net none</p>
 <dl class="facts"><div><dt>Kind</dt><dd>error</dd></div><div><dt>Blame</dt><dd>user</dd></div><div><dt>Exit code</dt><dd>1 (125 in zbx run)</dd></div></dl>
 <h2>What it means</h2>
-<p>A socket made for a container lives in the container's network namespace. A container started with --net host shares the host's network namespace, so a socket made &quot;in&quot; it would be the host's: that would open a port on the host under the container's name, and zbx refuses it. Only --net none and the default pasta network give a container a namespace of its own.</p>
+<p>A socket made for a container lives in the container's network namespace. zbx makes one only in a container started with --net none (the default), whose namespace holds nothing but its own loopback. A container started with --net host shares the host's network namespace, so a socket made &quot;in&quot; it would be the host's: that would open a port on the host under the container's name. A container with --net user reaches the outside through pasta, and sockets in it are not offered.</p>
 <p>Start the container with --net none (or without --net) and ask again.</p>
 <h2>Offline</h2>
 <p>The same text, without a network:</p>

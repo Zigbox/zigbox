@@ -6,9 +6,11 @@
 //! test.
 //!   1. start: `zbx run -d --net none` holds one link, `lo`.
 //!   2. listen (ZB-5): listeners on 127.77.0.2 and .3 made and closed live, answered from inside.
-//!   3. connect (ZB-5, ZB-8): a socket held before an adoption connects to a server inside.
+//!   3. connect (ZB-5, ZB-8): a socket held across an agent's SIGKILL and the supervisor's
+//!      re-exec (a new image, the socket kept) connects to a server inside after an adoption.
 //!   4. net (ZB-7): a second `zbx exec` reaches the first one's listener on 127.0.0.1.
-//!   5. hostile: the workload cannot see, signal or write what it must not.
+//!   5. hostile: the workload cannot see, signal, trace or write what it must not, and no helper
+//!      shows in its /proc while thousands are made.
 //!   6. refusals: one coded line each.
 //! `zig build demo-c4` (KVM) or `zig build demo-c4 -Daccel=tcg`.
 
@@ -51,7 +53,7 @@ const scripts = [_]Script{
         .check = checks.check_listen,
     },
     .{
-        .title = "STEP 3: a socket held across an adoption connects inside (ZB-5, ZB-8)",
+        .title = "STEP 3: a socket held across a restart and an adoption connects (ZB-5, ZB-8)",
         .name = "connect",
         .text = @embedFile("c4/connect.py"),
         .check = checks.check_connect,

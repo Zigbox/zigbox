@@ -76,7 +76,7 @@ footer{border-top:1px solid var(--line);padding-block:24px;color:var(--muted);
 <p class="summary">a socket could not be made inside the container</p>
 <dl class="facts"><div><dt>Kind</dt><dd>error</dd></div><div><dt>Blame</dt><dd>environment</dd></div><div><dt>Exit code</dt><dd>2 (125 in zbx run)</dd></div></dl>
 <h2>What it means</h2>
-<p>zbx makes the socket with a short-lived helper process that joins the container's user and network namespaces, opens the socket and hands it back with SCM_RIGHTS. One of those steps failed; the step and the system error are in the message. Usual causes: the caller is not the user that started the container (joining its user namespace is then refused), the container ended while the helper ran, or the caller has no free descriptor.</p>
+<p>zbx makes the socket with a short-lived helper process that joins the container's user and network namespaces, opens the socket and hands it back with SCM_RIGHTS. One of those steps failed; the step and the system error are in the message. Usual causes: the caller is not the user that started the container (joining its user namespace is then refused), the container ended while the helper ran, or the caller has no free descriptor. A caller that ignores SIGCHLD has its helper reaped by the kernel, and the wait for it fails with ECHILD: leave SIGCHLD at its default to use this call.</p>
 <p>The helper is a child of the caller and never enters the container's PID namespace, so nothing inside the container can see or signal it.</p>
 <h2>Offline</h2>
 <p>The same text, without a network:</p>

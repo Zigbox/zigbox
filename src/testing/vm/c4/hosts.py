@@ -20,3 +20,7 @@ zx("stop", "c4m")
 say("HOSTS-REFUSED-NET", zx("run", "--rootfs", R, "--net", "host", "--hosts-file", H, "--", "true")[2])
 say("HOSTS-REFUSED-MISSING", zx("run", "--rootfs", R, "--net", "none", "--hosts-file", "/nope", "--", "true")[2])
 say("HOSTS-REFUSED-DIR", zx("run", "--rootfs", R, "--net", "none", "--hosts-file", "/tmp", "--", "true")[2])
+L = "/home/demo/locked-hosts"
+open(L, "w").write("127.0.0.1 localhost\n")
+os.chmod(L, 0)
+say("HOSTS-REFUSED-UNREADABLE", zx("run", "--rootfs", R, "--net", "none", "--hosts-file", L, "--", "true")[2])

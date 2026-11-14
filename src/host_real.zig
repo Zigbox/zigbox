@@ -1864,6 +1864,35 @@ test "real host reads a file, reports a missing one, and closes every handle" {
     try std.testing.expectEqual(@as(u32, 0), real.open_count);
 }
 
+/// One thread of the shared-count test: reads a file through the shared host, many times.
+fn read_many(real: *HostReal, failed: *bool) void {
+    var buffer: [4096]u8 = undefined;
+    for (0..shared_count_rounds) |_| {
+        _ = real.interface().read_file("/proc/self/stat", &buffer) catch {
+            failed.* = true;
+            return;
+        };
+    }
+}
+
+const shared_count_rounds = 2000;
+
+test "the open count stays right when threads share one real host" {
+    // Goal: the contract's rule is one `HostReal` per thread, but a caller that breaks it must
+    // not corrupt the count (a lost update would trip an assertion later, or hide a leak).
+    // Method: four threads read a file through one shared host many times at once; each read
+    // opens and closes a descriptor, and the count is zero after all of them.
+    var real: HostReal = .{};
+    var failed: [4]bool = @splat(false);
+    var threads: [4]std.Thread = undefined;
+    for (&threads, &failed) |*thread, *flag| {
+        thread.* = try std.Thread.spawn(.{ .stack_size = 256 * 1024 }, read_many, .{ &real, flag });
+    }
+    for (threads) |thread| thread.join();
+    for (failed) |flag| try std.testing.expect(!flag);
+    try std.testing.expectEqual(@as(u32, 0), real.opened_now());
+}
+
 test "a caught SIGINT and SIGTERM set the flag instead of ending the process" {
     // Goal: the signals a build catches (REVIEW.md: every exit path) reach the flag, named, and
     // handlers are put back after. Method: catch, send each signal to this thread (so the
