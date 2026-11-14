@@ -242,7 +242,7 @@ pub const Schedule = struct {
         assert(entry.state != .free);
         const final = entry.state == .landed or entry.state == .failed;
         if (final and entry.waiters == 0 and !entry.in_job) entry.state = .free;
-        assert(entry.state != .fetching or entry.in_job);
+        if (entry.state == .fetching) assert(entry.in_job);
     }
 
     /// A reader read chunk `chunk` of `object`: after two consecutive chunks, the next
@@ -270,7 +270,7 @@ pub const Schedule = struct {
 
     fn fail(schedule: *Schedule, index: u16, failure: Failure) void {
         const entry = &schedule.pending[index];
-        assert(entry.state == .queued or entry.state == .fetching);
+        if (entry.state != .fetching) assert(entry.state == .queued);
         assert(failure != .none);
         entry.state = .failed;
         schedule.settled += 1;
@@ -405,7 +405,7 @@ pub const Schedule = struct {
 
     fn tick_entry(schedule: *Schedule, index: u16, now: u64) void {
         const entry = &schedule.pending[index];
-        assert(entry.state == .queued or entry.state == .fetching);
+        if (entry.state != .fetching) assert(entry.state == .queued);
         assert(!schedule.stopping);
         if (!schedule.has_any_source(entry.object)) {
             if (entry.state == .queued) schedule.fail(index, .unavailable);

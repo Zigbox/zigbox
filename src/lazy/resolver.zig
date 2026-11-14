@@ -552,7 +552,8 @@ pub const Resolver = struct {
                 continue;
             }
             const stored_length = location.length;
-            work.results[at] = resolver.inflate_and_keep(slot, work, at, segment_start, stored_length);
+            work.results[at] =
+                resolver.inflate_and_keep(slot, work, @intCast(at), segment_start, stored_length);
         }
     }
 
@@ -563,7 +564,7 @@ pub const Resolver = struct {
         resolver: *Resolver,
         slot: u32,
         work: *Work,
-        at: usize,
+        at: u32,
         offset: u64,
         length: u32,
     ) Result {
@@ -588,7 +589,7 @@ pub const Resolver = struct {
         resolver: *Resolver,
         slot: u32,
         work: *const Work,
-        at: usize,
+        at: u32,
         bytes: []const u8,
     ) Result {
         const object = &resolver.options.catalog.objects[work.objects[at]];

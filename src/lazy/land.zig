@@ -38,7 +38,12 @@ pub const ReadError = error{
 
 /// Reads chunk `index` of `wanted` into `out` and checks it against `wanted.hashes[index]`.
 /// Every error leaves `out` cleared, so no byte of an unverified chunk stays behind.
-pub fn read_local(store: *const Store, wanted: *const Wanted, index: u32, out: []u8) ReadError!usize {
+pub fn read_local(
+    store: *const Store,
+    wanted: *const Wanted,
+    index: u32,
+    out: []u8,
+) ReadError!usize {
     assert(index < wanted.hashes.len);
     const length = chunks.chunk_length(store, wanted.size, index);
     assert(length > 0);
@@ -68,7 +73,12 @@ fn read_checked(store: *const Store, wanted: *const Wanted, index: u32, out: []u
 }
 
 /// True if the whole object is in the store and its chunk `index` is right.
-fn read_from_object(store: *const Store, wanted: *const Wanted, index: u32, out: []u8) ReadError!bool {
+fn read_from_object(
+    store: *const Store,
+    wanted: *const Wanted,
+    index: u32,
+    out: []u8,
+) ReadError!bool {
     assert(out.len > 0);
     assert(index < wanted.hashes.len);
     const fs = store.fs;
@@ -87,7 +97,12 @@ fn read_from_object(store: *const Store, wanted: *const Wanted, index: u32, out:
 }
 
 /// True if `partial/<id>/<index>` holds the chunk, exactly, and it hashes right.
-fn read_from_partial(store: *const Store, wanted: *const Wanted, index: u32, out: []u8) ReadError!bool {
+fn read_from_partial(
+    store: *const Store,
+    wanted: *const Wanted,
+    index: u32,
+    out: []u8,
+) ReadError!bool {
     assert(out.len > 0);
     assert(index < wanted.hashes.len);
     const fs = store.fs;
