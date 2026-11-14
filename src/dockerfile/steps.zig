@@ -7,6 +7,8 @@ const std = @import("std");
 const assert = std.debug.assert;
 const constants = @import("../constants.zig");
 const file_mod = @import("../build/file.zig");
+const net = @import("../registry/net.zig");
+const reference = @import("../registry/reference.zig");
 const lines = @import("lines.zig");
 const words = @import("words.zig");
 const network = @import("network.zig");
@@ -546,7 +548,7 @@ pub fn copy(t: *Translator, instruction: *const Instruction) Error!void {
     }
     const sources = items[0 .. items.len - 1];
     if (given.checksum) |checksum| {
-        const fetch: Fetch = .{ .checksum = checksum, .raw = flags.rest, .sources = sources };
+        const fetch: Fetch = .{ .checksum = checksum, .sources = sources };
         return add_fetch(t, instruction, &given, &fetch, items[items.len - 1]);
     }
     if (instruction.keyword == .add) try add_sources(t, line, sources, given.unpack);
@@ -656,18 +658,18 @@ fn project_path(t: *Translator, line: u32, source: []const u8) Refused![]const u
     return result;
 }
 
-/// What `ADD --checksum` gave: the flag's value, the text after the flags as written (before
-/// any `ARG` is expanded), and the sources.
+/// What `ADD --checksum` gave: the flag's value and the sources, with the `ARG`s of both
+/// expanded as the other copy sources are (exec form is not expanded).
 const Fetch = struct {
     checksum: []const u8,
-    raw: []const u8,
     sources: []const []const u8,
 };
 
 /// `ADD --checksum=sha256:<hex> <url> <dest>`: a copy step with one `.fetch` entry, which keeps
 /// `--chown` and `--chmod`. It is neither flagged nor refused under `--hermetic`: the bytes are
 /// pinned, so the build gets the same file twice. Any other hash, a local source, a git
-/// repository or a URL built from an `ARG` is E0811.
+/// repository, plain http to a host that is not loopback, or a URL with no file name under a
+/// destination ending in `/` is E0811. `--exclude` is dropped, with a note: one file is fetched.
 fn add_fetch(
     t: *Translator,
     instruction: *const Instruction,
@@ -684,9 +686,12 @@ fn add_fetch(
             "--checksum per URL", .{});
     }
     const url = fetch.sources[0];
-    try fetch_url(t, line, url, fetch.raw);
+    try fetch_url(t, line, url, written_to);
     const sha256 = try sha256_of(t, line, fetch.checksum);
     const to = try translate.absolute(t, line, t.state().directory(), written_to, true);
+    if (given.excludes_count > 0) {
+        t.drop(line, "ADD --exclude of a fetch", "ignored: a fetch takes one file");
+    }
     const name = try begin(t, instruction, .copy);
     try t.put(indent ++ ".copy = .{\n" ++ indent ++ "    .{ .fetch = .{ .url = ");
     try t.put_string(url);
@@ -699,9 +704,10 @@ fn add_fetch(
     try end(t, name);
 }
 
-/// The URL of an `ADD --checksum`: http or https, not a git repository, written out in full.
-/// The build file's own checks (https, or http to a loopback host) run on the translation.
-fn fetch_url(t: *Translator, line: u32, url: []const u8, raw: []const u8) Refused!void {
+/// The URL of an `ADD --checksum`: http or https, not a git repository, plain http only to a
+/// loopback host, and a file name when the destination ends in `/`. The build file's own checks
+/// run on the translation; these say what is wrong and how to mend it.
+fn fetch_url(t: *Translator, line: u32, url: []const u8, written_to: []const u8) Refused!void {
     assert(line > 0);
     const what = "Dockerfile:{d} has ADD --checksum of {s}, ";
     const http = std.mem.startsWith(u8, url, "https://") or std.mem.startsWith(u8, url, "http://");
@@ -715,12 +721,17 @@ fn fetch_url(t: *Translator, line: u32, url: []const u8, raw: []const u8) Refuse
         const args = .{ line, url };
         return refuse(t.refusal(), .E0811, line, what ++ "a git repository", args, fix, .{});
     }
-    var words_raw = std.mem.tokenizeAny(u8, raw, " \t");
-    const first = words_raw.next() orelse "";
-    if (std.mem.indexOfScalar(u8, first, '$') != null) {
-        return refuse(t.refusal(), .E0811, line, what ++ "a URL built from an ARG", .{
-            line, url,
-        }, "write the URL out in full, so the build file names what the hash pins", .{});
+    if (url.len > constants.registry_url_bytes_max) return; // The build file's check refuses it.
+    const parsed = net.parse_url(url) catch return; // So does it refuse any other bad URL.
+    if (parsed.scheme == .http and !reference.is_loopback(parsed.host)) {
+        return refuse(t.refusal(), .E0811, line, what ++ "plain http to {s}, and only a " ++
+            "loopback host may use plain http", .{ line, url, parsed.host }, "use an https:// " ++
+            "URL", .{});
+    }
+    if (translate.names_directory(written_to) and file_mod.fetch_name(url) == null) {
+        return refuse(t.refusal(), .E0811, line, what ++ "which has no file name to take " ++
+            "for the destination `{s}`", .{ line, url, written_to }, "name the destination " ++
+            "file: a destination that does not end in /", .{});
     }
 }
 

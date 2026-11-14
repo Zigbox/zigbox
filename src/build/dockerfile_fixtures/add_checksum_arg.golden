@@ -1,0 +1,18 @@
+// Imported by `zbx import` from Dockerfile: target stage0, --network detect.
+// Edit this file from here on: `zbx build` reads it, not the Dockerfile.
+.{
+    .version = 1,
+    .steps = .{
+        // Dockerfile:4  ADD --checksum=sha256:5607b439e7580027cf8f2a5b34606ba5cc1079988db4cf213e0beeaf0...
+        .{
+            .name = "stage0-1",
+            .base = "alpine:3.20",
+            .copy = .{
+                .{ .fetch = .{ .url = "https://x.test/1.2/t.gz", .sha256 = "5607b439e7580027cf8f2a5b34606ba5cc1079988db4cf213e0beeaf03269a62" }, .to = "/t/" },
+            },
+        },
+    },
+    .image = .{
+        .base = "step:stage0-1",
+    },
+}
