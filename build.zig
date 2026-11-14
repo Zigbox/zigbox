@@ -690,6 +690,8 @@ fn add_c4_supervisor(b: *std.Build, harness_module: *std.Build.Module) void {
             .target = target,
             .optimize = .ReleaseSafe,
             .link_libc = false,
+            // Stripped: unstripped it is over the harness's 8 MiB body limit for a served file.
+            .strip = true,
             .imports = &.{.{ .name = "zigbox", .module = library }},
         }),
     });
