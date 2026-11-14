@@ -834,7 +834,7 @@ test "sim: a chunk read again is served from the store, with no second fetch" {
         const count = sim_state.objects[object].wanted.hashes.len;
         for (0..count) |chunk| {
             for (0..3) |_| {
-                var out: [chunk_bytes]u8 = undefined;
+                var out: [chunk_bytes]u8 = @splat(0xaa);
                 const at: u32 = @intCast(chunk);
                 const step = resolver.read_begin(@intCast(object), at, &out, 400_000);
                 const truth = chunk_bytes_of(&sim_state, @intCast(object), at);
