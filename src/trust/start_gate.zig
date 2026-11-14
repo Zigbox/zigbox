@@ -2,19 +2,23 @@
 //! (docs/briefs/library-trust-gate.md). Both load the same policy files (`gate.load`: the node's
 //! own, `/etc/zbx/policy.zon`, then the user's), judge the run's tree with `gate.judge_all`, and
 //! turn the tamper check on as soon as any policy file exists. So a node whose policy refuses an
-//! image from the command line refuses it from Zigcube's agent too, with the same code.
+//! image from the command line refuses it from Zigcube's agent too, with the same code. The
+//! library's `zigbox.exec_start` runs the gate `zbx exec` runs (`exec_gate.check`) the same way.
 //!
-//! The library's start has no way to switch the gate off: a check its caller can skip is no
-//! independent judge. With no policy file that asks for anything it reads nothing beyond the
-//! policy lookup and starts exactly as an ungated start would. The ungated `run.start` stays
-//! internal: `zbx run` gates before it (with the subject it words best), and a build step runs
-//! trees the build made itself, whose bases compose judged.
+//! The library has no way to switch the gate off: a check its caller can skip is no independent
+//! judge. With no policy file that asks for anything it reads nothing beyond the policy lookup
+//! and starts exactly as an ungated start would. The ungated `run.start` and `exec.start` stay
+//! internal, and so does a build step's start (`build.step.run_step`): `zbx run`, `zbx exec` and
+//! `zbx build` each gate before them, with the subject only they know (a build's base is bound
+//! to the manifest its lock names).
 //!
-//! The subject is what the caller's `Spec` says: its tree (a prefix or an image name is resolved
-//! first, and the start runs the tree that was judged), and `Spec.binding`, which is also what
-//! the run record keeps for the gate at `zbx exec`. A binding can only choose among statements
-//! about the same tree, so a caller that names the wrong one makes fewer statements count, never
-//! an unsigned tree pass.
+//! The subject is what the caller's `Spec` says, as the store backs it: its tree (a prefix or an
+//! image name is resolved first, and the start runs the tree that was judged), and
+//! `Spec.binding`, kept only when the store's own record of that manifest or result names the
+//! same tree. A binding the store does not back is dropped, so the tree is judged as `zbx run`
+//! judges the bare tree; a name the caller leaves unbound is bound to the manifest it resolved
+//! through, as `zbx run` binds it. What the gate judged is what the run record keeps, for the
+//! gate at `zbx exec`.
 
 const std = @import("std");
 const assert = std.debug.assert;
@@ -31,6 +35,8 @@ const spec_mod = @import("../runtime/spec.zig");
 const exec_gate = @import("exec_gate.zig");
 const gate = @import("gate.zig");
 const record_mod = @import("record.zig");
+const result = @import("../build/result.zig");
+const exec = @import("../runtime/exec.zig");
 const statement = @import("statement.zig");
 const tamper = @import("tamper.zig");
 
@@ -96,8 +102,9 @@ fn tamper_call(context: *anyopaque, store: *layout.Store, tree: Digest, diag: *D
     return then.call(then.context, store, tree, diag);
 }
 
-/// The library start's memory, about 17 MiB: the caller's, in static or heap storage, and it
-/// must not move while a start is going on (the tamper check points into it).
+/// The library start's memory, about 17 MiB: the caller's, in static or heap storage. It must
+/// not move while a start is going on (the tamper check points into it), and it serves one start
+/// or exec at a time: two threads that start at once each bring their own.
 pub const Workspace = struct {
     gate: gate.Memory,
     record: record_mod.Record,
@@ -106,8 +113,11 @@ pub const Workspace = struct {
     scratch: verify.Scratch,
     tree_buffer: [constants.store_tree_bytes_max]u8,
     stack: [constants.image_import_stack_max]Digest,
-    /// The image record a manifest binding derives its result from.
+    /// The image record a manifest binding is checked against and derives its result from.
     image: images.Image,
+    /// The result record a result binding is checked against, and the bytes it is read into.
+    result_record: result.Record,
+    result_bytes: [constants.build_result_bytes_max + 1]u8,
     /// The full digest of the tree judged, which the start then runs.
     tree_text: [constants.store_digest_text_bytes]u8,
     /// What the refusal names: the tree's digest, or the result's.
@@ -174,8 +184,10 @@ pub fn admit(
 }
 
 /// What the policy judges of `container`. A tree given by a prefix or an image name is resolved
-/// here and `container.image` set to its full digest, so the start runs the tree judged. A
-/// directory, or a tree with no store to find it in, has no tree: every check refuses it.
+/// here and `container.image` set to its full digest, so the start runs the tree judged; the
+/// binding is the one the store backs (`backed`), and `container.binding` is set to it, so the
+/// run record keeps what was judged. A directory, or a tree with no store to find it in, has no
+/// tree: every check refuses it.
 fn subject_of(
     host: Host,
     workspace: *Workspace,
@@ -184,16 +196,23 @@ fn subject_of(
     diag: *Diag,
 ) run.Error!gate.Subject {
     assert(diag.code == null);
-    const binding = binding_of(container.binding);
-    const none: gate.Subject = .{ .tree = null, .binding = binding, .text = "" };
+    const none: gate.Subject = .{ .tree = null, .binding = .none, .text = "" };
     const image = container.image orelse return none;
-    const tree = Digest.parse(image) orelse found: {
-        var store: layout.Store = undefined;
-        if (!store.locate(host)) return none; // The start says what is missing.
-        const resolved = image_mod.resolve(&store, options.image_workspace.?, image, diag);
-        break :found resolved catch return error.StartFailed;
+    var store: layout.Store = undefined;
+    const located = store.locate(host);
+    const resolved: image_mod.Resolved = if (Digest.parse(image)) |tree|
+        .{ .tree = tree, .manifest = null }
+    else found: {
+        if (!located) return none; // The start says what is missing.
+        const found = image_mod.resolve_image(&store, options.image_workspace.?, image, diag);
+        break :found found catch return error.StartFailed;
     };
-    workspace.tree_text = tree.text();
+    const binding: statement.Binding = if (located)
+        backed(&store, workspace, container.binding, resolved)
+    else
+        .none;
+    container.binding = spec_binding_of(binding);
+    workspace.tree_text = resolved.tree.text();
     container.image = &workspace.tree_text;
     workspace.subject_text = switch (binding) {
         .result => |bytes| (Digest{ .bytes = bytes }).text(),
@@ -201,19 +220,80 @@ fn subject_of(
     };
     assert(Digest.parse(container.image.?) != null);
     return .{
-        .tree = tree,
+        .tree = resolved.tree,
         .binding = binding,
         .derived = exec_gate.derived_of(host, binding, &workspace.image),
         .text = &workspace.subject_text,
     };
 }
 
-/// The binding as the policy reads it (the runtime does not know the trust module).
-fn binding_of(binding: spec_mod.Binding) statement.Binding {
-    assert(@backingInt(binding) <= 2);
-    return switch (binding) {
+/// The binding the store backs for `resolved.tree`: the caller's, when the store's record of
+/// that manifest or result names the same tree (`zbx run` binds only what it found there);
+/// otherwise the manifest a name resolved through; otherwise none. So a binding never makes a
+/// statement count that `zbx run` of the same tree, result or name would not count.
+fn backed(
+    store: *layout.Store,
+    workspace: *Workspace,
+    given: spec_mod.Binding,
+    resolved: image_mod.Resolved,
+) statement.Binding {
+    assert(@intFromPtr(store) != 0);
+    assert(@intFromPtr(workspace) != 0);
+    var errno: u16 = 0;
+    switch (given) {
+        .none => {},
+        .manifest => |bytes| {
+            const image = &workspace.image;
+            if (images.load(store, .{ .bytes = bytes }, image, &errno)) |_| {
+                if (image.tree.eql(resolved.tree)) return .{ .manifest = bytes };
+            } else |_| {}
+        },
+        .result => |bytes| {
+            const found = &workspace.result_record;
+            const buffer = &workspace.result_bytes;
+            if (result.load(store, .{ .bytes = bytes }, found, buffer, &errno)) |_| {
+                if (found.tree.eql(resolved.tree)) return .{ .result = bytes };
+            } else |_| {}
+        },
+    }
+    const manifest = resolved.manifest orelse return .none;
+    return .{ .manifest = manifest.bytes };
+}
+
+/// The binding as the run record keeps it (the runtime does not know the trust module).
+fn spec_binding_of(binding: statement.Binding) spec_mod.Binding {
+    const out: spec_mod.Binding = switch (binding) {
         .none => .none,
         .result => |bytes| .{ .result = bytes },
         .manifest => |bytes| .{ .manifest = bytes },
     };
+    assert(std.mem.eql(u8, @tagName(out), @tagName(binding)));
+    return out;
+}
+
+/// `exec.start` behind the gate `zbx exec` runs: the library's `zigbox.exec_start`. The
+/// container's tree and binding come from its run record, and every policy file is met before
+/// the command starts. A refusal returns `StartFailed` with `diag` holding the code `zbx exec`
+/// gives (E0903 to E0905), before anything is started; `handle` is set up as for any exec that
+/// fails before its command runs. The record is read only when a policy asks for something.
+pub fn exec_start(
+    host: Host,
+    command: *const exec.Spec,
+    options: exec.Options,
+    handle: *exec.Handle,
+    workspace: *Workspace,
+    diag: *Diag,
+) exec.Error!void {
+    assert(diag.code == null);
+    assert(command.command.len > 0);
+    exec.init_handle(host, command, options, handle);
+    const record = &workspace.record;
+    const work = &workspace.work;
+    const image = &workspace.image;
+    exec_gate.check(host, &workspace.gate, record, work, image, command.name, diag) catch {
+        assert(diag.code != null);
+        return error.StartFailed;
+    };
+    assert(diag.code == null);
+    return exec.start(host, command, options, handle, diag);
 }

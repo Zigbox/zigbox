@@ -32,6 +32,7 @@ const image_find = @import("../store/image_find.zig");
 const images = @import("../store/images.zig");
 const reference_mod = @import("../registry/reference.zig");
 const digest_mod = @import("../store/digest.zig");
+const Sha256 = @import("../registry/digest.zig").Sha256;
 const layout = @import("../store/layout.zig");
 const materialize = @import("../store/materialize.zig");
 const namespace = @import("../store/namespace.zig");
@@ -205,7 +206,27 @@ pub fn prepare(
 
 /// The digest `image` names, or the store's diagnostic.
 pub fn resolve(store: *Store, workspace: *Workspace, image: []const u8, diag: *Diag) Error!Digest {
+    const found = try resolve_image(store, workspace, image, diag);
+    return found.tree;
+}
+
+/// What `image` named: its tree, and the manifest of the image record a name resolved through
+/// (null for a digest or a prefix of one, which names a tree and nothing else).
+pub const Resolved = struct {
+    tree: Digest,
+    manifest: ?Sha256,
+};
+
+/// `resolve`, with the manifest a name was found under, which the trust gate binds the tree to
+/// as `zbx run` does.
+pub fn resolve_image(
+    store: *Store,
+    workspace: *Workspace,
+    image: []const u8,
+    diag: *Diag,
+) Error!Resolved {
     assert(diag.code == null);
+    assert(image.len > 0);
     const prefix = digest_mod.Prefix.parse(image) orelse {
         return resolve_name(store, workspace, image, diag);
     };
@@ -227,14 +248,19 @@ pub fn resolve(store: *Store, workspace: *Workspace, image: []const u8, diag: *D
             diagnose.ambiguous_digest(diag, image, two[0], two[1]);
             return error.Failed;
         },
-        .one => |digest| return digest,
+        .one => |digest| return .{ .tree = digest, .manifest = null },
     }
 }
 
 /// A name that is not a digest: the tree of the newest image record that was pulled as it. A
 /// library caller that wants the project's lock to decide uses the cli's way (`run_image.zig`);
 /// this is the store's own answer, for a caller that has pulled and only names.
-fn resolve_name(store: *Store, workspace: *Workspace, name: []const u8, diag: *Diag) Error!Digest {
+fn resolve_name(
+    store: *Store,
+    workspace: *Workspace,
+    name: []const u8,
+    diag: *Diag,
+) Error!Resolved {
     assert(name.len > 0);
     assert(diag.code == null);
     var reference: reference_mod.Reference = undefined;
@@ -254,7 +280,8 @@ fn resolve_name(store: *Store, workspace: *Workspace, name: []const u8, diag: *D
             image_diagnose.not_locked(diag, name, null);
             return error.Failed;
         };
-        return workspace.record.tree;
+        assert(workspace.record.manifest.eql(manifest));
+        return .{ .tree = workspace.record.tree, .manifest = manifest };
     }
     image_find.scan(store, &workspace.find, &workspace.record, &wanted) catch {
         diagnose.cannot_read(
@@ -270,7 +297,7 @@ fn resolve_name(store: *Store, workspace: *Workspace, name: []const u8, diag: *D
         image_diagnose.not_locked(diag, name, null);
         return error.Failed;
     }
-    return wanted.tree;
+    return .{ .tree = wanted.tree, .manifest = wanted.manifest };
 }
 
 // ---- The store's child ---------------------------------------------------------------------

@@ -12,7 +12,9 @@
 //!     `zbx run` does (`trust/start_gate.zig`): the same policy files (`/etc/zbx/policy.zon`,
 //!     then the user's), the same verdict and tamper check, the same refusal codes (E0903 to
 //!     E0907). There is no way to skip it. With no policy file it reads nothing more and changes
-//!     nothing; `gate` (a `GateWorkspace`, about 17 MiB) is the caller's memory for it.
+//!     nothing; `gate` (a `GateWorkspace`, about 17 MiB) is the caller's memory for it, one start
+//!     at a time per workspace. `exec_start` runs the gate `zbx exec` runs the same way. No
+//!     export starts a container or a command ungated: a build step's start is internal.
 //!   - `wait(handle)`: how it ended, as an `ExitReason`. `StartOptions.timeout_ms` ends a run
 //!     that lasts too long (SIGTERM, then SIGKILL after `grace_ms`); `timed_out(handle)` says so.
 //!   - `signal(handle, number)`: sends it a signal, with the forwarding rule of PID 1.
@@ -54,6 +56,15 @@ pub const GateWorkspace = start_gate.Workspace;
 
 /// `run.start` behind the trust gate. The ungated start is not part of the library.
 pub const start = start_gate.start;
+
+comptime {
+    // The gated starts are the library's, so a merge that points either name back at the ungated
+    // one fails to compile here rather than shipping quietly (the two signatures differ).
+    std.debug.assert(@TypeOf(start) == @TypeOf(start_gate.start));
+    std.debug.assert(@TypeOf(exec_start) == @TypeOf(start_gate.exec_start));
+    std.debug.assert(@TypeOf(start) != @TypeOf(run.start));
+    std.debug.assert(@TypeOf(exec_start) != @TypeOf(exec.start));
+}
 pub const wait = run.wait;
 pub const signal = run.signal;
 pub const inspect = run.inspect;
@@ -107,12 +118,15 @@ pub const open_log = logs.open_log;
 /// `ExecSpec.terminal` the command gets a pseudo-terminal sized as the caller's; without, its
 /// streams are the caller's. The thread that starts it must be the process's only thread at
 /// that moment and must be the one that waits. `ExecExit.code` is the command's exit code.
+/// `exec_start(host, spec, options, handle, gate, diag)` first meets the node's trust policy as
+/// `zbx exec` does (`trust/start_gate.zig`): a refusal is `StartFailed` with E0903 to E0905 and
+/// nothing started. `gate` is a `GateWorkspace`, one start or exec at a time.
 pub const exec = @import("runtime/exec.zig");
 pub const ExecSpec = exec.Spec;
 pub const ExecOptions = exec.Options;
 pub const ExecHandle = exec.Handle;
 pub const ExecExit = exec.Exit;
-pub const exec_start = exec.start;
+pub const exec_start = start_gate.exec_start;
 pub const exec_wait = exec.wait;
 pub const exec_signal = exec.signal;
 /// The recent execs of a container, as `zbx bundle` shows them.
@@ -248,19 +262,36 @@ pub const trust = @import("trust_export.zig");
 /// State volumes (M6): their names, layout, records and locks (`state/state.zig`).
 pub const state = @import("state/state.zig");
 
-/// The build (M7): the build file's parser, the step graph and its order, the cache key, one
-/// step's run, and the scheduler, for a caller that is not the command line. The caller reads
-/// the file with `build.file.parse`, orders it with `build.graph.order`, works out a step's key
-/// with `build.key.compute`, runs a step with `build.step.run_step` (its own `Workspace`, `Diag`
-/// and store) and drives the steps with `build.schedule.run`. Nothing here reads the environment,
-/// and nothing prints unless the request sets `stream`: then each line of the step's output goes
-/// to stderr behind `<step> | `. A failure is a coded `Diag`. `docs/demos/m7.md` has the limits.
+/// The build (M7): the build file's parser, the step graph and its order, the cache key, a
+/// step's names and its sweeps, and the scheduler, for a caller that is not the command line.
+/// The caller reads the file with `build.file.parse`, orders it with `build.graph.order`, works
+/// out a step's key with `build.key.compute` and drives the steps with `build.schedule.run`,
+/// with an executor of its own. A step's start (`run_step`) is not exported: it runs its base
+/// with no trust gate, because `zbx build` judges each base, bound to the manifest its lock
+/// names, before the step (docs/decisions/2026-11-13-library-trust-gate.md). Nothing here
+/// reads the environment or prints. A failure is a coded `Diag`. `docs/demos/m7.md` has the
+/// limits.
 pub const build = struct {
     pub const file = @import("build/file.zig");
     pub const graph = @import("build/graph.zig");
     pub const glob = @import("build/glob.zig");
     pub const key = @import("build/key.zig");
-    pub const step = @import("build/step.zig");
+    pub const step = struct {
+        const step_file = @import("build/step.zig");
+        pub const Error = step_file.Error;
+        pub const Request = step_file.Request;
+        pub const Result = step_file.Result;
+        pub const Workspace = step_file.Workspace;
+        pub const hostname = step_file.hostname;
+        pub const umask = step_file.umask;
+        pub const name_prefix = step_file.name_prefix;
+        pub const log_group_bytes = step_file.log_group_bytes;
+        pub const log_group = step_file.log_group;
+        pub const cache_dir_name = step_file.cache_dir_name;
+        pub const output_root_prefix = step_file.output_root_prefix;
+        pub const sweep = step_file.sweep;
+        pub const clear_caches = step_file.clear_caches;
+    };
     pub const schedule = @import("build/schedule.zig");
 };
 

@@ -29,6 +29,9 @@ const key_store = @import("key_store.zig");
 const provenance = @import("provenance.zig");
 const provenance_store = @import("provenance_store.zig");
 const start_gate = @import("start_gate.zig");
+const images = @import("../store/images.zig");
+const exec = @import("../runtime/exec.zig");
+const Sha256 = @import("../registry/digest.zig").Sha256;
 
 const policy_path = "/home/alice/.config/zbx/policy.zon";
 const state = "/home/alice/.local/state/zbx/containers";
@@ -91,6 +94,11 @@ fn terminated(digest: Digest) [constants.store_digest_text_bytes:0]u8 {
 /// Writes the user's policy file: the key `ci` listed, and `rule` (`require_signature` or
 /// `require_provenance`) set.
 fn write_policy(rule: []const u8) !void {
+    try write_policy_at(policy_path, rule);
+}
+
+/// Writes the policy file at `path` as `write_policy` does.
+fn write_policy_at(path: []const u8, rule: []const u8) !void {
     var key_failure: key_store.Failure = undefined;
     var paths: key_store.Paths = undefined;
     try testing.expect(key_store.locate(sim.interface(), &paths));
@@ -104,7 +112,7 @@ fn write_policy(rule: []const u8) !void {
             ".{s} = true }}",
         .{ public, rule },
     );
-    files.put_file(policy_path, 0o644, text);
+    files.put_file(path, 0o644, text);
 }
 
 /// The trust code `zbx run` refused `operand` with, or null when the gate let it through.
@@ -153,9 +161,14 @@ fn spec_of(image: []const u8, name: []const u8, binding: spec_mod.Binding) spec_
 /// The trust code the library's start refused `spec` with, or null when the gate let it
 /// through (the start may still fail later, for the simulator's reasons, never a trust code).
 fn verdict_of_library(spec: *const spec_mod.Spec, diag: *Diag) ?codes.Code {
+    return verdict_with(spec, null, diag);
+}
+
+/// `verdict_of_library`, with the caller's own tree check `check`.
+fn verdict_with(spec: *const spec_mod.Spec, check: ?image_mod.Check, diag: *Diag) ?codes.Code {
     world_dirs(spec.name.?);
     diag.reset();
-    const options: run.StartOptions = .{ .image_workspace = &image_ws };
+    const options: run.StartOptions = .{ .image_workspace = &image_ws, .tree_check = check };
     start_gate.start(sim.interface(), spec, options, &handle, &gate_ws, diag) catch {
         const code = diag.code.?;
         const name = @tagName(code);
@@ -417,4 +430,265 @@ test "with no policy file the library's gate reads nothing beyond the policy loo
     try testing.expect(gated.tree_check == null);
     try testing.expect(gated.image_workspace == options.image_workspace);
     try testing.expect(diag.code == null);
+}
+
+/// The path of the stored object whose bytes are `content`.
+fn object_with(content: []const u8) []const u8 {
+    var index: u32 = 0;
+    while (index < files.count) : (index += 1) {
+        const path = files.alive_path(index) orelse continue;
+        if (files.kind_of(path) != .file) continue;
+        if (std.mem.indexOf(u8, path, "/objects/") == null) continue;
+        if (std.mem.endsWith(u8, path, ".chunks")) continue;
+        if (std.mem.eql(u8, files.content_of(path).?, content)) return path;
+    }
+    unreachable; // The sample tree has an object of each content the tests name.
+}
+
+test "a damaged stored object is refused at both doors, whatever the policy asks" {
+    // Goal: the tamper check (E0907) is on in the library whenever a policy file exists, as it
+    // is in `zbx run`. Method: a policy file that asks nothing, then one that requires a
+    // signature with the tree signed; a byte of a stored object is flipped; both doors refuse
+    // with E0907. With the byte flipped back both admit it.
+    for ([_]bool{ false, true }, 0..) |signed, index| {
+        try setup(70 + index);
+        if (signed) {
+            try write_policy("require_signature");
+            try sign(&tree_text);
+        } else {
+            files.put_file(policy_path, 0o644, ".{ .version = 1 }");
+        }
+        const object = object_with("root:x:0:0\n");
+        files.flip_byte(object, 0);
+        const spec = spec_of(&tree_text, "lib-4", .none);
+        var diag: Diag = undefined;
+        try testing.expectEqual(@as(?codes.Code, .E0907), verdict_of_cli(&tree_text));
+        try testing.expectEqual(@as(?codes.Code, .E0907), verdict_of_library(&spec, &diag));
+        files.flip_byte(object, 0);
+        try testing.expectEqual(@as(?codes.Code, null), verdict_of_cli(&tree_text));
+        const again = spec_of(&tree_text, "lib-5", .none);
+        try testing.expectEqual(@as(?codes.Code, null), verdict_of_library(&again, &diag));
+    }
+}
+
+/// A caller's own tree check, which notes the tree it was asked about.
+const CallerCheck = struct {
+    calls: u32 = 0,
+    tree: ?Digest = null,
+
+    fn check(self: *CallerCheck) image_mod.Check {
+        return .{ .context = self, .call = call };
+    }
+
+    fn call(context: *anyopaque, _: *layout.Store, checked: Digest, diag: *Diag) bool {
+        const self: *CallerCheck = @ptrCast(@alignCast(context));
+        assert(diag.code == null);
+        self.calls += 1;
+        self.tree = checked;
+        return true;
+    }
+};
+
+test "the caller's own tree check runs after the tamper check, on the tree judged" {
+    // Goal: the gate keeps the caller's `tree_check` and runs it after its own, and the start
+    // runs the tree the gate judged. Method: a tree given by a prefix, with and without a policy
+    // file; `admit` rewrites the image to the full digest when a policy asks for something, the
+    // caller's check is called once with the tree, and with a damaged object (policy present) it
+    // is not called at all, since the tamper check refuses first.
+    for ([_]bool{ false, true }, 0..) |policy, index| {
+        try setup(80 + index);
+        if (policy) try write_policy("require_signature");
+        if (policy) try sign(&tree_text);
+        var caller: CallerCheck = .{};
+        const spec = spec_of(tree_text[3..15], "lib-6", .none);
+        var diag: Diag = undefined;
+        try testing.expectEqual(@as(?codes.Code, null), verdict_with(&spec, caller.check(), &diag));
+        try testing.expectEqual(@as(u32, 1), caller.calls);
+        try testing.expect(caller.tree.?.eql(tree));
+        if (!policy) continue;
+        var judged = spec_of(tree_text[3..15], "lib-7", .none);
+        diag.reset();
+        const options: run.StartOptions = .{ .image_workspace = &image_ws };
+        _ = try start_gate.admit(sim.interface(), &judged, options, &gate_ws, &diag);
+        try testing.expectEqualStrings(&tree_text, judged.image.?);
+        caller = .{};
+        files.flip_byte(object_with("setuid\n"), 0);
+        const damaged = spec_of(&tree_text, "lib-8", .none);
+        const refused = verdict_with(&damaged, caller.check(), &diag);
+        try testing.expectEqual(@as(?codes.Code, .E0907), refused);
+        try testing.expectEqual(@as(u32, 0), caller.calls);
+    }
+}
+
+var tree_other: Digest = undefined;
+var other_text: [constants.store_digest_text_bytes:0]u8 = undefined;
+
+/// A second tree in the store: the sample tree with one more file.
+fn import_other() !void {
+    files.put_file("/src/etc/other", 0o644, "other\n");
+    var diag: Diag = undefined;
+    diag.reset();
+    var made: import.Result = undefined;
+    const options: import.Options = .{ .squash_owner = false, .warn = null };
+    try import.import(&store, &import_work, "/src", options, &made, &diag);
+    tree_other = made.digest;
+    assert(!tree_other.eql(tree));
+    other_text = terminated(tree_other);
+}
+
+var image_record: images.Image = undefined;
+var reference_buffer: [200:0]u8 = undefined;
+
+/// Saves a pulled image of the sample tree, with the result record's config so that it derives
+/// `built`, and returns the reference by digest `zbx run` takes without a lock.
+fn save_image() ![:0]const u8 {
+    const image = &image_record;
+    image.tag_count = 0;
+    image.manifest = Sha256.of("manifest");
+    image.platform_len = 11;
+    @memcpy(image.platform[0..11], "linux/amd64");
+    image.config = Sha256.of("config");
+    image.tree = tree;
+    image.time = 1;
+    image.layer_count = 0;
+    image.settings = record.config.settings;
+    image.labels.clear();
+    var failure: fs_mod.Failure = undefined;
+    try images.save(&store, image, &failure);
+    try testing.expect(result.derive(tree, &image.settings, &image.labels).?.eql(built));
+    const manifest = image.manifest.text();
+    const text = try std.fmt.bufPrint(&reference_buffer, "docker.io/library/alpine@{s}", .{
+        &manifest,
+    });
+    reference_buffer[text.len] = 0;
+    return reference_buffer[0..text.len :0];
+}
+
+test "a binding the store does not back counts for nothing" {
+    // Goal: the library never admits what `zbx run` refuses for the same tree: a caller's
+    // binding to a result or a manifest whose record names another tree is dropped. Method: the
+    // result and the image of the sample tree are signed, a second tree is not; `zbx run` of the
+    // second tree is refused, and so is the library start of it bound to that result or that
+    // manifest, or to a result no record has. Bound to its own tree's result it is admitted.
+    try setup(90);
+    try import_other();
+    const reference = try save_image();
+    try write_policy("require_signature");
+    try sign(&built_text);
+    try sign(reference);
+    try testing.expectEqual(@as(?codes.Code, .E0905), verdict_of_cli(&other_text));
+    try testing.expectEqual(@as(?codes.Code, null), verdict_of_cli(&built_text));
+    try testing.expectEqual(@as(?codes.Code, null), verdict_of_cli(reference));
+    const bindings = [_]spec_mod.Binding{
+        .{ .result = built.bytes },
+        .{ .manifest = image_record.manifest.bytes },
+        .{ .result = Digest.of("no such result").bytes },
+    };
+    var diag: Diag = undefined;
+    for (bindings) |binding| {
+        const spec = spec_of(&other_text, "lib-9", binding);
+        try testing.expectEqual(@as(?codes.Code, .E0905), verdict_of_library(&spec, &diag));
+    }
+    const own = spec_of(&tree_text, "lib-10", .{ .result = built.bytes });
+    try testing.expectEqual(@as(?codes.Code, null), verdict_of_library(&own, &diag));
+}
+
+test "an image named by digest gets the verdict zbx run gives it, bound or by name" {
+    // Goal: the manifest and the result it derives count at both doors alike. Method: a pulled
+    // image of the sample tree; under require_signature, unsigned then signed by reference;
+    // under require_provenance, with the provenance of the result the image derives. Each time
+    // `zbx run <reference>`, the library start of the reference with no binding, and of the
+    // tree bound to the manifest agree, and the start runs the tree by its full digest.
+    const Step = enum { unsigned, signed, provenance };
+    const wants = [_]?codes.Code{ .E0905, null, null };
+    for ([_]Step{ .unsigned, .signed, .provenance }, 0..) |step, index| {
+        errdefer std.debug.print("step: {s}\n", .{@tagName(step)});
+        try setup(100 + index);
+        const reference = try save_image();
+        if (step == .provenance) try save_provenance_of_built();
+        try write_policy(if (step == .provenance) "require_provenance" else "require_signature");
+        if (step != .unsigned) try sign(reference);
+        if (step == .provenance) try sign(&built_text);
+        try testing.expectEqual(wants[index], verdict_of_cli(reference));
+        var diag: Diag = undefined;
+        const by_name = spec_of(reference, "lib-11", .none);
+        try testing.expectEqual(wants[index], verdict_of_library(&by_name, &diag));
+        const manifest: spec_mod.Binding = .{ .manifest = image_record.manifest.bytes };
+        const bound = spec_of(&tree_text, "lib-12", manifest);
+        try testing.expectEqual(wants[index], verdict_of_library(&bound, &diag));
+        var judged = spec_of(reference, "lib-13", .none);
+        diag.reset();
+        const options: run.StartOptions = .{ .image_workspace = &image_ws };
+        _ = start_gate.admit(sim.interface(), &judged, options, &gate_ws, &diag) catch {};
+        try testing.expectEqualStrings(&tree_text, judged.image.?);
+        try testing.expect(std.meta.eql(judged.binding, manifest));
+    }
+}
+
+test "the node's own policy file binds the library as it binds zbx run" {
+    // Goal: `/etc/zbx/policy.zon` is read by the library's gate, not only the user's file.
+    // Method: the system file alone requires a signature; both doors refuse the unsigned tree.
+    try setup(110);
+    if (files.kind_of("/etc") == null) files.put_dir("/etc", 0o755);
+    files.put_dir("/etc/zbx", 0o755);
+    try write_policy_at(constants.policy_system_path, "require_signature");
+    try testing.expect(files.kind_of(policy_path) == null);
+    try testing.expectEqual(@as(?codes.Code, .E0905), verdict_of_cli(&tree_text));
+    const spec = spec_of(&tree_text, "lib-14", .none);
+    var diag: Diag = undefined;
+    try testing.expectEqual(@as(?codes.Code, .E0905), verdict_of_library(&spec, &diag));
+}
+
+test "a refusal of a result names the result, as zbx run's does" {
+    // Goal: the subject a result-bound refusal names is the result's digest. Method: provenance
+    // required, none stored, the result signed; the library start of the tree bound to the
+    // result renders exactly what `zbx run <result>` printed.
+    try setup(120);
+    try write_policy("require_provenance");
+    try sign(&built_text);
+    try testing.expectEqual(@as(?codes.Code, .E0906), verdict_of_cli(&built_text));
+    var printed: [constants.output_bytes_max]u8 = undefined;
+    const cli_text = sim.stderr();
+    @memcpy(printed[0..cli_text.len], cli_text);
+    const spec = spec_of(&tree_text, "lib-15", .{ .result = built.bytes });
+    var diag: Diag = undefined;
+    try testing.expectEqual(@as(?codes.Code, .E0906), verdict_of_library(&spec, &diag));
+    var buffer: [constants.output_bytes_max]u8 = undefined;
+    const text = render.render(&diag, .text, false, &buffer);
+    try testing.expectEqualStrings(printed[0..cli_text.len], text);
+    try testing.expect(std.mem.indexOf(u8, text, &built_text) != null);
+}
+
+var exec_handle: exec.Handle = undefined;
+
+/// The trust code the library's exec in `name` was refused with, or null when the gate let it
+/// through (the exec may still fail later, for the simulator's reasons).
+fn verdict_of_exec(name: []const u8, diag: *Diag) ?codes.Code {
+    const command_spec: exec.Spec = .{ .name = name, .command = &.{"/bin/true"} };
+    diag.reset();
+    start_gate.exec_start(sim.interface(), &command_spec, .{}, &exec_handle, &gate_ws, diag) catch {
+        const code = diag.code.?;
+        if (std.mem.startsWith(u8, @tagName(code), "E090")) return code;
+        return null;
+    };
+    assert(diag.code == null);
+    return null;
+}
+
+test "the library's exec meets the policy as zbx exec does" {
+    // Goal: `zigbox.exec_start` is gated. Method: a container started with no policy; then a
+    // policy requires a signature; the library's exec in it is refused with E0905 and nothing
+    // started, and once the tree is signed it is let through.
+    try setup(130);
+    const spec = spec_of(&tree_text, "lib-16", .none);
+    var diag: Diag = undefined;
+    try testing.expectEqual(@as(?codes.Code, null), verdict_of_library(&spec, &diag));
+    var dir: records.Dir = undefined;
+    try testing.expect(records.locate(sim.interface(), &dir));
+    var parsed: records.Parsed = undefined;
+    try records.load(sim.interface(), &dir, "lib-16", &parsed);
+    try write_policy("require_signature");
+    try testing.expectEqual(@as(?codes.Code, .E0905), verdict_of_exec("lib-16", &diag));
+    try sign(&tree_text);
+    try testing.expectEqual(@as(?codes.Code, null), verdict_of_exec("lib-16", &diag));
 }
