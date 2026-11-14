@@ -692,3 +692,33 @@ test "the library's exec meets the policy as zbx exec does" {
     try sign(&tree_text);
     try testing.expectEqual(@as(?codes.Code, null), verdict_of_exec("lib-16", &diag));
 }
+
+test "the run record keeps the binding the gate judged, not the caller's" {
+    // Goal: an unbacked binding never reaches the run record, where `zbx exec`'s gate would read
+    // it back. Method: a signed tree under require_signature, started bound to a result no
+    // record has; it is admitted, and its run record has no binding. Bound to its own result,
+    // the record keeps that result.
+    try setup(140);
+    try write_policy("require_signature");
+    try sign(&tree_text);
+    const bindings = [_]spec_mod.Binding{
+        .{ .result = Digest.of("no such result").bytes },
+        .{ .result = built.bytes },
+    };
+    const names = [_][]const u8{ "lib-17", "lib-18" };
+    var diag: Diag = undefined;
+    for (bindings, names, 0..) |binding, name, index| {
+        const spec = spec_of(&tree_text, name, binding);
+        try testing.expectEqual(@as(?codes.Code, null), verdict_of_library(&spec, &diag));
+        var dir: records.Dir = undefined;
+        try testing.expect(records.locate(sim.interface(), &dir));
+        var parsed: records.Parsed = undefined;
+        try records.load(sim.interface(), &dir, name, &parsed);
+        const kept: spec_mod.Binding = parsed.binding orelse .none;
+        if (index == 0) {
+            try testing.expect(kept == .none);
+        } else {
+            try testing.expectEqualSlices(u8, &built.bytes, &kept.result);
+        }
+    }
+}
