@@ -114,7 +114,9 @@ const lazy_script =
     \\D=$($Z store import $R) || { echo "lazy: import FAILED"; exit 1; }
     \\echo "lazy: imported $D"
     \\C='cat /etc/alpine-release; md5sum /bin/busybox /lib/ld-musl-*'
-    \\C="$C; ls -lan /etc /usr/bin | md5sum"
+    \\# Not the link counts or block totals: an eager tree is hard links into the store.
+    \\A='$1 != "total" {print $1, $3, $4, $5, $NF}'
+    \\C="$C; ls -lan /etc /usr/bin /lib | awk '$A' | md5sum"
     \\E=$($Z run $D -- sh -c "$C" 2>&1); S=$?
     \\[ $S = 0 ] && ok "eager run" || fail "eager run" "exit $S: $E"
     \\L=$($Z run --lazy $D -- sh -c "$C" 2>&1); S=$?
