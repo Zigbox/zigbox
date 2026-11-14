@@ -304,9 +304,9 @@ pub fn fetched(preimage: []const u8, out: *[constants.build_copy_entries_max][32
 /// bytes left; a short or unknown field reads as null.
 const Decoder = struct {
     in: []const u8,
-    at: usize = 0,
+    at: u32 = 0,
 
-    fn take(decoder: *Decoder, count: usize) ?[]const u8 {
+    fn take(decoder: *Decoder, count: u32) ?[]const u8 {
         assert(decoder.at <= decoder.in.len);
         if (count > decoder.in.len - decoder.at) return null;
         defer decoder.at += count;

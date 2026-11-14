@@ -45,7 +45,8 @@ pub fn import(
     diag: *Diag,
 ) ?Digest {
     assert(diag.code == null);
-    assert(name.len > 0 and name.len <= constants.store_name_bytes_max);
+    assert(name.len > 0);
+    assert(name.len <= constants.store_name_bytes_max);
     const blobs: blobs_mod.Blobs = .{ .fs = store.fs, .root = store.root_text() };
     var path_storage: PathBuf = undefined;
     const path = blobs.final_path(&path_storage, sha256);
@@ -100,7 +101,8 @@ fn hash_blob(
         if (count == 0) break;
         hasher.update(ws.io[0..count]);
         // A blob over the store's file bound cannot be: build_fetch_bytes_max is below it.
-        if (!reader.update(ws.io[0..count], &ws.chunks)) return changed(store, sha256, diag) != null;
+        const fits = reader.update(ws.io[0..count], &ws.chunks);
+        if (!fits) return changed(store, sha256, diag) != null;
     } else return changed(store, sha256, diag) != null;
     const actual = hasher.final();
     if (!actual.eql(sha256)) {
@@ -140,7 +142,12 @@ fn one_file_tree(
     return digest;
 }
 
-fn failed(store: *Store, operation: []const u8, failure: *const object.Failure, diag: *Diag) ?Digest {
+fn failed(
+    store: *Store,
+    operation: []const u8,
+    failure: *const object.Failure,
+    diag: *Diag,
+) ?Digest {
     assert(operation.len > 0);
     assert(diag.code == null);
     store_diagnose.write_failed(diag, store, operation, failure.err, failure.errno);

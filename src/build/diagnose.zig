@@ -200,6 +200,19 @@ fn parse_fix(diag: *Diag, problem: *const file_mod.Problem) void {
     }
 }
 
+/// The fixes of a `.fetch` that does not load (`value_fix`'s).
+fn fetch_fix(diag: *Diag, kind: file_mod.ProblemKind) void {
+    assert(diag.code != null);
+    assert(kind != .bad_step_name);
+    diag.fix(.{ .sentence = switch (kind) {
+        .bad_fetch_url => "write .url as an https:// URL (http:// only to localhost or 127.x), " ++
+            "ending in a file name when .to ends in /",
+        .bad_sha256 => "write .sha256 as the file's 64 lowercase hex digits, as sha256sum " ++
+            "prints them",
+        else => "give a copy entry .fetch or .from and .src, not both; a fetch takes no .exclude",
+    } });
+}
+
 /// The fixes of the problems of one value (`describe_value`'s).
 fn value_fix(diag: *Diag, problem: *const file_mod.Problem) void {
     assert(diag.code != null);
@@ -244,12 +257,7 @@ fn value_fix(diag: *Diag, problem: *const file_mod.Problem) void {
             "empty, . or .. part, for example \"/cache\"" }),
         .bad_copy_to => diag.fix(.{ .sentence = "write .to as an absolute path written " ++
             "plainly, ending in / for a directory, for example \"/app/\"" }),
-        .bad_fetch_url => diag.fix(.{ .sentence = "write .url as an https:// URL (http:// " ++
-            "only to localhost or 127.x), ending in a file name when .to ends in /" }),
-        .bad_sha256 => diag.fix(.{ .sentence = "write .sha256 as the file's 64 lowercase hex " ++
-            "digits, as sha256sum prints them" }),
-        .fetch_and_source => diag.fix(.{ .sentence = "give a copy entry .fetch or " ++
-            ".from and .src, not both; a fetch takes no .exclude" }),
+        .bad_fetch_url, .bad_sha256, .fetch_and_source => fetch_fix(diag, problem.kind),
         .bad_mode => diag.fix(.{ .sentence = "write the mode as 3 or 4 octal digits, for " ++
             "example \"0755\"" }),
         .bad_pattern => diag.fix(.{ .sentence = "write a glob: * ? [a-z] and ** work, a \\ " ++
@@ -1486,7 +1494,8 @@ const UrlEcho = [256]u8;
 /// code: it is E0416 or E0417, as a pull's is (`registry/diagnose.zig` `cache_failed`).
 pub fn fetch_failed(diag: *Diag, step: []const u8, url: []const u8, reason: fetch_mod.Reason) void {
     assert(diag.code == null);
-    assert(reason != .mismatch and reason != .io);
+    assert(reason != .mismatch);
+    assert(reason != .io);
     var url_echo: UrlEcho = undefined;
     const shown = text_util.sanitise(&url_echo, url);
     diag.raise(.E0820);
@@ -1530,7 +1539,7 @@ fn network_words(err: net_mod.Error) []const u8 {
 }
 
 fn refusal_words(refusal: fetch_mod.Refusal) []const u8 {
-    assert(@intFromEnum(refusal) <= @intFromEnum(fetch_mod.Refusal.malformed));
+    assert(@backingInt(refusal) <= @backingInt(fetch_mod.Refusal.malformed));
     return switch (refusal) {
         .http => "to plain http, which only a loopback host may use",
         .loopback => "from a host that is not loopback to one that is",
@@ -1553,17 +1562,15 @@ pub fn fetch_mismatch(
     const shown = text_util.sanitise(&url_echo, url);
     diag.raise(.E0821);
     diag.while_("downloading the .fetch of build step \"{s}\"", .{step});
-    diag.cause("the bytes from {s} are sha256:{s}, not sha256:{s} as .sha256 pins", .{
-        shown, received, expected,
-    });
+    diag.cause("the bytes downloaded are not those .sha256 pins", .{});
+    diag.cause("{s} sent sha256:{s}", .{ shown, received });
     diag.context("step", "{s}", .{step});
     diag.context("url", "{s}", .{shown});
-    diag.context("expected", "sha256:{s}", .{expected});
-    diag.context("received", "sha256:{s}", .{received});
-    diag.fix(.{ .sentence = "if the hash was copied wrongly, correct .sha256 (or " ++
-        "ADD --checksum)" });
-    diag.fix(.{ .sentence = "otherwise find out why the server's file changed before " ++
-        "trusting it" });
+    diag.context("expect", "sha256:{s}", .{expected});
+    diag.context("actual", "sha256:{s}", .{received});
+    fix_sentence(diag, "if .sha256 (or ADD --checksum) was copied wrongly, correct it; it " ++
+        "pins sha256:{s}", .{expected});
+    diag.fix(.{ .sentence = "otherwise find out why the file changed before trusting it" });
     assert(diag.code.? == .E0821);
 }
 

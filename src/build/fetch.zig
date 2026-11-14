@@ -182,7 +182,7 @@ pub const Fetcher = struct {
 
     fn refuse(fetcher: *Fetcher, refusal: Refusal) error{Failed} {
         assert(fetcher.fd != null);
-        assert(@intFromEnum(refusal) <= @intFromEnum(Refusal.malformed));
+        assert(@backingInt(refusal) <= @backingInt(Refusal.malformed));
         fetcher.reason = .{ .refused = refusal };
         return error.Failed;
     }
@@ -226,7 +226,8 @@ pub const Fetcher = struct {
     /// One request; the body goes to the partial file only if the answer is a 200.
     fn ask(fetcher: *Fetcher, origin: client.Origin, target: []const u8) error{Failed}!void {
         assert(fetcher.fd != null);
-        assert(target.len > 0 and target[0] == '/');
+        assert(target.len > 0);
+        assert(target[0] == '/');
         fetcher.head = .{};
         const request: net.Request = .{
             .scheme = origin.scheme,

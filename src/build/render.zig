@@ -552,7 +552,8 @@ const m9_file =
     \\    .{ .name = "c", .base = "alpine:3.20",
     \\       .copy = .{ .{ .from = "step:a", .src = .{ "a*" }, .to = "/d/", .chown = "app",
     \\                     .chmod = "644", .exclude = .{ "*.o" } },
-    \\         .{ .fetch = .{ .url = "https://h.example/t.gz", .sha256 = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" },
+    \\         .{ .fetch = .{ .url = "https://h.example/t.gz",
+    \\              .sha256 = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" },
     \\            .to = "/f/" } } },
     \\  },
     \\}
@@ -562,13 +563,13 @@ test "every builder addition is printed, read back equal and printed the same" {
     // Goal: the canonical form carries the M9 fields. Method: one file with all of them, round
     // tripped, with each field's printed text looked for; then each value changed once.
     const canonical = try round_trip(m9_file);
+    const fetch_needle = ".fetch = .{ .url = \"https://h.example/t.gz\",";
     const printed = [_][]const u8{
         ".output = .root,",       ".user = \"app\",",    ".workdir = \"/w\",",
         ".exclude = .{},",        ".base = \"step:b\",", ".ro = true",
         ".mode = \"0755\"",       ".uid = 1, .gid = 2",  ".from = \"step:b\", .source",
         ".chown = \"app\"",       ".chmod = \"644\"",    ".exclude = .{ \"*.o\" }",
-        ".exclude = .{ \".git\"", ".user = \"app:app\"",
-        ".fetch = .{ .url = \"https://h.example/t.gz\", .sha256 = \"aaaa",
+        ".exclude = .{ \".git\"", ".user = \"app:app\"", fetch_needle,
     };
     for (printed) |needle| {
         if (std.mem.indexOf(u8, canonical, needle) == null) {
@@ -583,8 +584,8 @@ test "every builder addition is printed, read back equal and printed the same" {
         .{ "\"/tools\"", "\"/tool\"" },           .{ "\"644\"", "\"640\"" },
         .{ "\"*.o\"", "\"*.p\"" },                .{ "\"!keep.log\"", "\"keep.log\"" },
         .{ "\"app:app\"", "\"app:bpp\"" },        .{ "\"src/**/*.go\"", "\"src/*.go\"" },
-        .{ ".exclude = .{},", "" },
-        .{ "/t.gz", "/u.gz" },                    .{ "\"aaaa", "\"baaa" },
+        .{ ".exclude = .{},", "" },               .{ "/t.gz", "/u.gz" },
+        .{ "\"aaaa", "\"baaa" },
     };
     var buffer: [m9_file.len + 16]u8 = undefined;
     for (changed) |pair| {

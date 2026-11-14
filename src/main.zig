@@ -292,6 +292,8 @@ test {
 test {
     _ = @import("build/copy_tests.zig");
     _ = @import("build/copy_owner_tests.zig");
+    _ = @import("build/fetch_tests.zig");
+    _ = @import("build/fetch_tree.zig");
 }
 
 test {
@@ -305,7 +307,6 @@ test {
     _ = @import("build/key.zig");
     _ = @import("build/cache.zig");
     _ = @import("build/cache_tests.zig");
-    _ = @import("build/fetch_tests.zig");
     _ = @import("build/schedule_tests.zig");
     _ = @import("build/cache_bounds_tests.zig");
     _ = @import("build/result_tests.zig");
