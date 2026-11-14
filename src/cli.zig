@@ -116,11 +116,11 @@ const help_text =
     \\  --read-only     mount the root read-only, with a tmpfs at /tmp and /run
     \\  --net <mode>    none (the default: a network of its own, only lo), host (share the host's)
     \\                  or user (the network through pasta, as the user: apt install passt)
-    \\  --publish <h:c> forward TCP port h of this machine to port c of the container (repeatable;
-    \\                  implies --net user)
-    \\  --listen <addr:port>  make a TCP listener on the container's loopback (only 127.0.0.1;
-    \\                  --net none only) and hand it to the caller with --listen-send
+    \\  --publish <h:c> forward TCP port h here to port c inside (repeatable; --net user)
+    \\  --listen <addr:port>  a TCP listener on the container's loopback (127.0.0.1, --net none),
+    \\                  handed to the caller over --listen-send
     \\  --listen-send <fd>  the inherited Unix socket the listener goes over (SCM_RIGHTS)
+    \\  --hosts-file <path>  this file, read-only, as /etc/hosts (--net none only)
     \\  -e <name>[=<value>]  set a variable in the container, over the image's (repeatable): with
     \\                  =<value> that value, without it zbx's own (an error if unset there).
     \\                  A value is never stored or printed; only the name is shown
@@ -405,6 +405,8 @@ pub const RunArgs = struct {
     /// as typed (the descriptor number is read when the listener is sent, E0609).
     listen: ?runtime_spec.Listen = null,
     listen_send: ?[]const u8 = null,
+    /// `--hosts-file`: the path as typed; looked at when the container starts (E0612).
+    hosts_file: ?[]const u8 = null,
     /// The `-e` options, each read as it came (a bad one is refused there, E0010). A value stays
     /// in the argument it came in and is never copied; `run_env.resolve` merges them at the start.
     env: [constants.run_env_count_max]run_env.Setting = undefined,
@@ -468,6 +470,7 @@ const RunOption = enum {
     publish,
     listen,
     listen_send,
+    hosts_file,
     state,
     tmpfs,
     bind,
@@ -481,7 +484,7 @@ const RunOption = enum {
     workdir,
 
     fn flag(option: RunOption) []const u8 {
-        assert(@backingInt(option) <= 21);
+        assert(@backingInt(option) <= 22);
         assert(@tagName(option).len > 0);
         return switch (option) {
             .rootfs => "--rootfs",
@@ -495,6 +498,7 @@ const RunOption = enum {
             .publish => "--publish",
             .listen => "--listen",
             .listen_send => "--listen-send",
+            .hosts_file => "--hosts-file",
             .state => "--state",
             .tmpfs => "--tmpfs",
             .bind => "--bind",
@@ -700,7 +704,7 @@ const Token = union(enum) {
 /// `--rootfs`, `--rootfs=x` and the other value options of `run`, or null.
 fn run_option_of(argument: []const u8) ?Token {
     assert(argument.len <= constants.arg_bytes_max);
-    assert(std.enums.values(RunOption).len == 22);
+    assert(std.enums.values(RunOption).len == 23);
     inline for (comptime std.enums.values(RunOption)) |option| {
         const flag = comptime option.flag();
         if (std.mem.eql(u8, argument, flag)) return .{ .run_option_next = option };
@@ -1678,6 +1682,7 @@ fn take_run_option(
         .publish => unreachable, // Repeatable: `take_publish` above.
         .listen => unreachable, // `take_listen` above.
         .listen_send => &run_args.listen_send,
+        .hosts_file => &run_args.hosts_file,
         .state => unreachable, // Repeatable: `take_state` above.
         .tmpfs, .bind, .secret, .mount => unreachable, // Repeatable: `take_mount` above.
         .device => unreachable, // Repeatable: `take_device` above.
@@ -3632,6 +3637,7 @@ fn run_container(
         .network = network_of(&given),
         .publish = given.publish_slice(),
         .listen = given.listen,
+        .hosts_file = given.hosts_file orelse "",
         .state = given.state_slice(),
         .mounts = spec_mounts,
         .devices = given.devices_slice(),

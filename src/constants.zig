@@ -1413,7 +1413,7 @@ comptime {
     const candidates_bytes_max = (container_path_dirs_count + 1) * (command_word_bytes_max + 20);
     const paths_needed = derived_paths_max * (rootfs_bytes_max + 16) + candidates_bytes_max +
         2 * id_map_line_bytes_max + 2 * etc_file_bytes_max + 512 +
-        pasta_path_bytes_max + state_path_bytes_max + 80 + 2;
+        pasta_path_bytes_max + state_path_bytes_max + 80 + 2 + mount_path_bytes_max + 1;
     // Each state volume: its name, its target twice, its data directory, and a stage path below
     // the rootfs and one below /dev, each with its NUL.
     const state_paths = state_volumes_max * (state_name_bytes_max + 2 * state_target_bytes_max +
