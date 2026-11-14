@@ -365,6 +365,9 @@ pub const World = struct {
     broken_pipe_ignored: bool,
     /// Listener `i` is on its way through a channel: made, sent, not yet received.
     listener_in_flight: [constants.sim_listeners_max]bool,
+    /// Whether each listener or socket was made in a network namespace of a container's own
+    /// (a process with `new_net`), not the host's: what `made_in_container_net` answers.
+    listener_new_net: [constants.sim_listeners_max]bool,
     /// A process went through `exec` still holding a listener: the setup child forgot to close
     /// it, so the workload would inherit it (the model closes it, the kernel's close-on-exec
     /// would hide the mistake).
@@ -505,6 +508,7 @@ pub const World = struct {
         world.overlay_refused = false;
         world.broken_pipe_ignored = false;
         world.listener_in_flight = @splat(false);
+        world.listener_new_net = @splat(false);
         world.listener_leaked = false;
         world.pipe_capacity_bytes = pipe_bytes_max;
         world.next_pid = 500;
@@ -788,9 +792,15 @@ pub const World = struct {
         for (0..constants.sim_listeners_max) |slot| {
             if (world.listener_used(slot)) continue;
             world.processes[world.current].listener_holds[slot] = true;
+            world.listener_new_net[slot] = world.processes[world.current].new_net;
             return listener_handle_base + @as(u32, @intCast(slot));
         }
         return null;
+    }
+
+    /// Whether the listener or socket `handle` was made in a container's own network namespace.
+    pub fn made_in_container_net(world: *const World, handle: host.Handle) bool {
+        return world.listener_new_net[listener_slot(handle)];
     }
 
     fn listener_slot(handle: host.Handle) usize {

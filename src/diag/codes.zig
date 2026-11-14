@@ -196,6 +196,8 @@ pub const Code = enum(u8) {
     E0607,
     E0608,
     E0609,
+    E0610,
+    E0611,
     E0701,
     E0702,
     E0703,
@@ -3122,6 +3124,38 @@ pub const registry = [_]Entry{
         \\
         \\Pass one end of a socketpair(AF_UNIX, SOCK_STREAM), keep the other end,
         \\and read the listener from it with recvmsg.
+        ,
+    },
+    .{
+        .code = .E0610,
+        .severity = .@"error",
+        .blame = .user,
+        .summary = "the container has no network of its own to make a socket in",
+        .explanation =
+        \\A socket made for a container lives in the container's network namespace. A
+        \\container started with --net host shares the host's network namespace, so a
+        \\socket made "in" it would be the host's: that would open a port on the host
+        \\under the container's name, and zbx refuses it. Only --net none and the
+        \\default pasta network give a container a namespace of its own.
+        \\
+        \\Start the container with --net none (or without --net) and ask again.
+        ,
+    },
+    .{
+        .code = .E0611,
+        .severity = .@"error",
+        .blame = .environment,
+        .summary = "a socket could not be made inside the container",
+        .explanation =
+        \\zbx makes the socket with a short-lived helper process that joins the
+        \\container's user and network namespaces, opens the socket and hands it back
+        \\with SCM_RIGHTS. One of those steps failed; the step and the system error
+        \\are in the message. Usual causes: the caller is not the user that started
+        \\the container (joining its user namespace is then refused), the container
+        \\ended while the helper ran, or the caller has no free descriptor.
+        \\
+        \\The helper is a child of the caller and never enters the container's PID
+        \\namespace, so nothing inside the container can see or signal it.
         ,
     },
     .{

@@ -266,6 +266,7 @@ test {
     _ = @import("runtime/exec_history.zig");
     _ = @import("runtime/exec_tests.zig");
     _ = @import("runtime/exec_worker_tests.zig");
+    _ = @import("runtime/container_socket_tests.zig");
 }
 
 test {

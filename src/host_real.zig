@@ -120,6 +120,7 @@ pub const HostReal = struct {
         .bring_up_loopback = bring_up_loopback,
         .channel = channel,
         .listen_loopback = listen_loopback,
+        .tcp4_socket = tcp4_socket,
         .send_handle = send_handle,
         .receive_handle = receive_handle,
         .is_unix_stream = is_unix_stream,
@@ -693,6 +694,18 @@ pub const HostReal = struct {
             return close_failed(descriptor, err);
         };
         self.open_count += 1;
+        return @intCast(descriptor);
+    }
+
+    /// `socket(AF_INET, SOCK_STREAM)`, close-on-exec, and nothing more: the caller binds,
+    /// listens or connects it, wherever it ends up.
+    fn tcp4_socket(context: *anyopaque) host.Error!host.Handle {
+        const self = from_context(context);
+        const created = linux.socket(linux.AF.INET, linux.SOCK.STREAM | linux.SOCK.CLOEXEC, 0);
+        try check(created);
+        self.open_count += 1;
+        const descriptor: i32 = @intCast(created);
+        assert(descriptor >= 0);
         return @intCast(descriptor);
     }
 

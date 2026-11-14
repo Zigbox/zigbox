@@ -1,0 +1,7 @@
+error[ZBX-E0610]: the container has no network of its own to make a socket in
+  while  making a socket in the container web
+  cause  the container web has no network of its own: it shares the host's
+  name   web
+  fix    start the container with a network of its own:   zbx run -d --name web --net none alpine -- sleep 1000
+  more   zbx explain E0610
+  docs   https://zigbox.github.io/zigbox/errors/E0610.html

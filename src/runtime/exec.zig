@@ -297,7 +297,19 @@ fn find_container(
     record: *records.Parsed,
     diag: *Diag,
 ) Error!void {
+    try find_running(host, name, record, diag);
+    handle.name.print("{s}", .{record.name_slice()});
+    handle.container_pid = record.pid;
+    handle.scope.print("{s}", .{record.scope_slice()});
+    assert(handle.name.len > 0);
+}
+
+/// The lookup alone, for callers that have no exec handle (`container_socket.zig`): the record
+/// of the running container `name`, or the diagnostic of why there is none (E0701, E0402,
+/// E0220).
+pub fn find_running(host: Host, name: []const u8, record: *records.Parsed, diag: *Diag) Error!void {
     assert(diag.code == null);
+    assert(name.len > 0);
     var dir: records.Dir = undefined;
     if (!records.locate(host, &dir)) {
         diagnose.no_such_container(diag, name, .no_state);
@@ -315,10 +327,7 @@ fn find_container(
         exec_diagnose.not_running(diag, name, state == .lost, record);
         return error.StartFailed;
     }
-    handle.name.print("{s}", .{record.name_slice()});
-    handle.container_pid = record.pid;
-    handle.scope.print("{s}", .{record.scope_slice()});
-    assert(handle.name.len > 0);
+    assert(record.pid > 1);
 }
 
 /// The container's environment, as its PID 1 was started with it.
