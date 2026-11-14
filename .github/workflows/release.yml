@@ -123,8 +123,11 @@ jobs:
           if [ "$EVENT" = workflow_dispatch ]; then
             version="$INPUT_VERSION"
             [[ "$version" =~ $re ]] || fail "'$version' is not a version such as 0.5.1"
-            # The release commit is the one that ADDED the notes (an edit of them does not count).
-            sha=$(git log --diff-filter=A --format=%H origin/main -- "docs/releases/$version.md" | tail -n 1)
+            # The release commit is the one that ADDED the notes (an edit of them does not count);
+            # --first-parent makes a merged pull request's merge commit, which ci ran on, the release
+            # commit, as workflow_run does.
+            sha=$(git log --first-parent --diff-filter=A --format=%H origin/main \
+              -- "docs/releases/$version.md" | tail -n 1)
             [ -n "$sha" ] || fail "no commit of main added docs/releases/$version.md"
             [ "$(zon_version "$sha")" = "$version" ] || fail "build.zig.zon at $sha is not $version"
             git merge-base --is-ancestor "$sha" origin/main || fail "$sha is not on main"
