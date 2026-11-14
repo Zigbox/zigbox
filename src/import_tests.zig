@@ -84,5 +84,7 @@ test "an empty Dockerfile name or output is refused, not a bug" {
     try expect_stderr("name is empty");
     try testing.expectEqual(@as(u8, 1), run(&(base ++ .{ "-o", "" })));
     try expect_stderr("E0005");
+    try expect_stderr("zbx import Dockerfile -o");
+    try testing.expect(std.mem.indexOf(u8, sim.stderr(), "state export") == null);
     try testing.expect(files.content_of(output_path) == null);
 }

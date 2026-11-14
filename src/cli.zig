@@ -1181,9 +1181,9 @@ fn take_out_option(
     const is_import = operands.len >= 1 and command_named(operands[0]) == .import;
     if (!is_export and !is_import) return unknown_option(diag, argument);
     if (export_file.* != null) return unexpected_argument(diag, .state, argument);
-    if (index.* + 1 == args.len) return missing_option_value(diag, "-o");
+    if (index.* + 1 == args.len) return missing_out_value(diag, is_import);
     index.* += 1;
-    if (args[index.*].len == 0) return missing_option_value(diag, "-o");
+    if (args[index.*].len == 0) return missing_out_value(diag, is_import);
     export_file.* = args[index.*];
 }
 
@@ -3000,6 +3000,25 @@ fn import_flag_named(option: []const u8) bool {
 fn missing_option_value(diag: *Diag, option: []const u8) ParseError {
     assert(diag.code == null);
     assert(option.len >= 2);
+    return missing_value_fix(diag, option, null);
+}
+
+/// `-o` with no value: `import` and `state export` both take it, so the example names the
+/// command that was typed.
+fn missing_out_value(diag: *Diag, is_import: bool) ParseError {
+    assert(diag.code == null);
+    const result = missing_value_fix(diag, "-o", if (is_import)
+        "zbx import Dockerfile -o zbx.build.zon"
+    else
+        "zbx state export pgdata -o pgdata.tar.gz");
+    assert(diag.code.? == .E0005);
+    return result;
+}
+
+/// The E0005 for a value option that has none. `out_example` overrides the example for `-o`.
+fn missing_value_fix(diag: *Diag, option: []const u8, out_example: ?[]const u8) ParseError {
+    assert(diag.code == null);
+    assert(option.len >= 2);
     diag.raise(.E0005);
     diag.while_("reading the command line", .{});
     diag.cause("{s} needs a value, and none follows it", .{option});
@@ -3008,7 +3027,9 @@ fn missing_option_value(diag: *Diag, option: []const u8) ParseError {
     const sign_option = std.mem.eql(u8, option, "--key");
     diag.fix(.{
         .sentence = "give it a value:",
-        .command = if (export_option)
+        .command = if (out_example) |example|
+            example
+        else if (export_option)
             "zbx state export pgdata -o pgdata.tar.gz"
         else if (build_option)
             "zbx build --graph -f build/zbx.build.zon"
