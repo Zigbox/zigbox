@@ -18,9 +18,40 @@ The node table has a fixed part and an arena.
   always enough. Its ceiling is `lazy_index_bytes_max`: the trees
   are part of the index, and the index is bounded already.
 
+- **The chunk cache** (`fuse/cache.zig`) holds `2 × lazy_fuse_threads` chunks that the serving
+  threads share: 8 MiB at the defaults. See "Reads" below.
+- **Per serving thread**, a reply buffer of `fuse_reply_bytes` (1 MiB and 16 bytes) and a request
+  buffer of `fuse_request_bytes` (8 KiB): about 4 MiB for four threads. A thread no longer keeps a
+  chunk of its own; the cache replaces those 4 MiB with its 8.
+
 The lazy run's memory budget is therefore restated: **about 140 MiB plus the image's trees
 section**, which is at most `lazy_index_bytes_max`. Most images have a few MiB of trees; only a
-maximal index reaches the ceiling. No bound or default changes.
+maximal index reaches the ceiling. No bound or default changes. The server's part is the node
+table (25 MiB), the cache (8 MiB) and the threads' buffers (about 4 MiB); the resolver's is
+93.125 MiB (docs/decisions/2026-11-14-s2-resolver-choices.md).
+
+## Reads
+
+Brief line 100 ("`FUSE_MAX_PAGES` for 1 MiB reads") is overtaken by the probe
+(docs/decisions/2026-11-14-s2-probe-findings.md): a buffered read reaches the server as 128 KiB
+`READ`s, eight to a 1 MiB chunk, and only `O_DIRECT` sends 1 MiB ones. The server still asks for
+`max_pages` of a whole chunk, so a direct read is one request, and its reply buffer holds one.
+
+So that the eight `READ`s of a chunk cost one chunk read, the serving threads share a cache of
+whole, verified chunks. The first thread to want a chunk reads it into a free slot (unlocked: the
+other threads go on serving); a thread that wants the same chunk meanwhile waits on that slot and
+copies from it. A slot in use is never given up; otherwise the least recently used one is. Each
+thread uses at most one slot at a time, and there are twice as many slots as threads, so a free
+slot always exists (asserted). A failed read is not kept: the threads waiting on it answer `EIO`
+and the next request asks again. A unit test checks that eight 128 KiB `READ`s of a chunk make one
+chunk read, from one thread and spread over four.
+
+Readahead (`lazy_readahead_chunks`) is the resolver's (`Schedule.note_read`). It counts chunk
+reads, not `READ`s, and with the cache a file read front to back reaches it as one read per chunk,
+in order, so adjacent 128 KiB `READ`s count as sequential with nothing more in the server.
+
+Internal buffer constants (no user-visible bound): `cache.slots` = `2 × lazy_fuse_threads`,
+`fuse_request_bytes` 8 KiB, `fuse_max_write` 4 KiB, `fuse_reply_bytes` 1 MiB + 16.
 
 Two alternatives were rejected:
 

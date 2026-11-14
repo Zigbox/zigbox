@@ -159,8 +159,12 @@ test {
     _ = @import("fuse/abi.zig");
     _ = @import("fuse/nodes.zig");
     _ = @import("fuse/ops.zig");
+    _ = @import("fuse/cache.zig");
     _ = @import("fuse/resolver.zig");
     _ = @import("fuse/fixture.zig");
+    _ = @import("fuse/serve.zig");
+    _ = @import("fuse/kernel_tests.zig");
+    _ = @import("host_real_fuse.zig");
     _ = @import("layer/reader.zig");
     _ = @import("layer/tar.zig");
     _ = @import("layer/apply.zig");

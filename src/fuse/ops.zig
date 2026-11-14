@@ -20,6 +20,7 @@ const digest_mod = @import("../store/digest.zig");
 const xattrs = @import("../store/xattrs.zig");
 const abi = @import("abi.zig");
 const nodes = @import("nodes.zig");
+const cache_mod = @import("cache.zig");
 
 const Digest = digest_mod.Digest;
 const Node = nodes.Node;
@@ -31,7 +32,8 @@ pub const ChunkError = error{Unavailable};
 pub const Object = struct { id: Digest, ordinal: u32 };
 
 /// Where a `READ` gets its bytes: chunk `index` of `object`, verified against its hash, into
-/// `out` (which holds a chunk); the length. One per serving thread, so it may keep scratch space.
+/// `out` (which holds a chunk); the length. One per serving thread, so it may keep scratch space;
+/// the chunks it reads go into the cache the threads share (`cache.zig`).
 pub const Chunks = struct {
     context: *anyopaque,
     read: *const fn (context: *anyopaque, object: Object, index: u32, out: []u8) ChunkError!u32,
@@ -47,9 +49,11 @@ pub const init_flags: u32 = abi.init_async_read | abi.init_do_readdirplus |
 
 const Refused = error{ NoEnt, Io, NotDir, IsDir, Inval, Rofs, Range, NoSys, NoData, Proto };
 
-/// What every serving thread shares: the table, never changed while it is served.
+/// What every serving thread shares: the table, never changed while it is served, and the chunks
+/// read so far.
 pub const Server = struct {
     table: *const nodes.Table,
+    cache: *cache_mod.Cache,
     chunk_bytes: u32,
 
     fn node(server: *const Server, nodeid: u64) Refused!*const Node {
@@ -67,16 +71,12 @@ pub const Server = struct {
 /// One serving thread's memory.
 pub const Worker = struct {
     chunks: Chunks,
-    /// The last chunk read, kept for the next read of the same chunk.
-    chunk: []u8,
-    held: ?struct { id: Digest, index: u32, len: u32 },
     reply: []align(8) u8,
     reply_len: u32,
 
-    pub fn init(chunks: Chunks, chunk: []u8, reply: []align(8) u8) Worker {
-        assert(chunk.len > 0);
+    pub fn init(chunks: Chunks, reply: []align(8) u8) Worker {
         assert(reply.len >= constants.fuse_reply_bytes);
-        return .{ .chunks = chunks, .chunk = chunk, .held = null, .reply = reply, .reply_len = 0 };
+        return .{ .chunks = chunks, .reply = reply, .reply_len = 0 };
     }
 
     fn put(worker: *Worker, bytes: []const u8) void {
@@ -100,7 +100,7 @@ pub const Worker = struct {
 /// (`FORGET`, `BATCH_FORGET` and `INTERRUPT` take none, and a request too short to hold a
 /// header has no `unique` to answer to).
 pub fn handle(server: *const Server, worker: *Worker, request: []const u8) []const u8 {
-    assert(worker.chunk.len >= server.chunk_bytes);
+    assert(server.cache.chunk_bytes == server.chunk_bytes);
     if (request.len < @sizeOf(abi.InHeader)) return &.{};
     const header = std.mem.bytesToValue(abi.InHeader, request[0..@sizeOf(abi.InHeader)]);
     const opcode: abi.Opcode = @fromBackingInt(@intCast(header.opcode));
@@ -319,43 +319,35 @@ fn read(server: *const Server, worker: *Worker, nodeid: u64, body: []const u8) R
     const end = in.offset + length;
     while (at < end) {
         const index: u32 = @intCast(at / server.chunk_bytes);
-        const bytes = try chunk_of(server, worker, found, index);
+        const pinned = try chunk_of(server, worker, found, index);
+        defer server.cache.unpin(pinned);
         const within: usize = @intCast(at - @as(u64, index) * server.chunk_bytes);
-        assert(within < bytes.len);
-        const part: usize = @intCast(@min(end - at, bytes.len - within));
-        worker.put(bytes[within..][0..part]);
+        assert(within < pinned.bytes.len);
+        const part: usize = @intCast(@min(end - at, pinned.bytes.len - within));
+        worker.put(pinned.bytes[within..][0..part]);
         at += part;
     }
     assert(at == end);
 }
 
-/// Chunk `index` of a file, verified: the one this thread holds, or a fresh read.
+/// Chunk `index` of a file, verified, from the shared cache: held there already, or read now.
+/// The caller unpins it once copied.
 fn chunk_of(
     server: *const Server,
     worker: *Worker,
     found: *const Node,
     index: u32,
-) Refused![]const u8 {
+) Refused!cache_mod.Pin {
     assert(found.kind == .file);
     const start = @as(u64, index) * server.chunk_bytes;
     assert(start < found.size);
     const expected: u32 = @intCast(@min(server.chunk_bytes, found.size - start));
-    if (worker.held) |held| {
-        if (held.index == index and held.id.eql(found.digest)) {
-            assert(held.len == expected);
-            return worker.chunk[0..held.len];
-        }
-    }
-    worker.held = null;
-    const out = worker.chunk[0..server.chunk_bytes];
     const wanted: Object = .{ .id = found.digest, .ordinal = server.table.ordinal(found) };
-    const got = worker.chunks.read(worker.chunks.context, wanted, index, out) catch {
+    const pinned = server.cache.pin(worker.chunks, wanted, index, expected) catch {
         return error.Io;
     };
-    // A length the object's size does not give is a source that lied.
-    if (got != expected) return error.Io;
-    worker.held = .{ .id = found.digest, .index = index, .len = expected };
-    return worker.chunk[0..expected];
+    assert(pinned.bytes.len == expected);
+    return pinned;
 }
 
 fn readdirplus(server: *const Server, worker: *Worker, nodeid: u64, body: []const u8) Refused!void {
@@ -477,7 +469,8 @@ const fixture_mod = @import("fixture.zig");
 
 var test_fixture: fixture_mod.Fixture = undefined;
 var test_reply: [constants.fuse_reply_bytes]u8 align(8) = undefined;
-var test_chunk: [64]u8 = undefined;
+const test_chunk_bytes = 64;
+var test_cache_memory: [cache_mod.memory_bytes(test_chunk_bytes)]u8 = undefined;
 var test_request: [constants.fuse_request_bytes]u8 = undefined;
 
 /// "user.a" = "one", "user.b" = "".
@@ -486,6 +479,7 @@ const test_section = "\x02" ++ "\x06\x00user.a" ++ "\x03\x00one" ++ "\x06\x00use
 const Harness = struct {
     region: []align(8) u8,
     table: nodes.Table,
+    cache: cache_mod.Cache,
     server: Server,
     worker: Worker,
 
@@ -493,7 +487,7 @@ const Harness = struct {
     /// `x`, empty), and `l` (a symlink to `a`).
     fn init(harness: *Harness) !void {
         const fixture = &test_fixture;
-        fixture.init(test_chunk.len);
+        fixture.init(test_chunk_bytes);
         _ = fixture.begin();
         _ = try fixture.file("x", "", 0o644, &xattrs.empty);
         const sub = fixture.finish();
@@ -513,8 +507,13 @@ const Harness = struct {
         harness.region = held.region;
         harness.table.init(held.memory);
         try harness.table.build(fixture.source(), root);
-        harness.server = .{ .table = &harness.table, .chunk_bytes = test_chunk.len };
-        harness.worker = Worker.init(fixture.chunks(), &test_chunk, &test_reply);
+        harness.cache.init(testing.io, &test_cache_memory, test_chunk_bytes);
+        harness.server = .{
+            .table = &harness.table,
+            .cache = &harness.cache,
+            .chunk_bytes = test_chunk_bytes,
+        };
+        harness.worker = Worker.init(fixture.chunks(), &test_reply);
     }
 
     fn deinit(harness: *Harness) void {
@@ -783,4 +782,121 @@ test "writes are EROFS, unknown calls ENOSYS, and forgets get no reply" {
         @as(usize, 0),
         handle(&harness.server, &harness.worker, bytes[0..39]).len,
     );
+}
+
+/// The kernel's buffered read: 128 KiB `READ`s (docs/decisions/2026-11-14-s2-probe-findings.md).
+const kernel_read_bytes = 128 * 1024;
+
+/// A table over one file, `f`, of one whole chunk of `store_chunk_bytes`, served from a cache
+/// in `cache_memory`.
+const ChunkHarness = struct {
+    region: []align(8) u8,
+    cache_memory: []u8,
+    table: nodes.Table,
+    cache: cache_mod.Cache,
+    server: Server,
+    file: u64,
+
+    fn init(harness: *ChunkHarness) !void {
+        const chunk_bytes = constants.store_chunk_bytes;
+        const fixture = &test_fixture;
+        fixture.init(chunk_bytes);
+        const content = try testing.allocator.alloc(u8, chunk_bytes);
+        defer testing.allocator.free(content);
+        for (content, 0..) |*byte, index| byte.* = @truncate(index *% 31 +% index / 4096);
+        _ = fixture.begin();
+        _ = try fixture.file("f", content, 0o644, &xattrs.empty);
+        const root = try fixture.finish_root(.{
+            .mode = 0o755,
+            .uid = 0,
+            .gid = 0,
+            .xattrs = &xattrs.empty,
+        });
+        const held = try fixture_mod.table_memory(testing.allocator, 4, 4096);
+        errdefer testing.allocator.free(held.region);
+        harness.region = held.region;
+        harness.table.init(held.memory);
+        try harness.table.build(fixture.source(), root);
+        const cache_bytes: usize = @intCast(cache_mod.memory_bytes(chunk_bytes));
+        harness.cache_memory = try testing.allocator.alloc(u8, cache_bytes);
+        harness.cache.init(testing.io, harness.cache_memory, chunk_bytes);
+        harness.server = .{
+            .table = &harness.table,
+            .cache = &harness.cache,
+            .chunk_bytes = chunk_bytes,
+        };
+        const top = harness.table.node(abi.root_id).?;
+        harness.file = harness.table.lookup(top, "f").?.node + 1;
+    }
+
+    fn deinit(harness: *ChunkHarness) void {
+        testing.allocator.free(harness.cache_memory);
+        testing.allocator.free(harness.region);
+    }
+
+    /// Reads piece `piece` (128 KiB) of the chunk on `worker` and checks its bytes.
+    fn read_piece(harness: *ChunkHarness, worker: *Worker, request: []u8, piece: u32) !void {
+        var in = read_in(@as(u64, piece) * kernel_read_bytes, kernel_read_bytes);
+        const body = std.mem.asBytes(&in);
+        const bytes = fixture_mod.request(request, .read, harness.file, piece, &.{body});
+        const reply = handle(&harness.server, worker, bytes);
+        const header = fixture_mod.reply_header(reply);
+        try testing.expectEqual(@as(i32, 0), header.@"error");
+        const content = test_fixture.content_of(harness.table.node(harness.file).?.digest).?;
+        const start = piece * kernel_read_bytes;
+        try testing.expectEqualSlices(u8, content[start..][0..kernel_read_bytes], reply[16..]);
+    }
+};
+
+test "the kernel's eight 128 KiB READs of one chunk read it once" {
+    var harness: ChunkHarness = undefined;
+    try harness.init();
+    defer harness.deinit();
+    var worker = Worker.init(test_fixture.chunks(), &test_reply);
+    const pieces = constants.store_chunk_bytes / kernel_read_bytes;
+    comptime assert(pieces == 8);
+    for (0..pieces) |piece| try harness.read_piece(&worker, &test_request, @intCast(piece));
+    try testing.expectEqual(@as(u32, 1), test_fixture.chunk_reads);
+}
+
+test "serving threads share a chunk: one read for READs spread over them" {
+    var harness: ChunkHarness = undefined;
+    try harness.init();
+    defer harness.deinit();
+    const threads = constants.lazy_fuse_threads;
+    const pieces = constants.store_chunk_bytes / kernel_read_bytes;
+    comptime assert(pieces % threads == 0);
+    const replies_bytes = threads * constants.fuse_reply_bytes;
+    const replies = try testing.allocator.alignedAlloc(u8, .@"8", replies_bytes);
+    defer testing.allocator.free(replies);
+    var requests: [threads][constants.fuse_request_bytes]u8 = undefined;
+    var failures = std.atomic.Value(u32).init(0);
+    const Serve = struct {
+        fn run(
+            chunk: *ChunkHarness,
+            reply: []align(8) u8,
+            request: []u8,
+            first: u32,
+            failed: *std.atomic.Value(u32),
+        ) void {
+            var worker = Worker.init(test_fixture.chunks(), reply);
+            var piece = first;
+            while (piece < pieces) : (piece += threads) {
+                chunk.read_piece(&worker, request, piece) catch {
+                    _ = failed.fetchAdd(1, .monotonic);
+                };
+            }
+        }
+    };
+    var spawned: [threads]std.Thread = undefined;
+    for (&spawned, 0..) |*thread, at| {
+        const reply_bytes = constants.fuse_reply_bytes;
+        const reply: []align(8) u8 = @alignCast(replies[at * reply_bytes ..][0..reply_bytes]);
+        const index: u32 = @intCast(at);
+        const arguments = .{ &harness, reply, &requests[at], index, &failures };
+        thread.* = try std.Thread.spawn(.{}, Serve.run, arguments);
+    }
+    for (spawned) |thread| thread.join();
+    try testing.expectEqual(@as(u32, 0), failures.load(.monotonic));
+    try testing.expectEqual(@as(u32, 1), test_fixture.chunk_reads);
 }

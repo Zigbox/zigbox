@@ -14,6 +14,7 @@ const trees = @import("../store/trees.zig");
 const xattrs = @import("../store/xattrs.zig");
 const nodes = @import("nodes.zig");
 const ops = @import("ops.zig");
+const cache_mod = @import("cache.zig");
 
 const Digest = digest_mod.Digest;
 const Store = layout.Store;
@@ -105,7 +106,7 @@ var test_store: Store = undefined;
 var test_io: [constants.store_io_buffer_bytes]u8 = undefined;
 var test_hashes: [16]Digest = undefined;
 var test_scratch: xattrs.Scratch = undefined;
-var test_chunk: [8]u8 = undefined;
+var test_cache_memory: [cache_mod.memory_bytes(8)]u8 = undefined;
 var test_reply: [constants.fuse_reply_bytes]u8 align(8) = undefined;
 var test_request: [256]u8 = undefined;
 var test_tree: [4096]u8 = undefined;
@@ -169,8 +170,10 @@ test "the store adapter serves a stored image: its tree from trees, its bytes ve
     table.init(held.memory);
     try table.build(trees_source.source(), Digest.of(bytes));
     var store_chunks = StoreChunks.init(&test_store, &test_io, &test_scratch);
-    const server: ops.Server = .{ .table = &table, .chunk_bytes = 8 };
-    var worker = ops.Worker.init(store_chunks.chunks(), &test_chunk, &test_reply);
+    var cache: cache_mod.Cache = undefined;
+    cache.init(testing.io, &test_cache_memory, 8);
+    const server: ops.Server = .{ .table = &table, .cache = &cache, .chunk_bytes = 8 };
+    var worker = ops.Worker.init(store_chunks.chunks(), &test_reply);
     const in: abi.ReadIn = .{
         .fh = 0,
         .offset = 3,
@@ -197,6 +200,7 @@ test "the store adapter serves a stored image: its tree from trees, its bytes ve
         .flags = 0,
         .padding = 0,
     };
+    cache.init(testing.io, &test_cache_memory, 8); // Empty again: the chunk is read anew.
     const again = fixture_mod.request(&test_request, .read, 2, 2, &.{std.mem.asBytes(&first)});
     const reply = ops.handle(&server, &worker, again);
     try testing.expectEqual(@as(usize, 16), reply.len);

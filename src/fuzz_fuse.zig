@@ -28,6 +28,7 @@ const abi = @import("fuse/abi.zig");
 const nodes = @import("fuse/nodes.zig");
 const ops = @import("fuse/ops.zig");
 const fixture_mod = @import("fuse/fixture.zig");
+const cache_mod = @import("fuse/cache.zig");
 
 const Digest = @import("store/digest.zig").Digest;
 
@@ -41,7 +42,8 @@ const chunk_bytes_max = 4096;
 var fixture: fixture_mod.Fixture = undefined;
 var region: [nodes.memory_bytes(nodes_room_max, arena_limit_max)]u8 align(8) = undefined;
 var table: nodes.Table = undefined;
-var chunk: [chunk_bytes_max]u8 = undefined;
+var cache_memory: [cache_mod.memory_bytes(chunk_bytes_max)]u8 = undefined;
+var cache: cache_mod.Cache = undefined;
 var reply_buffer: [constants.fuse_reply_bytes]u8 align(8) = undefined;
 var request_buffer: [constants.fuse_request_bytes]u8 = undefined;
 var links: [nodes_room_max]u32 = undefined;
@@ -94,8 +96,11 @@ pub fn fuzz_fuse_request(seed: u64) void {
     check_walk(root);
     const before = snapshot();
     if (random.uintLessThan(u32, 4) == 0) fixture.failing = random_file(random);
-    const server: ops.Server = .{ .table = &table, .chunk_bytes = chunk_bytes };
-    var worker = ops.Worker.init(fixture.chunks(), chunk[0..chunk_bytes], &reply_buffer);
+    // A new cache each iteration: the chunk size changes, and the fixture's objects with it.
+    const io = std.Io.Threaded.global_single_threaded.io();
+    cache.init(io, cache_memory[0..@intCast(cache_mod.memory_bytes(chunk_bytes))], chunk_bytes);
+    const server: ops.Server = .{ .table = &table, .cache = &cache, .chunk_bytes = chunk_bytes };
+    var worker = ops.Worker.init(fixture.chunks(), &reply_buffer);
     for (0..requests_per_iteration) |_| {
         const sent = random_request(random, &server);
         const reply = ops.handle(&server, &worker, sent.bytes);
