@@ -242,6 +242,12 @@ fn value_fix(diag: *Diag, problem: *const file_mod.Problem) void {
             "empty, . or .. part, for example \"/cache\"" }),
         .bad_copy_to => diag.fix(.{ .sentence = "write .to as an absolute path written " ++
             "plainly, ending in / for a directory, for example \"/app/\"" }),
+        .bad_fetch_url => diag.fix(.{ .sentence = "write .url as an https:// URL (http:// " ++
+            "only to localhost or 127.x), ending in a file name when .to ends in /" }),
+        .bad_sha256 => diag.fix(.{ .sentence = "write .sha256 as the file's 64 lowercase hex " ++
+            "digits, as sha256sum prints them" }),
+        .fetch_and_source => diag.fix(.{ .sentence = "give a copy entry .fetch or " ++
+            ".from and .src, not both; a fetch takes no .exclude" }),
         .bad_mode => diag.fix(.{ .sentence = "write the mode as 3 or 4 octal digits, for " ++
             "example \"0755\"" }),
         .bad_pattern => diag.fix(.{ .sentence = "write a glob: * ? [a-z] and ** work, a \\ " ++
@@ -310,6 +316,8 @@ fn describe(writer: *std.Io.Writer, problem: *const file_mod.Problem) std.Io.Wri
         .text_too_long => try writer.print("the strings of the file come to more than {d} bytes", .{
             constants.build_pool_bytes,
         }),
+        .fetch_and_source => try writer.print("a copy entry has .fetch and .{s}; a fetch " ++
+            "is the entry's only source", .{field}),
         else => try describe_value(writer, problem.kind, word),
     }
 }
@@ -353,6 +361,12 @@ fn describe_value(writer: *std.Io.Writer, kind: ProblemKind, word: []const u8) !
             "plainly (no empty, . or .. part)", .{word}),
         .bad_copy_to => try writer.print(".to \"{s}\" is not an absolute path written " ++
             "plainly, which may end in /", .{word}),
+        .bad_fetch_url => try writer.print(".url \"{s}\" is not an https:// URL (or http:// " ++
+            "to loopback) of at most {d} bytes naming a file", .{
+            word,
+            constants.registry_url_bytes_max,
+        }),
+        .bad_sha256 => try writer.print(".sha256 \"{s}\" is not 64 lowercase hex digits", .{word}),
         .bad_mode => try writer.print("the mode \"{s}\" is not 3 or 4 octal digits", .{word}),
         .bad_pattern => try writer.print("the pattern \"{s}\" is not a valid glob", .{word}),
         .bad_project_source => try writer.print("the project source \"{s}\" has an empty " ++
@@ -650,6 +664,7 @@ fn level_name(level: Level) []const u8 {
         .copy => "a copy entry",
         .cache => "a cache entry",
         .bind => "a bind entry",
+        .fetch => "a copy entry's .fetch",
     };
     assert(name.len > 0);
     return name;

@@ -22,6 +22,7 @@ const assert = std.debug.assert;
 const constants = @import("../constants.zig");
 const lexer_mod = @import("lexer.zig");
 const reference_mod = @import("../registry/reference.zig");
+const net = @import("../registry/net.zig");
 const glob = @import("glob.zig");
 
 const Lexer = lexer_mod.Lexer;
@@ -71,10 +72,19 @@ pub const Span = struct {
 /// What a step keeps: M7's `/out`, or (M9) its whole root.
 pub const Output = enum { out, root };
 
+/// A copy entry's download (`.fetch = .{ .url, .sha256 }`): the bytes at `url`, which must
+/// hash to `sha256` (64 lowercase hex digits). Only the hash reaches the step's key.
+pub const Fetch = struct {
+    url: Text,
+    sha256: Text,
+};
+
 /// One entry of a `copy` step.
 pub const CopyEntry = struct {
-    /// Absent: the project. Otherwise `step:<name>` or a locked image reference.
+    /// Absent: the project, or the download. Otherwise `step:<name>` or a locked image reference.
     from: ?Text,
+    /// A download in place of `.from` and `.src`.
+    fetch: ?Fetch,
     /// Paths or globs, in `list_texts`.
     src: Span,
     to: Text,
@@ -266,6 +276,9 @@ pub const Field = enum {
     mode,
     uid,
     gid,
+    fetch,
+    url,
+    sha256,
 };
 
 /// Where in the schema a problem is.
@@ -279,6 +292,7 @@ pub const Level = enum {
     copy,
     cache,
     bind,
+    fetch,
 
     /// The fields this level takes, in the order the canonical printer writes them.
     pub fn allowed(level: Level) []const Field {
@@ -292,9 +306,10 @@ pub const Level = enum {
             .add => &.{ .from, .to },
             .config => &.{ .entrypoint, .cmd, .env, .workdir, .user, .labels },
             .label => &.{},
-            .copy => &.{ .from, .src, .to, .chown, .chmod, .exclude },
+            .copy => &.{ .from, .fetch, .src, .to, .chown, .chmod, .exclude },
             .cache => &.{ .id, .path, .ro, .mode, .uid, .gid },
             .bind => &.{ .from, .source, .to },
+            .fetch => &.{ .url, .sha256 },
         };
     }
 };
@@ -382,6 +397,13 @@ pub const ProblemKind = enum {
     bad_path,
     /// A copy's `.to`: absolute, plain, and it may end in `/`.
     bad_copy_to,
+    /// A fetch's `.url` is not `https://`, or `http://` to a loopback host, or is longer than
+    /// `registry_url_bytes_max`, or (with a `.to` ending in `/`) has no file name to copy to.
+    bad_fetch_url,
+    /// A fetch's `.sha256` is not 64 lowercase hex digits.
+    bad_sha256,
+    /// A copy entry has `.fetch` and also `.from`, `.src` or `.exclude` (`field` is the other).
+    fetch_and_source,
     /// `.chmod` or a cache's `.mode` is not 3 or 4 octal digits.
     bad_mode,
     /// A `.src` or `.exclude` entry is not a pattern (`word` is the entry).
@@ -826,6 +848,7 @@ fn parse_copies(parser: *Parser, step: *Step) Refused!void {
 fn parse_copy(parser: *Parser, entry: *CopyEntry, open: Token) Refused!void {
     entry.* = .{
         .from = null,
+        .fetch = null,
         .src = Span.none,
         .to = undefined,
         .chown = null,
@@ -838,6 +861,7 @@ fn parse_copy(parser: *Parser, entry: *CopyEntry, open: Token) Refused!void {
     while (try fields.next(parser)) |field| {
         switch (field) {
             .from => entry.from = try parse_from(parser, .copy),
+            .fetch => entry.fetch = try parse_fetch(parser),
             .src => {
                 const bound = constants.build_copy_sources_max;
                 try parse_texts(parser, .copy, field, &entry.src, bound);
@@ -860,9 +884,59 @@ fn parse_copy(parser: *Parser, entry: *CopyEntry, open: Token) Refused!void {
             else => unreachable, // `Fields.next` returns only the fields of the level.
         }
     }
-    if (!fields.has(.src)) return parser.fail(.missing_field, open, .copy, .src);
     if (!fields.has(.to)) return parser.fail(.missing_field, open, .copy, .to);
+    if (entry.fetch) |fetch| return check_fetch(parser, entry, &fields, fetch, open);
+    if (!fields.has(.src)) return parser.fail(.missing_field, open, .copy, .src);
     try check_sources(parser, entry, open);
+}
+
+/// `.fetch = .{ .url, .sha256 }`: both required; the URL is one a fetch may download, and the
+/// hash is 64 lowercase hex digits.
+fn parse_fetch(parser: *Parser) Refused!Fetch {
+    const open = try parser.expect(.open, .fetch, .open);
+    var fetch: Fetch = .{ .url = undefined, .sha256 = undefined };
+    var fields: Fields = .{ .level = .fetch };
+    while (try fields.next(parser)) |field| {
+        switch (field) {
+            .url => {
+                fetch.url = try parse_string(parser, .fetch, field);
+                if (!is_fetch_url(parser.file.text(fetch.url))) {
+                    return parser.fail_value(.bad_fetch_url, fetch.url, .fetch, field);
+                }
+            },
+            .sha256 => {
+                fetch.sha256 = try parse_string(parser, .fetch, field);
+                if (!is_sha256_hex(parser.file.text(fetch.sha256))) {
+                    return parser.fail_value(.bad_sha256, fetch.sha256, .fetch, field);
+                }
+            },
+            else => unreachable, // `Fields.next` returns only the fields of the level.
+        }
+    }
+    if (!fields.has(.url)) return parser.fail(.missing_field, open, .fetch, .url);
+    if (!fields.has(.sha256)) return parser.fail(.missing_field, open, .fetch, .sha256);
+    return fetch;
+}
+
+/// A fetch replaces `.from`, `.src` and `.exclude`; a `.to` ending in `/` takes the URL's file
+/// name, so the URL must have one.
+fn check_fetch(
+    parser: *Parser,
+    entry: *const CopyEntry,
+    fields: *const Fields,
+    fetch: Fetch,
+    open: Token,
+) Refused!void {
+    assert(fields.has(.fetch));
+    assert(fields.has(.to));
+    for ([_]Field{ .from, .src, .exclude }) |other| {
+        if (fields.has(other)) return parser.fail(.fetch_and_source, open, .copy, other);
+    }
+    const to = parser.file.text(entry.to);
+    if (to[to.len - 1] != '/') return;
+    if (fetch_name(parser.file.text(fetch.url)) == null) {
+        return parser.fail_value(.bad_fetch_url, fetch.url, .fetch, .url);
+    }
 }
 
 /// Each `.src` entry is a pattern with no `..` part, and rooted (`/`) only for a tree; one
@@ -1289,7 +1363,7 @@ pub fn takes_control_bytes(level: Level, field: Field) bool {
     return switch (level) {
         .step => field == .run or field == .env,
         .config => field == .entrypoint or field == .cmd or field == .env,
-        .file, .image, .add, .label, .copy, .cache, .bind => false,
+        .file, .image, .add, .label, .copy, .cache, .bind, .fetch => false,
     };
 }
 
@@ -1374,7 +1448,7 @@ fn check_env_list(
     assert(entries.len <= constants.build_config_env_max);
     assert(switch (level) {
         .step, .config => true,
-        .file, .image, .add, .label, .copy, .cache, .bind => false,
+        .file, .image, .add, .label, .copy, .cache, .bind, .fetch => false,
     });
     for (entries, 0..) |entry, index| {
         const key = env_key(parser.file.text(entry)) orelse {
@@ -1487,6 +1561,42 @@ fn is_user_part(part: []const u8) bool {
     // `007` and `7` are one id but two spellings, and a spelling is part of a key.
     if (part.len > 1 and part[0] == '0') return false;
     _ = std.fmt.parseInt(u32, part, 10) catch return false;
+    return true;
+}
+
+/// A URL a fetch may download: `https://`, or `http://` to a loopback host (the registry
+/// client's rule since M8), at most `registry_url_bytes_max` bytes.
+pub fn is_fetch_url(text: []const u8) bool {
+    if (text.len == 0) return false;
+    if (text.len > constants.registry_url_bytes_max) return false;
+    const url = net.parse_url(text) catch return false;
+    assert(url.host.len <= constants.reference_registry_bytes_max);
+    return url.scheme == .https or reference_mod.is_loopback(url.host);
+}
+
+/// The file name a fetch takes when its `.to` ends in `/`: the URL's last path part, without
+/// the query; null when that is empty, `.` or `..`.
+pub fn fetch_name(url: []const u8) ?[]const u8 {
+    assert(url.len <= constants.registry_url_bytes_max);
+    const path = net.without_query(url);
+    const scheme_end = (std.mem.indexOf(u8, path, "://") orelse return null) + 3;
+    const slash = std.mem.lastIndexOfScalar(u8, path, '/') orelse return null;
+    if (slash < scheme_end) return null;
+    const name = path[slash + 1 ..];
+    if (name.len == 0) return null;
+    if (std.mem.eql(u8, name, ".") or std.mem.eql(u8, name, "..")) return null;
+    assert(std.mem.indexOfScalar(u8, name, '/') == null);
+    return name;
+}
+
+/// 64 lowercase hex digits: a SHA-256 written as Docker's `--checksum` writes it.
+pub fn is_sha256_hex(text: []const u8) bool {
+    if (text.len != 64) return false;
+    for (text) |byte| {
+        const digit = byte >= '0' and byte <= '9';
+        const letter = byte >= 'a' and byte <= 'f';
+        if (!digit and !letter) return false;
+    }
     return true;
 }
 

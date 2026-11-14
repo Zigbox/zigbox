@@ -83,12 +83,20 @@ pub const Bind = struct {
 
 /// A copy entry: the tree of the files its sources and excludes kept, where it lands, and the
 /// ownership and mode it asks for (as written; the file's own text decides the effect).
+///
+/// A fetch (`fetch` set) has no tree: its key is the SHA-256 it is pinned to, never the URL, so
+/// a mirror serving the same bytes is a hit. `source` is then unused, and `to` is the resolved
+/// destination (the URL's file name appended when the written `.to` ends in `/`).
 pub const Copy = struct {
     source: Digest,
     to: []const u8,
     chown: ?[]const u8 = null,
     chmod: ?[]const u8 = null,
+    fetch: ?[32]u8 = null,
 };
+
+/// How a `copy_entries` entry is written: a tree's, or a fetch's.
+const CopyKind = enum(u8) { tree = 1, fetch = 2 };
 
 const Tag = enum(u8) {
     platform = 1,
@@ -108,6 +116,9 @@ const Tag = enum(u8) {
     workdir = 14,
     binds = 15,
     copies = 16,
+    /// Copy entries when any is a fetch (slice 3b): each starts with its `CopyKind`. A step with
+    /// no fetch keeps `copies`, so its key is the one it had before.
+    copy_entries = 17,
 };
 
 /// The fixed environment a step sees after the image's and the build file's, as `KEY=VALUE`.
@@ -243,17 +254,176 @@ fn encode_more(encoder: *Encoder, spec: *const Spec) Error!void {
             try encoder.digest(bind.source);
         }
     }
-    if (spec.copies.len > 0) {
-        try encoder.tag(.copies);
-        try encoder.int(@intCast(spec.copies.len));
-        for (spec.copies) |copy| {
-            try encoder.digest(copy.source);
-            try encoder.string(copy.to);
-            try encoder.optional(copy.chown);
-            try encoder.optional(copy.chmod);
+    if (spec.copies.len > 0) try encode_copies(encoder, spec.copies);
+}
+
+fn encode_copies(encoder: *Encoder, copies: []const Copy) Error!void {
+    assert(copies.len > 0);
+    assert(copies.len <= constants.build_copy_entries_max);
+    var fetches: u32 = 0;
+    for (copies) |copy| fetches += @intFromBool(copy.fetch != null);
+    try encoder.tag(if (fetches == 0) .copies else .copy_entries);
+    try encoder.int(@intCast(copies.len));
+    for (copies) |copy| {
+        if (fetches > 0) {
+            const kind: CopyKind = if (copy.fetch == null) .tree else .fetch;
+            try encoder.bytes(&.{@backingInt(kind)});
         }
+        if (copy.fetch) |sha256| try encoder.bytes(&sha256) else try encoder.digest(copy.source);
+        try encoder.string(copy.to);
+        try encoder.optional(copy.chown);
+        try encoder.optional(copy.chmod);
     }
 }
+
+/// The SHA-256 of each fetch a key's preimage names, in the entries' order, for `zbx store gc`
+/// to keep their blobs while a cache entry names them. Null for a preimage that is not one
+/// `compute` writes (gc then keeps nothing for it, as for any entry that does not parse).
+pub fn fetched(preimage: []const u8, out: *[constants.build_copy_entries_max][32]u8) ?u32 {
+    assert(preimage.len <= constants.build_key_preimage_bytes_max);
+    var decoder: Decoder = .{ .in = preimage };
+    const head = decoder.take(magic.len) orelse return null;
+    if (!std.mem.eql(u8, head, magic)) return null;
+    _ = decoder.int() orelse return null;
+    decoder.skip_step() orelse return null;
+    var count: u32 = 0;
+    while (decoder.at < preimage.len) {
+        const tag = decoder.int8() orelse return null;
+        if (tag == @backingInt(Tag.copy_entries)) {
+            count = decoder.fetches(out) orelse return null;
+        } else {
+            decoder.skip_more(tag) orelse return null;
+        }
+    }
+    assert(decoder.at == preimage.len);
+    assert(count <= out.len);
+    return count;
+}
+
+/// Reads a preimage back, field by field, as `compute` wrote it. Every read is bounded by the
+/// bytes left; a short or unknown field reads as null.
+const Decoder = struct {
+    in: []const u8,
+    at: usize = 0,
+
+    fn take(decoder: *Decoder, count: usize) ?[]const u8 {
+        assert(decoder.at <= decoder.in.len);
+        if (count > decoder.in.len - decoder.at) return null;
+        defer decoder.at += count;
+        return decoder.in[decoder.at..][0..count];
+    }
+
+    fn int8(decoder: *Decoder) ?u8 {
+        return (decoder.take(1) orelse return null)[0];
+    }
+
+    fn int(decoder: *Decoder) ?u32 {
+        const word = decoder.take(4) orelse return null;
+        return std.mem.readInt(u32, word[0..4], .little);
+    }
+
+    fn string(decoder: *Decoder) ?void {
+        const length = decoder.int() orelse return null;
+        _ = decoder.take(length) orelse return null;
+    }
+
+    fn list(decoder: *Decoder) ?void {
+        const count = decoder.int() orelse return null;
+        if (count > decoder.in.len) return null;
+        for (0..count) |_| decoder.string() orelse return null;
+    }
+
+    fn optional(decoder: *Decoder) ?void {
+        const flag = decoder.int8() orelse return null;
+        if (flag > 1) return null;
+        if (flag == 1) decoder.string() orelse return null;
+    }
+
+    fn expect(decoder: *Decoder, tag: Tag) ?void {
+        if ((decoder.int8() orelse return null) != @backingInt(tag)) return null;
+    }
+
+    /// The M7 fields, from the platform to the fixed environment.
+    fn skip_step(decoder: *Decoder) ?void {
+        const digest_bytes = constants.store_digest_bytes;
+        decoder.expect(.platform) orelse return null;
+        decoder.string() orelse return null;
+        decoder.expect(.base_tree) orelse return null;
+        _ = decoder.take(digest_bytes) orelse return null;
+        decoder.expect(.base_env) orelse return null;
+        decoder.list() orelse return null;
+        decoder.expect(.input_tree) orelse return null;
+        _ = decoder.take(digest_bytes) orelse return null;
+        decoder.expect(.needs) orelse return null;
+        const needs = decoder.int() orelse return null;
+        if (needs > constants.build_step_needs_max) return null;
+        for (0..needs) |_| {
+            decoder.string() orelse return null;
+            _ = decoder.take(digest_bytes) orelse return null;
+        }
+        decoder.expect(.argv) orelse return null;
+        decoder.list() orelse return null;
+        decoder.expect(.env) orelse return null;
+        decoder.list() orelse return null;
+        decoder.expect(.network) orelse return null;
+        _ = decoder.take(1) orelse return null;
+        decoder.expect(.fixed_env) orelse return null;
+        decoder.list() orelse return null;
+    }
+
+    /// One M9 field after its tag, other than `copy_entries`.
+    fn skip_more(decoder: *Decoder, tag: u8) ?void {
+        const digest_bytes = constants.store_digest_bytes;
+        switch (std.enums.fromInt(Tag, tag) orelse return null) {
+            .output_root => {},
+            .user, .workdir => decoder.string() orelse return null,
+            .binds => {
+                const count = decoder.int() orelse return null;
+                if (count > constants.build_step_binds_max) return null;
+                for (0..count) |_| {
+                    decoder.string() orelse return null;
+                    _ = decoder.take(digest_bytes) orelse return null;
+                }
+            },
+            .copies => {
+                const count = decoder.int() orelse return null;
+                if (count > constants.build_copy_entries_max) return null;
+                for (0..count) |_| {
+                    _ = decoder.take(digest_bytes) orelse return null;
+                    decoder.copy_rest() orelse return null;
+                }
+            },
+            else => return null,
+        }
+    }
+
+    fn copy_rest(decoder: *Decoder) ?void {
+        decoder.string() orelse return null;
+        decoder.optional() orelse return null;
+        decoder.optional() orelse return null;
+    }
+
+    /// `copy_entries` after its tag: each fetch's SHA-256 into `out`; the count of them.
+    fn fetches(decoder: *Decoder, out: *[constants.build_copy_entries_max][32]u8) ?u32 {
+        const count = decoder.int() orelse return null;
+        if (count > constants.build_copy_entries_max) return null;
+        var found: u32 = 0;
+        for (0..count) |_| {
+            const kind = std.enums.fromInt(CopyKind, decoder.int8() orelse return null);
+            const source = decoder.take(32) orelse return null;
+            switch (kind orelse return null) {
+                .tree => {},
+                .fetch => {
+                    out[found] = source[0..32].*;
+                    found += 1;
+                },
+            }
+            decoder.copy_rest() orelse return null;
+        }
+        assert(found <= count);
+        return found;
+    }
+};
 
 /// What the image step sees: the base's tree (the zero digest for no base), each `image.add`
 /// in the file's order (a later add merges over the earlier ones, so the order counts) as the
@@ -568,4 +738,74 @@ test "key: a file an exclude leaves out never changes the key; one it keeps does
     try testing.expect(plain.eql(logged));
     const kept = try key_of(&spec.of(toy_tree(&lines, &with_kept), &three), 1);
     try testing.expect(!plain.eql(kept));
+}
+
+test "key: a fetch is keyed by its hash and where it lands, and a tree entry by its tree" {
+    // Goal: the fetch encoding (slice 3b). Method: one fetch entry, then the hash, `.to`,
+    // `.chown` and `.chmod` changed one at a time, each a new key; a tree entry with the hash's
+    // bytes as its digest is another key again (the kind byte keeps them apart). The URL is not
+    // an input of `Spec`, so no change of it can reach the key.
+    const base = sample(&.{});
+    const hash_a: [32]u8 = @splat(0xa1);
+    const hash_b: [32]u8 = @splat(0xb2);
+    const variants = [_][]const Copy{
+        &.{.{ .source = sample_digest(0), .to = "/f", .fetch = hash_a }},
+        &.{.{ .source = sample_digest(0), .to = "/f", .fetch = hash_b }},
+        &.{.{ .source = sample_digest(0), .to = "/g", .fetch = hash_a }},
+        &.{.{ .source = sample_digest(0), .to = "/f", .fetch = hash_a, .chown = "1:1" }},
+        &.{.{ .source = sample_digest(0), .to = "/f", .fetch = hash_a, .chmod = "0644" }},
+        &.{.{ .source = .{ .bytes = hash_a }, .to = "/f" }},
+        &.{
+            .{ .source = .{ .bytes = hash_a }, .to = "/f" },
+            .{ .source = sample_digest(0), .to = "/f", .fetch = hash_a },
+        },
+    };
+    var seen: [variants.len]Digest = undefined;
+    for (variants, 0..) |copies, index| {
+        const spec = with_more(base, .{ .copies = copies });
+        const changed = try key_of(&spec, 0);
+        for (seen[0..index]) |earlier| try testing.expect(!changed.eql(earlier));
+        seen[index] = changed;
+    }
+    // The source digest of a fetch entry is not read: only its hash is.
+    const other = with_more(base, .{ .copies = &.{.{
+        .source = sample_digest(9),
+        .to = "/f",
+        .fetch = hash_a,
+    }} });
+    try testing.expect((try key_of(&other, 1)).eql(seen[0]));
+}
+
+test "key: the preimage reader finds each fetch's hash, past every other field" {
+    // Goal: `fetched` reads back what `compute` wrote, so gc keeps the blobs a cache entry
+    // names. Method: specs with every M9 field set and fetches among tree entries; then a spec
+    // with no fetch (none found), and every cut of a preimage (refused, never a crash).
+    const hash_a: [32]u8 = @splat(0xa1);
+    const hash_b: [32]u8 = @splat(0xb2);
+    var spec = with_more(sample(&.{}), .{
+        .root_output = true,
+        .user = "app",
+        .workdir = "/w",
+        .binds = &.{.{ .to = "/b", .source = sample_digest(5) }},
+        .copies = &.{
+            .{ .source = sample_digest(0), .to = "/f", .fetch = hash_a, .chmod = "0644" },
+            .{ .source = sample_digest(7), .to = "/c", .chown = "1:2" },
+            .{ .source = sample_digest(0), .to = "/g/h", .fetch = hash_b },
+        },
+    });
+    try compute(&spec, &key_storage[0]);
+    var out: [constants.build_copy_entries_max][32]u8 = undefined;
+    const preimage = key_storage[0].preimage();
+    try testing.expectEqual(@as(?u32, 2), fetched(preimage, &out));
+    try testing.expectEqualSlices(u8, &hash_a, &out[0]);
+    try testing.expectEqualSlices(u8, &hash_b, &out[1]);
+    for (0..preimage.len) |cut| {
+        if (fetched(preimage[0..cut], &out)) |count| try testing.expect(count <= 2);
+    }
+    spec.copies = &.{.{ .source = sample_digest(7), .to = "/c" }};
+    try compute(&spec, &key_storage[1]);
+    try testing.expectEqual(@as(?u32, 0), fetched(key_storage[1].preimage(), &out));
+    const plain = sample(&.{});
+    try compute(&plain, &key_storage[1]);
+    try testing.expectEqual(@as(?u32, 0), fetched(key_storage[1].preimage(), &out));
 }
