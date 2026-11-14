@@ -129,6 +129,10 @@ const rows = [_]Row{
         .true_outputs = &.{ "code", "demo_m9" },
     },
     .{
+        .paths = &.{"src/testing/vm/fixture_http.zig"},
+        .true_outputs = &.{ "code", "demo_m9" },
+    },
+    .{
         .paths = &.{"src/dockerfile/translate.zig"},
         .true_outputs = &.{ "code", "demo_m9" },
     },

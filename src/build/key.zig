@@ -393,7 +393,11 @@ const Decoder = struct {
                     decoder.copy_rest() orelse return null;
                 }
             },
-            else => return null,
+            // `copy_entries` is read by `fetches`; the M7 fields come before the M9 ones and
+            // never after: either here is a preimage that is not one.
+            .copy_entries => return null,
+            .platform, .base_tree, .base_env, .input_tree, .needs, .argv, .env => return null,
+            .network, .fixed_env, .image_adds, .image_config => return null,
         }
     }
 

@@ -529,14 +529,25 @@ test "a fetch is a copy entry's only source, pinned by a SHA-256" {
     inline for (refused) |case| {
         try step_refused(fetch ++ case[0], case[1]);
     }
-    const long_head = m9_head ++ fetch ++ "\"https://e.example/";
+    // A URL of exactly registry_url_bytes_max bytes is taken (it fails later, as the accepted
+    // ones above do, on the syntax after the step); one byte more is refused.
+    const long_head = m9_head ++ fetch ++ "\"";
+    const scheme = "https://e.example/";
     const long_tail = "\"" ++ pin ++ ", .to = \"/t\" } } } } }";
-    var long: [long_head.len + constants.registry_url_bytes_max + long_tail.len]u8 = undefined;
-    @memcpy(long[0..long_head.len], long_head);
-    @memset(long[long_head.len..][0..constants.registry_url_bytes_max], 'a');
-    @memcpy(long[long.len - long_tail.len ..], long_tail);
-    try testing.expectEqual(ProblemKind.bad_fetch_url, kind_of(&long));
+    const url_max = constants.registry_url_bytes_max;
+    var long: [long_head.len + url_max + 1 + long_tail.len]u8 = undefined;
+    for ([_]u32{ url_max, url_max + 1 }) |url_bytes| {
+        const total = long_head.len + url_bytes + long_tail.len;
+        @memcpy(long[0..long_head.len], long_head);
+        @memcpy(long[long_head.len..][0..scheme.len], scheme);
+        @memset(long[long_head.len + scheme.len ..][0 .. url_bytes - scheme.len], 'a');
+        @memcpy(long[total - long_tail.len .. total], long_tail);
+        const want: ProblemKind = if (url_bytes == url_max) .syntax else .bad_fetch_url;
+        try testing.expectEqual(want, kind_of(long[0..total]));
+    }
     try testing.expectEqualStrings("x.txt", file_mod.fetch_name("http://h/r/x.txt?q=/a").?);
+    try testing.expectEqualStrings("x.txt", file_mod.fetch_name("http://h/r/x.txt#/a/b").?);
+    try testing.expectEqualStrings("x.txt", file_mod.fetch_name("http://h/x.txt?a#b/c").?);
 }
 
 test "each M9 refusal names its kind" {
