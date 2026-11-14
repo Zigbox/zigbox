@@ -49,6 +49,11 @@ fn put(writer: *std.Io.Writer, bytes: []const u8) Error!void {
     writer.writeAll(bytes) catch return error.WriteFailed;
 }
 
+/// An allocating writer fails only when it cannot grow.
+fn put_grown(out: *Output, bytes: []const u8) error{OutOfMemory}!void {
+    out.writer.writeAll(bytes) catch return error.OutOfMemory;
+}
+
 fn put_int(writer: *std.Io.Writer, comptime T: type, value: T) Error!void {
     writer.writeInt(T, value, .big) catch return error.WriteFailed;
 }
@@ -438,7 +443,7 @@ fn digest_matches(packet: []const u8, material: []const []const u8) bool {
 }
 
 /// The binary packets of the first armored block of `text` (`-----BEGIN ...` to `-----END`).
-fn dearmor(memory: Allocator, text: []const u8) Error!?[]u8 {
+fn dearmor(memory: Allocator, text: []const u8) error{OutOfMemory}!?[]u8 {
     const begin = std.mem.indexOf(u8, text, "-----BEGIN PGP SIGNATURE-----") orelse return null;
     var lines = std.mem.splitScalar(u8, text[begin..], '\n');
     _ = lines.next();
@@ -462,16 +467,16 @@ fn dearmor(memory: Allocator, text: []const u8) Error!?[]u8 {
 
 /// `text` as a text-mode signature hashes it: lines end CRLF, trailing blanks stripped, and the
 /// last line ending is not part of it.
-fn canonical_text(memory: Allocator, text: []const u8) Error![]u8 {
+fn canonical_text(memory: Allocator, text: []const u8) error{OutOfMemory}![]u8 {
     var out = Output.init(memory);
     var body = text;
     if (std.mem.endsWith(u8, body, "\n")) body = body[0 .. body.len - 1];
     var lines = std.mem.splitScalar(u8, body, '\n');
     var first = true;
     while (lines.next()) |line| {
-        if (!first) try put(&out.writer, "\r\n");
+        if (!first) try put_grown(&out, "\r\n");
         first = false;
-        try put(&out.writer, std.mem.trimEnd(u8, line, " \t\r"));
+        try put_grown(&out, std.mem.trimEnd(u8, line, " \t\r"));
     }
     return out.toOwnedSlice() catch return error.OutOfMemory;
 }
@@ -495,13 +500,13 @@ pub const Form = enum {
 };
 
 /// Whether `file` is a signature (in `form`) over exactly `signed`; the answer is the signature's
-/// issuer fingerprint when it names one.
+/// issuer fingerprint when it names one. It only reads, so it fails only for memory.
 pub fn bound_to(
     memory: Allocator,
     form: Form,
     file: []const u8,
     signed: []const u8,
-) Error!Binding {
+) error{OutOfMemory}!Binding {
     var packet: []u8 = undefined;
     var canonical: []const u8 = signed;
     switch (form) {
@@ -517,8 +522,8 @@ pub fn bound_to(
             var lines = std.mem.splitScalar(u8, file[blank + 2 .. end], '\n');
             while (lines.next()) |line| {
                 const plain = if (std.mem.startsWith(u8, line, "- ")) line[2..] else line;
-                try put(&shown.writer, plain);
-                try put(&shown.writer, "\n");
+                try put_grown(&shown, plain);
+                try put_grown(&shown, "\n");
             }
             const shown_canonical = try canonical_text(memory, shown.written());
             const signed_canonical = try canonical_text(memory, signed);

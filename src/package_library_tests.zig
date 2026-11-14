@@ -130,7 +130,7 @@ test "a second caller builds unsigned packages through zigbox.package, and the c
     const tree = try build_tree(memory, &files);
     var sink: std.Io.Writer.Allocating = .init(memory);
     var source: pkg.TreeSource = .{ .files = tree };
-    const loose: pkg.CheckOptions = .{ .signatures_required = false, .test_key = false };
+    const loose: pkg.CheckOptions = .{ .signatures_required = false };
     try pkg.check_tree(source.source(), memory, &sink.writer, loose);
     try testing.expectEqual(@as(usize, 0), sink.written().len);
     try expect_own_name(tree);

@@ -25,6 +25,16 @@ pub const Options = struct {
 
 pub const Error = error{CheckFailed} || release.Error;
 
+/// A check without the test key: the tree is wrong (each problem is a line on the log), or
+/// memory ran out. Nothing of the OpenPGP module reaches a caller through it.
+pub const TreeError = error{ CheckFailed, OutOfMemory };
+
+/// What `check_tree` takes: no test key, which only Zigbox's own build and VM check use.
+pub const TreeOptions = struct {
+    /// The tree is expected to carry every signature file (a signed release), all by one key.
+    signatures_required: bool,
+};
+
 /// Where the files of the tree come from: `read_fn(context, path)` is the bytes or null.
 pub const Source = struct {
     context: *anyopaque,
@@ -56,7 +66,7 @@ const Checker = struct {
         return bytes;
     }
 
-    fn join(self: *Checker, left: []const u8, right: []const u8) Error![]u8 {
+    fn join(self: *Checker, left: []const u8, right: []const u8) TreeError![]u8 {
         return std.fmt.allocPrint(self.memory, "{s}{s}", .{ left, right }) catch
             return error.OutOfMemory;
     }
@@ -81,7 +91,7 @@ fn field(line: []const u8, name: []const u8) ?[]const u8 {
 }
 
 /// `Release` sums every `Packages` file; each `Packages` stanza sums its pool file.
-fn check_apt(checker: *Checker, valid_until_required: bool) Error!void {
+fn check_apt(checker: *Checker, valid_until_required: bool) TreeError!void {
     const text = checker.read(release.apt_release_path) orelse return;
     var lines = std.mem.splitScalar(u8, text, '\n');
     var in_sums = false;
@@ -131,7 +141,7 @@ fn check_validity(
     }
 }
 
-fn check_release_line(checker: *Checker, line: []const u8) Error!void {
+fn check_release_line(checker: *Checker, line: []const u8) TreeError!void {
     var words = std.mem.tokenizeScalar(u8, line, ' ');
     const digest = words.next() orelse return checker.fail("a Release line is empty", .{});
     const size_text = words.next() orelse
@@ -144,7 +154,7 @@ fn check_release_line(checker: *Checker, line: []const u8) Error!void {
     if (std.mem.endsWith(u8, name, "/Packages")) try check_packages(checker, bytes);
 }
 
-fn check_packages(checker: *Checker, text: []const u8) Error!void {
+fn check_packages(checker: *Checker, text: []const u8) TreeError!void {
     var stanzas = std.mem.splitSequence(u8, text, "\n\n");
     while (stanzas.next()) |stanza| {
         if (std.mem.trim(u8, stanza, "\n").len == 0) continue;
@@ -152,7 +162,7 @@ fn check_packages(checker: *Checker, text: []const u8) Error!void {
     }
 }
 
-fn check_stanza(checker: *Checker, stanza: []const u8) Error!void {
+fn check_stanza(checker: *Checker, stanza: []const u8) TreeError!void {
     var filename: ?[]const u8 = null;
     var size: ?u64 = null;
     var digest: ?[]const u8 = null;
@@ -171,7 +181,7 @@ fn check_stanza(checker: *Checker, stanza: []const u8) Error!void {
 }
 
 /// `repomd.xml` sums each metadata file; `primary.xml` sums each rpm.
-fn check_dnf(checker: *Checker, index: usize) Error!void {
+fn check_dnf(checker: *Checker, index: usize) TreeError!void {
     const arch = release.architectures[index].rpm_name();
     const base = try std.fmt.allocPrint(checker.memory, "rpm/{s}/", .{arch});
     const path = try checker.join(base, "repodata/repomd.xml");
@@ -198,7 +208,7 @@ fn check_dnf(checker: *Checker, index: usize) Error!void {
     if (digest.len == 0) checker.fail("{s} records no checksum", .{path});
 }
 
-fn check_primary(checker: *Checker, base: []const u8, gzipped: []const u8) Error!void {
+fn check_primary(checker: *Checker, base: []const u8, gzipped: []const u8) TreeError!void {
     var input: std.Io.Reader = .fixed(gzipped);
     var window: [constants.package_gzip_window_bytes]u8 = undefined;
     var decompress: std.compress.flate.Decompress = .init(&input, .gzip, &window);
@@ -291,7 +301,7 @@ fn note_key(checker: *Checker, path: []const u8, print: ?[20]u8) void {
 /// A signed release has all four round-2 signature files, each a signature over the bytes it
 /// sits beside (`openpgp.bound_to`), all by one key. With `required` false a missing file is
 /// skipped: the builder checks the files the owner has placed so far.
-fn check_signature_files(checker: *Checker, required: bool) Error!void {
+fn check_signature_files(checker: *Checker, required: bool) TreeError!void {
     const release_bytes = checker.source.read_fn(checker.source.context, release.apt_release_path);
     const apt_files = [_]struct { []const u8, openpgp.Form }{
         .{ release.apt_in_release_path, .clearsigned },
@@ -316,7 +326,7 @@ fn check_bound(
     signed: ?[]const u8,
     form: openpgp.Form,
     required: bool,
-) Error!void {
+) TreeError!void {
     const file = checker.source.read_fn(checker.source.context, path) orelse {
         if (required) checker.fail("{s} is missing", .{path});
         return;
@@ -423,12 +433,36 @@ pub fn check(
         .log = log,
         .headers_required = options.signatures_required,
     };
-    try check_apt(&checker, options.signatures_required and !options.test_key);
-    for (0..release.architectures.len) |index| try check_dnf(&checker, index);
+    try check_contents(&checker, options.signatures_required and !options.test_key);
     if (options.signatures_required) try check_signature_files(&checker, true);
     if (options.test_key) try check_test_signatures(&checker);
     if (checker.files_checked == 0) assert(checker.failures > 0);
     if (checker.failures > 0) return error.CheckFailed;
+}
+
+/// `check` for a caller outside Zigbox (`zigbox.package.check_tree`): the same digests and the
+/// same signature bindings, without the test key's signing. Every problem is one line on `log`.
+pub fn check_tree(
+    source: Source,
+    memory: Allocator,
+    log: *std.Io.Writer,
+    options: TreeOptions,
+) TreeError!void {
+    var checker: Checker = .{
+        .source = source,
+        .memory = memory,
+        .log = log,
+        .headers_required = options.signatures_required,
+    };
+    try check_contents(&checker, options.signatures_required);
+    if (options.signatures_required) try check_signature_files(&checker, true);
+    if (checker.files_checked == 0) assert(checker.failures > 0);
+    if (checker.failures > 0) return error.CheckFailed;
+}
+
+fn check_contents(checker: *Checker, valid_until_required: bool) TreeError!void {
+    try check_apt(checker, valid_until_required);
+    for (0..release.architectures.len) |index| try check_dnf(checker, index);
 }
 
 /// A tree in memory: the builder checks it before writing, and the tests use it.
@@ -670,4 +704,76 @@ test "swapped, missing or half-placed rpm header signatures are refused" {
     });
     try check_placed_signatures(first, memory, &sink.writer);
     try std.testing.expectEqual(@as(usize, 0), sink.written().len);
+}
+
+/// Round-2 signatures by the test key over `files`' `Release` and `repomd.xml`s, as the owner
+/// would place them, leaving the rpm header signatures to the caller.
+fn round_two_of(memory: Allocator, files: []const model.TreeFile) !release.Signatures {
+    var tree: TreeSource = .{ .files = files };
+    const source = tree.source();
+    const key = openpgp.test_key();
+    const text = source.read_fn(source.context, release.apt_release_path).?;
+    var signatures: release.Signatures = .{};
+    signatures.in_release = try openpgp.clearsign(memory, key, text);
+    const detached = try openpgp.sign_detached(memory, key, text);
+    signatures.release_gpg = try openpgp.armor(memory, "PGP SIGNATURE", detached);
+    for (0..release.architectures.len) |index| {
+        const repomd = source.read_fn(source.context, try release.repomd_path(memory, index)).?;
+        const signed = try openpgp.sign_detached(memory, key, repomd);
+        signatures.repomd_asc[index] = try openpgp.armor(memory, "PGP SIGNATURE", signed);
+    }
+    return signatures;
+}
+
+/// `check_tree` with `signatures_required`, expecting `CheckFailed` and `message` on the log.
+fn expect_strict_refusal(
+    memory: Allocator,
+    files: []const model.TreeFile,
+    message: []const u8,
+) !void {
+    var sink: std.Io.Writer.Allocating = .init(memory);
+    var tree: TreeSource = .{ .files = files };
+    const strict: TreeOptions = .{ .signatures_required = true };
+    const refused = check_tree(tree.source(), memory, &sink.writer, strict);
+    try std.testing.expectError(error.CheckFailed, refused);
+    try std.testing.expect(std.mem.indexOf(u8, sink.written(), message) != null);
+}
+
+test "check_tree with signatures required passes a signed tree and refuses each gap" {
+    // Goal: the strict mode a caller outside Zigbox (`zigbox.package.check_tree`) uses refuses
+    // a missing round-2 file, a Release without Valid-Until and an unsigned rpm, each with its
+    // own line, and passes a whole signed tree. Method: test-key trees, every other signature
+    // in place, so each refusal has one cause and its check alone can catch it. This test
+    // failed with `check_signature_files` not called, with `valid_until_required` false, and
+    // with `headers_required` false in `check_tree`.
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const memory = arena.allocator();
+    const signed = try release.build(memory, &test_inputs, .{
+        .test_key = true,
+        .signed_at = stamp,
+    });
+    var sink: std.Io.Writer.Allocating = .init(memory);
+    var tree: TreeSource = .{ .files = signed };
+    const strict: TreeOptions = .{ .signatures_required = true };
+    try check_tree(tree.source(), memory, &sink.writer, strict);
+    try std.testing.expectEqual(@as(usize, 0), sink.written().len);
+
+    var without: std.ArrayList(model.TreeFile) = .empty;
+    for (signed) |file| {
+        if (std.mem.eql(u8, file.path, release.apt_in_release_path)) continue;
+        try without.append(memory, file);
+    }
+    try std.testing.expectEqual(signed.len - 1, without.items.len);
+    try expect_strict_refusal(memory, without.items, "apt/dists/stable/InRelease is missing");
+
+    const forever = try release.build(memory, &test_inputs, .{ .test_key = true });
+    try expect_strict_refusal(memory, forever, "has no Valid-Until; build with -Dsigned-at");
+
+    const unsigned = try release.build(memory, &test_inputs, .{ .signed_at = stamp });
+    const headless = try release.build(memory, &test_inputs, .{
+        .signatures = try round_two_of(memory, unsigned),
+        .signed_at = stamp,
+    });
+    try expect_strict_refusal(memory, headless, "has no header signature (sign round 1");
 }

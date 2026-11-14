@@ -93,8 +93,9 @@ pub const open_log = logs.open_log;
 
 /// `exec` (M6b): a command in a running container, by its name, with what the container has and
 /// nothing more (its namespaces, cgroup, capabilities, `no_new_privs` and seccomp filter). The
-/// caller's `ExecHandle` (about 600 KiB; keep it in static storage or on the heap) holds the
-/// plan and the state; `exec_start` returns once the command runs, `exec_wait` reaps it. With
+/// caller's `ExecHandle` (at most 640 KiB, asserted at compile time; keep it in static storage
+/// or on the heap) holds the plan and the state; `exec_start` returns once the command runs,
+/// `exec_wait` reaps it. With
 /// `ExecSpec.terminal` the command gets a pseudo-terminal sized as the caller's; without, its
 /// streams are the caller's. The thread that starts it must be the process's only thread at
 /// that moment and must be the one that waits. `ExecExit.code` is the command's exit code.
@@ -224,9 +225,10 @@ pub const package = struct {
 
     /// `zig build packages-check` over a tree the caller assembled: `apt/` and
     /// `rpm/<architecture>/` for both architectures, as `zig build packages` lays them out.
-    pub const check_tree = check_file.check;
-    pub const CheckOptions = check_file.Options;
-    pub const CheckError = check_file.Error;
+    /// Its errors are `CheckFailed` and `OutOfMemory` only, and its options have no test key.
+    pub const check_tree = check_file.check_tree;
+    pub const CheckOptions = check_file.TreeOptions;
+    pub const CheckError = check_file.TreeError;
     pub const CheckSource = check_file.Source;
     pub const TreeSource = check_file.TreeSource;
 };
@@ -328,6 +330,16 @@ test "the package writer's surface is exactly what the decision names" {
     _ = package.dnf.write;
     _ = package.check_tree;
     _ = package.TreeSource.source;
+    // The check exposes nothing of the OpenPGP module: no test key, no signing error.
+    try std.testing.expectEqual(1, std.meta.fieldNames(package.CheckOptions).len);
+    try std.testing.expect(@hasField(package.CheckOptions, "signatures_required"));
+    const check_errors = @typeInfo(package.CheckError).error_set.error_names.?;
+    try std.testing.expectEqual(2, check_errors.len);
+    for (check_errors) |found| {
+        const known = std.mem.eql(u8, found, "CheckFailed") or
+            std.mem.eql(u8, found, "OutOfMemory");
+        try std.testing.expect(known);
+    }
 }
 
 test "the module's surface for a second product's diagnostics" {

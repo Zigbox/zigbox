@@ -88,7 +88,7 @@ fn package_xml(
 ) Error!void {
     const package = built.package;
     const parts = rpm.split(built.bytes) orelse
-        unreachable; // `built.bytes` is an rpm this module just wrote.
+        unreachable; // `write` refused every rpm `check_built` does not accept.
     const entries = try model.layout(memory, package, true);
     const epoch = constants.package_source_date_epoch;
     const rpm_arch = package.architecture.rpm_name();
@@ -122,7 +122,7 @@ fn package_xml(
         "</rpm:license>\n    <rpm:vendor></rpm:vendor>\n    <rpm:group>Unspecified</rpm:group>\n",
     );
     const build_host = rpm.build_host_of(parts.main_header) orelse
-        unreachable; // `rpm.write` names a build host in every main header.
+        unreachable; // `check_built` found the build host in this main header.
     try put(writer, "    <rpm:buildhost>");
     try put_escaped(writer, build_host);
     try put(writer, "</rpm:buildhost>\n");
@@ -226,13 +226,45 @@ fn built_less(_: void, left: model.Built, right: model.Built) bool {
     return std.mem.order(u8, left.package.version, right.package.version) == .lt;
 }
 
-/// The tree of one architecture: paths are relative to `rpm/<basearch>/`.
+/// `built.bytes` is the rpm `rpm.write` makes for `built.package` on `architecture`, byte for
+/// byte, with the build host its main header names and the header signature, if any, its
+/// signature header carries (both are the caller's to choose). The rpm is written again with
+/// those and compared whole, so a changed lead, header, digest or payload is caught, not only a
+/// changed main header. Anything else is `ForeignRpm`, a refusal: the bytes come from the caller.
+/// The rewrite runs in its own arena, freed on return, so a tree holds the intermediates (cpio,
+/// gzip output, headers) of one rpm at a time, not of every rpm until the caller frees `memory`.
+fn check_built(
+    memory: Allocator,
+    architecture: model.Architecture,
+    built: model.Built,
+) Error!void {
+    if (built.package.architecture != architecture) return error.ForeignRpm;
+    const parts = rpm.split(built.bytes) orelse return error.ForeignRpm;
+    const build_host = rpm.build_host_of(parts.main_header) orelse return error.ForeignRpm;
+    model.check_line(build_host) catch return error.ForeignRpm;
+    const signature = rpm.binary_tag(parts.signature_header, rpm.sig_tag.rsa);
+    if (signature) |bytes| {
+        if (bytes.len > constants.openpgp_signature_bytes_max) return error.ForeignRpm;
+    }
+    const options: rpm.Options = .{ .build_host = build_host, .header_signature = signature };
+    var rewrite: std.heap.ArenaAllocator = .init(memory);
+    defer rewrite.deinit();
+    const expected = try rpm.write(rewrite.allocator(), built.package, options);
+    assert(expected.len > 0);
+    if (!std.mem.eql(u8, expected, built.bytes)) return error.ForeignRpm;
+}
+
+/// The tree of one architecture: paths are relative to `rpm/<basearch>/`. Every rpm must be one
+/// `rpm.write` made for its package and `architecture`; any other bytes are `ForeignRpm`. That is
+/// this build's `rpm.write`: an rpm an earlier Zigbox made can differ (its payload compression or
+/// a header field), so rpms kept across a Zigbox upgrade are refused; write them again.
 pub fn write(
     memory: Allocator,
     architecture: model.Architecture,
     built: []const model.Built,
 ) Error![]model.TreeFile {
     if (built.len == 0 or built.len > constants.repo_packages_max) return error.TooManyFiles;
+    for (built) |item| try check_built(memory, architecture, item);
     const sorted = try memory.dupe(model.Built, built);
     std.mem.sort(model.Built, sorted, {}, built_less);
     var files: std.ArrayList(model.TreeFile) = .empty;
@@ -246,7 +278,7 @@ pub fn write(
         .{constants.package_source_date_epoch},
     );
     for (sorted) |item| {
-        assert(item.package.architecture == architecture);
+        assert(item.package.architecture == architecture); // `check_built` refused the others.
         try files.append(
             memory,
             .{ .path = try rpm.file_name(memory, item.package), .bytes = item.bytes },
@@ -307,4 +339,109 @@ test "the tree has the rpm, three checksum-named metadata files and repomd.xml" 
         try std.testing.expect(std.mem.indexOf(u8, repomd, sum) != null);
         try std.testing.expect(std.mem.indexOf(u8, file.path, sum) != null);
     }
+}
+
+test "bytes rpm.write did not make for the package are refused, not trusted" {
+    // Goal: `dnf.write` takes its rpms from the caller, so foreign bytes are a refusal
+    // (`ForeignRpm`), never a panic or a tree that describes other bytes. Method: empty bytes,
+    // a deb, a cut rpm, one flipped byte in each of the main header, the signature header, the
+    // build host and the payload, another package's rpm, an rpm of the other architecture; then
+    // an rpm carrying a header signature, as the caller places one, is accepted.
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const memory = arena.allocator();
+    const sample = &@import("deb.zig").sample;
+    const good = try rpm.write(memory, sample, .{ .build_host = "zigbox-build" });
+    const parts = rpm.split(good).?;
+    const host_at = std.mem.indexOf(u8, good, "zigbox-build").?;
+    assert(host_at >= parts.header_start);
+
+    var other = sample.*;
+    other.version = "1.2.4";
+    var aarch64 = sample.*;
+    aarch64.architecture = .aarch64;
+    const flips = [_]usize{
+        parts.header_start + parts.main_header.len / 2,
+        parts.header_start - 1,
+        host_at + "zigbox".len, // "zigbox=build": a build host rpm.write would take.
+        good.len - 1,
+    };
+    for (flips) |at| {
+        const flipped = try memory.dupe(u8, good);
+        flipped[at] ^= 0x10;
+        const built = [_]model.Built{.{ .package = sample, .bytes = flipped }};
+        try std.testing.expectError(error.ForeignRpm, write(memory, .x86_64, &built));
+    }
+    const foreign = [_][]const u8{
+        "",
+        try @import("deb.zig").write(memory, sample),
+        good[0 .. parts.header_end - 1],
+        try rpm.write(memory, &other, .{ .build_host = "zigbox-build" }),
+    };
+    for (foreign) |bytes| {
+        const built = [_]model.Built{.{ .package = sample, .bytes = bytes }};
+        try std.testing.expectError(error.ForeignRpm, write(memory, .x86_64, &built));
+    }
+    const elsewhere = try rpm.write(memory, &aarch64, .{ .build_host = "zigbox-build" });
+    const wrong_tree = [_]model.Built{.{ .package = &aarch64, .bytes = elsewhere }};
+    try std.testing.expectError(error.ForeignRpm, write(memory, .x86_64, &wrong_tree));
+
+    const signature: [120]u8 = @splat(0x88); // Opaque here: `check_tree` reads signatures.
+    const signed = try rpm.write(
+        memory,
+        sample,
+        .{ .build_host = "other-build", .header_signature = &signature },
+    );
+    const accepted = [_]model.Built{.{ .package = sample, .bytes = signed }};
+    _ = try write(memory, .x86_64, &accepted);
+}
+
+test "a header signature of 1024 bytes is accepted, one of 1025 is refused, not a crash" {
+    // Goal: the bound `rpm.write` asserts (`openpgp_signature_bytes_max`) is checked before the
+    // rewrite, so a caller's rpm past it is `ForeignRpm`, not a panic. Method: an rpm with a
+    // 1024-byte signature is accepted; the same rpm with its signature entry widened to 1025
+    // bytes of the signature header's data is refused. Without the length check in
+    // `check_built` this test panicked in `rpm.signature_header`.
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const memory = arena.allocator();
+    const sample = &@import("deb.zig").sample;
+    const signature: [constants.openpgp_signature_bytes_max]u8 = @splat(0x88);
+    const options: rpm.Options = .{ .build_host = "zigbox-build", .header_signature = &signature };
+    const good = try rpm.write(memory, sample, options);
+    const at_bound = [_]model.Built{.{ .package = sample, .bytes = good }};
+    _ = try write(memory, .x86_64, &at_bound);
+
+    const wide = try memory.dupe(u8, good);
+    const header = rpm.split(wide).?.signature_header;
+    const entries = std.mem.readInt(u32, header[8..12], .big);
+    const entry_at = for (0..entries) |index| {
+        const at = 16 + index * 16;
+        if (std.mem.readInt(u32, header[at..][0..4], .big) == rpm.sig_tag.rsa) break at;
+    } else unreachable; // `rpm.write` placed the signature.
+    const field_at = (header.ptr - wide.ptr) + entry_at;
+    std.mem.writeInt(u32, wide[field_at + 8 ..][0..4], 0, .big);
+    std.mem.writeInt(u32, wide[field_at + 12 ..][0..4], signature.len + 1, .big);
+    const read = rpm.binary_tag(header, rpm.sig_tag.rsa).?;
+    try std.testing.expectEqual(constants.openpgp_signature_bytes_max + 1, read.len);
+    const past_bound = [_]model.Built{.{ .package = sample, .bytes = wide }};
+    try std.testing.expectError(error.ForeignRpm, write(memory, .x86_64, &past_bound));
+}
+
+test "a build host that rpm.write would refuse is ForeignRpm, not the writer's own error" {
+    // Goal: `check_built` checks the build host as `rpm.write` does before rewriting, so a
+    // damaged one is `ForeignRpm` as documented. Method: a control byte (0x01) in the build host
+    // of a good rpm. Without the `check_line` guard this test got `rpm.write`'s own error.
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const memory = arena.allocator();
+    const sample = &@import("deb.zig").sample;
+    const good = try rpm.write(memory, sample, .{ .build_host = "zigbox-build" });
+    const damaged = try memory.dupe(u8, good);
+    const host_at = std.mem.indexOf(u8, damaged, "zigbox-build").?;
+    damaged[host_at + "zigbox".len] = 0x01;
+    const host = damaged[host_at..][0.."zigbox-build".len];
+    try std.testing.expectError(error.BadText, model.check_line(host));
+    const built = [_]model.Built{.{ .package = sample, .bytes = damaged }};
+    try std.testing.expectError(error.ForeignRpm, write(memory, .x86_64, &built));
 }

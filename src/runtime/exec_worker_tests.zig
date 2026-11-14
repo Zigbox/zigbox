@@ -159,6 +159,38 @@ test "a worker's exec ends with container_ended when the supervisor reaped PID 1
     try testing.expect(worker_handle.container_ended);
 }
 
+test "a worker's exec whose wait fails is lost: the command is killed, the container lives" {
+    // Goal: the `.lost` row of ZB-2's table, which no other test reaches deterministically.
+    // Method: the worker's exec starts; the first host call of the wait's `reap` step fails
+    // (EIO). The wait returns `.lost` with no exit code, `lost_diag` names the reap step, the
+    // command is killed and reaped rather than left behind, no namespace handle stays open, and
+    // the supervisor's container still runs.
+    var sim: HostSim = undefined;
+    const container_pid = try supervisor_starts(&sim, 35, .drops_handle);
+    var diag: Diag = undefined;
+    diag.reset();
+    try worker_execs(&sim, &.{ "/bin/sleep", "1000" }, &diag);
+    const command_pid = worker_handle.pid.?;
+    sim.faults.fail_step = worker_handle.plan.count - 1; // The `reap` step.
+    sim.faults.fail_step_errno = 5; // EIO.
+    const exit = exec.wait(&worker_handle);
+    try testing.expectEqual(exec.Exit.lost, exit);
+    try testing.expectEqual(@as(?u8, null), exit.code());
+    try testing.expect(sim.step_fault_fired);
+    try testing.expect(!worker_handle.container_ended);
+    try testing.expectEqual(codes.Code.E0221, worker_handle.lost_diag.code.?);
+    const pairs = worker_handle.lost_diag.pairs.slice();
+    const step = for (pairs) |*pair| {
+        if (std.mem.eql(u8, pair.key_slice(), "step")) break pair.value.slice();
+    } else return error.TestUnexpectedResult;
+    try testing.expect(std.mem.startsWith(u8, step, "reap ("));
+    try testing.expectEqual(.reaped, sim.world.find_process(command_pid).?.state);
+    for (sim.world.namespace_handles) |entry| try testing.expect(entry == null);
+    const container_state = sim.world.find_process(container_pid).?.state;
+    try testing.expect(container_state != .zombie);
+    try testing.expect(container_state != .reaped);
+}
+
 test "a worker's exec into a container that already ended, or without the state, is refused" {
     // Goal: the refusals a worker sees before anything is made. Method: a worker without the
     // agent's state directory gets E0402 (no such container) while the container runs; once

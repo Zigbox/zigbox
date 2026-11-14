@@ -78,6 +78,9 @@ pub const Error = error{
     /// A `Release` file lacks the `Date` line a re-date replaces, or a signing time is outside
     /// `constants.apt_signed_at_min` to `apt_signed_at_max`.
     BadRelease,
+    /// A `Built` given to the dnf writer is not an rpm `rpm.write` made for its package and the
+    /// tree's architecture: the bytes are damaged, from another tool, or for another package.
+    ForeignRpm,
 };
 
 /// One line saying what a package problem is, for the build tool to print after `package: `.
@@ -97,6 +100,8 @@ pub fn describe(err: Error) []const u8 {
         error.OutOfMemory => "out of memory",
         error.WriteFailed => "an output buffer could not grow",
         error.BadRelease => "a Release file has no Date line, or the signing time is out of range",
+        error.ForeignRpm => "an rpm for the dnf tree is not the one rpm.write makes for its " ++
+            "package and the tree's architecture",
     };
 }
 
