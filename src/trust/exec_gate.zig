@@ -80,7 +80,7 @@ pub fn check(
 /// The result the image record of a manifest-bound container derives, as the record is now (a
 /// re-pull since the run may have given it labels, which the run's gate lacked);
 /// null when the record cannot be read or gives none, which only narrows what counts.
-fn derived_of(host: Host, binding: statement.Binding, image: *images.Image) ?[32]u8 {
+pub fn derived_of(host: Host, binding: statement.Binding, image: *images.Image) ?[32]u8 {
     const manifest = switch (binding) {
         .manifest => |bytes| bytes,
         else => return null,

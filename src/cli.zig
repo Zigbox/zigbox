@@ -40,6 +40,7 @@ const verify_commands = @import("trust/verify_commands.zig");
 const trust_exec = @import("trust/exec_gate.zig");
 const trust_gate = @import("trust/gate.zig");
 const trust_tamper = @import("trust/tamper.zig");
+const trust_start = @import("trust/start_gate.zig");
 const layout_mod = @import("store/layout.zig");
 const trust_statement = @import("trust/statement.zig");
 const volume = @import("state/volume.zig");
@@ -2963,8 +2964,9 @@ pub const Storage = struct {
     gate: trust_gate.Memory,
     /// The tamper check of a run under a policy file (`trust/tamper.zig`).
     tamper: trust_tamper.Workspace,
-    tamper_on: bool,
-    tamper_always: bool,
+    /// The gate's state for this run (`trust/start_gate.zig`, shared with the library's start):
+    /// set by `check_policy`, read by `tree_check_of`.
+    run_gate: trust_start.Gate,
     /// `zbx exec`: the library's handle and the `-e` values.
     exec: exec_commands.Workspace,
     /// `zbx build`: the build file, its graph and the checks' findings. `verify` and `trust` work
@@ -3719,7 +3721,9 @@ fn gate_subject_of(
 }
 
 /// The gate in front of a run: every policy file that exists must be met before anything
-/// starts. A refusal has set `diag` and started nothing.
+/// starts. A refusal has set `diag` and started nothing. The library's start runs the same gate
+/// (`trust/start_gate.zig`); `zbx run` runs it here, ahead of the environment and the start,
+/// with the subject worded as `zbx sign` would take it.
 fn check_policy(
     host: Host,
     storage: *Storage,
@@ -3727,49 +3731,29 @@ fn check_policy(
     diag: *Diag,
 ) RunError!void {
     assert(diag.code == null);
-    trust_gate.load(host, &storage.gate, diag) catch return error.StartFailed;
-    const record = &storage.sign.record;
-    const work = &storage.sign.record_work;
-    trust_gate.judge_all(host, &storage.gate, record, work, subject, diag) catch {
-        return error.StartFailed;
+    const sign = &storage.sign;
+    storage.run_gate = .{
+        .memory = &storage.gate,
+        .record = &sign.record,
+        .work = &sign.record_work,
+        .tamper = &storage.tamper,
+        .lent = .{
+            .scratch = &sign.tree.verify.scratch,
+            .tree_buffer = &sign.tree.tree_buffer,
+            .stack = &sign.tree.stack,
+        },
     };
-    // Any policy file at all asks for the tamper check, whatever it requires (the strictest
-    // `verify` of them wins); with none there is no check.
-    storage.tamper_on = storage.gate.count > 0;
-    storage.tamper_always = false;
-    for (storage.gate.files[0..storage.gate.count]) |*loaded| {
-        if (loaded.policy.verify == .always) storage.tamper_always = true;
-    }
+    storage.run_gate.load(host, diag) catch return error.StartFailed;
+    storage.run_gate.judge(host, subject, diag) catch return error.StartFailed;
+    assert(storage.run_gate.then == null);
 }
 
-/// The check the store's child makes of the tree before it starts, or none.
+/// The check the store's child makes of the tree before it starts, or none. `check_policy` has
+/// run.
 fn tree_check_of(storage: *Storage) ?image_mod.Check {
     assert(@intFromPtr(storage) != 0);
-    assert(storage.gate.count <= constants.policy_files_max);
-    if (!storage.tamper_on) return null;
-    return .{ .context = storage, .call = tamper_call };
-}
-
-fn tamper_call(
-    context: *anyopaque,
-    store: *layout_mod.Store,
-    tree: digest_prefix.Digest,
-    diag: *Diag,
-) bool {
-    const storage: *Storage = @ptrCast(@alignCast(context));
-    assert(storage.tamper_on);
-    assert(tree.bytes.len == constants.store_digest_bytes);
-    assert(storage.gate.count > 0);
-    const sign = &storage.sign;
-    const lent: trust_tamper.Lent = .{
-        .scratch = &sign.tree.verify.scratch,
-        .tree_buffer = &sign.tree.tree_buffer,
-        .stack = &sign.tree.stack,
-    };
-    trust_tamper.check(store, &storage.tamper, lent, tree, storage.tamper_always, diag) catch {
-        return false;
-    };
-    return true;
+    assert(storage.run_gate.memory == &storage.gate);
+    return storage.run_gate.tree_check();
 }
 
 /// A run in the foreground: starts the container, waits for it, and reports how it ended.
@@ -5603,12 +5587,12 @@ test "run: any policy file with verify always makes the tamper check hash every 
     var diag: Diag = undefined;
     diag.reset();
     try check_policy(sim.interface(), &shared_storage, directory, &diag);
-    try testing.expect(shared_storage.tamper_on);
-    try testing.expect(!shared_storage.tamper_always);
+    try testing.expect(shared_storage.run_gate.tamper_on);
+    try testing.expect(!shared_storage.run_gate.tamper_always);
     policy_files.put_file("/home/alice/.config/zbx/policy.zon", 0o644, always);
     try check_policy(sim.interface(), &shared_storage, directory, &diag);
-    try testing.expect(shared_storage.tamper_on);
-    try testing.expect(shared_storage.tamper_always);
+    try testing.expect(shared_storage.run_gate.tamper_on);
+    try testing.expect(shared_storage.run_gate.tamper_always);
 }
 
 const Frame = struct { tag: u8, head: ?u8, body: []const u8 };
