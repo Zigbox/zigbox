@@ -66,7 +66,9 @@ version, finishes a half-done release:
 - the tag exists at another commit: `plan` refuses, before anything is written.
 
 By hand, the commit is found, not given: it is the commit of `main` that added
-`docs/releases/<version>.md`, and `build.zig.zon` must say that version there.
+`docs/releases/<version>.md`, and `build.zig.zon` must say that version there. The search
+follows `main`'s first parents, so a release merged with a merge commit resolves to that merge
+commit, the one `ci` ran on.
 
 ### What refuses before `publish`, and where
 
