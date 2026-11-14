@@ -121,7 +121,11 @@ fn package_xml(
         writer,
         "</rpm:license>\n    <rpm:vendor></rpm:vendor>\n    <rpm:group>Unspecified</rpm:group>\n",
     );
-    try print(writer, "    <rpm:buildhost>{s}</rpm:buildhost>\n", .{rpm.build_host});
+    const build_host = rpm.build_host_of(parts.main_header) orelse
+        unreachable; // `rpm.write` names a build host in every main header.
+    try put(writer, "    <rpm:buildhost>");
+    try put_escaped(writer, build_host);
+    try put(writer, "</rpm:buildhost>\n");
     try print(
         writer,
         "    <rpm:sourcerpm>{s}-{s}-{s}.src.rpm</rpm:sourcerpm>\n",
@@ -292,7 +296,7 @@ test "the tree has the rpm, three checksum-named metadata files and repomd.xml" 
     defer arena.deinit();
     const memory = arena.allocator();
     const sample = &@import("deb.zig").sample;
-    const bytes = try rpm.write(memory, sample, .{});
+    const bytes = try rpm.write(memory, sample, .{ .build_host = "zigbox-build" });
     const built = [_]model.Built{.{ .package = sample, .bytes = bytes }};
     const files = try write(memory, .x86_64, &built);
     try std.testing.expectEqual(@as(usize, 5), files.len);

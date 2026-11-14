@@ -52,6 +52,16 @@ pub const apt_release_gpg_path = "apt/dists/" ++ apt.suite ++ "/Release.gpg";
 pub const test_key_armored_path = "zigbox-test-key.asc";
 pub const test_key_binary_path = "zigbox-test-key.gpg";
 
+/// Zigbox's apt repository, as its `Release` names it; apt pins and unattended-upgrades on
+/// users' hosts match these, so they never change.
+pub const apt_identity: apt.Identity = .{
+    .origin = "Zigbox",
+    .label = "Zigbox",
+    .description = "Zigbox packages",
+};
+/// The build host every Zigbox rpm names, so that the file does not depend on the machine.
+pub const rpm_build_host = "zigbox-build";
+
 const Flavor = enum { deb, rpm };
 
 /// The package for one architecture: `zbx` and the licence, which the two formats place apart.
@@ -171,18 +181,22 @@ pub fn build(memory: Allocator, inputs: *const Inputs, options: Options) Error![
     for (architectures, 0..) |_, index| {
         const deb_package = try describe(memory, inputs, index, .deb);
         const rpm_package = try describe(memory, inputs, index, .rpm);
-        const header = try rpm.header_bytes(memory, rpm_package);
+        const header = try rpm.header_bytes(memory, rpm_package, rpm_build_host);
         const signature = if (options.test_key)
             try openpgp.sign_detached(memory, key, header)
         else
             options.signatures.header[index];
-        const rpm_bytes = try rpm.write(memory, rpm_package, .{ .header_signature = signature });
+        const rpm_bytes = try rpm.write(memory, rpm_package, .{
+            .build_host = rpm_build_host,
+            .header_signature = signature,
+        });
         const rpm_file = try rpm.file_name(memory, rpm_package);
         try add(memory, &files, try header_path(memory, rpm_file), header);
         debs[index] = .{ .package = deb_package, .bytes = try deb.write(memory, deb_package) };
         rpms[index] = .{ .package = rpm_package, .bytes = rpm_bytes };
     }
-    try add_tree(memory, &files, "apt/", try apt.write(memory, &debs, options.signed_at));
+    const apt_tree = try apt.write(memory, &debs, options.signed_at, &apt_identity);
+    try add_tree(memory, &files, "apt/", apt_tree);
     for (architectures, 0..) |architecture, index| {
         const prefix = try std.fmt.allocPrint(memory, "rpm/{s}/", .{architecture.rpm_name()});
         const tree = try dnf.write(memory, architecture, rpms[index..][0..1]);

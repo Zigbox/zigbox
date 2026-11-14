@@ -201,6 +201,7 @@ test {
     _ = @import("pull_library_tests.zig");
     _ = @import("push_library_tests.zig");
     _ = @import("build_library_tests.zig");
+    _ = @import("package_library_tests.zig");
     _ = @import("host_real_net.zig");
     _ = @import("testing/vm/registry_server.zig");
     _ = @import("testing/vm/registry_fixture.zig");
@@ -264,6 +265,7 @@ test {
     _ = @import("runtime/exec_diagnose.zig");
     _ = @import("runtime/exec_history.zig");
     _ = @import("runtime/exec_tests.zig");
+    _ = @import("runtime/exec_worker_tests.zig");
 }
 
 test {

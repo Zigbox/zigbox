@@ -85,8 +85,8 @@ pub fn describe(err: Error) []const u8 {
     return switch (err) {
         error.BadName => "a name, version or revision has an unusable byte or length " ++
             "(a version has no - or _)",
-        error.BadText => "a summary, description, licence, homepage or maintainer is empty, " ++
-            "too long or has a control byte",
+        error.BadText => "a summary, description, licence, homepage, maintainer, repository " ++
+            "identity or build host is empty, too long or has a control byte",
         error.BadPath => "a file path is not an absolute path of plain parts that fits a tar name",
         error.BadMode => "a file mode has bits outside 0o7777",
         error.DuplicatePath => "two entries share a path",
@@ -132,6 +132,12 @@ fn check_text(text: []const u8, newlines: bool, bytes_max: u32) Error!void {
         if (byte == '\n' and newlines) continue;
         if (byte < 0x20 or byte == 0x7f) return error.BadText;
     }
+}
+
+/// One line of text that names a publisher (an apt repository's origin, label or description, or
+/// an rpm's build host): not empty, within the summary bound, no control byte, no newline.
+pub fn check_line(text: []const u8) Error!void {
+    return check_text(text, false, constants.package_summary_bytes_max);
 }
 
 /// A path is absolute, made of non-empty parts that are not `.` or `..`, and has no byte a
