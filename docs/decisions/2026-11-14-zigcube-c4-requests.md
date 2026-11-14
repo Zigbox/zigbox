@@ -59,3 +59,50 @@ The explain text, goldens (`testdata/diag`) and the errors site carry both.
 
 `zigbox.container_socket` (the function), `zigbox.ContainerSocketKind` (`tcp4`),
 `zigbox.ContainerSocketError` (`SocketFailed`), `zigbox.container_socket_module`.
+
+## ZB-6: `Spec.hosts_file` and `--hosts-file PATH`
+
+- **What.** The file at `hosts_file` is bind-mounted, read-only, at `/etc/hosts` in place of the
+  generated one. It reuses the generated file's bind and remount steps with the host path as
+  the source; there is no staged copy, so the plan has two steps fewer, and the two steps are
+  not tolerant (the file is the caller's contract, a quiet fallback to the generated one would
+  hide a broken mesh).
+- **Only `--net none`.** With another network the runtime's own `/etc/hosts` is the right one;
+  a given file there is refused rather than half-honoured. `resolv.conf` and the hostname are
+  not rewritten.
+- **Refused, E0612** (one line, before anything is made): not `--net none`, a path that is not
+  absolute (or holds a NUL, or is over the path bound), missing, or not a regular file.
+- **Semantics a caller must know.** The bind is of the host file itself. An in-place rewrite
+  (open, truncate, write) is seen inside at once; replacing the path by a rename is not (the
+  mount holds the old file). Zigcube's C4 should rewrite in place. The demo checks both.
+- **Cut: the run record.** The record (version 10) is not bumped, so `zbx start` of a stopped
+  container does not remember `--hosts-file`. Flagged for the supervisor; a record bump is a
+  user-visible change that this release does not make.
+- **Known wart.** A failed hosts-file bind step reads "binding the generated /etc/hosts". The
+  run check (E0612) pre-empts the usual causes, so it is left.
+
+### Code taken
+
+| Code  | When |
+|-------|------|
+| E0612 | the hosts file cannot be bound at /etc/hosts (the four refusals above) |
+
+## ZB-7: `zbx exec` joins the container's network namespace
+
+A test, not a feature: the simulator test and demo step 4 (`net.py`) show that a command run by
+`zbx exec` sees the container's own loopback (the server another exec started on 127.0.0.1:9100
+answers, the host's 127.0.0.1:9100 refuses, one inet address). Writing it found a bug: `exec`
+into a `--net host` container has no net-namespace handle, and `exec_child` took the null with
+`.?`, which panicked. It now returns with the usual refusal. No behaviour of a working exec
+changed.
+
+## ZB-8: a ZB-5 socket survives adoption by a restarted agent
+
+A test, not a feature: the simulator test and demo step 3 (`connect.py`) hold a socket made by
+`container_socket`, kill and restart the agent that adopts the container, and connect on the
+same socket. The socket is a descriptor of the caller's, so it never depended on the agent.
+
+## Notes for the next implementer
+
+- `HostReal.open_count` is a plain counter: use one `HostReal` per thread.
+- The sim's `stat` reads `sim.files`; a bind source also needs `world.add_node`.
