@@ -83,6 +83,8 @@ const SimSource = struct {
     index: u8,
     behaviour: Behaviour,
     lied_told: u32,
+    /// Fetches asked of this source.
+    calls: u32,
 };
 
 const Reader = struct {
@@ -218,7 +220,7 @@ pub fn setup(sim: *Sim, seed: u64, scenario: Scenario) void {
     start_store(sim);
     make_objects(sim);
     for (&sim.sources, 0..) |*source, at| {
-        source.* = .{ .sim = sim, .index = @intCast(at), .behaviour = scenario.behaviours[at], .lied_told = 0 };
+        source.* = .{ .sim = sim, .index = @intCast(at), .behaviour = scenario.behaviours[at], .lied_told = 0, .calls = 0 };
     }
     for (sim.peer_interfaces[0..scenario.peers], 0..) |*peer, at| {
         peer.* = .{ .context = &sim.sources[at], .name = peer_names[at], .fetch = peer_fetch, .lied = peer_lied };
@@ -268,6 +270,7 @@ fn plan_call(source: *SimSource, deadline_ms: u32) lazy.FetchError!void {
     const behaviour = source.behaviour;
     const random = sim.prng.random();
     assert(deadline_ms > 0);
+    source.calls += 1;
     if (sim.now_ms >= behaviour.cut_from_ms and sim.now_ms < behaviour.cut_to_ms) {
         sim.elapsed_ms = deadline_ms;
         return error.TimedOut;
@@ -406,6 +409,30 @@ pub fn run(sim: *Sim) void {
         assert(reader.state != .waiting);
     }
     check_end(sim);
+}
+
+fn teardown_unrun(sim: *Sim) void {
+    assert(!sim.resolver.schedule.stopping);
+    assert(sim.objects_count > 0);
+    sim.resolver.schedule.stop();
+    teardown(sim);
+}
+
+/// The object with the most chunks.
+fn longest_object(sim: *const Sim) u32 {
+    assert(sim.objects_count > 0);
+    var best: u32 = 0;
+    for (sim.objects[0..sim.objects_count], 0..) |*object, at| {
+        if (object.wanted.hashes.len > sim.objects[best].wanted.hashes.len) best = @intCast(at);
+    }
+    assert(sim.objects[best].wanted.hashes.len >= 3);
+    return best;
+}
+
+/// Frees what `setup` took; after `run` and any checks of the resolver's state.
+fn teardown(sim: *Sim) void {
+    assert(sim.resolver.schedule.stopping);
+    assert(sim.objects_count > 0);
     sim.resolver.deinit(std.heap.page_allocator);
 }
 
@@ -474,7 +501,7 @@ fn next_time(sim: *Sim) ?u64 {
     }
     for (&sim.readers) |*reader| switch (reader.state) {
         .idle => next = later(next, reader.next_at_ms, now, &stalled),
-        .waiting => next = later(next, reader.waiting.until_ms, now, &stalled),
+        .waiting => next = later(next, reader_wake(sim, reader), now, &stalled),
         .done => {},
     };
     if (sim.resolver.schedule.tick(now)) |wake| next = later(next, wake, now, &stalled);
@@ -483,6 +510,16 @@ fn next_time(sim: *Sim) ?u64 {
     if (next == null and !stalled) return null;
     if (sim.gc_at_ms != std.math.maxInt(u64)) next = later(next, sim.gc_at_ms, now, &stalled);
     return next orelse now + 10;
+}
+
+/// When a waiting reader looks again: at once when its entry settled (the broadcast), else at
+/// its time or its entry's deadline, whichever is first.
+fn reader_wake(sim: *Sim, reader: *const Reader) u64 {
+    assert(reader.state == .waiting);
+    const schedule = &sim.resolver.schedule;
+    if (schedule.stopping or schedule.settled_for(reader.waiting.ticket)) return sim.now_ms + 1;
+    const entry = schedule.entry_of(reader.waiting.ticket);
+    return @min(reader.waiting.until_ms, entry.deadline_ms);
 }
 
 fn later(current: ?u64, candidate: u64, now: u64, stalled: *bool) ?u64 {
@@ -724,6 +761,7 @@ pub fn fuzz_lazy_resolver(seed: u64) void {
     const scenario = random_scenario(prng.random());
     setup(&sim_state, seed, scenario);
     run(&sim_state);
+    teardown(&sim_state);
     assert(sim_state.reads_ok + sim_state.reads_failed > 0 or sim_state.objects_count > 0);
 }
 
@@ -739,6 +777,7 @@ test "sim: honest sources serve every read and the fill makes every object whole
             if (peers == 0 and !registry) continue;
             setup(&sim_state, 7 + peers, honest_scenario(peers, registry, true));
             run(&sim_state);
+            teardown(&sim_state);
             try std.testing.expect(sim_state.reads_ok > 0);
             try std.testing.expectEqual(@as(u32, 0), sim_state.reads_failed);
         }
@@ -751,6 +790,7 @@ test "sim: a peer that always lies is named once per object, told every time, an
     scenario.behaviours[0].lie_per_mille = 1000;
     setup(&sim_state, 11, scenario);
     run(&sim_state);
+    teardown(&sim_state);
     try std.testing.expect(sim_state.lies_sent[0] > 0);
     try std.testing.expectEqual(@as(u32, 0), sim_state.reads_failed);
     try std.testing.expectEqual(sim_state.lies_sent[0], sim_state.sources[0].lied_told);
@@ -762,6 +802,7 @@ test "sim: a registry that is cut fails reads on time, with their events" {
     scenario.behaviours[0].cut_to_ms = std.math.maxInt(u64);
     setup(&sim_state, 13, scenario);
     run(&sim_state);
+    teardown(&sim_state);
     try std.testing.expectEqual(@as(u32, 0), sim_state.reads_ok);
     try std.testing.expect(sim_state.reads_failed > 0);
 }
@@ -772,12 +813,57 @@ test "sim: a disk below the floor refuses reads with store_full" {
     scenario.free_bytes = 0;
     setup(&sim_state, 17, scenario);
     run(&sim_state);
+    teardown(&sim_state);
     try std.testing.expectEqual(@as(u32, 0), sim_state.reads_ok);
     var store_full: u32 = 0;
     for (sim_state.events[0..sim_state.events_count]) |logged| {
         store_full += @intFromBool(logged.event.kind == .store_full);
     }
     try std.testing.expect(store_full > 0);
+}
+
+test "sim: a chunk read again is served from the store, with no second fetch" {
+    setup(&sim_state, 19, honest_scenario(1, true, true));
+    run(&sim_state);
+    defer teardown(&sim_state);
+    var calls: u32 = 0;
+    for (sim_state.sources[0..2]) |source| calls += source.calls;
+    try std.testing.expect(calls > 0);
+    const resolver = &sim_state.resolver;
+    for (0..sim_state.objects_count) |object| {
+        const count = sim_state.objects[object].wanted.hashes.len;
+        for (0..count) |chunk| {
+            for (0..3) |_| {
+                var out: [chunk_bytes]u8 = undefined;
+                const at: u32 = @intCast(chunk);
+                const step = resolver.read_begin(@intCast(object), at, &out, 400_000);
+                const truth = chunk_bytes_of(&sim_state, @intCast(object), at);
+                try std.testing.expectEqual(truth.len, step.done);
+                try std.testing.expectEqualSlices(u8, truth, out[0..truth.len]);
+            }
+        }
+    }
+    var after: u32 = 0;
+    for (sim_state.sources[0..2]) |source| after += source.calls;
+    try std.testing.expectEqual(calls, after);
+    for (&resolver.schedule.pending) |*entry| try std.testing.expect(entry.state == .free);
+}
+
+test "schedule: a chunk read again keeps the sequential streak" {
+    setup(&sim_state, 23, honest_scenario(1, false, false));
+    defer teardown_unrun(&sim_state);
+    const schedule = &sim_state.resolver.schedule;
+    const object = longest_object(&sim_state);
+    schedule.note_read(object, 0, 0);
+    schedule.note_read(object, 0, 0);
+    schedule.note_read(object, 0, 0);
+    try std.testing.expectEqual(@as(u8, 1), schedule.objects[object].streak);
+    schedule.note_read(object, 1, 0);
+    schedule.note_read(object, 1, 0);
+    try std.testing.expectEqual(@as(u8, 2), schedule.objects[object].streak);
+    var queued: u32 = 0;
+    for (&schedule.pending) |*entry| queued += @intFromBool(entry.state == .queued);
+    try std.testing.expect(queued > 0); // Readahead started.
 }
 
 test "sim: seeds" {

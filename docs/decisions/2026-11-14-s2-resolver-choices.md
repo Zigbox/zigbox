@@ -35,8 +35,9 @@ questions before choosing. The rulings:
    per slot for the registry's HTTP client. `Range.fetch` writes into the `out` it is given, which
    is the slot's range buffer, so the client that implements it must not need a second one; that
    client is not in slice 3 (the simulation stands in for it), and its own buffers are counted
-   when it lands. Either way the run stays inside the brief's "under 128 MiB" with the
-   node table.
+   when it lands. The S2 budget for a lazy run is restated (supervisor, 2026-11-14) as about
+   140 MiB plus the index's trees section (at most `lazy_index_bytes_max`), which slice 4's node
+   table holds; the resolver's share above is unchanged.
 
 ## Also decided in slice 3
 

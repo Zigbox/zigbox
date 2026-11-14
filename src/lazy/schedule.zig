@@ -114,6 +114,8 @@ pub const Schedule = struct {
     events_count: u32,
     events_dropped: u64,
     stopping: bool,
+    /// Counts entries that landed or failed, so whoever ticks knows to wake the readers.
+    settled: u64,
     report: lazy.Report,
 
     /// `objects` holds one entry per catalog object.
@@ -145,6 +147,7 @@ pub const Schedule = struct {
             .events_count = 0,
             .events_dropped = 0,
             .stopping = false,
+            .settled = 0,
             .report = std.mem.zeroes(lazy.Report),
         };
         for (&schedule.pending) |*entry| entry.* = std.mem.zeroes(Pending);
@@ -249,6 +252,10 @@ pub const Schedule = struct {
         const state = &schedule.objects[object];
         const count = schedule.catalog.objects[object].wanted.hashes.len;
         assert(chunk < count);
+        if (schedule.stopping) return;
+        // The same chunk again (FUSE reads a chunk in several pieces when nothing caches it):
+        // neither a step forward nor a jump, so the streak stands.
+        if (state.streak > 0 and chunk + 1 == state.next_chunk) return;
         state.streak = if (chunk == state.next_chunk) state.streak +| 1 else 1;
         state.next_chunk = chunk + 1;
         if (state.streak < 2) return;
@@ -266,6 +273,7 @@ pub const Schedule = struct {
         assert(entry.state == .queued or entry.state == .fetching);
         assert(failure != .none);
         entry.state = .failed;
+        schedule.settled += 1;
         entry.failure = failure;
         if (entry.wanted and failure == .unavailable) {
             schedule.emit(.unavailable, entry.object, entry.chunk, "", &entry.outcomes);
@@ -624,6 +632,7 @@ pub const Schedule = struct {
         assert(entry.state == .queued);
         assert(result == .landed or result == .local);
         entry.state = .landed;
+        schedule.settled += 1;
         if (result == .landed) {
             const wanted = &schedule.catalog.objects[entry.object].wanted;
             const length = chunk_length(wanted, schedule.chunk_bytes, entry.chunk);
@@ -684,6 +693,14 @@ pub const Schedule = struct {
         const outcomes: [sources_max]lazy.Outcome = @splat(.not_tried);
         schedule.emit(.unavailable, object, chunk, "", &outcomes);
         schedule.report.errors += 1;
+    }
+
+    /// Whether a reader holding `ticket` has something to look at (its entry landed or failed).
+    pub fn settled_for(schedule: *const Schedule, ticket: Ticket) bool {
+        const entry = schedule.entry_of(ticket);
+        assert(entry.state != .free);
+        assert(entry.waiters > 0);
+        return entry.state == .landed or entry.state == .failed;
     }
 
     /// Fill entries waiting for a slot.

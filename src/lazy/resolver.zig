@@ -236,23 +236,28 @@ pub const Resolver = struct {
                 .done => |length| return length,
                 .failed => |err| return err,
                 .wait => |waiting| {
-                    resolver.wait_until(waiting.until_ms);
+                    resolver.wait_until(waiting.ticket, waiting.until_ms);
                     step = resolver.read_poll(waiting.ticket, out, now_ms(io));
                 },
             }
         }
     }
 
-    fn wait_until(resolver: *Resolver, until_ms: u64) void {
+    /// Sleeps until the entry settles or `until_ms`. The entry is checked under the lock, so a
+    /// broadcast between the reader's poll and this wait is not lost; the entry's deadline,
+    /// which can only shrink, bounds the sleep too.
+    fn wait_until(resolver: *Resolver, ticket: Ticket, until_ms: u64) void {
         const io = resolver.io.?;
-        const now = now_ms(io);
         assert(until_ms < 1 << 62);
-        if (until_ms <= now) return;
         resolver.mutex.lockUncancelable(io);
         defer resolver.mutex.unlock(io);
         if (resolver.schedule.stopping) return;
+        if (resolver.schedule.settled_for(ticket)) return;
+        const now = now_ms(io);
+        const until = @min(until_ms, resolver.schedule.entry_of(ticket).deadline_ms);
+        if (until <= now) return;
         const wait: Io.Timeout = .{ .duration = .{
-            .raw = .fromMilliseconds(@intCast(until_ms - now)),
+            .raw = .fromMilliseconds(@intCast(until - now)),
             .clock = .awake,
         } };
         resolver.readers.waitTimeout(io, &resolver.mutex, wait) catch {};
@@ -269,7 +274,15 @@ pub const Resolver = struct {
         const wanted = &resolver.options.catalog.objects[object].wanted;
         assert(chunk < wanted.hashes.len);
         assert(out.len >= schedule_mod.chunk_length(wanted, resolver.options.store.chunk_bytes, chunk));
-        if (resolver.read_store(object, chunk, out)) |length| return .{ .done = length };
+        if (resolver.read_store(object, chunk, out)) |length| {
+            // Local already (resolved before, or another image's): no fetch, but the read still
+            // counts towards sequential readahead.
+            resolver.lock();
+            resolver.schedule.note_read(object, chunk, now);
+            resolver.wake_workers();
+            resolver.unlock();
+            return .{ .done = length };
+        }
         return resolver.ask(object, chunk, now);
     }
 
@@ -363,7 +376,10 @@ pub const Resolver = struct {
             const taken = while (true) {
                 if (resolver.schedule.stopping) break false;
                 const now = now_ms(io);
+                const settled = resolver.schedule.settled;
                 const wake = resolver.schedule.tick(now);
+                // A deadline the tick failed is news to its readers.
+                if (resolver.schedule.settled != settled) resolver.readers.broadcast(io);
                 if (resolver.slot_take(slot, &work, now)) break true;
                 const wait_ms = if (wake) |at| @max(at, now + 1) - now else constants.lazy_down_probe_ms;
                 const timeout: Io.Timeout = .{ .duration = .{
