@@ -7,7 +7,11 @@ calls as recommended on 2026-11-14. The brief is
 [docs/briefs/S2-lazy-start.md](../briefs/S2-lazy-start.md); it holds the detail and the reasons.
 The decided design:
 
-**Sequencing.** The owner ruled on 2026-11-14 that S2 (lazy start) is built after Zigbox 0.5.2, and that S1 (microVM isolation) is deferred until S2 ships. Call 2's split of S1's EROFS writer is done when S1 starts, not now. Call 13 stands: Zigcube's supervisor checks the `zigbox.lazy.Source` interface against Zigcube's swarm before slice 3.
+**Sequencing.** The owner ruled on 2026-11-14 that S2 (lazy start) is built in parallel with Zigbox
+0.5.2; slices 1 to 4 start at once, each coding against the interfaces this brief fixes, and slice 5
+waits for all four, and that S1 (microVM isolation) is deferred until S2 ships. Call 2's split of
+S1's EROFS writer is done when S1 starts, not now. Call 13 stands: Zigcube's supervisor checks the
+`zigbox.lazy.Source` interface against Zigcube's swarm before slice 3.
 
 1. **Namespace containers use rootless FUSE**, a read-only server written in Zig against
    `/dev/fuse` (no libc, no libfuse, no `fusermount3`), mounted with `mount(2)` by the setup child
