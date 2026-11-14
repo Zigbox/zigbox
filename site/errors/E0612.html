@@ -76,7 +76,7 @@ footer{border-top:1px solid var(--line);padding-block:24px;color:var(--muted);
 <p class="summary">the hosts file cannot be bound at /etc/hosts</p>
 <dl class="facts"><div><dt>Kind</dt><dd>error</dd></div><div><dt>Blame</dt><dd>user</dd></div><div><dt>Exit code</dt><dd>1 (125 in zbx run)</dd></div></dl>
 <h2>What it means</h2>
-<p>--hosts-file binds a file you own, read-only, at /etc/hosts in place of the one zbx generates. It is refused for a container with a network (a container with --net user or --net host resolves names through DNS, and a hosts file would shadow it), for a path that is not absolute, and for a path that is missing, not a regular file, or not readable by you when the container starts.</p>
+<p>--hosts-file binds a file you own, read-only, at /etc/hosts in place of the one zbx generates. It is refused for a container with a network (a container with --net user or --net host resolves names through DNS, and a hosts file would shadow it), for a path that is not absolute, and for a path that is missing, not a regular file, not readable by you, or that cannot be followed to a file (a loop of symbolic links) or read when the container starts. The cause says which.</p>
 <p>The file itself is bound, not a copy: rewriting it in place is seen inside at once, replacing it by renaming another file over it is not. The path is not kept in the container's run record, so nothing that reads the record (zbx ps, a bundle, an agent that adopts the container) learns it, and a container run again gets it only if it is given again. /etc/resolv.conf and /etc/hostname are generated as before.</p>
 <h2>Offline</h2>
 <p>The same text, without a network:</p>
