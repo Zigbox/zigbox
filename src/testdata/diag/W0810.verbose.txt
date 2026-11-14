@@ -1,0 +1,9 @@
+warning[ZBX-W0810]: the import has steps that are not hermetic
+  while  importing the Dockerfile
+  cause  their output can depend on the network or a cache, not only on the
+         inputs
+  cause  steps not hermetic: "build-2" (net, matched "apk add")
+  steps  1
+  fix    pin what each step fetches; zbx import --hermetic refuses such steps
+  more   zbx explain W0810
+  docs   https://zigbox.github.io/zigbox/errors/W0810.html

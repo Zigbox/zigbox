@@ -1,0 +1,45 @@
+// Imported by `zbx import` from Dockerfile: target stage0, --network detect.
+// Edit this file from here on: `zbx build` reads it, not the Dockerfile.
+.{
+    .version = 1,
+    .steps = .{
+        // Dockerfile:4  COPY main.go .
+        .{
+            .name = "stage0-1",
+            .base = "golang:1.22",
+            .copy = .{
+                .{ .src = .{ "main.go" }, .to = "/app/" },
+            },
+        },
+        // Dockerfile:5  COPY go.mod ..
+        .{
+            .name = "stage0-2",
+            .base = "step:stage0-1",
+            .copy = .{
+                .{ .src = .{ "go.mod" }, .to = "/" },
+            },
+        },
+        // Dockerfile:6  COPY go.sum ./
+        .{
+            .name = "stage0-3",
+            .base = "step:stage0-2",
+            .copy = .{
+                .{ .src = .{ "go.sum" }, .to = "/app/" },
+            },
+        },
+        // Dockerfile:7  COPY README.md docs
+        .{
+            .name = "stage0-4",
+            .base = "step:stage0-3",
+            .copy = .{
+                .{ .src = .{ "README.md" }, .to = "/app/docs" },
+            },
+        },
+    },
+    .image = .{
+        .base = "step:stage0-4",
+        .config = .{
+            .workdir = "/app",
+        },
+    },
+}

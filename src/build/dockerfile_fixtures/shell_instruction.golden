@@ -1,0 +1,20 @@
+// Imported by `zbx import` from Dockerfile: target stage0, --network detect.
+// Edit this file from here on: `zbx build` reads it, not the Dockerfile.
+.{
+    .version = 1,
+    .steps = .{
+        // Dockerfile:4  RUN echo "${HOSTNAME:-none}" | tee /host
+        .{
+            .name = "stage0-1",
+            .base = "debian:bookworm-slim",
+            .run = .{ "/bin/bash", "-o", "pipefail", "-c", "echo \"${HOSTNAME:-none}\" | tee /host" },
+            .output = .root,
+        },
+    },
+    .image = .{
+        .base = "step:stage0-1",
+        .config = .{
+            .cmd = .{ "/bin/bash", "-o", "pipefail", "-c", "echo running" },
+        },
+    },
+}

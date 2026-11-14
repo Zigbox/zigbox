@@ -1,0 +1,39 @@
+// Imported by `zbx import` from Dockerfile: target stage0, --network detect.
+// Edit this file from here on: `zbx build` reads it, not the Dockerfile.
+.{
+    .version = 1,
+    .steps = .{
+        // Dockerfile:4  RUN adduser -D ${APP_USER}
+        .{
+            .name = "stage0-1",
+            .base = "alpine:3.20",
+            .env = .{ "APP_USER=app" },
+            .run = .{ "/bin/sh", "-c", "adduser -D ${APP_USER}" },
+            .output = .root,
+        },
+        // Dockerfile:6  RUN whoami > /tmp/by-name
+        .{
+            .name = "stage0-2",
+            .base = "step:stage0-1",
+            .env = .{ "APP_USER=app" },
+            .run = .{ "/bin/sh", "-c", "whoami > /tmp/by-name" },
+            .output = .root,
+            .user = "app",
+        },
+        // Dockerfile:8  RUN id > /tmp/numeric
+        .{
+            .name = "stage0-3",
+            .base = "step:stage0-2",
+            .env = .{ "APP_USER=app" },
+            .run = .{ "/bin/sh", "-c", "id > /tmp/numeric" },
+            .output = .root,
+            .user = "1000:1000",
+        },
+    },
+    .image = .{
+        .base = "step:stage0-3",
+        .config = .{
+            .user = "app",
+        },
+    },
+}

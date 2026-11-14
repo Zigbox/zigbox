@@ -227,6 +227,15 @@ pub const Code = enum(u8) {
     E0817,
     E0818,
     W0802,
+    E0810,
+    E0811,
+    E0812,
+    E0813,
+    E0814,
+    E0815,
+    E0816,
+    W0810,
+    W0811,
     E0901,
     E0902,
     E0903,
@@ -3628,6 +3637,169 @@ pub const registry = [_]Entry{
         ,
     },
     .{
+        .code = .E0810,
+        .severity = .@"error",
+        .blame = .user,
+        .summary = "the Dockerfile can't be read",
+        .explanation =
+        \\zbx import reads a Dockerfile (./Dockerfile, the one named, or Dockerfile in
+        \\--context) and translates it into a build file. It is refused when the file
+        \\is not there, cannot be read or is larger than 256 KiB, and when its text is
+        \\not a Dockerfile: an unknown instruction, a line continued past the end, a
+        \\heredoc with no end, a bad escape directive, or an instruction missing its
+        \\arguments.
+        \\
+        \\The cause names the line and what was expected there. Nothing is written: an
+        \\import that is refused leaves the project as it was.
+        ,
+    },
+    .{
+        .code = .E0811,
+        .severity = .@"error",
+        .blame = .user,
+        .summary = "a Dockerfile instruction or flag is not supported",
+        .explanation =
+        \\zbx import translates what a build file can say the same way, and refuses
+        \\the rest rather than guess: ADD from a URL, a git repository or a local
+        \\archive, a RUN --mount of a secret, an ssh agent or a tmpfs, a bind from the
+        \\context or an image, --network=host, --security=insecure, --device, ONBUILD,
+        \\COPY heredocs and --parents, FROM --platform for another platform, FROM
+        \\scratch with steps, and the pattern forms of variable substitution (${X#p}
+        \\and the like).
+        \\
+        \\The cause names the instruction or flag and its line; the fix says what to
+        \\write instead, often a RUN that fetches with a checksum. Where zbx differs
+        \\from Docker: steps run rootless, with a fixed environment and timestamps;
+        \\there is no daemon cache, only the store's; a RUN with no detected fetch has
+        \\no network; and image references are pinned once in zbx.lock and never
+        \\re-resolved by a build.
+        ,
+    },
+    .{
+        .code = .E0812,
+        .severity = .@"error",
+        .blame = .user,
+        .summary = "a Dockerfile variable has no value",
+        .explanation =
+        \\zbx import substitutes variables where Docker does (FROM, COPY, ADD, ENV,
+        \\WORKDIR, USER, LABEL and the rest, never in a RUN's text), and resolves each
+        \\ARG once, at import: from --build-arg, else from its default. An ARG that is
+        \\used but has neither has no value, and a ${X?message} or ${X:?message} whose
+        \\variable is unset refuses the import as Docker refuses the build.
+        \\
+        \\The cause names the variable and its line. Give the value on the command
+        \\line with --build-arg NAME=VALUE, or a default in the Dockerfile (ARG
+        \\NAME=VALUE).
+        ,
+    },
+    .{
+        .code = .E0813,
+        .severity = .@"error",
+        .blame = .user,
+        .summary = "a Dockerfile stage can't be used",
+        .explanation =
+        \\A Dockerfile's stages become chains of steps, each named after its stage
+        \\(<stage>-<n>, the name lowered and cut to [a-z0-9-], stage<i> for an unnamed
+        \\one). The import is refused when --target names no stage, when a FROM, COPY
+        \\--from or --mount from names a stage that is not defined before it, when the
+        \\stages use each other in a cycle, and when two stages' names give the same
+        \\step names: zbx never renames a step silently.
+        \\
+        \\The cause names the stage and its line. Rename one of two colliding stages,
+        \\or give --target one of the stages the Dockerfile defines.
+        ,
+    },
+    .{
+        .code = .E0814,
+        .severity = .@"error",
+        .blame = .user,
+        .summary = "--hermetic refused a step",
+        .explanation =
+        \\zbx import --hermetic refuses a translation in which any step would have the
+        \\network or a cache mount, because such a step's output can depend on more
+        \\than its inputs. A RUN gets the network when it says --network=default and
+        \\the import's --network is all, or when --network detect finds a fetching
+        \\command in its text (apk add, apt-get, pip install, go mod download, curl
+        \\and the rest of the checked-in table); a RUN --mount=type=cache gets a
+        \\cache. A bind from another stage's step is not refused: that step's output
+        \\is an input of the build, so it is hermetic.
+        \\
+        \\The cause names the first such line and why. Nothing is written. Drop
+        \\--hermetic to import with the steps flagged (W0810), or change the step:
+        \\fetch the files once, outside the build, and copy them in.
+        ,
+    },
+    .{
+        .code = .E0815,
+        .severity = .@"error",
+        .blame = .user,
+        .summary = "the Dockerfile is larger than a build file holds",
+        .explanation =
+        \\A build file has bounds: 256 steps, each with bounded arguments,
+        \\environment, copies, caches and binds, and the whole file in bounded text.
+        \\The import also bounds what it reads: 2048 instructions, 64 stages, 256
+        \\words in one instruction, 256 variables and 64 build arguments. A Dockerfile
+        \\whose translation would pass one of them is refused rather than cut.
+        \\
+        \\The cause names the bound, the count and the line. Split the Dockerfile into
+        \\two builds, the second starting from the image of the first, or join RUN
+        \\instructions with &&.
+        ,
+    },
+    .{
+        .code = .E0816,
+        .severity = .@"error",
+        .blame = .user,
+        .summary = "the build file can't be written",
+        .explanation =
+        \\zbx import writes the build file to zbx.build.zon in the context directory,
+        \\or to -o's path. A file already there is never replaced unless --force is
+        \\given, since it may be a build file written by hand. The file is written
+        \\whole or not at all, so a write that fails (a directory that cannot be
+        \\written, a full disk) leaves what was there.
+        \\
+        \\The cause names the path. Give --force to replace the file, or -o to write
+        \\another one.
+        ,
+    },
+    .{
+        .code = .W0810,
+        .severity = .warning,
+        .blame = .user,
+        .summary = "the import has steps that are not hermetic",
+        .explanation =
+        \\Each step that the import gave the network or a cache mount can produce
+        \\different bytes on another day or another machine. The report marks each
+        \\one, with why: net with the word that matched (--network detect), net with
+        \\the flag that asked for it, or cache. The build warns of them again (W0801,
+        \\W0802).
+        \\
+        \\The cause names the steps. Pin what each one fetches (a version, or a
+        \\checksum the command verifies), or fetch it once outside the build and copy
+        \\it in; zbx import --hermetic refuses an import that still has such steps.
+        ,
+    },
+    .{
+        .code = .W0811,
+        .severity = .warning,
+        .blame = .user,
+        .summary = "parts of the Dockerfile did not carry over",
+        .explanation =
+        \\Some instructions have no step or setting of their own in a build file.
+        \\EXPOSE, VOLUME, HEALTHCHECK, STOPSIGNAL and MAINTAINER become labels of the
+        \\image (org.zigbox.import.expose and the like, the value as written). The
+        \\syntax and check directives, COPY --link, RUN --security=sandbox, a cache's
+        \\sharing mode, the BUILDKIT_* and SOURCE_DATE_EPOCH arguments, and an ENV of
+        \\a variable the build fixes are ignored: the builder has their meaning
+        \\already, or keeps its own. A COPY's --chown or --chmod, a COPY --from an
+        \\image, and --exclude on a COPY --from a stage are kept in the build file,
+        \\but zbx build does not run them yet (E0802), so the list names them too.
+        \\
+        \\The cause names each part. Read the list to be sure none of them matters to
+        \\the image, and change any copy that zbx build would refuse.
+        ,
+    },
+    .{
         .code = .E0901,
         .severity = .@"error",
         .blame = .user,
@@ -4442,6 +4614,7 @@ pub fn can_end_run(code: Code) bool {
         .E0527, .E0528, .E0529, .E0530, .E0531, .E0532, .E0533, .E0534, .E0535 => false,
         .E0801, .E0802, .E0803, .E0804, .E0805, .E0806, .E0807, .W0801 => false,
         .E0808, .E0817, .E0818, .W0802 => false,
+        .E0810, .E0811, .E0812, .E0813, .E0814, .E0815, .E0816, .W0810, .W0811 => false,
         .E0901, .E0902, .E0908, .E0909, .E0910, .E0911, .W0901, .W0902, .W0903 => false,
         .E1006, .E1007 => false,
         .E0220, .E0221, .E0222, .E0223, .E0224, .E0225, .E0226, .E0227 => false,
