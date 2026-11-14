@@ -1797,9 +1797,15 @@ var passwd_large: [@import("../image_user.zig").passwd_bytes_max + 1]u8 = undefi
 test "a passwd larger than zbx reads is named too large, for a copy's .chown and for .user" {
     // Goal: a name looked up in a passwd past its bound says the file is too large, not that the
     // name is missing. Method: a passwd one byte past 128 KiB that names `app` on its second
-    // line; `.chown = "app"` and then the image's `.user = "app"` against that base.
+    // line; `.chown = "app"` and then the image's `.user = "app"` against that base. At the
+    // bound, 128 KiB, the same passwd is read and `app` found.
     @memset(&passwd_large, '\n');
     @memcpy(passwd_large[0..owned_passwd.len], owned_passwd);
+    try owned_copy_loaded_with("app", "", passwd_large[0 .. passwd_large.len - 1]);
+    try owned_base_built();
+    try testing.expect(try context.begin(1) == .hit);
+    const at_bound = try owned_entry(composed.outputs[1], &.{ "opt", "app", "a.txt" });
+    try testing.expectEqual(@as(u32, 1001), at_bound.gid);
     try owned_copy_loaded_with("app", "", &passwd_large);
     try owned_base_built();
     try testing.expectError(error.Failed, context.begin(1));
