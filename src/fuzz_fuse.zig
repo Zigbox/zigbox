@@ -55,6 +55,7 @@ var reached: struct {
     reads_failed: u32 = 0,
     listings: u32 = 0,
     refused: u32 = 0,
+    sizes_forged: u32 = 0,
 } = .{};
 
 /// Attribute sections a file may carry, all valid and sorted.
@@ -458,7 +459,15 @@ fn check_read(server: *const ops.Server, nodeid: u64, body: []const u8, data: []
     assert(found.kind == .file);
     const in = std.mem.bytesToValue(abi.ReadIn, body[0..@sizeOf(abi.ReadIn)]);
     const content = fixture.content_of(found.digest).?;
-    assert(content.len == found.size);
+    if (content.len != found.size) {
+        // A damaged root that still decodes gave the object another size (an index carrying it
+        // is refused by `resolver.check_objects`); whatever is served is still the object's own.
+        reached.sizes_forged += 1;
+        if (data.len == 0) return;
+        assert(in.offset + data.len <= content.len);
+        assert(std.mem.eql(u8, data, content[@intCast(in.offset)..][0..data.len]));
+        return;
+    }
     if (in.offset >= content.len) {
         assert(data.len == 0);
         return;
