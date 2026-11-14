@@ -689,6 +689,8 @@ fn add_fuse_kernel_test(
         .target = target,
         .optimize = .ReleaseSafe,
         .link_libc = false,
+        // Stripped, to fit the harness's 8 MiB body (`http_body_bytes_max`); asserts stay on.
+        .strip = true,
         .imports = &.{.{ .name = "build_options", .module = options.createModule() }},
     });
     // The test's imports bring their own files' tests along; the guest runs this one alone.
