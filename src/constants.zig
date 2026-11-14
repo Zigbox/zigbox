@@ -779,6 +779,8 @@ pub const sim_fs_pool_bytes_max: u32 = 3 * 1024 * 1024;
 // The `lazy_index` fuzzer's own pool (`SimFs.use_pool`): its incompressible file of up to three
 // chunks, the imported object and two packed layers of it.
 pub const sim_fs_pool_lazy_fuzz_bytes_max: u32 = 24 * 1024 * 1024;
+// The `chaining` fuzzer's longest input: 256 runs of its shortest run size, the BLAKE3 piece.
+pub const fuzz_chaining_bytes_max: u32 = 256 * 1024;
 pub const sim_fs_handles_max: u32 = 8;
 
 // Registry and pull (M4, docs/briefs/M4-pull.md). Every byte a registry sends is bounded: it is
@@ -1990,7 +1992,7 @@ comptime {
 // ---- Lazy start (S2, docs/briefs/S2-lazy-start.md) ----------------------------------------
 
 /// The longest lazy index taken; a longer one is refused as too large (`E1207`). A 4 GiB file's
-/// chunk list is about 200 KiB; 64 MiB is far beyond any real image.
+/// chunk list is 4,096 records of 80 bytes, about 320 KiB; 64 MiB is far beyond any real image.
 pub const lazy_index_bytes_max: u32 = 64 * 1024 * 1024;
 
 /// The most names (paths) a tree started lazily may have: the FUSE node table, fixed at start. A

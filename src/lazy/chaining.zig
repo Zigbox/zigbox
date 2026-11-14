@@ -232,7 +232,7 @@ pub const Subtree = struct {
     /// The run's chaining value. With `root`, the hash of the input instead: right only when the
     /// run is the whole input (ordinal 0); the tests use it to check this file against std.
     pub fn final(subtree: *Subtree, root: bool) Digest {
-        assert(subtree.total >= 1 or root);
+        if (!root) assert(subtree.total >= 1);
         assert(subtree.block_len <= block_bytes);
         var flags: u32 = flag_chunk_end;
         if (subtree.blocks_done == 0) flags |= flag_chunk_start;

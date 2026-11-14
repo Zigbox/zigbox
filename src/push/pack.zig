@@ -615,7 +615,12 @@ fn write_stream(
     finished catch return failed(failure, wrote(ws, tree));
     if (out.index) |*anchor| {
         anchor.length = ws.file_sink.bytes + ws.file_sink.writer.end - anchor.offset;
-        anchor.check() catch unreachable; // The recorder kept the index within its bounds.
+        // The recorder kept `size` within `lazy_index_bytes_max`. `length` holds the index's
+        // deflated bytes, then at most 1,536 bytes of tar padding and end blocks, the flush and
+        // the 8-byte gzip footer. Std's deflate writes each block in the shortest of stored
+        // (5 bytes a 64 KiB block), fixed (at most 9 bits a byte) and dynamic codes, so the
+        // whole is at most 9/8 of the index plus a few KiB: within `compressed_bytes_max`.
+        anchor.check() catch unreachable;
     }
     if (lazy) ws.tar_tee.crc.writeFooter(&ws.file_sink.writer) catch
         return failed(failure, wrote(ws, tree));

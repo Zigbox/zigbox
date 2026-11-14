@@ -156,7 +156,6 @@ const DescriptorJson = struct {
     digest: ?[]const u8 = null,
     size: ?u64 = null,
     platform: ?PlatformJson = null,
-    annotations: ?LayerAnnotationsJson = null,
 };
 
 /// An `annotations` member read for one annotation, `name`, whose text `parse` reads into a `T`.
@@ -279,7 +278,6 @@ fn read_text(source: anytype, buffer: []u8) !?[]const u8 {
 }
 
 const DocumentJson = struct {
-    annotations: ?AnnotationsJson = null,
     schemaVersion: ?i64 = null,
     mediaType: ?[]const u8 = null,
     manifests: ?[]const DescriptorJson = null,
@@ -292,7 +290,36 @@ const DocumentJson = struct {
 pub const Document = struct {
     media: MediaType,
     json: DocumentJson,
+    notes: NotesJson,
 };
+
+/// The annotations zbx reads, in a pass of their own over the same body. They are only claims,
+/// so a repeated `annotations` member on the manifest, a layer or the config never refuses the
+/// document: the first is read (std's `use_first`). Every other member stays strict, a repeat
+/// of it `Malformed`, so two readers cannot take two different digests from one manifest.
+const NotesJson = struct {
+    annotations: ?AnnotationsJson = null,
+    layers: ?[]const LayerNotesJson = null,
+};
+
+const LayerNotesJson = struct {
+    annotations: ?LayerAnnotationsJson = null,
+};
+
+fn parse_notes(arena: std.mem.Allocator, body: []const u8) ParseError!NotesJson {
+    assert(body.len <= constants.registry_manifest_bytes_max);
+    assert(@intFromPtr(arena.vtable) != 0);
+    const options: std.json.ParseOptions = .{
+        .ignore_unknown_fields = true,
+        .duplicate_field_behavior = .use_first,
+    };
+    return std.json.parseFromSliceLeaky(NotesJson, arena, body, options) catch |err| {
+        return switch (err) {
+            error.OutOfMemory => error.TooComplex,
+            else => error.Malformed,
+        };
+    };
+}
 
 fn parse_json(arena: std.mem.Allocator, body: []const u8) ParseError!DocumentJson {
     assert(body.len <= constants.registry_manifest_bytes_max);
@@ -330,8 +357,9 @@ pub fn parse_document(
     } else {
         if (json.config == null) return error.Malformed;
     }
+    const notes = try parse_notes(arena, body);
     assert(problem.text.len == 0);
-    return .{ .media = media, .json = json };
+    return .{ .media = media, .json = json, .notes = notes };
 }
 
 fn name_media(problem: *Problem, text: ?[]const u8) void {
@@ -536,7 +564,7 @@ pub fn read_manifest(
         return error.UnknownMediaType;
     }
     resolved.tree_note = null;
-    if (document.json.annotations) |notes| resolved.tree_note = notes.value;
+    if (document.notes.annotations) |notes| resolved.tree_note = notes.value;
     resolved.config_digest = try descriptor_digest(config, problem);
     resolved.config_size = config.size orelse return error.BadDescriptor;
     if (resolved.config_size == 0) return error.BadDescriptor;
@@ -563,8 +591,10 @@ pub fn read_manifest(
     resolved.layer_count = @intCast(layers.len);
     assert(resolved.layer_count <= constants.registry_layers_max);
     resolved.lazy_index = null;
-    if (layers.len > 0) {
-        if (layers[0].annotations) |notes| resolved.lazy_index = notes.value;
+    const noted = document.notes.layers orelse &.{};
+    assert(noted.len == layers.len); // The same body, read twice.
+    if (noted.len > 0) {
+        if (noted[0].annotations) |notes| resolved.lazy_index = notes.value;
     }
 }
 
@@ -888,6 +918,31 @@ test "the first layer's lazy-index annotation is read when exact, and ignored ot
         try read_in(body, &resolved, &problem);
         try testing.expect(resolved.lazy_index == null);
     }
+}
+
+test "a repeated annotations member never refuses a manifest, and other repeats still do" {
+    // Goal: annotations are claims, so a repeat of the member on a layer, on the config or on
+    // the manifest reads the first and keeps the image; a repeated digest is still `Malformed`.
+    const anchor = comptime "offset=10 length=20 size=72 digest=b3:" ++ repeat('c', 64);
+    const notes = ",\"annotations\":{\"org.zigbox.lazy-index\":\"" ++ anchor ++ "\"}";
+    const layer = comptime describe(media_oci_layer_gzip, one, 11) ++ notes ++ notes ++ "}";
+    const config = comptime "\"config\":" ++ describe(media_oci_config, zero, 7) ++
+        ",\"annotations\":{},\"annotations\":{\"a\":\"b\"}}";
+    var resolved: Resolved = undefined;
+    var problem: Problem = .{};
+    const noted = "{\"schemaVersion\":2," ++ config_member ++ ",\"layers\":[" ++ layer ++ "]}";
+    try read_in(noted, &resolved, &problem);
+    const found = resolved.lazy_index orelse return error.TestUnexpectedResult;
+    try testing.expectEqual(@as(u64, 10), found.offset);
+    try read_in("{\"schemaVersion\":2," ++ config ++ ",\"layers\":[]}", &resolved, &problem);
+    try testing.expect(resolved.lazy_index == null);
+    const twice = "{\"annotations\":{},\"schemaVersion\":2," ++ config_member ++
+        ",\"layers\":[],\"annotations\":{}}";
+    try read_in(twice, &resolved, &problem);
+    try testing.expect(resolved.tree_note == null);
+    const digest_twice = comptime "{" ++ config_member ++ ",\"layers\":[" ++
+        describe(media_oci_layer_gzip, one, 11) ++ ",\"digest\":\"" ++ one ++ "\"}]}";
+    try testing.expectError(error.Malformed, read_in(digest_twice, &resolved, &problem));
 }
 
 test "a manifest with a type, digest or size it cannot use is refused" {

@@ -162,6 +162,7 @@ test {
     _ = @import("push/pack.zig");
     _ = @import("fuzz_pack.zig");
     _ = @import("fuzz_lazy_index.zig");
+    _ = @import("fuzz_chaining.zig");
     _ = @import("push/pack_tests.zig");
     _ = @import("lazy/chaining.zig");
     _ = @import("lazy/index.zig");
