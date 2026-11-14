@@ -1324,6 +1324,10 @@ pub fn hosts_file_invalid(diag: *Diag, problem: spec.HostsFileProblem, path: []c
         .missing => diag.cause("--hosts-file '{s}' does not exist", .{echo}),
         .not_a_file => diag.cause("--hosts-file '{s}' is not a regular file", .{echo}),
         .unreadable => diag.cause("--hosts-file '{s}' cannot be read by this user", .{echo}),
+        .lookup_failed => diag.cause("--hosts-file '{s}' cannot be followed to a file " ++
+            "(a loop of symbolic links, a name too long, or a file system error)", .{echo}),
+        .read_failed => diag.cause("--hosts-file '{s}' could not be read " ++
+            "(a file system error, not a permission)", .{echo}),
     }
     diag.fix(.{
         .sentence = "give the absolute path of a hosts file you own, with --net none:",

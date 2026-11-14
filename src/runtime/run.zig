@@ -1002,12 +1002,16 @@ fn hosts_file_look(host: Host, path: []const u8) ?spec_mod.HostsFileProblem {
     assert(path.len > 0);
     assert(path.len <= constants.mount_path_bytes_max);
     const found = host.stat(path) catch |err| switch (err) {
-        error.NotFound => return .missing,
-        else => return .unreadable, // A directory on the path this user cannot search.
+        error.NotFound => return .missing, // ENOENT, or ENOTDIR: a file where a directory is.
+        error.AccessDenied => return .unreadable, // A directory this user cannot search.
+        else => return .lookup_failed, // ELOOP, ENAMETOOLONG, EIO: not a permission problem.
     };
     if (found.mode & 0o170000 != 0o100000) return .not_a_file;
     var first: [1]u8 = undefined;
-    _ = host.read_prefix(path, &first) catch return .unreadable;
+    _ = host.read_prefix(path, &first) catch |err| switch (err) {
+        error.AccessDenied => return .unreadable,
+        else => return .read_failed,
+    };
     return null;
 }
 

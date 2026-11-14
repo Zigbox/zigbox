@@ -284,7 +284,13 @@ pub const HostsFileProblem = enum {
     too_long,
     missing,
     not_a_file,
+    /// Permission: a directory on the path this user cannot search, or a file it cannot read.
     unreadable,
+    /// The path cannot be followed to a file: a loop of symbolic links, a name too long, or
+    /// an error of the file system.
+    lookup_failed,
+    /// The file was found but reading it failed for a reason other than permission.
+    read_failed,
 };
 
 /// The problems of a hosts file path that need no look at the host.

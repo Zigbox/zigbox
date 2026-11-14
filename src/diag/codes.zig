@@ -3173,8 +3173,9 @@ pub const registry = [_]Entry{
         \\one zbx generates. It is refused for a container with a network (a
         \\container with --net user or --net host resolves names through DNS, and a
         \\hosts file would shadow it), for a path that is not absolute, and for a
-        \\path that is missing, not a regular file, or not readable by you when the
-        \\container starts.
+        \\path that is missing, not a regular file, not readable by you, or that
+        \\cannot be followed to a file (a loop of symbolic links) or read when the
+        \\container starts. The cause says which.
         \\
         \\The file itself is bound, not a copy: rewriting it in place is seen inside
         \\at once, replacing it by renaming another file over it is not. The path is

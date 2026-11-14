@@ -6,6 +6,7 @@
 const std = @import("std");
 const codes = @import("../diag/codes.zig");
 const constants = @import("../constants.zig");
+const host_mod = @import("../host.zig");
 const host_sim = @import("../host_sim.zig");
 const sim_run = @import("sim_run.zig");
 
@@ -117,3 +118,41 @@ test "--hosts-file: a bind of the given file that fails is a failed start, not a
     }
     try testing.expect(found);
 }
+
+test "--hosts-file: a look that fails is worded by its cause, not always as permission" {
+    // Goal: only a permission error reads "cannot be read by this user". Method: fail each host
+    // call of a run in turn, once with an I/O error and once with EACCES, until the failure
+    // lands on the hosts file's stat and on its first read. An I/O error there names the path
+    // problem or the failed read; EACCES names this user. Each is E0612 and starts nothing.
+    const errors = [_]host_mod.Error{ error.IoFailed, error.AccessDenied };
+    const wanted = [_][2][]const u8{
+        .{ "cannot be followed to a file", "could not be read (a file system error" },
+        .{ "cannot be read by this user", "cannot be read by this user" },
+    };
+    for (errors, wanted) |err, words| {
+        var found_stat = false;
+        var found_read = false;
+        for (0..calls_walked_max) |index| {
+            var sim: HostSim = undefined;
+            prepared(&sim, 84);
+            sim.faults.fail_call_index = sim.call_count + @as(u32, @intCast(index));
+            sim.faults.fail_call_error = err;
+            _ = run_with(&sim, "none", hosts_path);
+            const stderr = sim.stderr();
+            if (std.mem.indexOf(u8, stderr, "ZBX-E0612") == null) continue;
+            try testing.expect(!sim.world.processes[1].execd);
+            if (err == error.IoFailed) {
+                try testing.expect(std.mem.indexOf(u8, stderr, "by this user") == null);
+            }
+            if (std.mem.indexOf(u8, stderr, words[0]) != null) found_stat = true;
+            if (std.mem.indexOf(u8, stderr, words[1]) != null) found_read = true;
+            if (found_stat and found_read) break;
+        }
+        try testing.expect(found_stat);
+        try testing.expect(found_read);
+    }
+}
+
+/// How many host calls of a run the wording test fails in turn; the hosts file is looked at
+/// well before this many.
+const calls_walked_max = 400;
