@@ -76,8 +76,8 @@ footer{border-top:1px solid var(--line);padding-block:24px;color:var(--muted);
 <p class="summary">parts of the Dockerfile did not carry over</p>
 <dl class="facts"><div><dt>Kind</dt><dd>warning</dd></div><div><dt>Blame</dt><dd>user</dd></div><div><dt>Exit code</dt><dd>1</dd></div></dl>
 <h2>What it means</h2>
-<p>Some instructions have no step or setting of their own in a build file. EXPOSE, VOLUME, HEALTHCHECK, STOPSIGNAL and MAINTAINER become labels of the image (org.zigbox.import.expose and the like, the value as written). The syntax and check directives, COPY --link, RUN --security=sandbox, a cache's sharing mode, the BUILDKIT_* and SOURCE_DATE_EPOCH arguments, and an ENV of a variable the build fixes are ignored: the builder has their meaning already, or keeps its own.</p>
-<p>The cause names each part. Nothing is wrong; read the list to be sure none of them matters to the image.</p>
+<p>Some instructions have no step or setting of their own in a build file. EXPOSE, VOLUME, HEALTHCHECK, STOPSIGNAL and MAINTAINER become labels of the image (org.zigbox.import.expose and the like, the value as written). The syntax and check directives, COPY --link, RUN --security=sandbox, a cache's sharing mode, the BUILDKIT_* and SOURCE_DATE_EPOCH arguments, and an ENV of a variable the build fixes are ignored: the builder has their meaning already, or keeps its own. A COPY's --chown or --chmod, a COPY --from an image, and --exclude on a COPY --from a stage are kept in the build file, but zbx build does not run them yet (E0802), so the list names them too.</p>
+<p>The cause names each part. Read the list to be sure none of them matters to the image, and change any copy that zbx build would refuse.</p>
 <h2>Offline</h2>
 <p>The same text, without a network:</p>
 <pre class="term">zbx explain W0811</pre>

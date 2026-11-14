@@ -82,6 +82,15 @@ pub const cases = [_]Case{
     .{ .dockerfile = "label_key", .golden = "label_key" },
     .{ .dockerfile = "onbuild", .golden = "onbuild" },
     .{ .dockerfile = "stage_collision", .golden = "stage_collision" },
+    .{ .dockerfile = "from_variable", .golden = "from_variable" },
+    .{ .dockerfile = "from_stage_arg", .golden = "from_stage_arg" },
+    .{ .dockerfile = "from_mount_stage_arg", .golden = "from_mount_stage_arg" },
+    .{ .dockerfile = "workdir_dot", .golden = "workdir_dot" },
+    .{ .dockerfile = "copy_several", .golden = "copy_several" },
+    .{ .dockerfile = "bind_no_steps", .golden = "bind_no_steps" },
+    .{ .dockerfile = "heredoc_redirect", .golden = "heredoc_redirect" },
+    .{ .dockerfile = "network_forms", .golden = "network_forms" },
+    .{ .dockerfile = "bind_hermetic", .golden = "bind_hermetic", .hermetic = true },
 };
 
 pub fn options_of(case: *const Case, dockerfile: []const u8, table: *Table) translate.Options {
@@ -125,6 +134,7 @@ test "every fixture translates to its golden, or is refused as its golden says" 
     const ws = try workspace();
     defer testing.allocator.destroy(ws);
     var buffer: [1024]u8 = undefined;
+    var failed = false;
     inline for (cases) |case| {
         var table: Table = .{};
         const dockerfile = @embedFile(fixtures ++ case.dockerfile ++ ".Dockerfile");
@@ -133,9 +143,10 @@ test "every fixture translates to its golden, or is refused as its golden says" 
         const want = golden(case.golden);
         if (!std.mem.eql(u8, got, want)) {
             std.debug.print("fixture {s}: golden differs; got:\n{s}\n", .{ case.golden, got });
-            return error.TestUnexpectedResult;
+            failed = true;
         }
     }
+    if (failed) return error.TestUnexpectedResult;
 }
 
 fn golden(comptime name: []const u8) []const u8 {
@@ -147,8 +158,19 @@ fn golden(comptime name: []const u8) []const u8 {
 /// Whether the golden is a translation: the refusal goldens are listed here.
 fn exists(comptime name: []const u8) bool {
     const refusals = [_][]const u8{
-        "arg_from_no_default", "add_url",   "add_git", "secret_mount",    "mounts.hermetic",
-        "target_skips.last",   "label_key", "onbuild", "stage_collision",
+        "arg_from_no_default",
+        "add_url",
+        "add_git",
+        "secret_mount",
+        "mounts.hermetic",
+        "target_skips.last",
+        "label_key",
+        "onbuild",
+        "stage_collision",
+        "from_stage_arg",
+        "from_mount_stage_arg",
+        "copy_several",
+        "bind_no_steps",
     };
     for (refusals) |refused| {
         if (std.mem.eql(u8, refused, name)) return false;
@@ -226,4 +248,39 @@ test "the report names each step's line, its network reason and what was dropped
     try testing.expect(steps[2].cache and steps[2].bind);
     try testing.expectEqual(null, steps[2].network);
     try testing.expectEqual(1, ws.report.dropped_slice().len);
+}
+
+test "the report notes each copy part that zbx build refuses for now" {
+    // Goal: a copy with --chown or --chmod, from an image, or with --exclude from a stage is
+    // kept in the build file but noted (W0811), since `zbx build` refuses it (E0802). Method:
+    // one COPY of each shape, and one plain copy from a stage, which gets no note.
+    const ws = try workspace();
+    defer testing.allocator.destroy(ws);
+    var table: Table = .{};
+    const case: Case = .{ .dockerfile = "generated", .golden = "generated" };
+    const text =
+        \\FROM alpine:3.20 AS build
+        \\RUN true
+        \\FROM alpine:3.20
+        \\COPY --chown=1:1 --chmod=644 a /a
+        \\COPY --from=golang:1.22 /usr/local/go /go/
+        \\COPY --from=build --exclude=*.o / /b/
+        \\COPY --from=build / /c/
+        \\
+    ;
+    const options = options_of(&case, text, &table);
+    _ = try translate.translate(ws, &options);
+    const dropped = ws.report.dropped_slice();
+    const wanted = [_]struct { line: u32, what: []const u8 }{
+        .{ .line = 4, .what = "COPY --chown" },
+        .{ .line = 4, .what = "COPY --chmod" },
+        .{ .line = 5, .what = "COPY --from an image" },
+        .{ .line = 6, .what = "COPY --exclude with --from a stage" },
+    };
+    try testing.expectEqual(wanted.len, dropped.len);
+    for (wanted, dropped) |want, got| {
+        try testing.expectEqual(want.line, got.line);
+        try testing.expectEqualStrings(want.what, got.what_text());
+        try testing.expect(std.mem.indexOf(u8, got.became_text(), "E0802") != null);
+    }
 }

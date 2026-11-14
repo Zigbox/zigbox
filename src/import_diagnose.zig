@@ -27,24 +27,33 @@ fn code_of(code: refusal_mod.Code) codes.Code {
 }
 
 /// A refusal of the translator: what was refused, at which line of `dockerfile`, and what to
-/// write instead.
+/// write instead. The sentences are sanitised into buffers as large as the refusal's own, so
+/// nothing is cut here; the diagnostic's field bound is the only cut.
 pub fn refused(diag: *Diag, refusal: *const refusal_mod.Refusal, dockerfile: []const u8) void {
     assert(diag.code == null);
     assert(dockerfile.len > 0);
     var name_echo: Echo = undefined;
-    var what_echo: Echo = undefined;
+    var what_echo: [refusal_mod.what_bytes_max]u8 = undefined;
     const name = text_util.sanitise(&name_echo, dockerfile);
     const what = text_util.sanitise(&what_echo, refusal.what_text());
+    assert(what.len == refusal.what_len);
     diag.raise(code_of(refusal.code));
     diag.while_("importing {s}", .{name});
-    if (refusal.line > 0) {
+    // Most sentences open with their own location, `Dockerfile:<line> ...`: that is printed
+    // once, with the file's name as the user gave it.
+    const located = "Dockerfile:";
+    if (std.mem.startsWith(u8, what, located)) {
+        diag.cause("{s}:{s}", .{ name, what[located.len..] });
+    } else if (refusal.line > 0) {
         diag.cause("{s}:{d}: {s}", .{ name, refusal.line, what });
-        diag.context("line", "{d}", .{refusal.line});
     } else {
         diag.cause("{s}: {s}", .{ name, what });
     }
-    var fix_echo: Echo = undefined;
-    diag.fix(.{ .sentence = text_util.sanitise(&fix_echo, refusal.fix_text()) });
+    if (refusal.line > 0) diag.context("line", "{d}", .{refusal.line});
+    var fix_echo: [refusal_mod.fix_bytes_max]u8 = undefined;
+    const fix = text_util.sanitise(&fix_echo, refusal.fix_text());
+    assert(fix.len == refusal.fix_len);
+    diag.fix(.{ .sentence = fix });
     assert(diag.code != null);
 }
 

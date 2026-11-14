@@ -225,10 +225,10 @@ fn collision(t: *Translator, index: u32) Refused!void {
         var theirs: [slug_bytes_max]u8 = undefined;
         if (!std.mem.eql(u8, own, slug(t, @intCast(other_index), &theirs))) continue;
         const line = ws.stages[index].line;
-        const what = "the stages at Dockerfile:{d} and Dockerfile:{d} both make steps named " ++
-            "`{s}-<n>`";
+        const what = "Dockerfile:{d} starts a stage whose steps would be named `{s}-<n>`, " ++
+            "as the stage at Dockerfile:{d} names its own";
         const fix = "rename one of the stages so their names differ in [a-z0-9-]";
-        return refuse(t.refusal(), .E0813, line, what, .{ other.line, line, own }, fix, .{});
+        return refuse(t.refusal(), .E0813, line, what, .{ line, own, other.line }, fix, .{});
     }
 }
 

@@ -1,6 +1,5 @@
 error[ZBX-E0812]: a Dockerfile variable has no value
-  cause  Dockerfile:5: Dockerfile:5 uses `VERSION`, an ARG with no default and
-         no --...
-  fix    give ARG VERSION a default, or pass it with --build-arg in th...
+  cause  Dockerfile:5 uses `VERSION`, an ARG with no default and no --build-arg
+  fix    give ARG VERSION a default, or pass it with --build-arg in the build file
   more   zbx explain E0812 · rerun with --verbose for the full cause chain
   docs   https://zigbox.github.io/zigbox/errors/E0812.html

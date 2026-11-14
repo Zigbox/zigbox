@@ -2783,6 +2783,8 @@ fn unexpected_fix(diag: *Diag, command: Command) void {
         });
     } else if (command == .schema) {
         diag.fix(.{ .sentence = "name one command:", .command = "zbx schema ps" });
+    } else if (command == .import) {
+        diag.fix(.{ .sentence = "name one Dockerfile:", .command = "zbx import Dockerfile" });
     } else if (command == .inspect) {
         diag.fix(.{
             .sentence = "inspect one result at a time:",

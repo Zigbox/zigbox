@@ -23,6 +23,7 @@ const codes = @import("../diag/codes.zig");
 const key_mod = @import("key.zig");
 const layout = @import("../store/layout.zig");
 const load_mod = @import("load.zig");
+const graph_mod = @import("graph.zig");
 const support = @import("../store/test_support.zig");
 const digest_mod = @import("../store/digest.zig");
 const cache = @import("cache.zig");
@@ -476,15 +477,23 @@ const image_only =
 /// The build file with the second add's destination `dest`; the first step's output is the sample
 /// tree, the second's a tree whose `bin` is a file.
 fn image_started(dest: []const u8) void {
+    image_started_from(image_only, dest);
+}
+
+/// `image_started` with the build file `text`, whose `DEST` is replaced with `dest`.
+fn image_started_from(text: []const u8, dest: []const u8) void {
     start();
     var replaced: [1024]u8 = undefined;
-    const at = std.mem.indexOf(u8, image_only, "DEST").?;
+    const at = std.mem.indexOf(u8, text, "DEST").?;
     const out = std.fmt.bufPrint(&replaced, "{s}\"{s}\"{s}", .{
-        image_only[0..at], dest, image_only[at + 4 ..],
+        text[0..at], dest, text[at + 4 ..],
     }) catch unreachable; // Fits.
     var problem: file_mod.Problem = undefined;
     const parsed = file_mod.parse(out, &loaded.file, &problem);
     testing.expectEqual(file_mod.ParseResult.parsed, parsed) catch unreachable; // A valid file.
+    var graph_problem: graph_mod.Problem = undefined;
+    const ordered = graph_mod.order(&loaded.file, &loaded.graph, &graph_problem);
+    testing.expectEqual(graph_mod.Result.ordered, ordered) catch unreachable; // Acyclic.
     composed.outputs[0] = made_output();
     composed.locking.lock.clear();
     const manifest = oci_digest.Sha256{ .bytes = @splat(3) };
@@ -577,6 +586,42 @@ test "build_image: a hit writes the same record but for its times, and a cache w
     again.finished = provenance_work.parsed.finished;
     const rebuilt = provenance.render(&left, &again);
     try testing.expectEqualStrings(rebuilt, provenance.render(&right, &provenance_work.parsed));
+}
+
+const chained =
+    \\.{
+    \\    .version = 1,
+    \\    .steps = .{
+    \\        .{ .name = "compile", .base = "alpine:3.20", .inputs = .{"a"}, .run = .{"true"} },
+    \\        .{ .name = "notice", .base = "step:compile", .run = .{"true"} },
+    \\    },
+    \\    .image = .{
+    \\        .add = .{
+    \\            .{ .from = "compile", .to = "/usr/bin" },
+    \\            .{ .from = "notice", .to = DEST },
+    \\        },
+    \\    },
+    \\}
+    \\
+;
+
+test "build_image: a step on a `step:` base records the image its chain began with" {
+    // Goal: the provenance of a build whose step has a `step:` base, the shape every imported
+    // multi-step stage has; it once crashed looking the `step:` text up in zbx.lock. Method:
+    // build a file whose second step is on a `step:` base, and read the record: it names
+    // alpine:3.20, the one base in the lock, and never the `step:` text.
+    image_started_from(chained, "/etc");
+    try context.build_image();
+    const out = sim.stdout();
+    const at = std.mem.indexOf(u8, out, "built b3:").?;
+    const digest = Digest.parse(out[at + 6 ..][0..constants.store_digest_text_bytes]).?;
+    try stored_record(digest, &first_record);
+    try testing.expectEqual(@as(u32, 2), first_record.steps_count);
+    try testing.expectEqual(@as(u32, 1), first_record.bases_count);
+    var text: [constants.statement_bytes_max]u8 = undefined;
+    const rendered = provenance.render(&text, &first_record);
+    try testing.expect(std.mem.indexOf(u8, rendered, "alpine:3.20") != null);
+    try testing.expect(std.mem.indexOf(u8, rendered, "step:compile") == null);
 }
 
 test "build_image: a store full of provenance records skips the new one, and keeps replacing" {

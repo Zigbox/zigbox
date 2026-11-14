@@ -58,8 +58,8 @@ fn begin(t: *Translator, instruction: *const Instruction, kind: report_mod.Kind)
     const line = instruction.line;
     const index = ws.report.steps_count;
     if (index == constants.build_steps_max) {
-        return refuse(t.refusal(), .E0815, line, "the target makes more than {d} steps; " ++
-            "Dockerfile:{d} would be one more", .{ constants.build_steps_max, line }, "import " ++
+        return refuse(t.refusal(), .E0815, line, "Dockerfile:{d} makes one step more than " ++
+            "the {d} a target holds", .{ line, constants.build_steps_max }, "import " ++
             "a smaller --target, or merge RUN lines", .{});
     }
     const state = t.state();
@@ -174,7 +174,13 @@ fn command(
     if (instruction.heredocs_count == 0) {
         if (try words.exec_form(rest, line, &t.out, argv, t.refusal())) {
             if (argv.count == 0) return nothing(t, line);
-            return rest;
+            // Detection reads words, as in the shell form, not the JSON with its quotes.
+            const start = t.out.mark();
+            for (argv.slice(), 0..) |word, index| {
+                if (index > 0) try t.out.push(t.refusal(), line, " ");
+                try t.out.push(t.refusal(), line, word);
+            }
+            return t.out.since(start);
         }
         if (rest.len == 0) return nothing(t, line);
         try shell_argv(t, line, shell, rest, argv);
@@ -188,11 +194,12 @@ fn command(
             "heredoc marker after RUN's flags");
     const before = std.mem.trim(u8, rest[0..at], " \t");
     const after = std.mem.trim(u8, rest[at + marker.len ..], " \t");
-    if (after.len > 0) {
-        return unsupported(t, line, "RUN <<marker ", after, "put the command before the " ++
-            "marker, as `RUN python3 <<EOF`");
-    }
     if (before.len == 0) {
+        // `RUN <<EOF bash` runs the heredoc with what follows the marker; zbx does not.
+        if (after.len > 0) {
+            return unsupported(t, line, "RUN <<marker ", after, "put the command before the " ++
+                "marker, as `RUN python3 <<EOF`");
+        }
         if (std.mem.startsWith(u8, body, "#!")) {
             return unsupported(t, line, "RUN with ", "a heredoc that starts with #!", "write " ++
                 "the interpreter before the marker, as `RUN python3 <<EOF`");
@@ -254,44 +261,80 @@ fn mount(t: *Translator, line: u32, written: []const u8, mounts: *Mounts) Error!
             if (std.mem.eql(u8, name, key)) break;
         } else return unsupported(t, line, "RUN --mount option ", key, "remove the option");
     }
-    const state = t.state();
-    if (std.mem.eql(u8, kind, "cache")) {
-        if (mount_option(value, "from") != null) {
-            return unsupported(t, line, "RUN --mount=type=cache,", "from=...", "remove from=, " ++
-                "the cache starts empty");
-        }
-        const path = try translate.absolute(t, line, state.directory(), target orelse
-            return no_target(t, line), false);
-        const sharing = mount_option(value, "sharing") orelse "locked";
-        if (!std.mem.eql(u8, sharing, "locked")) {
-            t.drop(line, "RUN --mount=type=cache sharing", "became sharing=locked");
-        }
-        const ro = mount_option(value, "ro") orelse mount_option(value, "readonly");
-        mounts.caches[mounts.caches_count] = .{
-            .id = mount_option(value, "id") orelse path,
-            .path = path,
-            .ro = ro != null and !std.mem.eql(u8, ro.?, "false"),
-            .mode = mount_option(value, "mode"),
-            .uid = mount_option(value, "uid"),
-            .gid = mount_option(value, "gid"),
-        };
-        mounts.caches_count += 1;
-        return;
-    }
+    if (std.mem.eql(u8, kind, "cache")) return mount_cache(t, line, value, target, mounts);
     if (!std.mem.eql(u8, kind, "bind")) {
         return unsupported(t, line, "RUN --mount=type=", kind, "copy what the step needs " ++
             "into the stage, or pass it at run time");
     }
+    return mount_bind(t, line, written, value, target, mounts);
+}
+
+/// A `type=cache` mount, `value` already expanded.
+fn mount_cache(
+    t: *Translator,
+    line: u32,
+    value: []const u8,
+    target: ?[]const u8,
+    mounts: *Mounts,
+) Error!void {
+    assert(line > 0);
+    assert(mounts.caches_count < mounts.caches.len);
+    const state = t.state();
+    if (mount_option(value, "from") != null) {
+        return unsupported(t, line, "RUN --mount=type=cache,", "from=...", "remove from=, " ++
+            "the cache starts empty");
+    }
+    const path = try translate.absolute(t, line, state.directory(), target orelse
+        return no_target(t, line), false);
+    const sharing = mount_option(value, "sharing") orelse "locked";
+    if (!std.mem.eql(u8, sharing, "locked")) {
+        t.drop(line, "RUN --mount=type=cache sharing", "became sharing=locked, stricter");
+    }
+    const ro = mount_option(value, "ro") orelse mount_option(value, "readonly");
+    mounts.caches[mounts.caches_count] = .{
+        .id = mount_option(value, "id") orelse path,
+        .path = path,
+        .ro = ro != null and !std.mem.eql(u8, ro.?, "false"),
+        .mode = mount_option(value, "mode"),
+        .uid = mount_option(value, "uid"),
+        .gid = mount_option(value, "gid"),
+    };
+    mounts.caches_count += 1;
+}
+
+/// A `type=bind` mount from another stage's step; `written` is the mount as the Dockerfile
+/// has it, `value` the same expanded with the stage's variables.
+fn mount_bind(
+    t: *Translator,
+    line: u32,
+    written: []const u8,
+    value: []const u8,
+    target: ?[]const u8,
+    mounts: *Mounts,
+) Error!void {
+    assert(line > 0);
+    assert(mounts.binds_count < mounts.binds.len);
+    const state = t.state();
     if (mount_option(value, "rw") != null or mount_option(value, "readwrite") != null) {
         return unsupported(t, line, "RUN --mount=type=bind,", "rw", "copy the files into " ++
             "the stage with COPY instead");
     }
-    const from_name = mount_option(value, "from") orelse
+    // The value was expanded with the stage's variables; `from` is expanded again from what
+    // was written, with the global ones, as `stages.uses` expands it.
+    _ = mount_option(value, "from") orelse
         return unsupported(t, line, "RUN --mount=type=bind ", "from the context", "COPY the " ++
             "files into the stage instead; the builder mounts only a stage's tree");
-    const from = try stage_head(t, line, from_name) orelse
-        return unsupported(t, line, "RUN --mount=type=bind,from=", from_name, "make a stage " ++
-            "FROM the image and bind from it");
+    const written_from = mount_option(written, "from") orelse
+        return unsupported(t, line, "RUN --mount with ", "from= inside a variable", "write " ++
+            "from=<stage> in the mount itself");
+    const named = try from_name(t, line, written_from, "from");
+    const from = try stage_head(t, line, named) orelse
+        return unsupported(t, line, "RUN --mount=type=bind,from=", named, "bind from a stage " ++
+            "that runs a step; the builder binds only a step's output");
+    if (!std.mem.startsWith(u8, from, "step:")) {
+        return unsupported(t, line, "RUN --mount=type=bind,from=", named, "add a step to that " ++
+            "stage, or bind from one that has steps; the builder binds only a step's output");
+    }
     const source = mount_option(value, "source") orelse mount_option(value, "src") orelse "/";
     mounts.binds[mounts.binds_count] = .{
         .from = from,
@@ -426,15 +469,13 @@ fn copy_flags(
     const add = instruction.keyword == .add;
     var result: CopyFlags = .{};
     for (flags.slice()) |flag| {
-        const value = try words.word_of(flag.value orelse "", context, &t.out, t.refusal());
         const name = flag.name;
         if (std.mem.eql(u8, name, "from")) {
-            if (value.len == 0) {
-                return refuse(t.refusal(), .E0810, line, "Dockerfile:{d} has --from= with no " ++
-                    "stage or image", .{line}, "name a stage or an image after --from=", .{});
-            }
-            result.from = value;
-        } else if (std.mem.eql(u8, name, "chown")) {
+            result.from = try from_name(t, line, flag.value orelse "", "--from");
+            continue;
+        }
+        const value = try words.word_of(flag.value orelse "", context, &t.out, t.refusal());
+        if (std.mem.eql(u8, name, "chown")) {
             result.chown = value;
         } else if (std.mem.eql(u8, name, "chmod")) {
             result.chmod = value;
@@ -455,6 +496,27 @@ fn copy_flags(
     }
     assert(result.excludes_count <= flags.count);
     return result;
+}
+
+/// The stage or image a `--from` or a mount's `from` names. BuildKit expands it with the
+/// global `ARG`s only, and so does `stages.uses`, which decides the stages the target reaches:
+/// the two must agree, or a stage that was not reached would be used.
+fn from_name(t: *Translator, line: u32, written: []const u8, flag: []const u8) Error![]const u8 {
+    assert(flag.len > 0);
+    if (written.len == 0) {
+        return refuse(t.refusal(), .E0810, line, "Dockerfile:{d} has {s}= with no stage or " ++
+            "image", .{ line, flag }, "name a stage or an image after {s}=", .{flag});
+    }
+    const context = t.global_context(line);
+    const value = try words.word_of(written, &context, &t.out, t.refusal());
+    if (value.len == 0) {
+        return refuse(t.refusal(), .E0812, line, "Dockerfile:{d} has {s}={s}, which names " ++
+            "nothing: {s} is expanded with the ARGs before the first FROM only", .{
+            line, flag, written, flag,
+        }, "declare the ARG with its default before the first FROM", .{});
+    }
+    assert(value.len > 0);
+    return value;
 }
 
 /// `COPY` and `ADD`: one copy step with one entry.
@@ -483,7 +545,17 @@ pub fn copy(t: *Translator, instruction: *const Instruction) Error!void {
     const sources = items[0 .. items.len - 1];
     if (instruction.keyword == .add) try add_sources(t, line, sources, given.unpack);
     if (given.remote_flag) |flag| return unsupported(t, line, "ADD --", flag, "remove the flag");
-    const to = try translate.absolute(t, line, t.state().directory(), items[items.len - 1], true);
+    const written_to = items[items.len - 1];
+    if (sources.len > 1) {
+        if (!translate.names_directory(written_to)) {
+            const what = "Dockerfile:{d} has {s} of several sources to `{s}`, which does not " ++
+                "end in /";
+            const fix = "end the destination with /, as Docker requires";
+            const args = .{ line, keyword, written_to };
+            return refuse(t.refusal(), .E0810, line, what, args, fix, .{});
+        }
+    }
+    const to = try translate.absolute(t, line, t.state().directory(), written_to, true);
     var from_text: ?[]const u8 = null;
     if (given.from) |name| {
         from_text = try stage_head(t, line, name) orelse image: {
@@ -491,9 +563,32 @@ pub fn copy(t: *Translator, instruction: *const Instruction) Error!void {
             break :image name;
         };
     }
+    note_unbuilt(t, line, instruction.keyword == .add, &given, from_text);
     const name = try begin(t, instruction, .copy);
     try put_copy(t, &given, from_text, sources, to);
     try end(t, name);
+}
+
+/// Notes the parts of a copy the build file keeps but `zbx build` does not run yet (graph.zig,
+/// the slice 2 cuts), so the import report says so before a build is refused with E0802.
+fn note_unbuilt(
+    t: *Translator,
+    line: u32,
+    is_add: bool,
+    given: *const CopyFlags,
+    from_text: ?[]const u8,
+) void {
+    assert(line > 0);
+    if (from_text != null) assert(given.from != null);
+    const became = "kept, but zbx build refuses it (E0802) for now";
+    if (given.chown != null) t.drop(line, if (is_add) "ADD --chown" else "COPY --chown", became);
+    if (given.chmod != null) t.drop(line, if (is_add) "ADD --chmod" else "COPY --chmod", became);
+    const text = from_text orelse return;
+    if (!std.mem.startsWith(u8, text, "step:")) {
+        t.drop(line, "COPY --from an image", became);
+    } else if (given.excludes_count > 0) {
+        t.drop(line, "COPY --exclude with --from a stage", became);
+    }
 }
 
 fn put_copy(

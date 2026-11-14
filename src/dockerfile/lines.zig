@@ -150,7 +150,11 @@ pub fn parse(text: []const u8, parsed: *Parsed, refusal: *Refusal) Refused!void 
     parsed.check = null;
     parsed.instructions_count = 0;
     parsed.scratch_len = 0;
-    var lines: Lines = .{ .text = text };
+    // A UTF-8 byte order mark before the first line is not part of it, as BuildKit reads it.
+    const bom = "\xef\xbb\xbf";
+    const body = if (std.mem.startsWith(u8, text, bom)) text[bom.len..] else text;
+    assert(body.len <= text.len);
+    var lines: Lines = .{ .text = body };
     try read_directives(&lines, parsed, refusal);
     while (try next_instruction(&lines, parsed, refusal)) {}
     assert(parsed.instructions_count <= constants.import_instructions_max);
@@ -315,6 +319,9 @@ fn marker_after(text: []const u8, from: usize) ?Marker {
     var at = from;
     while (std.mem.indexOfPos(u8, text, at, "<<")) |found| {
         at = found + 2;
+        // BuildKit takes a heredoc only as a word of its own (`[0-9]*<<-?NAME`): the `<<` of
+        // `$((1<<EOF))` is a shift, and the marker of `<<<word` is a here-string.
+        if (!word_starts(text, found)) continue;
         var index = at;
         const strip = index < text.len and text[index] == '-';
         if (strip) index += 1;
@@ -331,6 +338,9 @@ fn marker_after(text: []const u8, from: usize) ?Marker {
             if (index >= text.len or text[index] != quote) continue;
             index += 1;
         }
+        if (index < text.len) {
+            if (std.mem.indexOfScalar(u8, " \t>|;&", text[index]) == null) continue;
+        }
         return .{
             .start = found,
             .end = index,
@@ -340,6 +350,15 @@ fn marker_after(text: []const u8, from: usize) ?Marker {
         };
     }
     return null;
+}
+
+/// Whether the `<<` at `at` begins a word, after any file descriptor digits.
+fn word_starts(text: []const u8, at: usize) bool {
+    assert(at + 2 <= text.len);
+    var start = at;
+    while (start > 0 and std.ascii.isDigit(text[start - 1])) start -= 1;
+    if (start == 0) return true;
+    return text[start - 1] == ' ' or text[start - 1] == '\t';
 }
 
 fn is_name_byte(byte: u8, first: bool) bool {
@@ -446,6 +465,16 @@ test "a directive after an instruction is a comment" {
     try testing.expectEqualStrings("a   AS b", parsed.slice(parsed.instructions[0].text));
 }
 
+test "a byte order mark before the first line is skipped" {
+    // Goal: a file saved with a UTF-8 BOM reads as the same file without one. Method: a BOM
+    // before a directive, which must still be read as one.
+    const parsed = try parse_test("\xef\xbb\xbf# escape=`\nFROM a\n");
+    defer testing.allocator.destroy(parsed);
+    try testing.expectEqual(@as(u8, '`'), parsed.escape);
+    try testing.expectEqual(Keyword.from, parsed.instructions[0].keyword);
+    try testing.expectEqual(@as(u32, 2), parsed.instructions[0].line);
+}
+
 test "heredocs: bodies, tab stripping, quotes and a missing end" {
     // Goal: each heredoc form is read, and a missing terminator is E0810. Method: two RUNs
     // and one unterminated body.
@@ -509,4 +538,20 @@ test "a << that names no heredoc is plain text" {
     try testing.expectEqual(@as(u8, 0), all[1].heredocs_count);
     try testing.expectEqual(@as(u8, 0), all[2].heredocs_count);
     try testing.expectEqual(Keyword.cmd, all[3].keyword);
+}
+
+test "a << inside a word is a shift, and a marker is a word of its own" {
+    // Goal: BuildKit's rule, a heredoc marker is a whole word (after fd digits), so a shift
+    // written without spaces opens no heredoc; the marker may be followed by a redirection.
+    // Method: `$((1<<EOF))` and `a<<EOF` open none; `cat 0<<EOF >x` and `cat <<EOF>x` do.
+    const parsed = try parse_test("FROM a\nRUN echo $((1<<EOF))\nRUN echo a<<EOF\n" ++
+        "RUN cat 0<<EOF >x\nhi\nEOF\nRUN cat <<EOF>x\nhi\nEOF\nCMD x\n");
+    defer testing.allocator.destroy(parsed);
+    const all = parsed.instructions_slice();
+    try testing.expectEqual(@as(usize, 6), all.len);
+    try testing.expectEqual(@as(u8, 0), all[1].heredocs_count);
+    try testing.expectEqual(@as(u8, 0), all[2].heredocs_count);
+    try testing.expectEqual(@as(u8, 1), all[3].heredocs_count);
+    try testing.expectEqual(@as(u8, 1), all[4].heredocs_count);
+    try testing.expectEqual(Keyword.cmd, all[5].keyword);
 }
