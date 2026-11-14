@@ -34,6 +34,7 @@ const log_path = "/home/demo/http.log";
 const build_path = project_dir ++ "/zbx.build.zon";
 const step7 = "FETCH9 7";
 const local_url = "http://127.0.0.1:8080/hello.txt";
+const fresh_data = "/home/demo/fresh-data";
 
 /// The server the harness serves to the guest, beside zbx.
 pub const routes = [_]vm.Route{
@@ -178,7 +179,10 @@ fn mismatch(session: *Session, out: *Io.Writer) !void {
     const wrong = "sed 's#" ++ checks.hello_sha256 ++ "#" ++ checks.wrong_sha256 ++ "#' " ++
         build_path ++ " > " ++ project_dir ++ "/bad.build.zon";
     _ = try common.expect_exit(session, out, step7, H.as_demo ++ "sh -c '" ++ wrong ++ "'", 0);
-    const fresh = H.as_demo ++ "XDG_DATA_HOME=/home/demo/fresh-data " ++ wrapper ++
+    // XDG_DATA_HOME must exist, as for every command: the store is made below it.
+    const data_home = H.as_demo ++ "mkdir -p " ++ fresh_data;
+    _ = try common.expect_exit(session, out, step7, data_home, 0);
+    const fresh = H.as_demo ++ "XDG_DATA_HOME=" ++ fresh_data ++ " " ++ wrapper ++
         " build -f bad.build.zon";
     const refused = try state.expect_long_split(session, out, fresh, 3, hello.build_timeout_s);
     const streams = refused.streams;
