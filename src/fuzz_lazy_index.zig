@@ -4,15 +4,18 @@
 //!
 //!   1. The layer carries an index exactly when the tree is within `names_max` names (a bound
 //!      the iteration lowers at random): the bound is the only reason for no index.
-//!   2. An independent reader finds it: the anchor's range inflates alone to the anchor's size
-//!      and hash, `verify` accepts it against the tree the pack started from, and each chunk of
-//!      each object inflates alone from its own offset to its own hash, the chunks together
-//!      being the object's size and every range lying before the index.
+//!   2. An independent reader finds it: the whole blob inflates as one gzip member (its CRC and
+//!      size checked) to the config's diff_id, the anchor's range inflates alone to the anchor's
+//!      size and hash, `verify` accepts it against the tree the pack started from, and each chunk
+//!      of each object inflates alone from its own offset to its own hash and, in a file of two
+//!      chunks or more, to its own chaining value, the chunks together being the object's size
+//!      and every range lying before the index.
 //!   3. Random bytes into the reader never crash it and never pass for an index: the index with
 //!      bytes changed, cut short or grown, its anchor made to match, is refused or (when the
 //!      change left it a well-formed index of the same tree) accepted as one; any accepted
 //!      index's ranges stay in their bounds. Random text into the anchor parser is refused or
-//!      renders back to itself.
+//!      renders back to itself. A range's compressed bytes changed or cut short never crash the
+//!      range inflate.
 //!
 //! `check_layer` is the reader of property 2; the `pack` fuzzer uses it as well.
 
@@ -33,6 +36,8 @@ const layout = @import("store/layout.zig");
 const support = @import("store/test_support.zig");
 const index_mod = @import("lazy/index.zig");
 const verify_mod = @import("lazy/verify.zig");
+const chaining = @import("lazy/chaining.zig");
+const oci = @import("registry/digest.zig");
 const pack = @import("push/pack.zig");
 
 const Digest = digest_mod.Digest;
@@ -40,6 +45,7 @@ const root_path = "/data/store";
 
 var sim: host_sim.HostSim = undefined;
 var files: fs_sim.SimFs = undefined;
+var files_pool: [constants.sim_fs_pool_lazy_fuzz_bytes_max]u8 = undefined;
 var store: layout.Store = undefined;
 var imports: import.Workspace = undefined;
 var packing: pack.Workspace = undefined;
@@ -72,12 +78,14 @@ pub const Read = struct {
 pub fn check_layer(on: *layout.Store, made: *const pack.Packed, tree: Digest) Read {
     const anchor = made.index orelse @panic("check_layer needs an indexed layer");
     const blob = read_blob(on, made);
+    check_member(blob, made.diff_id);
     if (anchor.offset + anchor.length >= blob.len) @panic("the index must end before the footer");
     const plain = inflate_at(blob, anchor.offset, anchor.length, anchor.size) catch
         @panic("the index range must inflate alone");
     if (plain.len > reader.index.len) @panic("the fuzzer's index room is too small");
     const bytes = reader.index[0..plain.len];
     @memcpy(bytes, plain);
+    reader.checking.key = tree.bytes[0..verify_mod.key_bytes].*; // Any key; one per tree here.
     const index = verify_mod.verify(&reader.checking, bytes, &anchor, tree) catch
         @panic("a written index must verify");
     for (0..index.header.objects) |ordinal| {
@@ -90,11 +98,42 @@ pub fn check_layer(on: *layout.Store, made: *const pack.Packed, tree: Digest) Re
             const chunk = inflate_at(blob, record.offset, record.length, want) catch
                 @panic("a chunk range must inflate alone");
             if (!Digest.of(chunk).eql(record.hash)) @panic("a chunk does not hash to its record");
+            const value = if (object.chunk_count == 1) zero else chaining.run_value(
+                chunk,
+                step,
+                constants.store_chunk_bytes,
+            );
+            if (!value.eql(record.chaining)) @panic("a chunk is not its chaining value");
             covered += want;
         }
         if (covered != object.size) @panic("an object's chunks are not its size");
     }
     return .{ .index = index, .bytes = bytes, .blob = blob };
+}
+
+const zero: Digest = .{ .bytes = @splat(0) };
+
+/// The blob as one gzip member, inflated by std's reader: its footer's CRC and size are the
+/// plain bytes', nothing follows it, and the plain bytes hash to `diff_id`.
+fn check_member(blob: []const u8, diff_id: oci.Sha256) void {
+    var input: std.Io.Reader = .fixed(blob);
+    var inflate: flate.Decompress = .init(&input, .gzip, &reader.window);
+    var hasher = oci.Hasher.init();
+    var crc = std.hash.Crc32.init();
+    var total: u64 = 0;
+    while (true) {
+        const count = inflate.reader.readSliceShort(&reader.plain) catch
+            @panic("the layer must inflate as one gzip member");
+        if (count == 0) break;
+        hasher.update(reader.plain[0..count]);
+        crc.update(reader.plain[0..count]);
+        total += count;
+    }
+    const footer = inflate.container_metadata.gzip;
+    if (footer.crc != crc.final()) @panic("the gzip footer's CRC is not the plain bytes'");
+    if (footer.count != @as(u32, @truncate(total))) @panic("the gzip footer's size is wrong");
+    if (input.seek != blob.len) @panic("bytes follow the gzip member");
+    if (!hasher.final().eql(diff_id)) @panic("the layer does not inflate to its diff_id");
 }
 
 fn read_blob(on: *layout.Store, made: *const pack.Packed) []const u8 {
@@ -129,17 +168,49 @@ fn inflate_at(blob: []const u8, offset: u64, length: u64, size: u64) error{Malfo
 }
 
 /// Adds one file the plain generator never makes: empty, one byte short of a chunk, a chunk or
-/// one byte over. Its bytes repeat a random 4 KiB block, so the sim's store pool holds the file,
-/// its imported object and the packed layer.
+/// one byte over, whose bytes repeat a random 4 KiB block; or two to three chunks of random
+/// bytes, which no compressor shrinks.
 fn add_sized_file(random: std.Random, target: *fs_sim.SimFs) void {
     const chunk = constants.store_chunk_bytes;
     const sizes = [_]u32{ 0, 1, chunk - 1, chunk, chunk + 1 };
-    const size = sizes[random.uintLessThan(usize, sizes.len)];
-    const content = reader.blob[0..size];
+    const choice = random.uintLessThan(usize, sizes.len + 1);
+    if (choice == sizes.len) {
+        const size = random.intRangeAtMost(u32, 2 * chunk, 3 * chunk);
+        const content = reader.blob[0..size];
+        random.bytes(content);
+        target.put_file("/src/sized", 0o644, content);
+        return;
+    }
+    const content = reader.blob[0..sizes[choice]];
     var block: [4096]u8 = undefined;
     random.bytes(&block);
     for (content, 0..) |*byte, at| byte.* = block[at % block.len];
     target.put_file("/src/sized", 0o644, content);
+}
+
+/// Property 3: a chunk's compressed bytes, changed or cut short, into the range inflate; it
+/// returns or refuses, and never crashes.
+fn mutate_ranges(random: std.Random, read: *const Read) void {
+    const index = &read.index;
+    if (index.header.chunks == 0) return;
+    for (0..4) |_| {
+        const object = index.object(random.uintLessThan(u32, index.header.objects));
+        if (object.chunk_count == 0) continue;
+        const step = random.uintLessThan(u32, object.chunk_count);
+        const record = index.chunk(object.first_chunk + step);
+        const before = @as(u64, step) * constants.store_chunk_bytes;
+        const want: usize = @intCast(@min(object.size - before, constants.store_chunk_bytes));
+        var span: usize = record.length;
+        @memcpy(reader.range[0..span], read.blob[@intCast(record.offset)..][0..span]);
+        if (random.boolean()) {
+            reader.range[random.uintLessThan(usize, span)] ^= @as(u8, 1) << random.int(u3);
+        } else {
+            span = random.uintLessThan(usize, span) + 1;
+            reader.range[span - 1] = random.int(u8);
+        }
+        const out = reader.plain[0..want];
+        index_mod.inflate_range(&reader.range, span, out, &reader.window) catch {};
+    }
 }
 
 /// Property 3: changed, cut and grown copies of `read.bytes`, each with an anchor that matches
@@ -215,6 +286,7 @@ pub fn fuzz_lazy_index(seed: u64) void {
     const random = prng.random();
     sim.init(seed, &.{});
     files.init(seed);
+    files.use_pool(&files_pool);
     sim.store_fs = &files;
     files.put_dir("/data", 0o755);
     support.make_store_directories(&files, root_path);
@@ -237,6 +309,7 @@ pub fn fuzz_lazy_index(seed: u64) void {
     const blob_end = read.blob.len;
     assert(anchor.offset + anchor.length < blob_end);
     mutate_index(random, &read, anchor, imported.digest);
+    mutate_ranges(random, &read);
     fuzz_anchor_text(random, anchor);
 
     if (names >= 1) {
@@ -263,6 +336,7 @@ fn pack_with(tree: Digest, names_max: u32) pack.Packed {
     };
     packing.piece = constants.pack_io_bytes;
     packing.names_max = names_max;
+    packing.index_bytes_max = constants.lazy_index_bytes_max;
     pack.pack_pieces(&store, &packing, input, &made, &failure) catch
         @panic("a whole tree must pack");
     return made;

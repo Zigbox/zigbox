@@ -58,6 +58,7 @@ fn pack_at(tree: @import("store/digest.zig").Digest, piece: u32, version: u32) p
     };
     packing.piece = piece;
     packing.names_max = constants.lazy_nodes_max;
+    packing.index_bytes_max = constants.lazy_index_bytes_max;
     pack.pack_pieces(&store, &packing, input, &made, &failure) catch
         @panic("a whole tree must pack");
     return made;

@@ -158,7 +158,9 @@ pub const SimFs = struct {
     hook: ?Hook = null,
     nodes: [constants.sim_fs_nodes_max]Node,
     count: u32,
-    pool: [constants.sim_fs_pool_bytes_max]u8,
+    /// Where file bytes go: `pool_inline`, or a caller's larger buffer (`use_pool`).
+    pool: []u8,
+    pool_inline: [constants.sim_fs_pool_bytes_max]u8,
     pool_len: u32,
     opens: [constants.sim_fs_handles_max]Open,
     prng: std.Random.Xoshiro256,
@@ -177,10 +179,20 @@ pub const SimFs = struct {
     builder: xattrs.Builder,
     blob: [constants.store_xattr_blob_bytes_max]u8,
 
+    /// Puts file bytes in `buffer` from now on, for a test that holds more than the inline pool
+    /// (which stays small: a `SimFs` often lives on the stack). Called right after `init`.
+    pub fn use_pool(sim: *SimFs, buffer: []u8) void {
+        assert(sim.pool_len == 0);
+        assert(buffer.len >= sim.pool_inline.len);
+        assert(buffer.len <= std.math.maxInt(u32));
+        sim.pool = buffer;
+    }
+
     /// Initialises in place. The tree is empty (the root exists and cannot be removed).
     pub fn init(sim: *SimFs, seed: u64) void {
         sim.count = 0;
         sim.clock = 0;
+        sim.pool = &sim.pool_inline;
         sim.pool_len = 0;
         sim.opens = @splat(closed_slot);
         sim.prng = std.Random.Xoshiro256.init(seed);

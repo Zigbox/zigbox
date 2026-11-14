@@ -39,6 +39,7 @@ const tree_mod = @import("../store/tree.zig");
 const trees = @import("../store/trees.zig");
 const json = @import("../trust/json.zig");
 const tar_write = @import("../layer/tar_write.zig");
+const chaining = @import("../lazy/chaining.zig");
 const index_mod = @import("../lazy/index.zig");
 const pack_index = @import("pack_index.zig");
 
@@ -225,6 +226,8 @@ pub const Workspace = struct {
     piece: u32,
     /// The most names a tree with an index has: `lazy_nodes_max` (tests lower it to reach it).
     names_max: u32,
+    /// The longest index written: `lazy_index_bytes_max` (tests lower it to reach it).
+    index_bytes_max: u64,
 };
 
 const Walk = struct {
@@ -359,6 +362,11 @@ fn write_body(walk: *Walk, entry: *const tree_mod.Entry, record: bool) Error!voi
     defer fs.close(fd);
     var hasher = digest_mod.Hasher.init();
     var chunk = digest_mod.Hasher.init();
+    // A file of two chunks or more anchors each chunk to its content by its chaining value.
+    const anchored = entry.size > constants.store_chunk_bytes;
+    var ordinal: u64 = 0;
+    var subtree: chaining.Subtree = undefined;
+    subtree.init(ordinal, constants.store_chunk_bytes);
     var chunk_left: u64 = constants.store_chunk_bytes;
     var chunk_start: u64 = if (walk.lazy and entry.size > 0) try walk.cut() else 0;
     var total: u64 = 0;
@@ -374,10 +382,14 @@ fn write_body(walk: *Walk, entry: *const tree_mod.Entry, record: bool) Error!voi
         walk.archive.writeAll(walk.ws.io[0..count]) catch return walk.write_failed();
         if (!walk.lazy) continue;
         chunk.update(walk.ws.io[0..count]);
+        if (anchored) subtree.update(walk.ws.io[0..count]);
         chunk_left -= count;
         if (chunk_left > 0 and total < entry.size) continue;
         const end = try walk.cut();
-        if (record) try record_chunk(walk, chunk.final(), chunk_start, end);
+        const value = if (anchored) subtree.final(false) else zero_digest;
+        if (record) try record_chunk(walk, chunk.final(), value, chunk_start, end);
+        ordinal += 1;
+        subtree.init(ordinal, constants.store_chunk_bytes);
         chunk = digest_mod.Hasher.init();
         chunk_left = constants.store_chunk_bytes;
         chunk_start = end;
@@ -387,11 +399,14 @@ fn write_body(walk: *Walk, entry: *const tree_mod.Entry, record: bool) Error!voi
     tar_write.pad(walk.archive, total) catch return walk.write_failed();
 }
 
-fn record_chunk(walk: *Walk, hash: Digest, start: u64, end: u64) Error!void {
+const zero_digest: Digest = .{ .bytes = @splat(0) };
+
+fn record_chunk(walk: *Walk, hash: Digest, value: Digest, start: u64, end: u64) Error!void {
     assert(end > start);
     assert(end - start <= constants.lazy_range_bytes_max);
     walk.ws.recorder.chunk(walk.fs, .{
         .hash = hash,
+        .chaining = value,
         .offset = start,
         .length = @intCast(end - start),
     }) catch return walk.spill_failed();
@@ -531,7 +546,7 @@ fn write_layer(
     blobs.ensure_directories(&blob_fail) catch return stopped_write(failure, tree, blob_fail.errno);
     const lazy = input.writer_version >= 2;
     if (lazy) {
-        ws.recorder.start(store, ws.names_max) catch {
+        ws.recorder.start(store, ws.names_max, ws.index_bytes_max) catch {
             return stopped_write(failure, tree, fs.last_errno());
         };
     }
@@ -906,11 +921,13 @@ pub fn pack(
 ) Error!void {
     ws.piece = constants.pack_io_bytes;
     ws.names_max = constants.lazy_nodes_max;
+    ws.index_bytes_max = constants.lazy_index_bytes_max;
     return pack_pieces(store, ws, input, out, failure);
 }
 
 /// `pack` with the pieces `ws.piece` bytes long (at least 1024): the output must not depend
-/// on it, which the tests check. `ws.names_max` is set by the caller as well.
+/// on it, which the tests check. `ws.names_max` and `ws.index_bytes_max` are set by the caller
+/// as well.
 pub fn pack_pieces(
     store: *Store,
     ws: *Workspace,
@@ -923,6 +940,8 @@ pub fn pack_pieces(
     assert(ws.piece <= constants.pack_io_bytes);
     assert(ws.names_max >= 1);
     assert(ws.names_max <= constants.lazy_nodes_max);
+    assert(ws.index_bytes_max >= index_mod.header_bytes);
+    assert(ws.index_bytes_max <= constants.lazy_index_bytes_max);
     assert(input.writer_version >= 1);
     assert(input.writer_version <= constants.layer_writer_version);
     out.tree = input.tree;

@@ -23,7 +23,7 @@ pub const header_bytes: u32 = 72;
 /// A tree record's fixed part: digest and length; the tree's bytes follow.
 pub const tree_head_bytes: u32 = 36;
 pub const object_record_bytes: u32 = 48;
-pub const chunk_record_bytes: u32 = 48;
+pub const chunk_record_bytes: u32 = 80;
 pub const order_record_bytes: u32 = 4;
 /// The gzip header std writes; no compressed range can start inside it.
 pub const gzip_header_bytes: u32 = 10;
@@ -44,7 +44,7 @@ comptime {
     assert(header_bytes == magic.len + 4 * 2 + constants.store_digest_bytes + 4 * 6);
     assert(tree_head_bytes == constants.store_digest_bytes + 4);
     assert(object_record_bytes == constants.store_digest_bytes + 8 + 4 + 4);
-    assert(chunk_record_bytes == constants.store_digest_bytes + 8 + 4 + 4);
+    assert(chunk_record_bytes == 2 * constants.store_digest_bytes + 8 + 4 + 4);
     assert(constants.store_chunk_bytes <= constants.lazy_range_bytes_max);
     assert(compressed_bytes_max < std.math.maxInt(u32));
 }
@@ -115,7 +115,12 @@ pub const Object = struct {
 };
 
 pub const Chunk = struct {
+    /// The chunk's BLAKE3, as the store's chunk list holds it.
     hash: Digest,
+    /// The chunk's BLAKE3 chaining value at its place in the file (`chaining.zig`) for a file
+    /// of two chunks or more, which joins into the content hash; all zero for a one-chunk file,
+    /// whose hash is its content.
+    chaining: Digest,
     /// The compressed range in the layer blob.
     offset: u64,
     length: u32,
@@ -160,9 +165,10 @@ pub fn encode_chunk(record: Chunk, out: *[chunk_record_bytes]u8) void {
     assert(record.length <= constants.lazy_range_bytes_max);
     assert(record.offset >= gzip_header_bytes);
     @memcpy(out[0..32], &record.hash.bytes);
-    std.mem.writeInt(u64, out[32..40], record.offset, .little);
-    std.mem.writeInt(u32, out[40..44], record.length, .little);
-    std.mem.writeInt(u32, out[44..48], 0, .little);
+    @memcpy(out[32..64], &record.chaining.bytes);
+    std.mem.writeInt(u64, out[64..72], record.offset, .little);
+    std.mem.writeInt(u32, out[72..76], record.length, .little);
+    std.mem.writeInt(u32, out[76..80], 0, .little);
 }
 
 /// How many chunks a file of `size` bytes has (the store's `object.chunk_count`, kept here so
@@ -203,8 +209,9 @@ pub const Index = struct {
         const at = @as(usize, ordinal) * chunk_record_bytes;
         return .{
             .hash = read_digest(index.chunks, at),
-            .offset = read_u64(index.chunks, at + 32),
-            .length = read_u32(index.chunks, at + 40),
+            .chaining = read_digest(index.chunks, at + 32),
+            .offset = read_u64(index.chunks, at + 64),
+            .length = read_u32(index.chunks, at + 72),
         };
     }
 
@@ -264,6 +271,8 @@ pub fn parse(bytes: []const u8) Refusal!Index {
         return error.TooLarge;
     }
     if (header.names > constants.lazy_nodes_max) return error.TooLarge;
+    // The order section is reserved in version 1: the writer leaves it empty.
+    if (header.order != 0) return error.Malformed;
     // The root is a tree; every other tree and every object has a name in the tree.
     if (header.trees == 0 or header.trees > @as(u64, header.names) + 1) return error.Malformed;
     if (header.objects > header.names) return error.Malformed;
@@ -283,9 +292,7 @@ pub fn parse(bytes: []const u8) Refusal!Index {
     if (!read_digest(index.trees, 0).eql(header.tree)) return error.Malformed;
     try check_objects(&index);
     try check_chunks(&index);
-    for (0..header.order) |position| {
-        if (index.order_at(@intCast(position)) >= header.chunks) return error.Malformed;
-    }
+    assert(index.order.len == 0);
     return index;
 }
 
@@ -337,7 +344,7 @@ fn check_chunks(index: *const Index) Refusal!void {
     var end: u64 = gzip_header_bytes;
     for (0..index.header.chunks) |ordinal| {
         const at = ordinal * chunk_record_bytes;
-        if (read_u32(index.chunks, at + 44) != 0) return error.Malformed;
+        if (read_u32(index.chunks, at + 76) != 0) return error.Malformed;
         const record = index.chunk(@intCast(ordinal));
         if (record.length == 0) return error.Malformed;
         if (record.length > constants.lazy_range_bytes_max) return error.Malformed;

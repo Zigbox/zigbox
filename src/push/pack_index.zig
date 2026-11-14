@@ -70,6 +70,8 @@ pub const Recorder = struct {
     names: u32,
     /// `lazy_nodes_max`, or less in a test.
     names_max: u32,
+    /// `lazy_index_bytes_max`, or less in a test.
+    index_bytes_max: u64,
     trees: u32,
     objects: u32,
     chunks: u32,
@@ -77,16 +79,26 @@ pub const Recorder = struct {
     seen: seen_mod.Seen,
 
     /// Makes the three spill files; on failure none is left.
-    pub fn start(recorder: *Recorder, store: *Store, names_max: u32) fs_mod.Error!void {
+    pub fn start(
+        recorder: *Recorder,
+        store: *Store,
+        names_max: u32,
+        index_bytes_max: u64,
+    ) fs_mod.Error!void {
         assert(names_max >= 1);
         assert(names_max <= constants.lazy_nodes_max);
+        assert(index_bytes_max >= index_mod.header_bytes);
+        assert(index_bytes_max <= constants.lazy_index_bytes_max);
         recorder.recording = true;
         recorder.names_max = names_max;
+        recorder.index_bytes_max = index_bytes_max;
         recorder.names = 0;
         recorder.trees = 0;
         recorder.objects = 0;
         recorder.chunks = 0;
-        recorder.seen.reset();
+        var key: [seen_mod.key_bytes]u8 = undefined;
+        try store.host.random_bytes(&key);
+        recorder.seen.reset(&key);
         for (&recorder.spills) |*spill| {
             spill.open = false;
             spill.made = false;
@@ -115,7 +127,7 @@ pub const Recorder = struct {
     fn put(recorder: *Recorder, fs: Fs, section: Section, data: []const u8) fs_mod.Error!void {
         assert(recorder.recording);
         try recorder.spills[@backingInt(section)].put(fs, data);
-        if (recorder.index_bytes() > constants.lazy_index_bytes_max) recorder.recording = false;
+        if (recorder.index_bytes() > recorder.index_bytes_max) recorder.recording = false;
     }
 
     /// Counts one name of the tree (every tar entry but the root's).

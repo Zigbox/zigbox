@@ -23,6 +23,7 @@ const tar_mod = @import("../layer/tar.zig");
 const pack = @import("pack.zig");
 const index_mod = @import("../lazy/index.zig");
 const verify_mod = @import("../lazy/verify.zig");
+const chaining = @import("../lazy/chaining.zig");
 const flate = std.compress.flate;
 const PathBuf = @import("../store/fs.zig").PathBuf;
 
@@ -87,6 +88,7 @@ fn pack_tree_as(
     };
     packing.piece = piece;
     packing.names_max = names_max;
+    packing.index_bytes_max = constants.lazy_index_bytes_max;
     try pack.pack_pieces(&store, &packing, input, &made, &failure);
     try testing.expectEqual(version, made.writer_version);
     return made;
@@ -230,6 +232,7 @@ fn check_index(made: pack.Packed, tree: digest_mod.Digest) !index_mod.Index {
     try testing.expect(bytes.len <= index_bytes.len);
     const kept = index_bytes[0..bytes.len];
     @memcpy(kept, bytes); // The chunks are inflated through `plain_bytes` next.
+    checking.key = @splat(1);
     const index = try verify_mod.verify(&checking, kept, &anchor, tree);
     for (0..index.header.objects) |ordinal| {
         const object = index.object(@intCast(ordinal));
@@ -239,6 +242,12 @@ fn check_index(made: pack.Packed, tree: digest_mod.Digest) !index_mod.Index {
             const want = @min(object.size - covered, constants.store_chunk_bytes);
             const chunk = try inflate_at(blob, record.offset, record.length, want);
             try testing.expect(digest_mod.Digest.of(chunk).eql(record.hash));
+            const value = if (object.chunk_count == 1) zero else chaining.run_value(
+                chunk,
+                step,
+                constants.store_chunk_bytes,
+            );
+            try testing.expect(value.eql(record.chaining));
             covered += want;
         }
         try testing.expectEqual(object.size, covered);
@@ -294,6 +303,95 @@ test "a tree over the names bound packs with no index and no annotation, and sti
     try testing.expectEqualSlices(u8, &over.manifest.bytes, &cached.manifest.bytes);
 }
 
+const zero: digest_mod.Digest = .{ .bytes = @splat(0) };
+
+/// Packs `tree` with writer 2 and the index bound at `index_bytes_max` bytes.
+fn pack_bytes_bound(tree: digest_mod.Digest, index_bytes_max: u64) !pack.Packed {
+    var made: pack.Packed = undefined;
+    var failure: pack.Failure = undefined;
+    const input: pack.Input = .{
+        .tree = tree,
+        .settings = &settings,
+        .labels = null,
+        .writer_version = 2,
+    };
+    packing.piece = constants.pack_io_bytes;
+    packing.names_max = constants.lazy_nodes_max;
+    packing.index_bytes_max = index_bytes_max;
+    defer packing.index_bytes_max = constants.lazy_index_bytes_max;
+    try pack.pack_pieces(&store, &packing, input, &made, &failure);
+    return made;
+}
+
+/// The names in the store's `tmp/`.
+fn tmp_entries() !u32 {
+    var counter: struct {
+        names: u32 = 0,
+        fn call(context: *anyopaque, name: []const u8) void {
+            _ = name;
+            const self: *@This() = @ptrCast(@alignCast(context));
+            self.names += 1;
+        }
+    } = .{};
+    try store.fs.read_dir(root_path ++ "/tmp", .{
+        .context = &counter,
+        .call = @TypeOf(counter).call,
+    });
+    return counter.names;
+}
+
+test "an index exactly at its byte bound is written, and one byte over gets none" {
+    // Goal: `lazy_index_bytes_max` is the writer's bound to the byte, and a tree past it gets
+    // neither index nor annotation, nothing half written. Method: pack once to learn the
+    // index's size, then again with the bound at that size and one byte under it.
+    start(7, 0);
+    const imported = try import_source(false);
+    const full = try pack_bytes_bound(imported.digest, constants.lazy_index_bytes_max);
+    const size = (full.index orelse return error.TestNoIndex).size;
+    try testing.expectEqual(0, try tmp_entries());
+
+    pack.forget(&store, imported.digest, 2);
+    const at_bound = try pack_bytes_bound(imported.digest, size);
+    try testing.expect(!at_bound.cached);
+    _ = try check_index(at_bound, imported.digest);
+    try testing.expect(try manifest_names_index(at_bound));
+    try testing.expect(at_bound.layer.eql(full.layer));
+    try testing.expectEqual(0, try tmp_entries());
+
+    pack.forget(&store, imported.digest, 2);
+    const over = try pack_bytes_bound(imported.digest, size - 1);
+    try testing.expect(!over.cached);
+    try testing.expect(over.index == null);
+    try testing.expect(!try manifest_names_index(over));
+    try testing.expect(imported.digest.eql(try round_trip(over, false)));
+    try testing.expectEqual(0, try tmp_entries());
+}
+
+test "a writer 2 pack that fails at any write point leaves the store's tmp/ empty" {
+    // Goal: the spill files and the blob being written never outlive a failed pack. Method:
+    // count a clean pack's write points, then fail each in turn on a fresh store. A failed
+    // removal of a spill is swallowed (gc sweeps `tmp/`), so only failed packs are checked.
+    start(8, 0);
+    const clean_import = try import_source(false);
+    const before = files.mutations;
+    _ = try pack_bytes_bound(clean_import.digest, constants.lazy_index_bytes_max);
+    const points = files.mutations - before;
+    try testing.expectEqual(0, try tmp_entries());
+    try testing.expect(points > 3);
+    var failed: u32 = 0;
+    for (0..points) |point| {
+        start(8, 0);
+        const imported = try import_source(false);
+        files.faults.fail_mutation = files.mutations + @as(u32, @intCast(point));
+        const made = pack_bytes_bound(imported.digest, constants.lazy_index_bytes_max);
+        files.faults.fail_mutation = null;
+        if (made) |_| continue else |_| {}
+        failed += 1;
+        try testing.expectEqual(0, try tmp_entries());
+    }
+    try testing.expect(failed >= points - 3);
+}
+
 /// Whether the manifest blob of `made` carries the lazy-index annotation.
 fn manifest_names_index(made: pack.Packed) !bool {
     var path: PathBuf = undefined;
@@ -336,6 +434,7 @@ test "a tree with a file missing or changed is refused, naming what stopped the 
     };
     packing.piece = constants.pack_io_bytes;
     packing.names_max = constants.lazy_nodes_max;
+    packing.index_bytes_max = constants.lazy_index_bytes_max;
 
     files.flip_byte(object_path, 0);
     try testing.expectError(
@@ -606,16 +705,16 @@ const golden_manifest_x86_64 =
     "sha256:9fb72b7ef67ab49164f62a0c208083bea73a9c06c40ca8742c6cc5620201d59d";
 
 // Writer 2's goldens: taken from a reviewed run of the test above.
-const golden_v2_anchor = "offset=553 length=522 size=1139 digest=b3:" ++
-    "89f280c823c3551b2c9047c43eb269590227f75bebafed2e4a85a17288d83c12";
+const golden_v2_anchor = "offset=553 length=529 size=1235 digest=b3:" ++
+    "583a5ac82933d0cf9a9dcfb61f6240b5e539e994736d81098f77d4efe4bde2b8";
 const golden_v2_layer =
-    "sha256:df84ea0f0f80652d4da9841afee14acf8557240896e3c4e47e7704e3fc7c18f2";
+    "sha256:5455021fdeb5104679205221c5f42e4cefb616cb2fb18ff5f624c87b670884d1";
 const golden_v2_diff_id =
-    "sha256:c6ad9caf007e6827d902aee135bf98a0c1270545426ac051a226f12343e41f9b";
+    "sha256:cee1c36b026692889d7e069f9a1e5503045479d58191395125a2762438bc7a0f";
 const golden_v2_config_x86_64 =
-    "sha256:727f1eade709825dfd41ce798fcda0a1a54b05822b852b95eec0361696bd195e";
+    "sha256:4d8222c3e3b685e8d3c5d3caf9b406fe77222bfae1fa526222c3ec58191d7983";
 const golden_v2_manifest_x86_64 =
-    "sha256:752a604561bc4e994fb3b39d188f44da64ff7dd8915d2ac8915092da06ba02ca";
+    "sha256:ab6d038d21aa9233456f4ba008f25f4a989d166f8b7b709183a07f5f1c0284c6";
 
 const config_mod = @import("../registry/config.zig");
 const result_mod = @import("../build/result.zig");

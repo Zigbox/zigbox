@@ -4,18 +4,28 @@
 //! each tree's order, a directory's entries right after its own entry), over the index's own
 //! trees, skipping a subtree it has met before and counting its names from what it counted then.
 //!
+//! Every chunk is anchored to its file's content hash, so to the tree: a one-chunk file's chunk
+//! hash is its content, and a longer file's chunk chaining values join into its content
+//! (`chaining.zig`, `docs/decisions/2026-11-14-s2-chunk-anchor.md`). A fetched chunk is checked
+//! against its chaining value at its place before any byte of it is used. A longer file's plain
+//! chunk hashes (what the store's chunk list holds) cannot be checked without the bytes; the
+//! fetch checks them too, and a chunk that matches its chaining value but not its hash means the
+//! index lied.
+//!
 //! Pure, like `index.zig`; it writes nothing. A caller stores the trees with
-//! `trees.put_checked`, and the chunk hashes are checked when a chunk is fetched.
+//! `trees.put_checked`.
 
 const std = @import("std");
 const assert = std.debug.assert;
 const constants = @import("../constants.zig");
+const chaining = @import("chaining.zig");
 const index_mod = @import("index.zig");
 const seen_mod = @import("seen.zig");
 const tree_mod = @import("../store/tree.zig");
 const Digest = @import("../store/digest.zig").Digest;
 
 const Index = index_mod.Index;
+pub const key_bytes = seen_mod.key_bytes;
 const Refusal = index_mod.Refusal;
 
 /// A tree being walked; its name count is not known yet.
@@ -31,8 +41,10 @@ const Frame = struct {
     names: u32,
 };
 
-/// About 20 MiB; kept by the caller.
+/// About 20 MiB; kept by the caller, who sets `key` to fresh random bytes before each walk (the
+/// walk is pure, so it cannot draw them itself).
 pub const Workspace = struct {
+    key: [seen_mod.key_bytes]u8,
     seen: seen_mod.Seen,
     frames: [constants.store_depth_max + 1]Frame,
 };
@@ -75,7 +87,7 @@ pub fn verify(
 pub fn walk_index(ws: *Workspace, index: *const Index) Refusal!void {
     assert(index.header.complete);
     assert(index.header.names <= constants.lazy_nodes_max);
-    ws.seen.reset();
+    ws.seen.reset(&ws.key);
     var walk: Walk = .{
         .ws = ws,
         .index = index,
@@ -150,7 +162,8 @@ fn push(walk: *Walk, digest: Digest) Refusal!void {
 }
 
 /// A file entry: its object listed with its size, at its first appearance, by the store's rules
-/// for chunks (a one-chunk file's chunk is its content, an empty file's content is empty).
+/// for chunks (a one-chunk file's chunk is its content, an empty file's content is empty), and
+/// a longer file's chunks anchored to its content.
 fn check_file(walk: *Walk, entry: *const tree_mod.Entry) Refusal!void {
     assert(entry.kind == .file);
     assert(walk.objects <= walk.index.header.objects);
@@ -168,5 +181,26 @@ fn check_file(walk: *Walk, entry: *const tree_mod.Entry) Refusal!void {
     if (record.chunk_count == 1) {
         const chunk = walk.index.chunk(record.first_chunk);
         if (!chunk.hash.eql(entry.content)) return error.Malformed;
+        if (!chunk.chaining.eql(zero)) return error.Malformed;
     }
+    if (record.chunk_count >= 2) try check_anchors(walk.index, &record, entry.content);
+}
+
+const zero: Digest = .{ .bytes = @splat(0) };
+
+/// The chaining values of a file of two chunks or more join into its content hash.
+fn check_anchors(
+    index: *const Index,
+    record: *const index_mod.Object,
+    content: Digest,
+) Refusal!void {
+    assert(record.chunk_count >= 2);
+    assert(record.first_chunk + record.chunk_count <= index.header.chunks);
+    var joiner = chaining.Joiner.init();
+    const last = record.first_chunk + record.chunk_count - 1;
+    for (record.first_chunk..last) |ordinal| {
+        joiner.add(&index.chunk(@intCast(ordinal)).chaining);
+    }
+    const root = joiner.root(&index.chunk(last).chaining);
+    if (!root.eql(content)) return error.Malformed;
 }

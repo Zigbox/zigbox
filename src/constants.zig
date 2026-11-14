@@ -776,6 +776,9 @@ pub const state_export_time_max: u64 = 0o77777777777;
 pub const sim_fs_nodes_max: u32 = 640;
 pub const sim_fs_path_bytes_max: u32 = 192;
 pub const sim_fs_pool_bytes_max: u32 = 3 * 1024 * 1024;
+// The `lazy_index` fuzzer's own pool (`SimFs.use_pool`): its incompressible file of up to three
+// chunks, the imported object and two packed layers of it.
+pub const sim_fs_pool_lazy_fuzz_bytes_max: u32 = 24 * 1024 * 1024;
 pub const sim_fs_handles_max: u32 = 8;
 
 // Registry and pull (M4, docs/briefs/M4-pull.md). Every byte a registry sends is bounded: it is
