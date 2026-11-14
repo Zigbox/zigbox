@@ -174,6 +174,8 @@ pub fn show(out: *Io.Writer, title: []const u8, result: Session.Result) !void {
         "\n{s}: $ {s}   (exit {d})\n{s}\n",
         .{ demo_name, title, result.status, result.output },
     );
+    // Flushed so a later panic cannot swallow what the guest already said.
+    try out.flush();
 }
 
 /// A `zbx` run with its two streams kept apart.
