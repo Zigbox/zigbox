@@ -1,6 +1,6 @@
 .{
     // The result digest of the demo project (src/testing/vm/m9_project, imported from its
-    // Dockerfile), as a recorded run of `zig build demo-m9` prints it in the clean VM. Empty until
-    // the first green run: the run prints the line to put here.
-    .digest = "",
+    // Dockerfile), as a recorded run of `zig build demo-m9` prints it in the clean VM: VM run
+    // 43544344033 on 4685d6c, the first to reach the golden check.
+    .digest = "b3:54d2df5e5a52d41c61ff59a7b92f18324abd68faab0119bb6e90e6ffa068c3fa",
 }
