@@ -44,6 +44,15 @@ const rows = [_]Row{
         .paths = &.{"src/testing/vm/main_m8_packages.zig"},
         .true_outputs = &.{ "code", "demo_m8_packages" },
     },
+    // The S2 probe (S2 slice 1) runs only on a vm/s2-* branch: no CI demo.
+    .{
+        .paths = &.{
+            "src/testing/vm/main_s2_probe.zig",
+            "src/testing/vm/checks_s2_probe.zig",
+            "src/testing/vm/s2_probe/fuse_probe.zig",
+        },
+        .true_outputs = &.{"code"},
+    },
     // The release workflow, its own actions and its signing script run after a push to main and
     // in their own test jobs: no demo.
     .{
