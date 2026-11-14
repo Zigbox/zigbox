@@ -372,7 +372,6 @@ fn free_bytes(context: *anyopaque) u64 {
     return sim.scenario.free_bytes;
 }
 
-
 fn next_gc(sim: *Sim) u64 {
     assert(sim.scenario.gc_per_mille <= 1000);
     if (sim.scenario.gc_per_mille == 0) return std.math.maxInt(u64);
@@ -464,24 +463,35 @@ fn take_jobs(sim: *Sim) void {
     sim.resolver.drain_events();
 }
 
+/// The next time anything is due. A wake that is due now (a down source's probe with nothing
+/// to probe) does not hold time back, nor does it jump past anything else.
 fn next_time(sim: *Sim) ?u64 {
     const now = sim.now_ms;
     var next: ?u64 = null;
+    var stalled = false;
     for (sim.ends_ms) |end| {
-        if (end) |at| next = earliest(next, at);
+        if (end) |at| next = later(next, at, now, &stalled);
     }
     for (&sim.readers) |*reader| switch (reader.state) {
-        .idle => next = earliest(next, reader.next_at_ms),
-        .waiting => next = earliest(next, reader.waiting.until_ms),
+        .idle => next = later(next, reader.next_at_ms, now, &stalled),
+        .waiting => next = later(next, reader.waiting.until_ms, now, &stalled),
         .done => {},
     };
-    if (sim.resolver.schedule.tick(now)) |wake| next = earliest(next, wake);
+    if (sim.resolver.schedule.tick(now)) |wake| next = later(next, wake, now, &stalled);
     const fill = &sim.resolver.fill;
-    if (!fill.done) next = earliest(next, @max(fill.paused_until_ms, now + 10));
-    if (sim.gc_at_ms != std.math.maxInt(u64) and next != null) next = earliest(next, sim.gc_at_ms);
-    const at = next orelse return null;
-    // A wake that is due now (a probe with nothing to probe) moves time on a little.
-    return if (at <= now) now + 10 else at;
+    if (!fill.done) next = later(next, @max(fill.paused_until_ms, now + 10), now, &stalled);
+    if (next == null and !stalled) return null;
+    if (sim.gc_at_ms != std.math.maxInt(u64)) next = later(next, sim.gc_at_ms, now, &stalled);
+    return next orelse now + 10;
+}
+
+fn later(current: ?u64, candidate: u64, now: u64, stalled: *bool) ?u64 {
+    assert(current == null or current.? > now);
+    if (candidate <= now) {
+        stalled.* = true;
+        return current;
+    }
+    return earliest(current, candidate);
 }
 
 fn earliest(current: ?u64, candidate: u64) u64 {

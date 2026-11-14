@@ -17,6 +17,7 @@
 const std = @import("std");
 const assert = std.debug.assert;
 const Io = std.Io;
+const flate = std.compress.flate;
 const constants = @import("../constants.zig");
 const layout = @import("../store/layout.zig");
 const lazy = @import("lazy.zig");
@@ -68,10 +69,21 @@ pub const Work = struct {
 };
 
 const SlotMemory = struct {
+    /// `lazy_range_bytes_max`, and room for the trailer `inflate_range` writes after a range.
     range: []u8,
     chunk: []u8,
     put: []u8,
+    window: *[flate.max_window_len]u8,
 };
+
+/// What `init` allocates, all of it, before any fetch: per slot a range, a chunk, the store's
+/// copy buffer and an inflate window. The supervisor accepted the estimate (about 93 MiB here;
+/// docs/decisions/2026-11-14-s2-resolver-choices.md); a bound that pushes it past this fails
+/// the build.
+pub const memory_bytes: u64 = slots * slot_bytes;
+const slot_bytes: u64 = constants.lazy_range_bytes_max + range_trailer_bytes +
+    constants.store_chunk_bytes + constants.store_io_buffer_bytes + flate.max_window_len;
+const memory_bytes_max: u64 = 96 * 1024 * 1024;
 
 const FillCursor = struct {
     object: lazy.ObjectIndex,
@@ -133,20 +145,23 @@ pub const Resolver = struct {
     fn alloc_slot(gpa: std.mem.Allocator, store: *const Store) error{OutOfMemory}!SlotMemory {
         assert(store.chunk_bytes <= constants.lazy_range_bytes_max);
         assert(store.chunk_bytes > 0);
-        const range = try gpa.alloc(u8, constants.lazy_range_bytes_max);
+        const range = try gpa.alloc(u8, constants.lazy_range_bytes_max + range_trailer_bytes);
         errdefer gpa.free(range);
         const chunk = try gpa.alloc(u8, store.chunk_bytes);
         errdefer gpa.free(chunk);
         const put = try gpa.alloc(u8, constants.store_io_buffer_bytes);
-        return .{ .range = range, .chunk = chunk, .put = put };
+        errdefer gpa.free(put);
+        const window = try gpa.create([flate.max_window_len]u8);
+        return .{ .range = range, .chunk = chunk, .put = put, .window = window };
     }
 
     fn free_slot(gpa: std.mem.Allocator, memory: SlotMemory) void {
-        assert(memory.range.len == constants.lazy_range_bytes_max);
+        assert(memory.range.len == constants.lazy_range_bytes_max + range_trailer_bytes);
         assert(memory.put.len == constants.store_io_buffer_bytes);
         gpa.free(memory.range);
         gpa.free(memory.chunk);
         gpa.free(memory.put);
+        gpa.destroy(memory.window);
     }
 
     /// After `stop` (or when `start` was never called).
@@ -473,6 +488,7 @@ pub const Resolver = struct {
         assert(work.job.length > 0);
         const buffer = resolver.memory[slot].range[0..work.job.length];
         const got = range.fetch(range.context, work.job.offset, buffer, work.job.timeout_ms);
+        defer @memset(resolver.memory[slot].range[0 .. work.job.length + range_trailer_bytes], 0);
         const length = got catch |err| {
             const result: Result = switch (err) {
                 error.NotFound => .not_found,
@@ -497,19 +513,26 @@ pub const Resolver = struct {
                 work.results[at] = .lied; // A short answer: this chunk's bytes did not come.
                 continue;
             }
-            const segment = buffer[@intCast(segment_start)..@intCast(segment_end)];
-            work.results[at] = resolver.inflate_and_keep(slot, work, at, segment);
+            work.results[at] = resolver.inflate_and_keep(slot, work, at, segment_start, location.length);
         }
     }
 
-    fn inflate_and_keep(resolver: *Resolver, slot: u32, work: *Work, at: usize, segment: []const u8) Result {
+    /// Inflates the chunk whose compressed bytes are at `offset` in the slot's range buffer.
+    /// `inflate_range` writes its trailer over the next chunk's first bytes, so they are kept
+    /// and put back.
+    fn inflate_and_keep(resolver: *Resolver, slot: u32, work: *Work, at: usize, offset: u64, length: u32) Result {
+        const memory = &resolver.memory[slot];
         const wanted = &resolver.options.catalog.objects[work.objects[at]].wanted;
-        const length = schedule_mod.chunk_length(wanted, resolver.options.store.chunk_bytes, work.chunks[at]);
-        assert(length <= resolver.memory[slot].chunk.len);
-        assert(segment.len > 0);
-        const out = resolver.memory[slot].chunk[0..@intCast(length)];
-        const inflated = inflate(segment, out) catch return .lied;
-        assert(inflated == out.len);
+        const size = schedule_mod.chunk_length(wanted, resolver.options.store.chunk_bytes, work.chunks[at]);
+        assert(size <= memory.chunk.len);
+        assert(length > 0);
+        const from: usize = @intCast(offset);
+        const range = memory.range[from..][0 .. length + range_trailer_bytes];
+        const saved = range[length..][0..range_trailer_bytes].*;
+        const out = memory.chunk[0..@intCast(size)];
+        const inflated = inflate_range(range, length, out, memory.window);
+        range[length..][0..range_trailer_bytes].* = saved;
+        inflated catch return .lied;
         return resolver.keep(slot, work, at, out);
     }
 
@@ -667,19 +690,36 @@ fn now_ms(io: Io) u64 {
     return @intCast(ms);
 }
 
-/// Inflates raw deflate `segment` (starting at a full-flush point) into exactly `out`.
-pub fn inflate(segment: []const u8, out: []u8) error{Corrupt}!usize {
-    assert(out.len > 0);
-    assert(segment.len > 0);
-    var input: Io.Reader = .fixed(segment);
-    var decompress: std.compress.flate.Decompress = .init(&input, .raw, &.{});
-    var writer: Io.Writer = .fixed(out);
-    decompress.reader.streamExact(&writer, out.len) catch return error.Corrupt;
-    assert(writer.end == out.len);
-    return out.len;
+/// Slice 2's `index.inflate_range` (src/lazy/index.zig on claude/s2-slice2), copied unchanged
+/// until that branch merges; then this and the two constants go, and the call above uses it.
+/// Inflates one compressed range (whole deflate blocks from an empty history) to exactly
+/// `out.len` bytes. `range` holds the `length` compressed bytes and `range_trailer_bytes` of
+/// room after them, which this overwrites with an empty final block.
+pub fn inflate_range(
+    range: []u8,
+    length: usize,
+    out: []u8,
+    window: *[flate.max_window_len]u8,
+) error{Malformed}!void {
+    assert(length >= 1);
+    assert(range.len >= length + range_trailer_bytes);
+    range[length..][0..range_trailer_bytes].* = range_trailer;
+    var input: std.Io.Reader = .fixed(range[0 .. length + range_trailer_bytes]);
+    var inflate: flate.Decompress = .init(&input, .raw, window);
+    inflate.reader.readSliceAll(out) catch return error.Malformed;
+    if (inflate.reader.takeByte()) |_| {
+        return error.Malformed;
+    } else |err| switch (err) {
+        error.EndOfStream => {},
+        error.ReadFailed => return error.Malformed,
+    }
 }
+
+pub const range_trailer = [2]u8{ 0x03, 0x00 };
+pub const range_trailer_bytes: u32 = range_trailer.len;
 
 comptime {
     assert(slots >= 2);
     assert(constants.lazy_store_free_bytes_min / 4 > 0);
+    assert(memory_bytes <= memory_bytes_max);
 }

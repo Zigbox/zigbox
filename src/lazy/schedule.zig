@@ -377,14 +377,21 @@ pub const Schedule = struct {
             schedule.tick_entry(index, now);
             if (entry.state == .queued or entry.state == .fetching) {
                 wake = earliest(wake, entry.deadline_ms);
-                if (entry.state == .queued and entry.tried != 0) {
-                    wake = earliest(wake, entry.round_ms + constants.lazy_down_fail_ms);
+                // A round already due has a candidate source, so a free slot takes it.
+                const round_end = entry.round_ms + constants.lazy_down_fail_ms;
+                if (entry.state == .queued and entry.tried != 0 and round_end > now) {
+                    wake = earliest(wake, round_end);
                 }
             }
         }
+        // Only a probe still to come is a reason to wake: one already due is taken by the next
+        // free slot, and returning `now` for it would hide the deadlines behind it.
         for (schedule.sources[0..schedule.sources_count]) |*source| {
-            if (source.down) wake = earliest(wake, @max(source.probe_at_ms, now));
+            if (source.down and source.probe_at_ms > now) {
+                wake = earliest(wake, source.probe_at_ms);
+            }
         }
+        if (wake) |at| assert(at > now);
         return wake;
     }
 
@@ -482,8 +489,8 @@ pub const Schedule = struct {
 
     fn rank(entry: *const Pending) u8 {
         assert(entry.state == .queued);
-        assert(@intFromEnum(entry.purpose) <= 2);
-        return @intFromEnum(entry.purpose);
+        assert(@backingInt(entry.purpose) <= 2);
+        return @backingInt(entry.purpose);
     }
 
     fn take(schedule: *Schedule, job: *Job, index: u16) void {
