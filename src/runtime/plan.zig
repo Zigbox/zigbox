@@ -608,7 +608,6 @@ pub const Plan = struct {
         plan.listen_port = input.listen orelse 0;
         plan.hosts_file = input.hosts_file.len > 0;
         if (plan.hosts_file) assert(input.network == .none);
-        plan.hosts_path = if (plan.hosts_file) plan.add_text(&.{input.hosts_file}) else empty_text;
         if (plan.has_listener) assert(input.network == .none);
         if (plan.has_listener) assert(plan.listen_port > 0);
         plan.has_workdir = input.workdir.len > 0;
@@ -623,6 +622,7 @@ pub const Plan = struct {
         plan.candidates_count = 0;
         // Offset 0 is the empty text, so a step with nothing to say has a valid reference.
         assert(plan.add_text(&.{""}).offset == 0);
+        plan.hosts_path = if (plan.hosts_file) plan.add_text(&.{input.hosts_file}) else empty_text;
         plan.name = plan.add_text(&.{input.name});
         plan.hostname_ref = plan.add_text(&.{input.hostname_text()});
         plan.workdir = plan.add_text(&.{input.workdir});
@@ -2175,6 +2175,40 @@ test "a read-only plan binds the hostname read-only too, and has one step more (
     try testing.expectEqual(@as(u32, 1), remounts);
     try testing.expectEqual(plan.steps_expected(), plan.count);
     try testing.expect(plan.count > writable_count);
+}
+
+test "a given hosts file is bound itself, read-only, with no staged copy and no fallback (ZB-6)" {
+    // Goal: ZB-6's plan. Method: build with and without `hosts_file`; the given plan has two
+    // steps fewer (no stage, no unstage of the hosts), binds the host's path over the mount
+    // point and remounts it read-only, both non-tolerant and in no group, while the other two
+    // files keep their steps, and the step count is the one `steps_expected` says.
+    var plan: Plan = undefined;
+    var input = test_input(&.{"sh"});
+    input.network = .none;
+    plan.build(&input);
+    const generated = plan.count;
+    input.hosts_file = "/srv/mesh/hosts";
+    plan.build(&input);
+    try testing.expectEqual(generated - 2, plan.count);
+    try testing.expectEqual(plan.steps_expected(), plan.count);
+    const hosts: u8 = @backingInt(netfiles.File.hosts);
+    var binds: u32 = 0;
+    for (plan.steps[0..plan.count], 0..) |step, at| {
+        if (step.index != hosts or !is_etc(step.kind)) continue;
+        if (step.kind == .create_etc_file or step.kind == .make_etc_dir) continue;
+        try testing.expect(step.kind != .stage_etc_file and step.kind != .unstage_etc_file);
+        try testing.expect(!step.tolerant);
+        try testing.expectEqual(@as(u8, 0), group_of(&step));
+        if (step.kind != .bind_etc_file) continue;
+        binds += 1;
+        try testing.expectEqualStrings("/srv/mesh/hosts", plan.text(step.source));
+        try testing.expectEqualStrings("/srv/alpine/etc/hosts", plan.text(step.target));
+        try testing.expectEqual(Kind.remount_etc_file, plan.steps[at + 1].kind);
+    }
+    try testing.expectEqual(@as(u32, 1), binds);
+    var stages: u32 = 0;
+    for (plan.steps[0..plan.count]) |step| stages += @intFromBool(step.kind == .stage_etc_file);
+    try testing.expectEqual(@as(u32, 2), stages);
 }
 
 test "the generated /etc files are bound read-only over the image's, and the staged name goes" {
