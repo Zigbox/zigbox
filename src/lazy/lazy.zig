@@ -238,4 +238,5 @@ test {
     _ = @import("schedule.zig");
     _ = @import("resolver.zig");
     _ = @import("sim.zig");
+    _ = @import("resolver_test.zig");
 }
