@@ -46,7 +46,7 @@ release PR merged to main (supervisor; version in build.zig.zon, notes in docs/r
        │              the tap's formula differs only in url, version, sha256 (and the one-off lines)
        ├─ publish     the draft becomes the release; THIS creates the tag, at the release commit
        ├─ tap         env release-publish: commit Formula/zigbox.rb to Zigbox/homebrew-tap main
-       ├─ site        repository_dispatch to Zigbox/zigbox.github.io, wait for the deploy
+       ├─ site        repository_dispatch to Zigbox/website, wait for the deploy
        └─ verify      macos-15 and macos-15-intel: the public zip (signature, Gatekeeper,
                       both architectures, zbx --version), then brew install, zbx --version, brew test
 ```
@@ -119,7 +119,7 @@ read, so a concurrent change to the formula makes it fail, never overwrite.
 - The temporary keychain is put on the user search list for the signing step, because `codesign`
   needs it there to resolve the chain; the `always()` step restores the list the job found. Both
   steps are the same in `mac-test`.
-- The App can write the contents of two repositories, `homebrew-tap` and `zigbox.github.io`, and
+- The App can write the contents of two repositories, `homebrew-tap` and `website`, and
   read Actions on the site; it is not installed on `Zigbox/zigbox`. Its key is a secret of
   `release-publish` alone (no reviewers, `main` only): `preflight`, `prepare`, `tap` and `site`
   can read it. Tokens are minted per job for the repositories that job needs.
@@ -138,7 +138,7 @@ read, so a concurrent change to the formula makes it fail, never overwrite.
 
 | # | Item | Kind | Where | Owner of it | Exists? |
 |---|---|---|---|---|---|
-| 1 | GitHub App "Zigbox Release": Contents read and write, Metadata read, Actions read | GitHub App | Zigbox org, installed on `homebrew-tap` and `zigbox.github.io` only | owner | new (uninstall from `zigbox` if installed) |
+| 1 | GitHub App "Zigbox Release": Contents read and write, Metadata read, Actions read | GitHub App | Zigbox org, installed on `homebrew-tap` and `website` only | owner | new (uninstall from `zigbox` if installed) |
 | 2 | `RELEASE_APP_ID` | variable | env `release-publish` | owner | new |
 | 3 | `RELEASE_APP_PRIVATE_KEY` (the App's `.pem`) | secret | env `release-publish` | owner | new |
 | 4 | Environment `release-publish`: deployments from `main` only, no reviewers | environment | Zigbox/zigbox | owner | new |
@@ -154,7 +154,7 @@ read, so a concurrent change to the formula makes it fail, never overwrite.
 | 14 | `.github/actions/`: `setup-gh`, `find-draft`, `tap-formula`, `mac-check-zip` | actions | Zigbox/zigbox | implementer | new |
 | 15 | `zig build mac-release` builds and joins both architectures; tests | code | Zigbox/zigbox | implementer | changed |
 | 16 | `packaging.md`, this file, AGENTS.md line, STYLE.md (`lipo`), decision | docs | Zigbox/zigbox | implementer, supervisor | changed |
-| 17 | Site `deploy.yml` accepting `repository_dispatch` type `site` | workflow | Zigbox/zigbox.github.io | — | exists |
+| 17 | Site `deploy.yml` accepting `repository_dispatch` type `site` | workflow | Zigbox/website | — | exists |
 
 No longer needed: the `release-tag` environment, the `MAC_RELEASE_RUNNER_LABEL` variable, the
 self-hosted release runner and its separate macOS user, the runner group. (`MAC_RUNNER_LABEL` and
@@ -178,7 +178,7 @@ no runner to set up and no macOS user to make.
 GitHub Apps → New GitHub App. Name `Zigbox Release`; no webhook (untick Active); repository
 permissions **Contents: Read and write**, **Actions: Read**, Metadata: Read; "Only on this
 account". Create it, note the App ID, and **Generate a private key** (a `.pem` downloads). Then
-**Install App** → Zigbox → Only select repositories: `homebrew-tap` and `zigbox.github.io`
+**Install App** → Zigbox → Only select repositories: `homebrew-tap` and `website`
 (not `zigbox`).
 
 **2. The environment `release-publish`, and the `release` policy.**
