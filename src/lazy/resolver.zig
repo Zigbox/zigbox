@@ -56,7 +56,8 @@ pub const Step = union(enum) {
     wait: Waiting,
 };
 
-pub const Waiting = struct { ticket: Ticket, until_ms: u64 };
+/// A reader's wait: its entry, when to look again, and when the read began (which bounds it).
+pub const Waiting = struct { ticket: Ticket, until_ms: u64, began_ms: u64 };
 
 /// One slot's job, copied out of the schedule so the fetch runs without the lock.
 pub const Work = struct {
@@ -65,6 +66,10 @@ pub const Work = struct {
     objects: [job_chunks_max]lazy.ObjectIndex,
     chunks: [job_chunks_max]u32,
     results: [job_chunks_max]Result,
+    /// The entry was asked for again because the reader found its stored copy damaged.
+    refetch: [job_chunks_max]bool,
+    /// The chunk's put made its object whole.
+    whole: [job_chunks_max]bool,
     sent: u64,
 };
 
@@ -92,6 +97,8 @@ const FillCursor = struct {
     whole: u32,
     paused_until_ms: u64,
     done: bool,
+    /// A fill slot is planning from a copy of this cursor (without the lock).
+    planning: bool,
 };
 
 pub const Resolver = struct {
@@ -141,13 +148,53 @@ pub const Resolver = struct {
             .whole = 0,
             .paused_until_ms = 0,
             .done = !options.fill,
+            .planning = false,
         };
+        resolver.check_index();
+        resolver.count_whole();
         resolver.io = null;
         resolver.mutex = .init;
         resolver.store_mutex = .init;
         resolver.readers = .init;
         resolver.workers = .init;
         resolver.threads = @splat(null);
+    }
+
+    /// Drops the registry hint of each object whose locations the resolver cannot use: not one
+    /// per chunk, a range of no bytes or longer than `lazy_range_bytes_max`, or one that runs
+    /// past the end of a blob's offsets. The index is untrusted; its peers still serve.
+    fn check_index(resolver: *Resolver) void {
+        const objects = resolver.options.catalog.objects;
+        assert(resolver.objects.len == objects.len);
+        for (objects, resolver.objects) |*object, *state| {
+            assert(!state.no_registry);
+            if (!locations_usable(object)) state.no_registry = true;
+        }
+    }
+
+    fn locations_usable(object: *const lazy.Object) bool {
+        assert(object.wanted.hashes.len <= constants.store_chunks_max);
+        if (object.locations.len == 0) return true;
+        if (object.locations.len != object.wanted.hashes.len) return false;
+        for (object.locations) |location| {
+            if (location.length == 0) return false;
+            if (location.length > constants.lazy_range_bytes_max) return false;
+            if (location.offset > std.math.maxInt(u64) - @as(u64, location.length)) return false;
+        }
+        return true;
+    }
+
+    /// Objects already whole in the store start `objects_local` (without the fill, nothing
+    /// else would count them).
+    fn count_whole(resolver: *Resolver) void {
+        const objects = resolver.options.catalog.objects;
+        assert(resolver.schedule.report.objects_local == 0);
+        for (objects, 0..) |*object, at| {
+            if (land_mod.object_is_whole(resolver.options.store, &object.wanted)) {
+                resolver.schedule.mark_whole(@intCast(at));
+            }
+        }
+        assert(resolver.schedule.report.objects_local <= objects.len);
     }
 
     fn alloc_slot(gpa: std.mem.Allocator, store: *const Store) error{OutOfMemory}!SlotMemory {
@@ -206,8 +253,10 @@ pub const Resolver = struct {
         }
     }
 
-    /// Ends every wait (`Stopped`) and joins the threads. Fetches in flight end within their
-    /// attempt timeout.
+    /// Ends every wait (`Stopped`) and joins the fetch threads. Fetches in flight end within
+    /// their attempt timeout. Readers in `read` wake and return `Stopped`; the caller (the FUSE
+    /// server) joins its reader threads after this and before `deinit`, which frees what they
+    /// read into.
     pub fn stop(resolver: *Resolver) void {
         const io = resolver.io.?;
         assert(resolver.threads.len == slots);
@@ -227,15 +276,15 @@ pub const Resolver = struct {
         const io = resolver.io.?;
         resolver.mutex.lockUncancelable(io);
         defer resolver.mutex.unlock(io);
-        var result = resolver.schedule.report;
-        result.objects_local = resolver.fill.whole;
+        const result = resolver.schedule.report;
         assert(result.objects_total == resolver.options.catalog.objects.len);
         assert(result.objects_local <= result.objects_total);
         return result;
     }
 
     /// Chunk `chunk` of object `object`, verified, into `out` (at least the chunk's length).
-    /// Blocks until it is local or the read gives up (`lazy_read_deadline_ms` at most).
+    /// Blocks until it is local or the read gives up (`lazy_read_deadline_ms` from its start at
+    /// most, however often the chunk has to be asked for again).
     pub fn read(
         resolver: *Resolver,
         object: lazy.ObjectIndex,
@@ -251,15 +300,15 @@ pub const Resolver = struct {
                 .failed => |err| return err,
                 .wait => |waiting| {
                     resolver.wait_until(waiting.ticket, waiting.until_ms);
-                    step = resolver.read_poll(waiting.ticket, out, now_ms(io));
+                    step = resolver.read_poll(waiting, out, now_ms(io));
                 },
             }
         }
     }
 
     /// Sleeps until the entry settles or `until_ms`. The entry is checked under the lock, so a
-    /// broadcast between the reader's poll and this wait is not lost; the entry's deadline,
-    /// which can only shrink, bounds the sleep too.
+    /// broadcast between the reader's poll and this wait is not lost; the entry's deadline
+    /// bounds the sleep too.
     fn wait_until(resolver: *Resolver, ticket: Ticket, until_ms: u64) void {
         const io = resolver.io.?;
         assert(until_ms < 1 << 62);
@@ -289,6 +338,22 @@ pub const Resolver = struct {
         assert(chunk < wanted.hashes.len);
         const chunk_bytes = resolver.options.store.chunk_bytes;
         assert(out.len >= schedule_mod.chunk_length(wanted, chunk_bytes, chunk));
+        return resolver.look(object, chunk, out, now, now);
+    }
+
+    /// From the store, else an ask. `began` is when the read began: every ask of the read is
+    /// bounded by `lazy_read_deadline_ms` from it, so a chunk that keeps going missing (a gc, a
+    /// disk that damages what it is given) cannot hold a reader longer than that.
+    fn look(
+        resolver: *Resolver,
+        object: lazy.ObjectIndex,
+        chunk: u32,
+        out: []u8,
+        now: u64,
+        began: u64,
+    ) Step {
+        assert(began <= now);
+        assert(object < resolver.options.catalog.objects.len);
         if (resolver.read_store(object, chunk, out)) |length| {
             // Local already (resolved before, or another image's): no fetch, but the read still
             // counts towards sequential readahead.
@@ -297,12 +362,39 @@ pub const Resolver = struct {
             resolver.wake_workers();
             resolver.unlock();
             return .{ .done = @intCast(length) };
+        } else |err| switch (err) {
+            error.NotLocal => return resolver.ask(object, chunk, now, began, false),
+            // `put_chunk` replaces a chunk file that does not hash right: fetch it again.
+            error.Damaged => return resolver.ask(object, chunk, now, began, true),
+            // A put never replaces a whole object, and a store that refuses reads is not the
+            // sources' to fix: the read fails, and an event says so.
+            error.ObjectDamaged, error.Unreadable => return resolver.refuse(object, chunk),
         }
-        return resolver.ask(object, chunk, now);
     }
 
-    fn ask(resolver: *Resolver, object: lazy.ObjectIndex, chunk: u32, now: u64) Step {
+    /// The read fails before any source is asked; an `E1203` event says so.
+    fn refuse(resolver: *Resolver, object: lazy.ObjectIndex, chunk: u32) Step {
         assert(object < resolver.options.catalog.objects.len);
+        assert(chunk < resolver.options.catalog.objects[object].wanted.hashes.len);
+        resolver.lock();
+        resolver.schedule.refuse(object, chunk);
+        resolver.unlock();
+        resolver.drain_events();
+        return .{ .failed = error.Unavailable };
+    }
+
+    fn ask(
+        resolver: *Resolver,
+        object: lazy.ObjectIndex,
+        chunk: u32,
+        now: u64,
+        began: u64,
+        refetch: bool,
+    ) Step {
+        assert(object < resolver.options.catalog.objects.len);
+        assert(began <= now);
+        const until_ms = began + constants.lazy_read_deadline_ms;
+        if (now >= until_ms) return resolver.refuse(object, chunk);
         const free = resolver.options.free.query(resolver.options.free.context);
         resolver.lock();
         if (resolver.schedule.stopping) {
@@ -315,48 +407,59 @@ pub const Resolver = struct {
             resolver.drain_events();
             return .{ .failed = error.StoreFull };
         }
-        const ticket = resolver.schedule.request(object, chunk, .on_demand, now);
-        // The table is full: more readers than the FUSE server has threads. Said in an event.
-        if (ticket == null) resolver.schedule.table_full(object, chunk);
+        const asked: schedule_mod.Ask = .{
+            .purpose = .on_demand,
+            .began_ms = began,
+            .refetch = refetch,
+        };
+        const ticket = resolver.schedule.request(object, chunk, asked, now);
+        // Every entry is a reader's or in a job: more readers than the table holds. An event.
+        if (ticket == null) resolver.schedule.refuse(object, chunk);
+        var until: u64 = until_ms;
+        if (ticket) |held| {
+            const own = resolver.schedule.reader_deadline(held, began);
+            until = @min(own, resolver.schedule.entry_of(held).deadline_ms);
+        }
         resolver.wake_workers();
         resolver.unlock();
         if (ticket) |held| {
-            const until_ms = now + constants.lazy_read_deadline_ms;
-            return .{ .wait = .{ .ticket = held, .until_ms = until_ms } };
+            return .{ .wait = .{ .ticket = held, .until_ms = until, .began_ms = began } };
         }
         resolver.drain_events();
         return .{ .failed = error.Unavailable };
     }
 
     /// A reader's next step, after a wake-up or its time.
-    pub fn read_poll(resolver: *Resolver, ticket: Ticket, out: []u8, now: u64) Step {
+    pub fn read_poll(resolver: *Resolver, waiting: Waiting, out: []u8, now: u64) Step {
         assert(out.len > 0);
+        assert(waiting.began_ms <= now);
+        const ticket = waiting.ticket;
         resolver.lock();
         _ = resolver.schedule.tick(now);
         const entry = resolver.schedule.entry_of(ticket);
+        const own_deadline = resolver.schedule.reader_deadline(ticket, waiting.began_ms);
         const object = entry.object;
         const chunk = entry.chunk;
         const state = entry.state;
         const failure = entry.failure;
-        const deadline = entry.deadline_ms;
+        const until_ms = @min(entry.deadline_ms, own_deadline);
+        // A later reader may have pushed the entry's deadline out; this one keeps its own.
+        const late = (state == .queued or state == .fetching) and now >= own_deadline;
+        if (late) resolver.schedule.give_up(ticket);
         if (state == .landed or state == .failed) resolver.schedule.release(ticket);
         resolver.unlock();
         resolver.drain_events();
+        if (late) return .{ .failed = error.Unavailable };
         switch (state) {
             .free => unreachable,
-            .queued, .fetching => return .{ .wait = .{ .ticket = ticket, .until_ms = deadline } },
+            .queued, .fetching => return .{ .wait = .{
+                .ticket = ticket,
+                .until_ms = until_ms,
+                .began_ms = waiting.began_ms,
+            } },
             .failed => return .{ .failed = read_error(failure) },
-            .landed => {
-                if (resolver.read_store(object, chunk, out)) |length| {
-                    resolver.lock();
-                    resolver.schedule.note_read(object, chunk, now);
-                    resolver.wake_workers();
-                    resolver.unlock();
-                    return .{ .done = @intCast(length) };
-                }
-                // Gone again (a gc, a damaged file): ask once more, a fresh entry.
-                return resolver.ask(object, chunk, now);
-            },
+            // Gone again (a gc) or damaged since it landed: looked at again, in the same bound.
+            .landed => return resolver.look(object, chunk, out, now, waiting.began_ms),
         }
     }
 
@@ -370,17 +473,19 @@ pub const Resolver = struct {
         };
     }
 
-    /// The chunk from the store, verified, or null.
-    fn read_store(resolver: *Resolver, object: lazy.ObjectIndex, chunk: u32, out: []u8) ?usize {
+    /// The chunk from the store, verified (`read_local` hashes it). Without the store lock: a
+    /// read uses none of the store's temporary names or counters, and holding the lock across
+    /// a chunk's read and hash would stall every slot's put behind it.
+    fn read_store(
+        resolver: *Resolver,
+        object: lazy.ObjectIndex,
+        chunk: u32,
+        out: []u8,
+    ) land_mod.ReadError!usize {
         const wanted = &resolver.options.catalog.objects[object].wanted;
         assert(chunk < wanted.hashes.len);
-        resolver.lock_store();
-        defer resolver.unlock_store();
-        const length = land_mod.read_local(resolver.options.store, wanted, chunk, out) catch
-            return null;
-        // The pair of `land`'s check: no byte reaches a reader that did not hash right here.
-        assert(lazy.Digest.of(out[0..length]).eql(wanted.hashes[chunk]));
-        return length;
+        assert(out.len > 0);
+        return land_mod.read_local(resolver.options.store, wanted, chunk, out);
     }
 
     fn slot_loop(resolver: *Resolver, slot: u32) void {
@@ -421,7 +526,9 @@ pub const Resolver = struct {
     }
 
     /// Under the lock: the slot's next job, copied into `work`. A fill slot with nothing queued
-    /// plans the next stretch of the fill first (which needs the store, so it drops the lock).
+    /// plans the next stretch of the fill first. The plan reads the store, so it drops the
+    /// lock; it moves a copy of the fill's cursor, and only one slot plans at a time, so the
+    /// cursor itself changes only under the lock.
     pub fn slot_take(resolver: *Resolver, slot: u32, work: *Work, now: u64) bool {
         assert(slot < slots);
         assert(!resolver.schedule.jobs[slot].active);
@@ -430,18 +537,40 @@ pub const Resolver = struct {
             return true;
         }
         if (slot < constants.lazy_fetches_max) return false;
-        if (resolver.fill.done or now < resolver.fill.paused_until_ms) return false;
-        if (resolver.schedule.queued_fill() > 0) return false;
-        resolver.unlock();
+        if (!resolver.fill_due(now)) return false;
         var plan: FillPlan = undefined;
-        resolver.fill_plan(&plan, now);
+        plan.cursor = resolver.fill;
+        resolver.fill.planning = true;
+        resolver.unlock();
+        resolver.fill_plan(slot, &plan, now);
         resolver.lock();
-        for (plan.objects[0..plan.count], plan.chunks[0..plan.count]) |object, chunk| {
-            _ = resolver.schedule.request(object, chunk, .fill, now) orelse break;
-        }
+        resolver.fill_commit(&plan, now);
+        if (resolver.schedule.stopping) return false;
         const job = resolver.schedule.next_job(slot, now) orelse return false;
         resolver.copy_work(job, work);
         return true;
+    }
+
+    fn fill_due(resolver: *const Resolver, now: u64) bool {
+        assert(resolver.fill.object <= resolver.options.catalog.objects.len);
+        assert(resolver.fill.whole <= resolver.options.catalog.objects.len);
+        if (resolver.fill.done or resolver.fill.planning) return false;
+        if (now < resolver.fill.paused_until_ms) return false;
+        return resolver.schedule.queued_fill() == 0;
+    }
+
+    /// Under the lock: the plan's cursor becomes the fill's, and its chunks are queued.
+    fn fill_commit(resolver: *Resolver, plan: *const FillPlan, now: u64) void {
+        assert(resolver.fill.planning);
+        assert(plan.count <= job_chunks_max);
+        resolver.fill = plan.cursor;
+        resolver.fill.planning = false;
+        for (plan.whole[0..plan.whole_count]) |object| resolver.schedule.mark_whole(object);
+        if (resolver.schedule.stopping) return;
+        for (plan.objects[0..plan.count], plan.chunks[0..plan.count]) |object, chunk| {
+            const asked: schedule_mod.Ask = .{ .purpose = .fill, .began_ms = now };
+            _ = resolver.schedule.request(object, chunk, asked, now) orelse break;
+        }
     }
 
     fn copy_work(resolver: *const Resolver, job: *const schedule_mod.Job, work: *Work) void {
@@ -454,6 +583,8 @@ pub const Resolver = struct {
             work.purposes[at] = entry.purpose;
             work.objects[at] = entry.object;
             work.chunks[at] = entry.chunk;
+            work.refetch[at] = entry.refetch;
+            work.whole[at] = false;
             work.results[at] = .failed;
         }
     }
@@ -463,10 +594,11 @@ pub const Resolver = struct {
         assert(slot < slots);
         assert(resolver.schedule.jobs[slot].active);
         const count = work.job.count;
-        for (work.results[0..count], work.purposes[0..count]) |result, purpose| {
+        for (work.results[0..count], work.purposes[0..count], 0..) |result, purpose, at| {
             if (purpose == .fill and result == .store_full) {
                 resolver.fill.paused_until_ms = now + constants.lazy_down_probe_ms;
             }
+            if (work.whole[at]) resolver.schedule.mark_whole(work.objects[at]);
         }
         resolver.schedule.job_done(slot, work.results[0..count], work.sent, now);
     }
@@ -478,7 +610,8 @@ pub const Resolver = struct {
         const count = work.job.count;
         var missing: u32 = 0;
         for (0..count) |at| {
-            if (resolver.chunk_is_local(work.objects[at], work.chunks[at])) {
+            // A chunk a reader found damaged is fetched even though its file is there.
+            if (!work.refetch[at] and resolver.chunk_is_local(work.objects[at], work.chunks[at])) {
                 work.results[at] = .local;
             } else {
                 missing += 1;
@@ -502,22 +635,37 @@ pub const Resolver = struct {
     fn fetch_peer(resolver: *Resolver, slot: u32, work: *Work) void {
         const peer = resolver.options.peers[work.job.source];
         assert(work.job.count == 1);
-        const object = &resolver.options.catalog.objects[work.objects[0]];
-        const buffer = resolver.memory[slot].chunk;
-        const id = object.wanted.id;
-        const got = peer.fetch(peer.context, id, work.chunks[0], buffer, work.job.timeout_ms);
-        const length = got catch |err| {
-            work.results[0] = switch (err) {
-                error.NotFound => .not_found,
-                error.TimedOut => .timed_out,
-                error.Failed => .failed,
-            };
+        const wanted = &resolver.options.catalog.objects[work.objects[0]].wanted;
+        const chunk = work.chunks[0];
+        const length = schedule_mod.chunk_length(wanted, resolver.options.store.chunk_bytes, chunk);
+        const buffer = resolver.memory[slot].chunk[0..@intCast(length)];
+        const request: lazy.Request = .{
+            .chunk = wanted.hashes[chunk],
+            .length = @intCast(length),
+            .object = wanted.id,
+            .index = chunk,
+            .timeout_ms = work.job.timeout_ms,
+        };
+        const fetched = peer.fetch(peer.context, &request, buffer) catch |err| {
+            work.results[0] = result_of(err);
             return;
         };
-        assert(length <= buffer.len);
-        work.sent = length;
-        work.results[0] = resolver.keep(slot, work, 0, buffer[0..length]);
-        if (work.results[0] == .lied) peer.lied(peer.context, object.wanted.id, work.chunks[0]);
+        work.sent = @min(fetched.length, buffer.len);
+        // A short answer is a failed fetch, never a lie: only bytes that hash wrong are.
+        if (fetched.length != buffer.len) {
+            work.results[0] = .failed;
+            return;
+        }
+        work.results[0] = resolver.keep(slot, work, 0, buffer);
+        if (work.results[0] == .lied) peer.lied(peer.context, &request, fetched.peer);
+    }
+
+    fn result_of(err: lazy.FetchError) Result {
+        return switch (err) {
+            error.NotFound => .not_found,
+            error.TimedOut => .timed_out,
+            error.Failed => .failed,
+        };
     }
 
     fn fetch_range(resolver: *Resolver, slot: u32, work: *Work) void {
@@ -528,18 +676,12 @@ pub const Resolver = struct {
         const got = range.fetch(range.context, work.job.offset, buffer, work.job.timeout_ms);
         defer @memset(resolver.memory[slot].range[0 .. work.job.length + range_trailer_bytes], 0);
         const length = got catch |err| {
-            const result: Result = switch (err) {
-                error.NotFound => .not_found,
-                error.TimedOut => .timed_out,
-                error.Failed => .failed,
-            };
             for (work.results[0..work.job.count]) |*slot_result| {
-                if (slot_result.* != .local) slot_result.* = result;
+                if (slot_result.* != .local) slot_result.* = result_of(err);
             }
             return;
         };
-        assert(length <= buffer.len);
-        work.sent = length;
+        work.sent = @min(length, buffer.len);
         var segment_end: u64 = 0;
         for (0..work.job.count) |at| {
             const object = &resolver.options.catalog.objects[work.objects[at]];
@@ -547,8 +689,10 @@ pub const Resolver = struct {
             const segment_start = segment_end;
             segment_end += location.length;
             if (work.results[at] == .local) continue;
-            if (segment_end > length) {
-                work.results[at] = .lied; // A short answer: this chunk's bytes did not come.
+            if (segment_end > work.sent) {
+                // A short answer: this chunk's bytes did not all come. A failed fetch, not a
+                // lie (lazy.zig: only bytes that hash wrong are).
+                work.results[at] = .failed;
                 continue;
             }
             const stored_length = location.length;
@@ -588,7 +732,7 @@ pub const Resolver = struct {
     fn keep(
         resolver: *Resolver,
         slot: u32,
-        work: *const Work,
+        work: *Work,
         at: u32,
         bytes: []const u8,
     ) Result {
@@ -611,6 +755,10 @@ pub const Resolver = struct {
         const store = resolver.options.store;
         return switch (land_mod.land(store, put, &object.wanted, work.chunks[at], bytes)) {
             .landed => .landed,
+            .whole => whole: {
+                work.whole[at] = true;
+                break :whole .landed;
+            },
             .lied => unreachable, // Hashed just above.
             .content_mismatch => .content_mismatch,
             .store_full => .store_full,
@@ -628,38 +776,51 @@ pub const Resolver = struct {
     }
 
     const FillPlan = struct {
+        /// A copy of the fill's cursor, moved by the plan and committed under the lock.
+        cursor: FillCursor,
         count: u32,
         objects: [job_chunks_max]lazy.ObjectIndex,
         chunks: [job_chunks_max]u32,
+        /// Objects the plan found whole (or made, when empty), for `objects_local`.
+        whole_count: u32,
+        whole: [looks_max]lazy.ObjectIndex,
     };
 
-    /// Without the lock: the next chunks the fill needs, from its cursor, at most a job's worth;
-    /// empty objects are made on the way. Looks at most `lazy_pending_max` chunks per call.
-    fn fill_plan(resolver: *Resolver, plan: *FillPlan, now: u64) void {
+    /// The chunks a plan looks at, at most, per call.
+    const looks_max = constants.lazy_pending_max;
+
+    /// Without the lock: the next chunks the fill needs, from the plan's cursor, at most a
+    /// job's worth; empty objects are made on the way (with `slot`'s copy buffer).
+    fn fill_plan(resolver: *Resolver, slot: u32, plan: *FillPlan, now: u64) void {
         const objects = resolver.options.catalog.objects;
-        assert(resolver.fill.object <= objects.len);
+        assert(plan.cursor.object <= objects.len);
+        assert(slot >= constants.lazy_fetches_max);
         plan.count = 0;
+        plan.whole_count = 0;
         var looked: u32 = 0;
         resolver.lock_store();
         defer resolver.unlock_store();
-        const looked_max = constants.lazy_pending_max;
-        while (plan.count < job_chunks_max and looked < looked_max) : (looked += 1) {
-            if (resolver.fill.object == objects.len) {
-                resolver.fill_pass_ended(now);
+        while (plan.count < job_chunks_max and looked < looks_max) : (looked += 1) {
+            if (plan.cursor.object == objects.len) {
+                fill_pass_ended(&plan.cursor, objects.len, now);
                 return;
             }
-            resolver.fill_look(plan);
+            resolver.fill_look(slot, plan);
         }
         assert(plan.count <= job_chunks_max);
+        assert(plan.whole_count <= looks_max);
     }
 
-    /// One step of the fill's cursor: one object found whole, or one chunk looked at.
-    fn fill_look(resolver: *Resolver, plan: *FillPlan) void {
+    /// One step of the plan's cursor: one object found whole, or one chunk looked at.
+    fn fill_look(resolver: *Resolver, slot: u32, plan: *FillPlan) void {
         const store = resolver.options.store;
-        const cursor = &resolver.fill;
+        const cursor = &plan.cursor;
         const wanted = &resolver.options.catalog.objects[cursor.object].wanted;
         assert(cursor.chunk <= wanted.hashes.len);
+        assert(plan.whole_count < looks_max);
         if (cursor.chunk == 0 and land_mod.object_is_whole(store, wanted)) {
+            plan.whole[plan.whole_count] = cursor.object;
+            plan.whole_count += 1;
             cursor.whole += 1;
             cursor.object += 1;
             return;
@@ -667,7 +828,10 @@ pub const Resolver = struct {
         if (wanted.hashes.len == 0) {
             const free = resolver.options.free.query(resolver.options.free.context);
             if (free >= constants.lazy_store_free_bytes_min) {
-                if (land_mod.land_empty(store, resolver.memory[slots - 1].put, wanted) == .landed) {
+                const put = resolver.memory[slot].put;
+                if (land_mod.land_empty(store, put, wanted) == .whole) {
+                    plan.whole[plan.whole_count] = cursor.object;
+                    plan.whole_count += 1;
                     cursor.whole += 1;
                 }
             }
@@ -687,11 +851,10 @@ pub const Resolver = struct {
     }
 
     /// The cursor reached the end: done when every object was whole, else a new pass later.
-    fn fill_pass_ended(resolver: *Resolver, now: u64) void {
-        const cursor = &resolver.fill;
-        assert(cursor.object == resolver.options.catalog.objects.len);
+    fn fill_pass_ended(cursor: *FillCursor, objects_count: usize, now: u64) void {
+        assert(cursor.object == objects_count);
         assert(cursor.chunk == 0);
-        if (cursor.whole == resolver.options.catalog.objects.len) {
+        if (cursor.whole == objects_count) {
             cursor.done = true;
             return;
         }

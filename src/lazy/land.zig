@@ -29,9 +29,12 @@ const Wanted = chunks.Wanted;
 pub const ReadError = error{
     /// Neither the object nor the chunk is in the store.
     NotLocal,
-    /// The store holds bytes for the chunk that do not hash right. Nothing is returned; the
-    /// chunk is fetched again (a put replaces a damaged chunk file).
+    /// The chunk file (`partial/<id>/<index>`) holds bytes that do not hash right. Nothing is
+    /// returned; the chunk is fetched again, and the put replaces the damaged file.
     Damaged,
+    /// The whole object is in the store but this chunk of it does not hash right. A put never
+    /// replaces a whole object, so the read fails.
+    ObjectDamaged,
     /// The file system refused a read.
     Unreadable,
 };
@@ -91,8 +94,8 @@ fn read_from_object(
     defer fs.close(fd);
     const offset = @as(u64, index) * store.chunk_bytes;
     const got = fs.read_full_at(fd, offset, out) catch return error.Unreadable;
-    if (got != out.len) return error.Damaged;
-    if (!Digest.of(out).eql(wanted.hashes[index])) return error.Damaged;
+    if (got != out.len) return error.ObjectDamaged;
+    if (!Digest.of(out).eql(wanted.hashes[index])) return error.ObjectDamaged;
     return true;
 }
 
@@ -125,7 +128,7 @@ fn read_from_partial(
 
 /// Whether chunk `index` is in the store, by name only (no hash): what the fill and readahead
 /// use to skip what is there. A damaged chunk counts as present here; the read that needs it
-/// finds the damage and fetches it.
+/// finds the damage and asks for it again with `refetch`, which skips this look.
 pub fn is_local(store: *const Store, wanted: *const Wanted, index: u32) bool {
     assert(index < wanted.hashes.len);
     assert(store.root_len > 1);
@@ -147,6 +150,8 @@ pub fn object_is_whole(store: *const Store, wanted: *const Wanted) bool {
 pub const Landed = enum {
     /// The chunk is in the store (now, or it was already).
     landed,
+    /// As `landed`, and the object is whole in the store with it.
+    whole,
     /// The bytes are not the chunk: wrong length or wrong hash. Nothing was written.
     lied,
     /// Every chunk was in and they do not make the object: the index's chunk hashes do not add
@@ -180,7 +185,10 @@ pub fn land(store: *Store, io: []u8, wanted: *const Wanted, index: u32, bytes: [
         };
     };
     assert(progress.have <= progress.total);
-    if (progress.complete) assert(progress.have == progress.total);
+    if (progress.complete) {
+        assert(progress.have == progress.total);
+        return .whole;
+    }
     return .landed;
 }
 
@@ -198,7 +206,7 @@ pub fn land_empty(store: *Store, io: []u8, wanted: *const Wanted) Landed {
         };
     };
     assert(progress.complete);
-    return .landed;
+    return .whole;
 }
 
 fn failure_is_full(failure: *const chunks.Failure) bool {

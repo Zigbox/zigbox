@@ -44,6 +44,7 @@ const peers_max = 3;
 const readers_max = constants.lazy_fuse_threads;
 const reads_per_reader_max = 12;
 const events_max = 1024;
+const damaged_max = 8;
 /// A stored deflate block's header: BFINAL 0, BTYPE 00, padding, LEN, NLEN.
 const stored_header_bytes = 5;
 const blob_bytes_max = content_bytes_max +
@@ -59,6 +60,8 @@ pub const Behaviour = struct {
     not_found_per_mille: u16 = 0,
     failed_per_mille: u16 = 0,
     lie_per_mille: u16 = 0,
+    /// Per mille of answers cut short: a failed fetch, never a lie.
+    short_per_mille: u16 = 0,
     /// Every call in [cut_from_ms, cut_to_ms) times out.
     cut_from_ms: u64 = 0,
     cut_to_ms: u64 = 0,
@@ -76,6 +79,8 @@ pub const Scenario = struct {
     crash_mutation: ?u32 = null,
     /// A gc removes an object or chunk now and then.
     gc_per_mille: u16 = 0,
+    /// Of those faults, per mille that damage a stored chunk or make it unreadable instead.
+    damage_per_mille: u16 = 0,
     /// Every source honest and in time, room on disk: property 4 applies.
     honest: bool,
 };
@@ -102,16 +107,24 @@ const Reader = struct {
 };
 
 const Event = struct { event: lazy.Event, at_ms: u64 };
+/// A store file the sim damaged: a chunk file, or the whole object when `chunk` is null.
+const Damage = struct { object: u32, chunk: ?u32 };
+const PathBuf = @import("../store/fs.zig").PathBuf;
 
 pub const Sim = struct {
     prng: Prng,
     now_ms: u64,
     elapsed_ms: u64,
     gc_at_ms: u64,
+    /// Store files damaged or made unreadable on purpose: removed before the store is checked.
+    damaged: [damaged_max]Damage,
+    damaged_count: u8,
     crashes: u32,
     lies_sent: [peers_max + 1]u32,
     /// Per source, a bit per object it lied about.
     lied_objects: [peers_max + 1]u16,
+    /// A bit per object the registry sent a wrong segment of.
+    registry_wrong: u16,
     scenario: Scenario,
     host: host_sim.HostSim,
     files: fs_sim.SimFs,
@@ -260,6 +273,8 @@ pub fn setup(sim: *Sim, seed: u64, scenario: Scenario) void {
     sim.crashes = 0;
     sim.lies_sent = @splat(0);
     sim.lied_objects = @splat(0);
+    sim.registry_wrong = 0;
+    sim.damaged_count = 0;
     sim.events_count = 0;
     sim.reads_ok = 0;
     sim.reads_failed = 0;
@@ -310,48 +325,51 @@ fn per_mille(random: std.Random, value: u16) bool {
 
 fn peer_fetch(
     context: *anyopaque,
-    id: Digest,
-    index: u32,
+    request: *const lazy.Request,
     out: []u8,
-    deadline_ms: u32,
-) lazy.FetchError!usize {
+) lazy.FetchError!lazy.Fetched {
     const source = source_of(context);
     const sim = source.sim;
-    try plan_call(source, deadline_ms);
+    assert(out.len == request.length);
+    try plan_call(source, request.timeout_ms);
     const random = sim.prng.random();
     if (per_mille(random, source.behaviour.not_found_per_mille)) return error.NotFound;
-    const object = find_object(sim, id) orelse return error.NotFound;
-    const truth = chunk_bytes_of(sim, object, index);
-    assert(out.len >= truth.len);
-    @memcpy(out[0..truth.len], truth);
-    if (!per_mille(random, source.behaviour.lie_per_mille)) return truth.len;
+    const object = find_object(sim, request.object) orelse return error.NotFound;
+    const truth = chunk_bytes_of(sim, object, request.index);
+    assert(out.len == truth.len);
+    assert(Digest.of(truth).eql(request.chunk));
+    @memcpy(out, truth);
+    const peer = peer_token(source);
+    if (per_mille(random, source.behaviour.short_per_mille)) {
+        return .{ .length = random.uintLessThan(u32, @intCast(out.len)), .peer = peer };
+    }
+    const length: u32 = @intCast(out.len);
+    const lying = per_mille(random, source.behaviour.lie_per_mille);
+    if (!lying) return .{ .length = length, .peer = peer };
     sim.lies_sent[source.index] += 1;
     sim.lied_objects[source.index] |= @as(u16, 1) << @intCast(object);
-    return lie(random, out, truth.len);
+    flip(random, out);
+    return .{ .length = length, .peer = peer };
 }
 
-/// Wrong bytes, or a wrong length, or both.
-fn lie(random: std.Random, out: []u8, length: usize) usize {
-    assert(length > 0);
-    assert(out.len >= length);
-    switch (random.uintLessThan(u8, 3)) {
-        0 => {
-            out[random.uintLessThan(usize, length)] ^= 1 + random.uintLessThan(u8, 255);
-            return length;
-        },
-        1 => return random.uintLessThan(usize, length),
-        else => {
-            if (length == out.len) return length - 1;
-            out[length] = random.int(u8);
-            return length + 1;
-        },
-    }
+fn peer_token(source: *const SimSource) lazy.PeerToken {
+    assert(source.index <= peers_max);
+    assert(peers_max < 0x100);
+    return 0x5eed_0000 + @as(lazy.PeerToken, source.index);
 }
 
-fn peer_lied(context: *anyopaque, id: Digest, index: u32) void {
+/// Wrong bytes: one of them changed.
+fn flip(random: std.Random, out: []u8) void {
+    assert(out.len > 0);
+    assert(out.len <= blob_bytes_max);
+    out[random.uintLessThan(usize, out.len)] ^= 1 + random.uintLessThan(u8, 255);
+}
+
+fn peer_lied(context: *anyopaque, request: *const lazy.Request, peer: lazy.PeerToken) void {
     const source = source_of(context);
-    assert(find_object(source.sim, id) != null);
-    assert(index < chunks_per_object_max);
+    assert(find_object(source.sim, request.object) != null);
+    assert(request.index < chunks_per_object_max);
+    if (peer != peer_token(source)) @panic("a lie was told to the wrong peer");
     source.lied_told += 1;
 }
 
@@ -367,12 +385,12 @@ fn registry_fetch(
     context: *anyopaque,
     offset: u64,
     out: []u8,
-    deadline_ms: u32,
+    timeout_ms: u32,
 ) lazy.FetchError!usize {
     const source = source_of(context);
     const sim = source.sim;
     assert(out.len > 0);
-    try plan_call(source, deadline_ms);
+    try plan_call(source, timeout_ms);
     if (offset >= sim.blob_len) return error.Failed;
     const random = sim.prng.random();
     var from: usize = @intCast(offset);
@@ -381,11 +399,33 @@ fn registry_fetch(
         // A wrong offset: the blob from somewhere else.
         from = random.uintLessThan(usize, sim.blob_len);
     }
-    const length = @min(out.len, sim.blob_len - from);
+    var length = @min(out.len, sim.blob_len - from);
     @memcpy(out[0..length], sim.blob[from..][0..length]);
-    if (lying) sim.lies_sent[source.index] += 1;
-    if (lying and random.boolean()) return lie(random, out, length);
+    if (lying) {
+        sim.lies_sent[source.index] += 1;
+        if (random.boolean()) flip(random, out[0..length]);
+    }
+    if (per_mille(random, source.behaviour.short_per_mille)) {
+        length = random.uintLessThan(usize, length);
+    }
+    note_wrong_segments(sim, offset, out[0..length]);
     return length;
+}
+
+/// The objects a registry answer holds a wrong segment of: the only ones it may be named for.
+fn note_wrong_segments(sim: *Sim, offset: u64, answer: []const u8) void {
+    assert(offset < sim.blob_len);
+    assert(answer.len <= blob_bytes_max);
+    for (sim.objects[0..sim.objects_count], 0..) |*object, at| {
+        for (object.locations) |location| {
+            if (location.offset < offset) continue;
+            const start: usize = @intCast(location.offset - offset);
+            if (start + location.length > answer.len) continue;
+            const sent = answer[start..][0..location.length];
+            const truth = sim.blob[@intCast(location.offset)..][0..location.length];
+            if (!std.mem.eql(u8, sent, truth)) sim.registry_wrong |= @as(u16, 1) << @intCast(at);
+        }
+    }
 }
 
 fn log_event(context: *anyopaque, event: *const lazy.Event) void {
@@ -464,12 +504,13 @@ fn teardown(sim: *Sim) void {
 }
 
 /// A crash is followed by a restart (the resolver keeps going, as after a remount), and a gc
-/// removes a whole object or one chunk file now and then.
+/// removes a whole object or one chunk file now and then, or damages one or makes it unreadable.
 fn faults(sim: *Sim) void {
     assert(sim.now_ms < 1 << 62);
     if (sim.files.crashed) {
         sim.files.restart();
         sim.crashes += 1;
+        repair(sim);
         support.check_whole(&sim.files, root_path, chunk_bytes) catch
             @panic("store not whole after a crash");
     }
@@ -478,16 +519,43 @@ fn faults(sim: *Sim) void {
     const random = sim.prng.random();
     const object = random.uintLessThan(u32, sim.objects_count);
     const wanted = &sim.objects[object].wanted;
-    var path_storage: @import("../store/fs.zig").PathBuf = undefined;
+    var path_storage: PathBuf = undefined;
+    var chunk: ?u32 = null;
+    var path: [:0]const u8 = undefined;
     if (land.object_is_whole(&sim.store, wanted)) {
-        sim.files.remove_path(sim.store.object_path(&path_storage, wanted.id));
-        return;
+        path = sim.store.object_path(&path_storage, wanted.id);
+    } else {
+        if (wanted.hashes.len == 0) return;
+        chunk = random.uintLessThan(u32, @intCast(wanted.hashes.len));
+        path = chunks_mod.partial_chunk(&sim.store, &path_storage, wanted.id, chunk.?);
     }
-    if (wanted.hashes.len == 0) return;
-    const chunk = random.uintLessThan(u32, @intCast(wanted.hashes.len));
-    const path = chunks_mod.partial_chunk(&sim.store, &path_storage, wanted.id, chunk);
-    _ = sim.store.fs.lstat(path) catch return;
-    sim.files.remove_path(path);
+    const stat = sim.store.fs.lstat(path) catch return;
+    if (!per_mille(random, sim.scenario.damage_per_mille)) return sim.files.remove_path(path);
+    if (sim.damaged_count == damaged_max or stat.size == 0) return;
+    if (random.boolean()) {
+        sim.files.flip_byte(path, random.uintLessThan(u32, @intCast(stat.size)));
+    } else {
+        sim.files.set_unreadable(path);
+    }
+    sim.damaged[sim.damaged_count] = .{ .object = object, .chunk = chunk };
+    sim.damaged_count += 1;
+}
+
+/// Removes what `faults` damaged, as a gc would: the store holds only whole files after.
+fn repair(sim: *Sim) void {
+    assert(sim.damaged_count <= damaged_max);
+    assert(!sim.files.crashed);
+    for (sim.damaged[0..sim.damaged_count]) |damage| {
+        const wanted = &sim.objects[damage.object].wanted;
+        var path_storage: PathBuf = undefined;
+        const path = if (damage.chunk) |chunk|
+            chunks_mod.partial_chunk(&sim.store, &path_storage, wanted.id, chunk)
+        else
+            sim.store.object_path(&path_storage, wanted.id);
+        _ = sim.store.fs.lstat(path) catch continue;
+        sim.files.remove_path(path);
+    }
+    sim.damaged_count = 0;
 }
 
 fn finish_jobs(sim: *Sim) void {
@@ -610,13 +678,10 @@ fn all_down(sim: *const Sim) bool {
 
 fn poll(sim: *Sim, reader: *Reader) void {
     assert(reader.state == .waiting);
-    const ticket = reader.waiting.ticket;
-    const step = sim.resolver.read_poll(ticket, &reader.out, sim.now_ms);
-    if (step == .wait and !std.meta.eql(step.wait.ticket, ticket)) {
-        // Landed and gone again (a gc): a fresh entry, a fresh deadline.
-        reader.began_ms = sim.now_ms;
-        reader.all_down_at_start = all_down(sim);
-    }
+    // Landed and gone again (a gc) asks again, but the read keeps its start: its bound holds
+    // across every ask.
+    const step = sim.resolver.read_poll(reader.waiting, &reader.out, sim.now_ms);
+    if (step == .wait) assert(step.wait.began_ms == reader.began_ms);
     settle(sim, reader, step);
 }
 
@@ -681,6 +746,7 @@ fn check_end(sim: *Sim) void {
         sim.files.restart();
         sim.crashes += 1;
     }
+    repair(sim);
     support.check_whole(&sim.files, root_path, chunk_bytes) catch @panic("store not whole");
     check_chunks(sim);
     check_lies(sim);
@@ -704,7 +770,9 @@ fn check_chunks(sim: *Sim) void {
             const read = land.read_local(&sim.store, &object.wanted, index, &out);
             const length = read catch |err| switch (err) {
                 error.NotLocal => continue,
-                error.Damaged, error.Unreadable => @panic("the store holds a damaged chunk"),
+                error.Damaged, error.ObjectDamaged, error.Unreadable => {
+                    @panic("the store holds a damaged chunk");
+                },
             };
             const truth = chunk_bytes_of(sim, @intCast(at), index);
             if (!std.mem.eql(u8, out[0..length], truth)) @panic("the store holds a wrong chunk");
@@ -715,13 +783,17 @@ fn check_chunks(sim: *Sim) void {
 /// Property 5: a peer that sent wrong bytes is told each time and named once per object;
 /// no source that sent only true bytes is named.
 fn check_lies(sim: *const Sim) void {
-    assert(sim.resolver.schedule.events_dropped == 0);
+    assert(sim.resolver.schedule.report.events_dropped == 0);
     assert(sim.events_count < events_max);
     var named: [peers_max + 1]u16 = @splat(0);
     for (sim.events[0..sim.events_count]) |*logged| {
         if (logged.event.kind != .lied) continue;
         const source = source_by_name(sim, logged.event.source);
         if (sim.lies_sent[source] == 0) @panic("an honest source was named a liar");
+        if (source == sim.scenario.peers) {
+            const wrong = sim.registry_wrong & (@as(u16, 1) << @intCast(logged.event.object));
+            if (wrong == 0) @panic("the registry was named for an object it sent true");
+        }
         const bit = @as(u16, 1) << @intCast(logged.event.object);
         if (named[source] & bit != 0) @panic("a lie was named twice for one object");
         named[source] |= bit;
@@ -763,7 +835,10 @@ pub fn random_scenario(random: std.Random) Scenario {
         },
         1 => scenario.bytes_max = random.uintLessThan(u64, content_bytes_max * 2),
         2 => scenario.crash_mutation = random.uintLessThan(u32, 400),
-        3 => scenario.gc_per_mille = random.intRangeAtMost(u16, 1, 100),
+        3 => {
+            scenario.gc_per_mille = random.intRangeAtMost(u16, 1, 100);
+            scenario.damage_per_mille = some_per_mille(random);
+        },
         else => {},
     }
     return scenario;
@@ -775,6 +850,7 @@ fn random_behaviour(random: std.Random, behaviour: *Behaviour) void {
     behaviour.not_found_per_mille = some_per_mille(random);
     behaviour.failed_per_mille = some_per_mille(random);
     behaviour.lie_per_mille = some_per_mille(random);
+    behaviour.short_per_mille = some_per_mille(random);
     if (random.uintLessThan(u8, 3) == 0) {
         behaviour.cut_from_ms = random.uintLessThan(u64, 60_000);
         behaviour.cut_to_ms = behaviour.cut_from_ms + random.uintLessThan(u64, 120_000);

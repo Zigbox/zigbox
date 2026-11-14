@@ -58,11 +58,16 @@ pub const Pending = struct {
     /// A reader waited on it at some point: its failure is shown (`E1203`, `E1206`).
     wanted: bool,
     in_job: bool,
+    /// A reader found the stored copy damaged: the slot fetches it even though a file of that
+    /// name is there, and `put_chunk` replaces the bad copy.
+    refetch: bool,
     waiters: u16,
     generation: u32,
     object: lazy.ObjectIndex,
     chunk: u32,
     requested_ms: u64,
+    /// When the latest reader of it began: the base of the all-sources-down rule.
+    asked_ms: u64,
     deadline_ms: u64,
     round_ms: u64,
     /// Sources asked in this round.
@@ -96,6 +101,18 @@ pub const ObjectState = struct {
     /// Consecutive chunk reads so far, for readahead.
     streak: u8,
     next_chunk: u32,
+    /// Seen whole in the store: counted once in `report.objects_local`.
+    whole: bool,
+    /// The index's locations for it are malformed: the registry is not asked for it.
+    no_registry: bool,
+};
+
+/// Who asks for a chunk, and since when: a reader's read is bounded by `lazy_read_deadline_ms`
+/// from its own start, however often it asks again.
+pub const Ask = struct {
+    purpose: Purpose,
+    began_ms: u64,
+    refetch: bool = false,
 };
 
 pub const Schedule = struct {
@@ -112,7 +129,6 @@ pub const Schedule = struct {
     events: [pending_max]lazy.Event,
     events_head: u32,
     events_count: u32,
-    events_dropped: u64,
     stopping: bool,
     /// Counts entries that landed or failed, so whoever ticks knows to wake the readers.
     settled: u64,
@@ -145,7 +161,6 @@ pub const Schedule = struct {
             .events = undefined,
             .events_head = 0,
             .events_count = 0,
-            .events_dropped = 0,
             .stopping = false,
             .settled = 0,
             .report = std.mem.zeroes(lazy.Report),
@@ -153,51 +168,87 @@ pub const Schedule = struct {
         for (&schedule.pending) |*entry| entry.* = std.mem.zeroes(Pending);
         for (&schedule.jobs) |*job| job.* = std.mem.zeroes(Job);
         for (names, 0..) |name, at| schedule.names[at] = name;
-        @memset(objects, .{ .bad = 0, .broken = false, .streak = 0, .next_chunk = 0 });
+        @memset(objects, .{
+            .bad = 0,
+            .broken = false,
+            .streak = 0,
+            .next_chunk = 0,
+            .whole = false,
+            .no_registry = false,
+        });
         schedule.report.objects_total = @intCast(catalog.objects.len);
     }
 
-    /// Joins the entry for this chunk, or makes one. Null when the table is full (a reader
-    /// waits and asks again; readahead and fill skip the chunk).
+    /// Joins the entry for this chunk, or makes one. Null when the table is full: for a reader,
+    /// only when every entry is a reader's or in a job (speculative entries make room for it);
+    /// readahead and fill skip the chunk.
     pub fn request(
         schedule: *Schedule,
         object: lazy.ObjectIndex,
         chunk: u32,
-        purpose: Purpose,
+        ask: Ask,
         now: u64,
     ) ?Ticket {
         assert(object < schedule.catalog.objects.len);
         assert(chunk < schedule.catalog.objects[object].wanted.hashes.len);
+        assert(ask.began_ms <= now);
+        const deadline_ms = ask.began_ms + constants.lazy_read_deadline_ms;
         if (schedule.find(object, chunk)) |index| {
             const entry = &schedule.pending[index];
-            if (purpose == .on_demand) {
+            if (ask.purpose == .on_demand) {
+                // A reader that joins brings its own deadline: it never inherits an older one.
                 entry.purpose = .on_demand;
                 entry.wanted = true;
                 entry.waiters += 1;
+                entry.deadline_ms = @max(entry.deadline_ms, deadline_ms);
+                entry.asked_ms = @max(entry.asked_ms, ask.began_ms);
             }
+            if (ask.refetch) entry.refetch = true;
             return .{ .index = index, .generation = entry.generation };
         }
-        const index = schedule.find_free() orelse return null;
+        const index = schedule.find_free() orelse
+            (if (ask.purpose == .on_demand) schedule.evict() else null) orelse return null;
         const entry = &schedule.pending[index];
         assert(entry.state == .free);
         entry.* = .{
             .state = .queued,
-            .purpose = purpose,
+            .purpose = ask.purpose,
             .failure = .none,
-            .wanted = purpose == .on_demand,
+            .wanted = ask.purpose == .on_demand,
             .in_job = false,
-            .waiters = @intFromBool(purpose == .on_demand),
+            .refetch = ask.refetch,
+            .waiters = @intFromBool(ask.purpose == .on_demand),
             .generation = entry.generation +% 1,
             .object = object,
             .chunk = chunk,
             .requested_ms = now,
-            .deadline_ms = now + constants.lazy_read_deadline_ms,
+            .asked_ms = ask.began_ms,
+            .deadline_ms = deadline_ms,
             .round_ms = now,
             .tried = 0,
             .outcomes = @splat(.not_tried),
         };
         if (schedule.objects[object].broken) schedule.fail(index, .unavailable);
         return .{ .index = index, .generation = entry.generation };
+    }
+
+    /// Frees a queued fill entry, else a queued readahead entry, for a reader: neither has a
+    /// waiter, and either is asked for again later.
+    fn evict(schedule: *Schedule) ?u16 {
+        assert(pending_max <= std.math.maxInt(u16));
+        assert(schedule.find_free() == null);
+        var found: ?u16 = null;
+        for (&schedule.pending, 0..) |*entry, at| {
+            if (entry.state != .queued) continue;
+            if (entry.purpose == .on_demand) continue;
+            assert(entry.waiters == 0);
+            assert(!entry.in_job);
+            found = @intCast(at);
+            if (entry.purpose == .fill) break;
+        }
+        const index = found orelse return null;
+        schedule.pending[index].state = .free;
+        return index;
     }
 
     fn find(schedule: *const Schedule, object: lazy.ObjectIndex, chunk: u32) ?u16 {
@@ -264,7 +315,8 @@ pub const Schedule = struct {
             const next = chunk + ahead;
             if (next >= count) break;
             if (schedule.find(object, next) != null) continue;
-            _ = schedule.request(object, next, .readahead, now) orelse break;
+            const ask: Ask = .{ .purpose = .readahead, .began_ms = now };
+            _ = schedule.request(object, next, ask, now) orelse break;
         }
     }
 
@@ -296,7 +348,7 @@ pub const Schedule = struct {
         assert(object < schedule.catalog.objects.len);
         assert(schedule.events_count <= pending_max);
         if (schedule.events_count == pending_max) {
-            schedule.events_dropped += 1;
+            schedule.report.events_dropped += 1;
             return;
         }
         const at = (schedule.events_head + schedule.events_count) % pending_max;
@@ -327,7 +379,10 @@ pub const Schedule = struct {
         assert(object < schedule.objects.len);
         if (schedule.objects[object].bad & bit(source) != 0) return false;
         if (schedule.registry) |registry| {
-            if (source == registry) return schedule.catalog.objects[object].locations.len > 0;
+            if (source == registry) {
+                if (schedule.objects[object].no_registry) return false;
+                return schedule.catalog.objects[object].locations.len > 0;
+            }
         }
         return true;
     }
@@ -357,6 +412,17 @@ pub const Schedule = struct {
             if (!schedule.sources[source].down) return true;
         }
         return false;
+    }
+
+    /// The time a reader that began at `began_ms` stops waiting on the ticket's entry: its own
+    /// read deadline, or `lazy_down_fail_ms` from its start while every source it could use is
+    /// down. A later reader joining the entry never moves an earlier reader's bound.
+    pub fn reader_deadline(schedule: *const Schedule, ticket: Ticket, began_ms: u64) u64 {
+        const entry = schedule.entry_of(ticket);
+        assert(began_ms < 1 << 62);
+        assert(entry.state != .free);
+        if (schedule.has_live_source(entry)) return began_ms + constants.lazy_read_deadline_ms;
+        return began_ms + constants.lazy_down_fail_ms;
     }
 
     fn has_any_source(schedule: *const Schedule, object: lazy.ObjectIndex) bool {
@@ -416,7 +482,7 @@ pub const Schedule = struct {
             return;
         }
         if (!schedule.has_live_source(entry)) {
-            entry.deadline_ms = @min(entry.deadline_ms, entry.requested_ms +
+            entry.deadline_ms = @min(entry.deadline_ms, entry.asked_ms +
                 constants.lazy_down_fail_ms);
             schedule.mark_down_outcomes(entry);
         }
@@ -575,7 +641,7 @@ pub const Schedule = struct {
             const entry = &schedule.pending[index];
             assert(entry.in_job);
             entry.in_job = false;
-            schedule.settle(index, job.source, result);
+            schedule.settle(index, job.source, result, now);
         }
         job.active = false;
     }
@@ -604,7 +670,7 @@ pub const Schedule = struct {
         }
     }
 
-    fn settle(schedule: *Schedule, index: u16, source: u8, result: Result) void {
+    fn settle(schedule: *Schedule, index: u16, source: u8, result: Result, now: u64) void {
         const entry = &schedule.pending[index];
         if (entry.state != .failed) assert(entry.state == .fetching);
         assert(source < schedule.sources_count);
@@ -623,7 +689,9 @@ pub const Schedule = struct {
             .not_found => entry.outcomes[source] = .not_found,
             .timed_out => entry.outcomes[source] = .timed_out,
             .failed => entry.outcomes[source] = .failed,
-            .busy => entry.tried &= ~bit(source),
+            // The store was busy (a gc): the source keeps its turn, but not before the next
+            // round, so a long gc is not met with a fetch loop.
+            .busy => entry.round_ms = @max(entry.round_ms, now),
             .store_full => schedule.fail(index, .store_full),
             .content_mismatch => {
                 schedule.objects[entry.object].broken = true;
@@ -691,14 +759,42 @@ pub const Schedule = struct {
         schedule.report.errors += 1;
     }
 
-    /// A read refused because the pending table is full: still an event, so no failed read goes
-    /// unexplained.
-    pub fn table_full(schedule: *Schedule, object: lazy.ObjectIndex, chunk: u32) void {
+    /// A read refused before any source was asked: the pending table is full, or the store
+    /// cannot give back a chunk it holds (unreadable, or a whole object that is damaged). Still
+    /// an event, so no failed read goes unexplained.
+    pub fn refuse(schedule: *Schedule, object: lazy.ObjectIndex, chunk: u32) void {
         assert(object < schedule.objects.len);
         assert(chunk < schedule.catalog.objects[object].wanted.hashes.len);
         const outcomes: [sources_max]lazy.Outcome = @splat(.not_tried);
         schedule.emit(.unavailable, object, chunk, "", &outcomes);
         schedule.report.errors += 1;
+    }
+
+    /// A reader stops waiting at its own deadline while its entry goes on for a later reader:
+    /// its failure is shown and counted, and its ticket is released. The last reader of an
+    /// entry fails the entry itself, so no one is left fetching for nobody.
+    pub fn give_up(schedule: *Schedule, ticket: Ticket) void {
+        const entry = &schedule.pending[ticket.index];
+        assert(entry.generation == ticket.generation);
+        assert(entry.waiters > 0);
+        if (entry.state == .queued or entry.state == .fetching) {
+            if (entry.waiters == 1) {
+                schedule.fail(ticket.index, .unavailable);
+            } else {
+                schedule.emit(.unavailable, entry.object, entry.chunk, "", &entry.outcomes);
+                schedule.report.errors += 1;
+            }
+        }
+        schedule.release(ticket);
+    }
+
+    /// `object` is whole in the store: counted once, so `objects_local` never goes down.
+    pub fn mark_whole(schedule: *Schedule, object: lazy.ObjectIndex) void {
+        assert(object < schedule.objects.len);
+        if (schedule.objects[object].whole) return;
+        schedule.objects[object].whole = true;
+        schedule.report.objects_local += 1;
+        assert(schedule.report.objects_local <= schedule.report.objects_total);
     }
 
     /// Whether a reader holding `ticket` has something to look at (its entry landed or failed).
