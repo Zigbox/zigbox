@@ -248,3 +248,125 @@ test "a tree the store lacks is damaged or unreadable, never a crash" {
     try testing.expectError(error.Failed, copy_owner.restamp(context, &ws, missing, "/x", stamp));
     try testing.expect(failure == .io or failure == .damaged);
 }
+
+/// A chain of `levels` directories each holding `fan` entries `d0`, `d1`, ... that all name the
+/// next level (a DAG, as merged trees share subtrees), and at the bottom one file. `entries` is
+/// what a walk of the whole tree decodes.
+fn shared_chain(levels: u32, fan: u32, entries: *u32) !Digest {
+    const a = try put_file("a", "abc", 0o644);
+    var at = try directory(&.{.{ .file = .{ .name = "a", .file = a } }}, false);
+    var visits: u32 = 1; // How many times the walk visits the level being built.
+    var level: u32 = 0;
+    while (level < levels) : (level += 1) visits *= fan;
+    entries.* = visits; // The file, once per visit of the bottom level.
+    var names: [8][2]u8 = undefined;
+    var items: [8]Item = undefined;
+    level = 0;
+    while (level < levels) : (level += 1) {
+        for (0..fan) |index| {
+            names[index] = .{ 'd', '0' + @as(u8, @intCast(index)) };
+            items[index] = .{ .dir = .{ .name = &names[index], .child = at } };
+        }
+        visits = @divExact(visits, fan);
+        entries.* += visits * fan;
+        at = try directory(items[0..fan], level + 1 == levels);
+    }
+    try testing.expectEqual(@as(u32, 1), visits);
+    return at;
+}
+
+test "a restamp decodes at most its entry budget, and a shared subtree counts at every visit" {
+    // Goal: a selection whose subtrees are shared is walked once per path, so the walk counts
+    // its entries against `store_walk_entries_max` and refuses past it as too large, never
+    // `unreachable`. Method: a chain of four levels, each with three names for the next level
+    // (3^4 visits of the bottom); the budget at exactly the entries decoded passes, one fewer
+    // is `too_large`.
+    var context = start();
+    var entries: u32 = 0;
+    const root = try shared_chain(4, 3, &entries);
+    try testing.expectEqual(@as(u32, 3 + 9 + 27 + 81 + 81), entries);
+    const stamp: copy_owner.Stamp = .{ .owner = .{ .uid = 9, .gid = 9 } };
+    context.entries_max = entries;
+    const stamped = try copy_owner.restamp(context, &ws, root, "/", stamp);
+    try testing.expectEqual(entries, ws.entries);
+    var entry: tree.Entry = undefined;
+    try entry_at(stamped, &.{ "d2", "d0", "d1", "d2", "a" }, &entry, null);
+    try testing.expectEqual(@as(u32, 9), entry.uid);
+    context.entries_max = entries - 1;
+    failure = .too_deep;
+    try testing.expectError(error.Failed, copy_owner.restamp(context, &ws, root, "/", stamp));
+    try testing.expect(failure == .too_large);
+}
+
+/// `count` directories named `d`, nested, the last holding one file.
+fn nested(count: u32, a: File) !Digest {
+    var at = try directory(&.{.{ .file = .{ .name = "a", .file = a } }}, count == 0);
+    var level: u32 = 0;
+    while (level < count) : (level += 1) {
+        at = try directory(&.{.{ .dir = .{ .name = "d", .child = at } }}, level + 1 == count);
+    }
+    return at;
+}
+
+test "a restamp reaches store_depth_max directories deep, and one more is too deep" {
+    // Goal: the walk's depth bound, at the bound and one past it, for the tree and for `.to`.
+    // Method: 64 nested directories below the root are stamped; 65 are `too_deep`. A `.to` of
+    // 64 names is the way to the bottom; one of 65 names is refused before a tree is read.
+    const context = start();
+    const depth_max = @import("../constants.zig").store_depth_max;
+    const stamp: copy_owner.Stamp = .{ .mode = 0o600 };
+    const a = try put_file("a", "abc", 0o644);
+    const deepest = try nested(depth_max, a);
+    _ = try copy_owner.restamp(context, &ws, deepest, "/", stamp);
+    var to_buffer: [2 * (depth_max + 1)]u8 = undefined;
+    for (0..depth_max + 1) |index| to_buffer[2 * index ..][0..2].* = "/d".*;
+    const to_max = to_buffer[0 .. 2 * depth_max];
+    const way = try copy_owner.restamp(context, &ws, deepest, to_max, stamp);
+    // On the way to `.to`: every directory keeps 0755; the file below gets the mode.
+    var path: [depth_max + 1][]const u8 = undefined;
+    for (path[0..depth_max]) |*part| part.* = "d";
+    path[depth_max] = "a";
+    var entry: tree.Entry = undefined;
+    try entry_at(way, path[0..depth_max], &entry, null);
+    try testing.expectEqual(@as(u16, 0o755), entry.mode);
+    try entry_at(way, path[0 .. depth_max + 1], &entry, null);
+    try testing.expectEqual(@as(u16, 0o600), entry.mode);
+
+    failure = .too_large;
+    const too_deep = try nested(depth_max + 1, a);
+    try testing.expectError(error.Failed, copy_owner.restamp(context, &ws, too_deep, "/", stamp));
+    try testing.expect(failure == .too_deep);
+    failure = .too_large;
+    const missing = Digest.of("never read");
+    const refused = copy_owner.restamp(context, &ws, missing, &to_buffer, stamp);
+    try testing.expectError(error.Failed, refused);
+    try testing.expect(failure == .too_deep);
+}
+
+test "a directory right under .to gets the mode, whatever an earlier .to left in the path" {
+    // Goal: the boundary of the way to `.to`: a directory at `.to`'s own depth is a match, not
+    // the way, so it takes the mode. Method: a restamp to `/app/sub/` (which leaves `sub` as the
+    // second name of the path), then one to `/app/`, whose `sub` must be 0640, not 0755.
+    const context = start();
+    const root = try selection();
+    const stamp: copy_owner.Stamp = .{ .owner = .{ .uid = 5, .gid = 5 }, .mode = 0o640 };
+    const deeper = try copy_owner.restamp(context, &ws, root, "/app/sub/", stamp);
+    var entry: tree.Entry = undefined;
+    try entry_at(deeper, &.{ "app", "sub" }, &entry, null);
+    try testing.expectEqual(@as(u16, 0o755), entry.mode);
+    const stamped = try copy_owner.restamp(context, &ws, root, "/app/", stamp);
+    try entry_at(stamped, &.{ "app", "sub" }, &entry, null);
+    try testing.expectEqual(@as(u16, 0o640), entry.mode);
+    try testing.expectEqual(@as(u32, 5), entry.uid);
+}
+
+test "a uid alone is a number with no group" {
+    // Goal: the form BuildKit gives the group of the same number. Method: each form of `.chown`.
+    try testing.expect(copy_owner.uid_alone("1000"));
+    try testing.expect(copy_owner.uid_alone("0"));
+    try testing.expect(!copy_owner.uid_alone("1000:1000"));
+    try testing.expect(!copy_owner.uid_alone("1000:"));
+    try testing.expect(!copy_owner.uid_alone("app"));
+    try testing.expect(!copy_owner.uid_alone("app1"));
+    try testing.expect(!copy_owner.uid_alone("1a"));
+}

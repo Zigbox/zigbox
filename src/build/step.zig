@@ -239,7 +239,7 @@ fn resolve_identity(
         var where: [constants.build_step_name_bytes_max + 8]u8 = undefined;
         // The buffer holds the name at its bound plus `step ""`.
         const named = std.fmt.bufPrint(&where, "step \"{s}\"", .{spec.name}) catch unreachable;
-        diagnose.user_not_found(diag, named, text);
+        diagnose.user_not_found(diag, named, text, ws.user_ws.too_large);
         return error.Failed;
     };
     ws.user = found.user;

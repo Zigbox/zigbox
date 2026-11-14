@@ -33,6 +33,8 @@ pub const Request = struct {
     name: []const u8,
     selections: []const Digest,
     tos: []const []const u8,
+    /// Each entry's `.chown` text as written (null: none), for a refusal to name.
+    chowns: []const ?[]const u8,
     stamps: []const copy_owner.Stamp,
     ws: *copy_owner.Workspace,
     stamped: []Digest,
@@ -56,6 +58,7 @@ pub fn restamp(request: *const Request, diag: *Diag) Error!void {
     assert(count > 0);
     assert(count <= constants.build_copy_entries_max);
     assert(request.tos.len == count);
+    assert(request.chowns.len == count);
     assert(request.stamps.len == count);
     assert(request.stamped.len == count);
     var changed: u32 = 0;
@@ -114,7 +117,9 @@ pub fn restamp(request: *const Request, diag: *Diag) Error!void {
 
 /// The child: restamps each selection that has a stamp, and writes the digests in order, or the
 /// encoded diagnostic, to the pipe. Under the one-id map (W0201) every owner is container root,
-/// as every other file the store writes there is; the mode still applies.
+/// as every other file the store writes there is; the mode still applies. Under the full map an
+/// owner the map does not reach is refused before anything is written: the kernel would refuse
+/// its `fchown` with `EINVAL`, which would read as a store failure.
 fn job_call(context: *anyopaque, squash_owner: bool) u8 {
     const job: *Job = @ptrCast(@alignCast(context));
     const request = job.request;
@@ -122,7 +127,9 @@ fn job_call(context: *anyopaque, squash_owner: bool) u8 {
     diag.reset();
     var bytes: [report_bytes_max]u8 = undefined;
     var length: usize = 0;
+    if (!squash_owner) unmappable(request, &diag);
     for (request.stamps, request.selections, request.tos) |stamp_given, selection, to| {
+        if (diag.code != null) break;
         if (!stamp_given.changes()) continue;
         var stamp = stamp_given;
         if (squash_owner and stamp.owner != null) stamp.owner = .{ .uid = 0, .gid = 0 };
@@ -137,6 +144,21 @@ fn job_call(context: *anyopaque, squash_owner: bool) u8 {
     var encoded: [constants.diag_carry_bytes_max]u8 = undefined;
     request.host.write_handle_all(job.report.write, diag.encode(&encoded)) catch {};
     return diag.exit_code();
+}
+
+/// `E0817` in `diag` for the first owner the full map does not reach (ids 0 to
+/// `subid_range_min`, as `namespace.run` writes the map); nothing if every one is reached.
+fn unmappable(request: *const Request, diag: *Diag) void {
+    assert(diag.code == null);
+    assert(request.stamps.len == request.chowns.len);
+    for (request.stamps, request.chowns) |stamp, chown| {
+        const owner = stamp.owner orelse continue;
+        const id = @max(owner.uid, owner.gid);
+        if (id <= constants.subid_range_min) continue;
+        diagnose.copy_owner_unmappable(diag, request.name, chown.?, id);
+        assert(diag.code != null);
+        return;
+    }
 }
 
 fn stamped(
