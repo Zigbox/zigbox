@@ -294,6 +294,7 @@ const roots = [_][]const u8{
     "src/testing/vm/main_m8.zig",
     "src/testing/vm/main_m8b.zig",
     "src/testing/vm/main_m10.zig",
+    "src/testing/vm/main_s2_probe.zig",
     "src/testing/vm/main_z7.zig",
     "src/testing/vm/main_m8_packages.zig",
     "src/testing/vm/main_top20.zig",
@@ -328,6 +329,7 @@ const linux_only = [_][]const u8{
     "src/testing/vm/main_m8.zig",
     "src/testing/vm/main_m8b.zig",
     "src/testing/vm/main_m10.zig",
+    "src/testing/vm/main_s2_probe.zig",
     "src/testing/vm/main_z7.zig",
     "src/testing/vm/main_m8_packages.zig",
     "src/testing/vm/main_top20.zig",
@@ -565,6 +567,11 @@ const demos = [_]struct { step: []const u8, root: []const u8, help: []const u8 }
         .help = "Run the M10 demo: --device and --gpu with a fake vendor, doctor, refusals",
     },
     .{
+        .step = "demo-s2-probe",
+        .root = "src/testing/vm/main_s2_probe.zig",
+        .help = "Run the S2 probe: a no-libc FUSE server under a userxattr overlay, as a user",
+    },
+    .{
         .step = "demo-z7",
         .root = "src/testing/vm/main_z7.zig",
         .help = "Run the Z7 check: a host port forwarded into the guest (docs/vm-module.md)",
@@ -660,6 +667,26 @@ fn add_harness_imports(b: *std.Build, step: []const u8, module: *std.Build.Modul
         });
     }
     if (std.mem.eql(u8, step, "demo-m10")) add_gpu_fixtures(b, module);
+    if (std.mem.eql(u8, step, "demo-s2-probe")) add_s2_probe_fixture(b, module);
+}
+
+/// demo-s2-probe's throwaway FUSE server (S2 slice 1), static x86_64 with no libc, embedded in
+/// the harness, which serves it to the guest.
+fn add_s2_probe_fixture(b: *std.Build, harness_module: *std.Build.Module) void {
+    const target = b.resolveTargetQuery(.{ .cpu_arch = .x86_64, .os_tag = .linux });
+    const probe = b.addExecutable(.{
+        .name = "fuse_probe",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/testing/vm/s2_probe/fuse_probe.zig"),
+            .target = target,
+            .optimize = .ReleaseSafe,
+            .strip = true,
+            .link_libc = false,
+        }),
+    });
+    harness_module.addAnonymousImport("fuse_probe", .{
+        .root_source_file = probe.getEmittedBin(),
+    });
 }
 
 /// demo-m10's fake driver library (soname `libzbxgpu.so.1`) and the program that needs it, built
