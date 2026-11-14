@@ -54,11 +54,15 @@ pub fn drift_of(stderr: []const u8) ?Drift {
     return drift;
 }
 
-/// `--locked` in a fresh store: exit 3, E0822 first, naming `fetch` and both digests; `use`
-/// never ran, so the report has no row for it.
+/// The refusal's headline. W0801 (the build uses the network) may come before it.
+const refusal_head = "error[ZBX-E0822]: a pinned step's output differs from its pin\n";
+
+/// `--locked` in a fresh store: exit 3, E0822 naming `fetch` and both digests, and no other
+/// error; `use` never ran, so the report has no row for it.
 pub fn check_drift_refused(stdout: []const u8, stderr: []const u8, status: u8) Error!Drift {
     if (status != 3) return error.RefusalWrong;
-    if (!std.mem.startsWith(u8, stderr, "error[ZBX-E0822]: ")) return error.RefusalWrong;
+    if (std.mem.indexOf(u8, stderr, refusal_head) == null) return error.RefusalWrong;
+    if (std.mem.count(u8, stderr, "error[") != 1) return error.RefusalWrong;
     if (std.mem.indexOf(u8, stderr, "errno") != null) return error.RefusalWrong;
     if (has_row(stdout, "use")) return error.PinWrong;
     return drift_of(stderr) orelse error.PinWrong;
@@ -102,9 +106,9 @@ fn repeat(comptime byte: u8) *const [64]u8 {
     }
 }
 
-const refusal = "error[ZBX-E0822]: step fetch gave an output that is not its pin\n" ++
-    "  while checking step fetch against its pin\n  cause: step fetch produced " ++
-    output_text ++ ",\n    and its pin is " ++ pinned_text ++ "\n";
+const refusal = "warning[ZBX-W0801]: the build has steps that use the network\n" ++
+    refusal_head ++ "  cause: step fetch produced\n    " ++ output_text ++
+    ",\n    and its pin is\n    " ++ pinned_text ++ "\n  fix: build without --locked\n";
 
 test "the pinned lock: version 2, one pin for fetch, the image kept" {
     const lock =
@@ -138,10 +142,13 @@ test "the drift refusal names both digests, even wrapped, and use never ran" {
     try testing.expectEqualStrings(pinned_text, &drift.pinned);
     try testing.expectEqualStrings(output_text, &drift.output);
     try testing.expectError(error.RefusalWrong, check_drift_refused("", refusal, 1));
-    try testing.expectError(error.RefusalWrong, check_drift_refused("", refusal[1..], 3));
+    const other = "error[ZBX-E0801]: x\n" ++ refusal;
+    try testing.expectError(error.RefusalWrong, check_drift_refused("", other, 3));
+    const headless = refusal_head[0 .. refusal_head.len - 2];
+    try testing.expectError(error.RefusalWrong, check_drift_refused("", headless, 3));
     const ran = "  fetch   miss   0.10 s  net\n  use   miss   0.01 s\n";
     try testing.expectError(error.PinWrong, check_drift_refused(ran, refusal, 3));
-    const same = "error[ZBX-E0822]: step fetch produced " ++ pinned_text ++ ", and its pin is " ++
+    const same = refusal_head ++ "step fetch produced " ++ pinned_text ++ ", and its pin is " ++
         pinned_text ++ "\n";
     try testing.expectError(error.PinWrong, check_drift_refused("", same, 3));
 }
@@ -165,7 +172,8 @@ test "the drift warning names the refusal's digests, and use misses" {
         .key = "",
         .output = "",
     };
-    const warned = "warning[ZBX-W0803]: x\n  cause: step fetch produced " ++ output_text ++
+    const warned = "warning[ZBX-W0801]: x\nwarning[ZBX-W0803]: y\n  cause: step fetch produced " ++
+        output_text ++
         ", and its pin is " ++ pinned_text ++ "\n";
     try check_drift_warned(&report, warned, 0, &drift);
     try testing.expectError(error.ReportWrong, check_drift_warned(&report, warned, 1, &drift));
