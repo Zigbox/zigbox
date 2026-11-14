@@ -84,7 +84,7 @@ fn split_report(stdout: []const u8, stderr: []const u8) ?Split {
 
 /// Step 1: `zbx import` exited 0; the report has each step with its line and kind and nothing
 /// after (no `net`, no `cache`: the `tools` stage is not reached), the footer, `EXPOSE` and
-/// `HEALTHCHECK` as labels, and W0811 follows it.
+/// `HEALTHCHECK` as labels, and W0811 follows it, naming both as labels.
 pub fn check_import(stdout: []const u8, stderr: []const u8, status: u8) Error!void {
     if (status != 0) return error.ImportWrong;
     const split = split_report(stdout, stderr) orelse return error.ImportWrong;
@@ -100,8 +100,13 @@ pub fn check_import(stdout: []const u8, stderr: []const u8, status: u8) Error!vo
     if (!has_line(report, footer)) return error.ImportWrong;
     if (!std.mem.startsWith(u8, split.warnings, "warning[ZBX-W0811]: ")) return error.ImportWrong;
     if (std.mem.indexOf(u8, stderr, "error[") != null) return error.ImportWrong;
-    // W0811's cause is cut after a few entries, so the labels are read from the report's list
-    // of what did not carry over, which W0811 summarizes.
+    // W0811's cause holds the demo's three dropped parts (it is cut after a few entries), and
+    // the report's list of what did not carry over holds each on its own line.
+    const named = [_][]const u8{
+        "EXPOSE:19 (label org.zigbox.import.expose)",
+        "HEALTHCHECK:20 (label org.zigbox.import.healthcheck)",
+    };
+    if (!contains_all(split.warnings, &named)) return error.ImportWrong;
     const labels = [_][]const u8{
         "  Dockerfile:19  EXPOSE: label org.zigbox.import.expose",
         "  Dockerfile:20  HEALTHCHECK: label org.zigbox.import.healthcheck",
@@ -115,6 +120,24 @@ pub fn check_import(stdout: []const u8, stderr: []const u8, status: u8) Error!vo
 pub fn check_same_bytes(got: []const u8, golden: []const u8) Error!void {
     assert(golden.len > 0);
     if (!std.mem.eql(u8, got, golden)) return error.ImportWrong;
+}
+
+/// A fixture the binary translated: exit 0, nothing on stdout, a report whose last line is the
+/// footer, W0810 exactly when the footer counts a flagged step, and no error or errno.
+pub fn check_fixture_imported(stdout: []const u8, stderr: []const u8, status: u8) Error!void {
+    if (status != 0) return error.ImportWrong;
+    const split = split_report(stdout, stderr) orelse return error.ImportWrong;
+    const report = std.mem.trimEnd(u8, split.report, "\n");
+    const start = if (std.mem.lastIndexOfScalar(u8, report, '\n')) |at| at + 1 else 0;
+    const last = report[start..];
+    assert(last.len <= report.len);
+    if (!std.mem.startsWith(u8, last, "imported ")) return error.ImportWrong;
+    if (std.mem.indexOf(u8, last, " to zbx.build.zon; ") == null) return error.ImportWrong;
+    const none_flagged = std.mem.endsWith(u8, last, "; 0 flagged");
+    const w0810 = std.mem.indexOf(u8, split.warnings, "warning[ZBX-W0810]: ") != null;
+    if (none_flagged == w0810) return error.ImportWrong;
+    if (std.mem.indexOf(u8, stderr, "error[") != null) return error.ImportWrong;
+    if (std.mem.indexOf(u8, stderr, "errno") != null) return error.ImportWrong;
 }
 
 /// The first build on a store: every row a miss.
@@ -156,7 +179,7 @@ pub fn check_extra(report: *const Report) Error!void {
 }
 
 /// Step 2: `zbx inspect <digest> --output json` shows the digest, the user as `uid:gid`, the
-/// workdir and the two labels the import made.
+/// workdir and the two labels the import made, and no other label.
 pub fn check_inspect(stdout: []const u8, digest: []const u8) Error!void {
     assert(digest.len > 0);
     var buffer: [96]u8 = undefined;
@@ -168,8 +191,9 @@ pub fn check_inspect(stdout: []const u8, digest: []const u8) Error!void {
         named,
         "\"workdir\":\"/home/app\"",
         "\"user\":\"10001:10001\"",
-        "\"org.zigbox.import.expose\":\"8080\"",
-        "\"org.zigbox.import.healthcheck\":\"CMD [",
+        "\"labels\":{\"org.zigbox.import.expose\":\"8080\"," ++
+            "\"org.zigbox.import.healthcheck\":" ++
+            "\"CMD [\\\"/usr/local/bin/hello\\\", \\\"--whoami\\\"]\"}",
     };
     for (wants) |want| {
         if (std.mem.indexOf(u8, stdout, want) == null) return error.InspectWrong;
@@ -229,12 +253,11 @@ pub fn check_refused(
     if (!contains_all(stderr, wants)) return error.RefusalWrong;
 }
 
-/// The pull's own refusal with the network down: a first line `error[ZBX-E05..]` and the exit
-/// code of a failure the user did not cause: 2 (environment, as a name that does not resolve) or
-/// 3 (external, a registry that fails), never 1 (user) or 70 (internal).
+/// The pull's own refusal with the network down in the guest: E0502, the registry's name does
+/// not resolve, with exit 2 (the environment's failure, not the user's 1 or the internal 70).
 pub fn check_pull_refused(stderr: []const u8, status: u8) Error!void {
-    if (status != 2 and status != 3) return error.RefusalWrong;
-    if (!std.mem.startsWith(u8, stderr, "error[ZBX-E05")) return error.RefusalWrong;
+    if (status != 2) return error.RefusalWrong;
+    if (!std.mem.startsWith(u8, stderr, "error[ZBX-E0502]: ")) return error.RefusalWrong;
     if (std.mem.indexOf(u8, stderr, "errno") != null) return error.RefusalWrong;
 }
 
@@ -496,7 +519,6 @@ test "refusals: the code first, the words anywhere once wrapped, never errno" {
     try testing.expectError(error.RefusalWrong, elsewhere);
     const resolve = "error[ZBX-E0502]: the registry's name does not resolve\n";
     try check_pull_refused(resolve, 2);
-    try check_pull_refused(resolve, 3);
     try testing.expectError(error.RefusalWrong, check_pull_refused(resolve, 1));
     try testing.expectError(error.RefusalWrong, check_pull_refused(resolve, 70));
     try testing.expectError(error.RefusalWrong, check_pull_refused("error[ZBX-E0814]: x\n", 2));
@@ -560,4 +582,172 @@ test "the import JSON: the target, the stages and each step's line" {
     const moved = try std.mem.replaceOwned(u8, arena, json_doc, "\"line\":14", "\"line\":13");
     try testing.expectError(error.ImportWrong, check_import_json(arena, moved));
     try testing.expectError(error.ImportWrong, check_import_json(arena, "{}"));
+}
+
+/// `text` with its one `old` replaced by `new`, in `buffer`.
+fn edited(buffer: []u8, text: []const u8, old: []const u8, new: []const u8) []const u8 {
+    assert(std.mem.count(u8, text, old) == 1);
+    const size = std.mem.replacementSize(u8, text, old, new);
+    _ = std.mem.replace(u8, text, old, new, buffer[0..size]);
+    return buffer[0..size];
+}
+
+test "the import check refuses each way the import can go wrong alone" {
+    // Goal: every guard of check_import and split_report fails the check by itself. Method: the
+    // recorded output with one thing changed each: output on stdout, a warning before the
+    // report as well as after it, an error line, an extra step, another footer, and W0811
+    // without EXPOSE or HEALTHCHECK.
+    var buffer: [4096]u8 = undefined;
+    try testing.expectError(error.ImportWrong, check_import("x\n", import_stderr, 0));
+    const around = import_warning ++ import_report ++ import_warning;
+    try testing.expectError(error.ImportWrong, check_import("", around, 0));
+    const errored = import_stderr ++ "error[ZBX-E0001]: x\n";
+    try testing.expectError(error.ImportWrong, check_import("", errored, 0));
+    const step_line = "stage2-4  Dockerfile:17  run\nnot carried";
+    const extra = edited(&buffer, import_stderr, "not carried", step_line);
+    try testing.expectError(error.ImportWrong, check_import("", extra, 0));
+    const flagged = edited(&buffer, import_stderr, "; 0 flagged", "; 1 flagged");
+    try testing.expectError(error.ImportWrong, check_import("", flagged, 0));
+    const no_expose = edited(&buffer, import_stderr, "EXPOSE:19", "EXPOSE:18");
+    try testing.expectError(error.ImportWrong, check_import("", no_expose, 0));
+    const dropped = "HEALTHCHECK:20 (dropped";
+    const no_health = edited(&buffer, import_stderr, "HEALTHCHECK:20 (label", dropped);
+    try testing.expectError(error.ImportWrong, check_import("", no_health, 0));
+}
+
+test "a fixture's translation: the footer, W0810 with a flagged step, nothing else" {
+    // Goal: the ACCEPT check of a translated fixture. Method: recorded outputs of bind_hermetic
+    // and network_forms, then each with one thing changed.
+    const plain = "build-1  Dockerfile:3  run\nstage1-1  Dockerfile:5  run  bind\n" ++
+        "imported 2 steps from 2 stages (target stage1) to zbx.build.zon; 0 flagged\n";
+    const net = "stage0-1  Dockerfile:3  run  net (matched \"wget\")\n" ++
+        "imported 1 step from 1 stage (target stage0) to zbx.build.zon; 1 flagged\n";
+    const w0810 = "warning[ZBX-W0810]: the import has steps that are not hermetic\n";
+    try check_fixture_imported("", plain, 0);
+    try check_fixture_imported("", net ++ w0810, 0);
+    try testing.expectError(error.ImportWrong, check_fixture_imported("", plain, 1));
+    try testing.expectError(error.ImportWrong, check_fixture_imported("x", plain, 0));
+    try testing.expectError(error.ImportWrong, check_fixture_imported("", net, 0));
+    try testing.expectError(error.ImportWrong, check_fixture_imported("", plain ++ w0810, 0));
+    try testing.expectError(error.ImportWrong, check_fixture_imported("", "build-1  x\n", 0));
+    const elsewhere = "imported 1 step from 1 stage (target stage0) to t.zon; 0 flagged\n";
+    try testing.expectError(error.ImportWrong, check_fixture_imported("", elsewhere, 0));
+    const errored = plain ++ "error[ZBX-E0001]: x\n";
+    try testing.expectError(error.ImportWrong, check_fixture_imported("", errored, 0));
+    const errno = plain ++ "warning[ZBX-W0811]: errno 2\n";
+    try testing.expectError(error.ImportWrong, check_fixture_imported("", errno, 0));
+}
+
+test "the tools check refuses each way the tools import can go wrong alone" {
+    // Goal: every guard of check_tools fails the check by itself. Method: the recorded output
+    // with an extra step, another footer, W0810 present but not first, and an error line.
+    const report = "tools-1  Dockerfile:11  run  net (matched \"apk add\")  cache\n" ++
+        "imported 1 step from 1 stage (target tools) to tools.build.zon; 1 flagged\n";
+    const w0810 = "warning[ZBX-W0810]: the import has steps that are not hermetic\n";
+    const w0811 = "warning[ZBX-W0811]: parts of the Dockerfile did not carry over\n";
+    const extra = "tools-2  Dockerfile:12  run\n" ++ report;
+    try testing.expectError(error.ImportWrong, check_tools("", extra ++ w0810 ++ w0811, 0));
+    const unflagged = "tools-1  Dockerfile:11  run  net (matched \"apk add\")  cache\n" ++
+        "imported 1 step from 1 stage (target tools) to tools.build.zon; 0 flagged\n";
+    try testing.expectError(error.ImportWrong, check_tools("", unflagged ++ w0810 ++ w0811, 0));
+    const late = report ++ w0811 ++ w0810 ++ w0811;
+    try testing.expectError(error.ImportWrong, check_tools("", late, 0));
+    const errored = report ++ w0810 ++ w0811 ++ "error[ZBX-E0001]: x\n";
+    try testing.expectError(error.ImportWrong, check_tools("", errored, 0));
+}
+
+test "the cache checks refuse each wrong row, count or total alone" {
+    // Goal: every guard of check_first_build, check_all_hits and check_extra fails the check by
+    // itself. Method: the passing reports with one row renamed, one total changed, or one row's
+    // verdict flipped while the hit total stays 2.
+    var renamed = report_of(&.{}, digest_a);
+    renamed.rows[0].name = "other";
+    try testing.expectError(error.ReportWrong, check_first_build(&renamed));
+    var miss_counted = report_of(&row_names, digest_a);
+    miss_counted.misses = 1;
+    try testing.expectError(error.CacheWrong, check_all_hits(&miss_counted));
+    var hit_counted = report_of(&.{ "build-1", "stage2-1" }, digest_b);
+    hit_counted.hits = 3;
+    try testing.expectError(error.CacheWrong, check_extra(&hit_counted));
+    for (0..row_names.len) |index| {
+        var flipped = report_of(&.{ "build-1", "stage2-1" }, digest_b);
+        flipped.rows[index].hit = !flipped.rows[index].hit;
+        try testing.expectEqual(@as(u32, 2), flipped.hits);
+        try testing.expectError(error.CacheWrong, check_extra(&flipped));
+    }
+}
+
+test "inspect refuses another schema, workdir or label, and a third label" {
+    // Goal: every want of check_inspect fails it by itself, and the labels are exactly two.
+    // Method: the document with one thing changed each; a tree digest that is not hex.
+    var buffer: [1024]u8 = undefined;
+    const changes = [_][2][]const u8{
+        .{ "zbx.build_result/1", "zbx.build_result/2" },
+        .{ "\"/home/app\"", "\"/home\"" },
+        .{ "\"8080\"", "\"8081\"" },
+        .{ "--whoami", "--who" },
+        .{ "\"labels\":{", "\"labels\":{\"a\":\"b\"," },
+        .{ "\"}}}", "\",\"a\":\"b\"}}}" },
+    };
+    for (changes) |change| {
+        const changed = edited(&buffer, inspect_json, change[0], change[1]);
+        try testing.expectError(error.InspectWrong, check_inspect(changed, digest_a));
+    }
+    const not_hex = "{\"tree\":\"b3:" ++ @as([64]u8, @splat('z')) ++ "\"}";
+    try testing.expectEqual(null, inspect_tree(not_hex));
+}
+
+test "a refusal with errno, or not first, fails; the pull's refusal is E0502 with exit 2" {
+    // Goal: check_refused's errno and first-line guards, check_pull_refused's pinned code and
+    // status, and check_warnings reading only warning heads. Method: one change each.
+    const head = "error[ZBX-E0814]: --hermetic refused a step\n";
+    const errno = check_refused(head ++ "errno 2\n", 1, "ZBX-E0814", &.{});
+    try testing.expectError(error.RefusalWrong, errno);
+    const after = "warning[ZBX-W0810]: x\n" ++ head;
+    try testing.expectError(error.RefusalWrong, check_refused(after, 1, "ZBX-E0814", &.{}));
+    const resolve = "error[ZBX-E0502]: the registry's name does not resolve\n";
+    try testing.expectError(error.RefusalWrong, check_pull_refused(resolve, 3));
+    const reach = "error[ZBX-E0503]: can't reach the registry\n";
+    try testing.expectError(error.RefusalWrong, check_pull_refused(reach, 2));
+    const named = "warning[ZBX-W0801]: a\n  cause  see ZBX-W0802\n";
+    try testing.expectError(error.ReportWrong, check_warnings(named, &.{"ZBX-W0802"}));
+}
+
+test "same bytes: one byte off, same length, fails" {
+    // Goal: check_same_bytes compares bytes, not lengths. Method: equal text, then one byte
+    // changed, then one byte longer.
+    try check_same_bytes("abc\n", "abc\n");
+    try testing.expectError(error.ImportWrong, check_same_bytes("abd\n", "abc\n"));
+    try testing.expectError(error.ImportWrong, check_same_bytes("abc\n\n", "abc\n"));
+}
+
+test "the comment variant refuses a Dockerfile whose line 9 or 12 is not blank" {
+    // Goal: with_comments never overwrites an instruction. Method: twelve lines, none blank.
+    var buffer: [256]u8 = undefined;
+    const full = "FROM a\n" ** 12;
+    try testing.expectEqual(null, with_comments(&buffer, full, "x", "y"));
+}
+
+test "the import JSON refuses a flagged count, a cached step and another kind" {
+    // Goal: check_import_json's flagged, cache and kind guards each fail it by itself. Method:
+    // the recorded document with one change each.
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    const json_doc = @embedFile("m9_fixtures/import.json.txt");
+    const cached_step = "\"line\":16,\"kind\":\"copy\",\"network\":null,\"matched\":false," ++
+        "\"cache\":";
+    const changes = [_][2][]const u8{
+        .{ "\"flagged\":0", "\"flagged\":1" },
+        .{ "\"line\":8,\"kind\":\"run\"", "\"line\":8,\"kind\":\"copy\"" },
+        .{ cached_step ++ "false", cached_step ++ "true" },
+        .{ "\"stages\":2", "\"stages\":3" },
+        .{ "\"target\":\"stage2\"", "\"target\":\"tools\"" },
+        .{ "\"name\":\"build-1\"", "\"name\":\"build-0\"" },
+    };
+    for (changes) |change| {
+        const changed = try std.mem.replaceOwned(u8, arena, json_doc, change[0], change[1]);
+        try testing.expect(!std.mem.eql(u8, changed, json_doc));
+        try testing.expectError(error.ImportWrong, check_import_json(arena, changed));
+    }
 }

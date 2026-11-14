@@ -3,11 +3,18 @@
 //! embed files outside `src/testing/vm/`, so build.zig hands it this file as the anonymous import
 //! `m9_vm_cases`, and this file embeds its neighbours.
 //!
-//! Only the fixtures whose translation needs no image beyond that lock run here: the rest name
-//! node, python, debian, nginx, golang:1.22, quay.io or mcr.microsoft.com bases, gigabytes of
-//! pulls or registries zbx does not pull from (docs/demos/m9.md, "Cuts"). Every fixture, these
-//! included, is checked against its golden by `zig build test` through the library
-//! (src/dockerfile/translate_tests.zig); the binary adds the reading, the lock and the writing.
+//! `zbx import` resolves every base before it translates, so a fixture whose base the lock does
+//! not pin pulls it, refused or not. Here are 22 of the 33 goldens: those on the lock's bases, and
+//! those on debian:bookworm-slim and nginx:1.27 (add_url, add_git and label_key pull them;
+//! heredoc_run, shell_instruction and labels then reuse them). The 11 left out pull bases of
+//! hundreds of megabytes to a gigabyte each, golang:1.22 (mounts and mounts.hermetic,
+//! workdir_dot, copy_from_stage_glob, copy_from_image_platform), golang:1.22-alpine
+//! (arg_from_no_default.build_arg), node (onbuild) and python (secret_mount), or pull from
+//! registries other than Docker Hub, which the demo reaches only through its mirror: quay.io
+//! (arg_from, arg_from.build_arg) and mcr.microsoft.com (escape_backtick) (docs/demos/m9.md,
+//! "Cuts"). Every golden is checked by `zig build test` through the library
+//! (src/dockerfile/translate_tests.zig); the binary adds the reading, the lock, the pulls and
+//! the writing.
 
 pub const Case = struct {
     /// The golden's name, without `.golden` or `.refused`; the directory the guest uses.
@@ -91,5 +98,72 @@ pub const cases = [_]Case{
         .dockerfile = @embedFile("arg_from_no_default.Dockerfile"),
         .golden = @embedFile("arg_from_no_default.refused"),
         .refused = true,
+    },
+    .{
+        .name = "bind_hermetic",
+        .dockerfile = @embedFile("bind_hermetic.Dockerfile"),
+        .arguments = "--hermetic",
+        .golden = @embedFile("bind_hermetic.golden"),
+        .refused = false,
+    },
+    .{
+        .name = "from_variable",
+        .dockerfile = @embedFile("from_variable.Dockerfile"),
+        .golden = @embedFile("from_variable.golden"),
+        .refused = false,
+    },
+    .{
+        .name = "heredoc_redirect",
+        .dockerfile = @embedFile("heredoc_redirect.Dockerfile"),
+        .golden = @embedFile("heredoc_redirect.golden"),
+        .refused = false,
+    },
+    .{
+        .name = "network_forms",
+        .dockerfile = @embedFile("network_forms.Dockerfile"),
+        .golden = @embedFile("network_forms.golden"),
+        .refused = false,
+    },
+    .{
+        .name = "bind_no_steps",
+        .dockerfile = @embedFile("bind_no_steps.Dockerfile"),
+        .golden = @embedFile("bind_no_steps.refused"),
+        .refused = true,
+    },
+    .{
+        .name = "copy_several",
+        .dockerfile = @embedFile("copy_several.Dockerfile"),
+        .golden = @embedFile("copy_several.refused"),
+        .refused = true,
+    },
+    .{
+        .name = "from_mount_stage_arg",
+        .dockerfile = @embedFile("from_mount_stage_arg.Dockerfile"),
+        .golden = @embedFile("from_mount_stage_arg.refused"),
+        .refused = true,
+    },
+    .{
+        .name = "from_stage_arg",
+        .dockerfile = @embedFile("from_stage_arg.Dockerfile"),
+        .golden = @embedFile("from_stage_arg.refused"),
+        .refused = true,
+    },
+    .{
+        .name = "heredoc_run",
+        .dockerfile = @embedFile("heredoc_run.Dockerfile"),
+        .golden = @embedFile("heredoc_run.golden"),
+        .refused = false,
+    },
+    .{
+        .name = "shell_instruction",
+        .dockerfile = @embedFile("shell_instruction.Dockerfile"),
+        .golden = @embedFile("shell_instruction.golden"),
+        .refused = false,
+    },
+    .{
+        .name = "labels",
+        .dockerfile = @embedFile("labels.Dockerfile"),
+        .golden = @embedFile("labels.golden"),
+        .refused = false,
     },
 };

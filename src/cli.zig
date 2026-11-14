@@ -1181,10 +1181,32 @@ fn take_out_option(
     const is_import = operands.len >= 1 and command_named(operands[0]) == .import;
     if (!is_export and !is_import) return unknown_option(diag, argument);
     if (export_file.* != null) return unexpected_argument(diag, .state, argument);
-    if (index.* + 1 == args.len) return missing_option_value(diag, "-o");
+    if (index.* + 1 == args.len) return out_option_value(diag, is_import, .missing);
     index.* += 1;
-    if (args[index.*].len == 0) return missing_option_value(diag, "-o"); // `-o ''` names nothing.
+    if (args[index.*].len == 0) return out_option_value(diag, is_import, .empty);
     export_file.* = args[index.*];
+}
+
+/// `-o` with no value, or with an empty one (`-o ''` names no file): E0005, with a fix line for
+/// the command it was given to.
+fn out_option_value(diag: *Diag, is_import: bool, value: enum { missing, empty }) ParseError {
+    assert(diag.code == null);
+    diag.raise(.E0005);
+    diag.while_("reading the command line", .{});
+    switch (value) {
+        .missing => diag.cause("-o needs a value, and none follows it", .{}),
+        .empty => diag.cause("-o is given an empty value, which names no file", .{}),
+    }
+    diag.fix(.{
+        .sentence = "give it a file name:",
+        .command = if (is_import)
+            "zbx import -o build/zbx.build.zon"
+        else
+            "zbx state export pgdata -o pgdata.tar.gz",
+        .template = true,
+    });
+    assert(diag.code.? == .E0005);
+    return error.BadOptionValue;
 }
 
 /// The passphrase and key options: `sign` takes `--key` and `--passphrase-file`, `key new` takes
@@ -3003,14 +3025,11 @@ fn missing_option_value(diag: *Diag, option: []const u8) ParseError {
     diag.raise(.E0005);
     diag.while_("reading the command line", .{});
     diag.cause("{s} needs a value, and none follows it", .{option});
-    const export_option = std.mem.eql(u8, option, "-o");
     const build_option = std.mem.eql(u8, option, "-f");
     const sign_option = std.mem.eql(u8, option, "--key");
     diag.fix(.{
         .sentence = "give it a value:",
-        .command = if (export_option)
-            "zbx state export pgdata -o pgdata.tar.gz"
-        else if (build_option)
+        .command = if (build_option)
             "zbx build --graph -f build/zbx.build.zon"
         else if (sign_option)
             "zbx sign b3:<64 hex> --key release"

@@ -77,15 +77,23 @@ test "a refusal exits 1 with its code and writes nothing" {
 
 test "an empty Dockerfile name or -o value is refused, not a crash" {
     // Goal: `zbx import ''` and `zbx import -o ''` name no file, so each is a usage refusal with
-    // exit 1 (the cli fuzzer found both asserting). Method: each run on a world with a
-    // Dockerfile, and no file written.
+    // exit 1 (the cli fuzzer found both asserting), whose cause names the empty value and whose
+    // fix fits the command. Method: each run on a world with a Dockerfile, and no file written.
     world(3, settings_only);
     try testing.expectEqual(@as(u8, 1), run(&.{ "zbx", "import", "", "--context", project }));
     try expect_stderr("E0810");
     try expect_stderr("'' is not a path zbx can follow");
     try testing.expectEqual(@as(u8, 1), run(&(base ++ .{ "-o", "" })));
     try expect_stderr("E0005");
+    try expect_stderr("-o is given an empty value, which names no file");
+    try expect_stderr("zbx import -o build/zbx.build.zon");
+    try testing.expect(std.mem.indexOf(u8, sim.stderr(), "state export") == null);
+    try testing.expectEqual(@as(u8, 1), run(&(base ++ .{"-o"})));
+    try expect_stderr("-o needs a value, and none follows it");
+    try expect_stderr("zbx import -o build/zbx.build.zon");
     try testing.expectEqual(@as(u8, 1), run(&.{ "zbx", "state", "export", "v", "-o", "" }));
     try expect_stderr("E0005");
+    try expect_stderr("-o is given an empty value, which names no file");
+    try expect_stderr("zbx state export pgdata -o pgdata.tar.gz");
     try testing.expect(files.content_of(output_path) == null);
 }

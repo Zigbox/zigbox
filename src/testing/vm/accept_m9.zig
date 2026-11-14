@@ -2,8 +2,9 @@
 //! the first VM after HELLO9, in a copy of the project (`~/hello2`, wrapper `zh2`) and a fixture
 //! directory (`~/fx`, wrapper `zf`), so that `~/hello` stays what step 1 imported:
 //!
-//!   - the fixtures that need only the demo lock's images, through the binary: each writes its
-//!     golden translation, or is refused as its golden says and writes nothing;
+//!   - the fixtures of src/build/dockerfile_fixtures/vm_cases.zig, through the binary: each
+//!     writes its golden translation with a clean report, or is refused as its golden says and
+//!     writes nothing;
 //!   - `zbx build --graph` on the imported file is the golden `m9_expected.graph.txt`;
 //!   - changing nothing in the Dockerfile but its comments gives the same build file;
 //!   - an unlocked `FROM` with the network down is the pull's own `05xx` refusal;
@@ -50,8 +51,12 @@ const unlocked_dockerfile = "FROM busybox:1.36\nRUN true\n";
 const zh2_offline = "unshare -n " ++ zh2;
 // Each count runs the listing alone first (`&&`), so the command's own failure is the exit code
 // the harness asserts; `grep -c` exits 1 for a count of zero, which is the answer wanted here.
-const count_work = "sh -c 'if [ -d " ++ common.store_dir ++ "/build/work ]; then ls -A " ++
-    common.store_dir ++ "/build/work > /tmp/work.out && wc -l < /tmp/work.out; else echo 0; fi'";
+// The store's `build/` (the steps' logs) must exist, so a wrong store path fails rather than
+// counting nothing; `build/work/` itself may be gone.
+const store_build = common.store_dir ++ "/build";
+const count_work = "sh -c 'test -d " ++ store_build ++ " && if [ -d " ++ store_build ++
+    "/work ]; then ls -A " ++ store_build ++ "/work > /tmp/work.out && " ++
+    "wc -l < /tmp/work.out; else echo 0; fi'";
 const count_records = H.as_demo ++ "sh -c '/home/demo/zh2 ps --all > /home/demo/ps.out && " ++
     "{ grep -c build- /home/demo/ps.out || test $? -eq 1; }'";
 
@@ -87,10 +92,10 @@ fn fixtures(session: *Session, out: *Io.Writer) !void {
             };
             _ = try common.expect_exit(session, out, step, fixture_absent, 0);
         } else {
-            if (done.status != 0) {
-                const what = "fixture " ++ case.name ++ " refused";
-                return fail_step(out, step, what, error.ImportWrong);
-            }
+            const streams = done.streams;
+            checks.check_fixture_imported(streams.stdout, streams.stderr, done.status) catch |err| {
+                return fail_step(out, step, "expected fixture " ++ case.name ++ "'s report", err);
+            };
             const path = fixture_dir ++ "/zbx.build.zon";
             const written = try hello.read_file(session, out, step, path);
             checks.check_same_bytes(written, case.golden) catch |err| {
@@ -164,6 +169,7 @@ test {
     }
     try std.testing.expect(setup.len <= 1024);
     try std.testing.expect(count_records.len <= 1024);
+    try std.testing.expect(count_work.len <= 1024);
     var buffer: [2048]u8 = undefined;
     const commented = checks.with_comments(&buffer, hello.dockerfile, "the tools", "the image");
     try std.testing.expect(commented.?.len <= 1536);
