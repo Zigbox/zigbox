@@ -485,7 +485,22 @@ pub const Resolver = struct {
         const wanted = &resolver.options.catalog.objects[object].wanted;
         assert(chunk < wanted.hashes.len);
         assert(out.len > 0);
-        return land_mod.read_local(resolver.options.store, wanted, chunk, out);
+        const store_lock: land_mod.StoreLock = .{
+            .context = resolver,
+            .lock = lock_store_opaque,
+            .unlock = unlock_store_opaque,
+        };
+        return land_mod.read_local(resolver.options.store, wanted, chunk, out, &store_lock);
+    }
+
+    fn lock_store_opaque(context: *anyopaque) void {
+        const resolver: *Resolver = @ptrCast(@alignCast(context));
+        resolver.lock_store();
+    }
+
+    fn unlock_store_opaque(context: *anyopaque) void {
+        const resolver: *Resolver = @ptrCast(@alignCast(context));
+        resolver.unlock_store();
     }
 
     fn slot_loop(resolver: *Resolver, slot: u32) void {

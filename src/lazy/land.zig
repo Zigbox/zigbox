@@ -39,21 +39,41 @@ pub const ReadError = error{
     Unreadable,
 };
 
+/// Serialises the store's file calls between threads (its handle count and last errno are not
+/// shared safely). `read_local` holds it for each file's open, read and close only, never for
+/// the hash, so a reader hashing a chunk does not hold up the slots' puts.
+pub const StoreLock = struct {
+    context: *anyopaque,
+    lock: *const fn (context: *anyopaque) void,
+    unlock: *const fn (context: *anyopaque) void,
+
+    fn hold(store_lock: ?*const StoreLock) void {
+        const held = store_lock orelse return;
+        held.lock(held.context);
+    }
+
+    fn release(store_lock: ?*const StoreLock) void {
+        const held = store_lock orelse return;
+        held.unlock(held.context);
+    }
+};
+
 /// Reads chunk `index` of `wanted` into `out` and checks it against `wanted.hashes[index]`.
 /// Every error leaves `out` cleared, so no byte of an unverified chunk stays behind.
+/// `store_lock` is null on one thread.
 pub fn read_local(
     store: *const Store,
     wanted: *const Wanted,
     index: u32,
     out: []u8,
+    store_lock: ?*const StoreLock,
 ) ReadError!usize {
     assert(index < wanted.hashes.len);
     const length = chunks.chunk_length(store, wanted.size, index);
     assert(length > 0);
     assert(out.len >= length);
-    if (read_checked(store, wanted, index, out[0..@intCast(length)])) |got| {
+    if (read_checked(store, wanted, index, out[0..@intCast(length)], store_lock)) |got| {
         assert(got == length);
-        assert(Digest.of(out[0..got]).eql(wanted.hashes[index]));
         return got;
     } else |err| {
         @memset(out[0..@intCast(length)], 0);
@@ -61,21 +81,40 @@ pub fn read_local(
     }
 }
 
-fn read_checked(store: *const Store, wanted: *const Wanted, index: u32, out: []u8) ReadError!usize {
+fn read_checked(
+    store: *const Store,
+    wanted: *const Wanted,
+    index: u32,
+    out: []u8,
+    store_lock: ?*const StoreLock,
+) ReadError!usize {
     assert(out.len == chunks.chunk_length(store, wanted.size, index));
     assert(out.len > 0);
     // The object first, then the chunk file, then the object again: an assembly may finish
     // (and remove the chunk files) between the first two looks.
     for (0..2) |round| {
-        if (try read_from_object(store, wanted, index, out)) return out.len;
+        StoreLock.hold(store_lock);
+        const from_object = read_from_object(store, wanted, index, out);
+        StoreLock.release(store_lock);
+        if (try from_object) {
+            if (!Digest.of(out).eql(wanted.hashes[index])) return error.ObjectDamaged;
+            return out.len;
+        }
         if (round == 0) {
-            if (try read_from_partial(store, wanted, index, out)) return out.len;
+            StoreLock.hold(store_lock);
+            const partial = read_from_partial(store, wanted, index, out);
+            StoreLock.release(store_lock);
+            if (try partial) {
+                if (!Digest.of(out).eql(wanted.hashes[index])) return error.Damaged;
+                return out.len;
+            }
         }
     }
     return error.NotLocal;
 }
 
-/// True if the whole object is in the store and its chunk `index` is right.
+/// True if the whole object is in the store and its chunk `index` was read whole (the caller
+/// hashes it, outside the store lock).
 fn read_from_object(
     store: *const Store,
     wanted: *const Wanted,
@@ -95,11 +134,10 @@ fn read_from_object(
     const offset = @as(u64, index) * store.chunk_bytes;
     const got = fs.read_full_at(fd, offset, out) catch return error.Unreadable;
     if (got != out.len) return error.ObjectDamaged;
-    if (!Digest.of(out).eql(wanted.hashes[index])) return error.ObjectDamaged;
     return true;
 }
 
-/// True if `partial/<id>/<index>` holds the chunk, exactly, and it hashes right.
+/// True if `partial/<id>/<index>` holds exactly the chunk's length (the caller hashes it).
 fn read_from_partial(
     store: *const Store,
     wanted: *const Wanted,
@@ -122,7 +160,6 @@ fn read_from_partial(
     var extra: [1]u8 = undefined;
     const more = fs.read_full_at(fd, out.len, &extra) catch return error.Unreadable;
     if (more != 0) return error.Damaged;
-    if (!Digest.of(out).eql(wanted.hashes[index])) return error.Damaged;
     return true;
 }
 

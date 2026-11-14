@@ -769,7 +769,7 @@ fn check_chunks(sim: *Sim) void {
     for (sim.objects[0..sim.objects_count], 0..) |*object, at| {
         for (0..object.wanted.hashes.len) |chunk| {
             const index: u32 = @intCast(chunk);
-            const read = land.read_local(&sim.store, &object.wanted, index, &out);
+            const read = land.read_local(&sim.store, &object.wanted, index, &out, null);
             const length = read catch |err| switch (err) {
                 error.NotLocal => continue,
                 error.Damaged, error.ObjectDamaged, error.Unreadable => {
@@ -1073,4 +1073,7 @@ test "sim: regression seeds" {
     // `zig build fuzz -- lazy_resolver 2087983757`: every source was marked bad for an object
     // while its entry was fetching, so the entry outlived its deadline and tripped `tick`.
     fuzz_lazy_resolver(11207900475674901063);
+    // 2326231968809022906 is iteration 4509 of the same run: a chunk file made unreadable
+    // failed `put_chunk` without filling its failure, and `land` read the garbage errno.
+    fuzz_lazy_resolver(2326231968809022906);
 }

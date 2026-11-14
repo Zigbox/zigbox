@@ -957,10 +957,11 @@ test "resolver: a damaged chunk file is fetched again and replaced" {
     defer close_resolver();
     var out: [chunk_bytes]u8 = @splat(0);
     const wanted = &fixture.objects[0].wanted;
-    try testing.expectError(error.Damaged, land_mod.read_local(&fixture.store, wanted, 0, &out));
+    const damaged = land_mod.read_local(&fixture.store, wanted, 0, &out, null);
+    try testing.expectError(error.Damaged, damaged);
     try expect_true_read(0, 0, 0);
     try testing.expectEqual(@as(u32, 1), fixture.peers[0].calls.load(.monotonic));
-    const length = try land_mod.read_local(&fixture.store, wanted, 0, &out);
+    const length = try land_mod.read_local(&fixture.store, wanted, 0, &out, null);
     try testing.expectEqualSlices(u8, truth(0, 0), out[0..length]);
     try testing.expectEqual(@as(u32, 0), fixture.events_count.load(.monotonic));
 }
