@@ -23,6 +23,7 @@ const render = @import("diag/render.zig");
 const diagnose = @import("runtime/diagnose.zig");
 const image_mod = @import("runtime/image.zig");
 const lazy_server_mod = @import("fuse/lazy_server.zig");
+const lazy_diagnose = @import("fuse/diagnose.zig");
 const reference_mod = @import("registry/reference.zig");
 const layout = @import("store/layout.zig");
 const runtime = @import("runtime/run.zig");
@@ -3871,12 +3872,7 @@ fn check_lazy(given: *const RunArgs, invocation: *const Invocation, diag: *Diag)
     assert(diag.code == null);
     if (!given.detach and invocation.operand != null) return;
     const flag: []const u8 = if (given.detach) "-d" else "--rootfs";
-    diag.raise(.E0003);
-    diag.while_("reading the command line", .{});
-    diag.cause("'--lazy' serves an image from the store to a run in the foreground, and does " ++
-        "not take '{s}'", .{flag});
-    diag.context("cmd", "run", .{});
-    diag.context("arg", "{s}", .{flag});
+    lazy_diagnose.flag_refused(diag, flag);
     return error.StartFailed;
 }
 

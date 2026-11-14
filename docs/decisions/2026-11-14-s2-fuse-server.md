@@ -121,10 +121,12 @@ thread, and starts the serving threads.
 - **The net layer's `etc`.** A lazy run's lower directory is an empty mount point when the
   container's directory is made, so the net layer's `etc` gets the default mode 0755, owned by
   root, rather than the tree's `etc` attributes. Slice 5 can read them from the node table.
-- **Codes.** Slice 4 adds no code; the supervisor was asked. A refused mount or serve is the
-  generic setup failure, with the step's phrase. A tree the table cannot hold is reported as
-  E0422 with a cause naming the bound. `--lazy` with `-d` or `--rootfs` is E0003. Slice 5 maps
-  these to E1201, E1204, E1207 and E1208.
+- **Codes (supervisor's ruling, 2026-11-14).** Slice 4 registers E1207 (an image too large
+  for the node table: the cause names the bound it passed, entries or MiB of directory
+  listings) and E1208 (`--lazy` with `-d` or `--rootfs`; the cause names the option), with the
+  brief's wording. A tree whose directories cannot be read, are missing, do not hash or do not
+  decode is E0422 `tree_damaged`, with a cause saying which. A refused mount or serve stays the
+  generic setup failure, with the plan step's phrase, until slice 5 adds E1201 and E1204.
 - **Only `main` serves.** `cli.lazy_server` is null for tests, fuzzers and library callers. A
   lazy run there gets a server that builds nothing and refuses the descriptor, so it fails at
   the serving step and never claims a run it did not serve.

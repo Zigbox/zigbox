@@ -1,0 +1,9 @@
+error[ZBX-E1208]: --lazy does not work with another option given
+  while  reading the command line
+  cause  '--lazy' serves an image from the store to a run in the foreground, and
+         does not take '--rootfs'
+  cmd    run
+  arg    --rootfs
+  fix    leave out --lazy, or the other option
+  more   zbx explain E1208
+  docs   https://zigbox.github.io/zigbox/errors/E1208.html

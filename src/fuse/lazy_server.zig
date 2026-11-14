@@ -22,6 +22,7 @@ const host_real_fuse = @import("../host_real_fuse.zig");
 const doctor = @import("../doctor.zig");
 const Diag = @import("../diag/diag.zig").Diag;
 const store_diagnose = @import("../store/diagnose.zig");
+const diagnose = @import("diagnose.zig");
 const store_namespace = @import("../store/namespace.zig");
 const layout = @import("../store/layout.zig");
 const xattrs = @import("../store/xattrs.zig");
@@ -118,7 +119,10 @@ pub const Server = struct {
         server.table.init(memory);
         var trees: resolver.StoreTrees = .{ .store = store, .errno = 0 };
         server.table.build(trees.source(), tree) catch |err| {
-            store_diagnose.tree_damaged(diag, tree, build_failure(err));
+            switch (err) {
+                error.TooManyNodes, error.TooLarge => diagnose.too_large(diag, tree, bound(err)),
+                else => store_diagnose.tree_damaged(diag, tree, build_failure(err)),
+            }
             return false;
         };
         assert(store.chunk_bytes > 0);
@@ -139,14 +143,22 @@ pub const Server = struct {
             error.Damaged => "cannot be served lazily: a directory of it does not hash to its id",
             error.Unreadable => "cannot be served lazily: a directory of it cannot be read",
             error.Malformed => "cannot be served lazily: a directory of it does not decode",
+            error.TooManyNodes, error.TooLarge => unreachable, // E1207, `bound`.
+        };
+    }
+
+    /// The bound of the node table that a tree too large for it passed (E1207).
+    fn bound(err: nodes.BuildError) []const u8 {
+        return switch (err) {
             error.TooManyNodes => std.fmt.comptimePrint(
-                "is too large to serve lazily (more than {d} entries)",
+                "has more than {d} entries",
                 .{constants.lazy_nodes_max},
             ),
             error.TooLarge => std.fmt.comptimePrint(
-                "is too large to serve lazily (its directories exceed {d} MiB)",
+                "has more than {d} MiB of directory listings",
                 .{constants.lazy_index_bytes_max / (1024 * 1024)},
             ),
+            else => unreachable, // E0422, `build_failure`.
         };
     }
 

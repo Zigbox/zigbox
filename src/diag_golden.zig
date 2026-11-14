@@ -17,6 +17,7 @@ const image_diagnose = @import("image_diagnose.zig");
 const aws_diagnose = @import("aws/diagnose.zig");
 const push_diagnose = @import("push/diagnose.zig");
 const build_diagnose = @import("build/diagnose.zig");
+const lazy_diagnose = @import("fuse/diagnose.zig");
 const trust_diagnose = @import("trust/diagnose.zig");
 const policy_mod = @import("trust/policy.zig");
 const verdict_mod = @import("trust/verdict.zig");
@@ -735,7 +736,8 @@ fn publish_args(comptime forward: [:0]const u8) [9][:0]const u8 {
 
 /// One case per code that the command line can trigger. B0001 is a panic and has its own test.
 const cases = base_cases ++ bundle_cases ++ registry_cases ++ image_cases ++ state_cases ++
-    mount_cases ++ writable_cases ++ logs_cases ++ exec_cases ++ build_cases ++ key_cases;
+    mount_cases ++ writable_cases ++ logs_cases ++ exec_cases ++ build_cases ++ key_cases ++
+    lazy_cases;
 
 const build_project = "/home/alice/hello";
 
@@ -814,6 +816,23 @@ const build_cases = [_]Case{
     .{ .code = .E0818, .args = &.{}, .direct = build_glob_pool, .exit = 1 },
     .{ .code = .W0802, .args = &.{}, .direct = build_cache_steps, .warning = true, .exit = 0 },
 };
+
+/// The lazy start's codes that slice 4 raises (fuse/diagnose.zig). E1207 needs a tree too large
+/// for the real server's table, which the simulated run does not build: its golden is the
+/// diagnostic as `fuse/diagnose.zig` builds it.
+const lazy_cases = [_]Case{
+    .{ .code = .E1207, .args = &.{}, .direct = lazy_too_large, .exit = 1 },
+    .{
+        .code = .E1208,
+        .args = &.{ "run", "--lazy", "--rootfs", "/srv/alpine", "--", "/bin/sh" },
+        .exit = 125,
+    },
+};
+
+fn lazy_too_large(diag: *Diag) void {
+    const tree_digest = Digest.parse("b3:" ++ test_util.repeat('7', 64)).?;
+    lazy_diagnose.too_large(diag, tree_digest, "has more than 262144 entries");
+}
 
 const key_directory = "/home/alice/.config/zbx/keys";
 

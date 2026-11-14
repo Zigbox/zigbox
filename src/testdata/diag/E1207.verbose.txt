@@ -1,0 +1,7 @@
+error[ZBX-E1207]: the image is too large for lazy start
+  while  reading the image's directories to serve them lazily
+  cause  the image has more than 262144 entries
+  tree   b3:7777777777777777777777777777777777777777777777777777777777777777
+  fix    run it without --lazy, which reads the whole image first
+  more   zbx explain E1207
+  docs   https://zigbox.github.io/zigbox/errors/E1207.html
