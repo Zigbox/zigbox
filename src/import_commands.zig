@@ -197,7 +197,8 @@ fn read_input(
 ) Error![]const u8 {
     assert(buffer.len > 1);
     var storage: Path = undefined;
-    const text = terminated(&storage, path) orelse {
+    const followable = path.len > 0; // `zbx import ''` names no file.
+    const text = (if (followable) terminated(&storage, path) else null) orelse {
         import_diagnose.read_failed(diag, path, .bad_path);
         return error.Failed;
     };

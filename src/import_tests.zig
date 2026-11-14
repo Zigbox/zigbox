@@ -74,3 +74,18 @@ test "a refusal exits 1 with its code and writes nothing" {
     try expect_stderr("E0005");
     try testing.expect(files.content_of(output_path) == null);
 }
+
+test "an empty Dockerfile name or -o value is refused, not a crash" {
+    // Goal: `zbx import ''` and `zbx import -o ''` name no file, so each is a usage refusal with
+    // exit 1 (the cli fuzzer found both asserting). Method: each run on a world with a
+    // Dockerfile, and no file written.
+    world(3, settings_only);
+    try testing.expectEqual(@as(u8, 1), run(&.{ "zbx", "import", "", "--context", project }));
+    try expect_stderr("E0810");
+    try expect_stderr("'' is not a path zbx can follow");
+    try testing.expectEqual(@as(u8, 1), run(&(base ++ .{ "-o", "" })));
+    try expect_stderr("E0005");
+    try testing.expectEqual(@as(u8, 1), run(&.{ "zbx", "state", "export", "v", "-o", "" }));
+    try expect_stderr("E0005");
+    try testing.expect(files.content_of(output_path) == null);
+}

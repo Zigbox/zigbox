@@ -63,7 +63,7 @@ pub const ReadFailure = enum { missing, not_file, too_large, unreadable, bad_pat
 /// `E0810`: the Dockerfile (or its `.dockerignore`) cannot be read.
 pub fn read_failed(diag: *Diag, path: []const u8, failure: ReadFailure) void {
     assert(diag.code == null);
-    assert(path.len > 0);
+    assert(path.len > 0 or failure == .bad_path); // An empty path is one zbx cannot follow.
     var echo: Echo = undefined;
     const shown = text_util.sanitise(&echo, path);
     diag.raise(.E0810);
