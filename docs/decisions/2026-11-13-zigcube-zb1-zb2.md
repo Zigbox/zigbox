@@ -65,7 +65,7 @@ const dnf_tree = try pkg.dnf.write(memory, .x86_64, &rpms_x86_64);
 // The check `zig build packages-check` runs, over the placed tree (both architectures, laid
 // out as `apt/` and `rpm/<architecture>/`): one line per problem on `log`, CheckFailed if any.
 var source: pkg.TreeSource = .{ .files = placed };
-const strict: pkg.CheckOptions = .{ .signatures_required = true };
+const strict: pkg.CheckOptions = .{ .signatures_required = true, .test_key = false };
 try pkg.check_tree(source.source(), memory, log, strict);
 ```
 
@@ -80,25 +80,14 @@ try pkg.check_tree(source.source(), memory, log, strict);
   goes back in as `.header_signature` in `pkg.rpm.Options`. `Release` and each `repomd.xml`
   are signed by the caller after the trees are written, as Zigbox's own release does
   (docs/releases/packaging.md); `check_tree` with `signatures_required` then checks every
-  signature file is placed and that one key made them all. OpenPGP signing is not exported.
-- `CheckOptions` has one field, `signatures_required`, and `CheckError` is `CheckFailed` or
-  `OutOfMemory` (follow-up, 2026-11-14): the check behind `zig build packages-check` also signs
-  with Zigbox's fixed test key (`-Dtest-key`), which vouches for nothing, so that option and the
-  openpgp errors it could raise stay inside Zigbox. The OpenPGP reader itself is still compiled
-  into a caller, since `signatures_required` has to read the signature files; none of its names
-  or errors is exported.
+  signature file is placed and that one key made them all. OpenPGP signing is not exported;
+  `test_key = true` checks against Zigbox's fixed test key only, which vouches for nothing.
 - The bounds a caller meets, as `Error` values: 64 files per package (`TooManyFiles`), 64 MiB
   per file (`FileTooLarge`), 98-byte paths (`BadPath`), and 32 packages per apt or dnf tree
   (`TooManyFiles`). An apt tree that keeps past versions for two architectures fills 32 after
   16 releases; keep only the versions users need.
-- `dnf.write` takes rpms `rpm.write` made for the tree's architecture. Other bytes in a `Built`
-  are refused with `ForeignRpm` before anything is written (follow-up, 2026-11-14; it was an
-  assertion). Each rpm is written again from its package, with the build host its header names
-  and the header signature it carries, and compared whole, so a cut, a changed lead, header,
-  digest or payload, another package's rpm or another architecture's is refused. The header
-  signature's own bytes are not judged here; `check_tree` reads them. The rewrite costs about one
-  more rpm of memory per package, freed before the next. The `dnf` fuzzer
-  (`zig build fuzz -- dnf`) damages rpms, signed and unsigned, and checks this.
+- `dnf.write` takes rpms `rpm.write` made; other bytes in a `Built` are a broken contract (an
+  assertion), not a refusal.
 - The same files are also the `zigbox_package` module. A compilation that links the runtime
   uses `zigbox.package` and never imports `zigbox_package` as well. Importing both fails the
   build with `error: file exists in modules 'zigbox' and 'zigbox_package'` (reviewer B checked
@@ -130,7 +119,7 @@ in another process can exec, given:
 What Zigcube calls:
 
 ```zig
-var handle: zigbox.ExecHandle = undefined; // about 400 KiB, at most 640 KiB: static or heap
+var handle: zigbox.ExecHandle = undefined; // about 800 KiB: static or heap, not the stack
 var diag: zigbox.diag.Diag = undefined;
 diag.reset();
 const spec: zigbox.ExecSpec = .{ .name = container_name, .command = argv, .terminal = false };
@@ -160,11 +149,8 @@ exec (`.signaled = 9`, 137, `container_ended`), both with PID 1 left unreaped an
 order on a real agent, with the supervisor's `run.wait` reaping it before the worker's
 `exec_wait`; a worker with another home gets E0402, and after the container ended E0220. The
 command SIGKILLed while the container lives is not worker-specific: `src/runtime/exec_tests.zig`
-covers it ("a command killed by SIGKILL while its container lives says so at once"). The `.lost`
-row is tested from a worker (follow-up, 2026-11-14): the reap step fails once, `exec_wait` gives
-`.lost` with E0221 naming the reap, the command is killed and reaped, and the container lives.
-`@sizeOf(ExecHandle)` is asserted at compile time to be at most
-`constants.exec_handle_bytes_max` (640 KiB; about 400 KiB on x86_64 today). On a real host, demo-m6b runs `zbx exec` as its own process, without
+covers it ("a command killed by SIGKILL while its container lives says so at once"). No test
+reaches exec's `.lost` (a wait step that fails), from a worker or otherwise; that is open. On a real host, demo-m6b runs `zbx exec` as its own process, without
 a terminal, against a `zbx run -d` container, including EXEC 6 (the container killed under the
 exec: code 137 and "the container ex4 ended, and the command with it") and EXEC 7 (E0220 on a
 stopped container); its last run on main is green:
