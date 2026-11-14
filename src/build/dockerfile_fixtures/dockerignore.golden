@@ -9,7 +9,7 @@
             .name = "stage0-1",
             .base = "alpine:3.20",
             .copy = .{
-                .{ .src = .{ "." }, .to = "/app" },
+                .{ .src = .{ "*" }, .to = "/app/" },
             },
         },
     },

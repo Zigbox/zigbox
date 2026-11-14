@@ -555,7 +555,11 @@ pub fn copy(t: *Translator, instruction: *const Instruction) Error!void {
             return refuse(t.refusal(), .E0810, line, what, args, fix, .{});
         }
     }
-    const to = try translate.absolute(t, line, t.state().directory(), written_to, true);
+    const written = try translate.absolute(t, line, t.state().directory(), written_to, true);
+    const to = if (given.from == null and whole_context(sources))
+        try into_directory(t, line, written)
+    else
+        written;
     var from_text: ?[]const u8 = null;
     if (given.from) |name| {
         from_text = try stage_head(t, line, name) orelse image: {
@@ -624,10 +628,35 @@ fn put_copy(
 }
 
 /// A context source as the builder reads it: relative to the project (Docker reads `/x` there
-/// as `x`, and `/` as the whole context).
+/// as `x`). The whole context (`.` or `/`) is `*`, every entry at the top of the project, since
+/// a build file refuses a project source of `.` (docs/decisions/2026-11-13-copy-source-refusals.md).
 fn project_path(source: []const u8) []const u8 {
+    if (is_whole_context(source)) return "*";
+    return std.mem.trimStart(u8, source, "/");
+}
+
+fn is_whole_context(source: []const u8) bool {
     const trimmed = std.mem.trimStart(u8, source, "/");
-    return if (trimmed.len == 0) "." else trimmed;
+    return trimmed.len == 0 or std.mem.eql(u8, trimmed, ".");
+}
+
+fn whole_context(sources: []const []const u8) bool {
+    for (sources) |source| {
+        if (is_whole_context(source)) return true;
+    }
+    return false;
+}
+
+/// `to` ending in `/`: the entries of the whole context go inside it, as Docker's `COPY . to`
+/// puts the context's contents there (a `*` copied to a `.to` without `/` is refused, E0803).
+fn into_directory(t: *Translator, line: u32, to: []const u8) Refused![]const u8 {
+    assert(to.len > 0);
+    assert(to[0] == '/');
+    if (to[to.len - 1] == '/') return to;
+    const start = t.out.mark();
+    try t.out.push(t.refusal(), line, to);
+    try t.out.push(t.refusal(), line, "/");
+    return t.out.since(start);
 }
 
 const archives = [_][]const u8{
