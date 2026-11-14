@@ -589,7 +589,12 @@ pub const Schedule = struct {
         const entry = &schedule.pending[index];
         assert(entry.state == .fetching or entry.state == .failed);
         assert(source < schedule.sources_count);
-        if (entry.state == .failed) return schedule.free_if_done(index);
+        if (entry.state == .failed) {
+            // The reader gave up, but a lie is still a lie: the source is not asked for this
+            // object again, and it is named.
+            if (result == .lied) schedule.mark_bad(entry.object, entry.chunk, source, &entry.outcomes);
+            return schedule.free_if_done(index);
+        }
         entry.state = .queued;
         switch (result) {
             .landed, .local => schedule.land(index, result),
@@ -629,12 +634,22 @@ pub const Schedule = struct {
         assert(entry.state == .queued);
         assert(source < schedule.sources_count);
         entry.outcomes[source] = .lied;
-        const object = &schedule.objects[entry.object];
-        if (object.bad & bit(source) == 0) {
-            object.bad |= bit(source);
-            const name = schedule.names[source];
-            schedule.emit(.lied, entry.object, entry.chunk, name, &entry.outcomes);
-        }
+        schedule.mark_bad(entry.object, entry.chunk, source, &entry.outcomes);
+    }
+
+    /// The first lie of `source` about `object` is named (`W1202`); it is not asked again.
+    fn mark_bad(
+        schedule: *Schedule,
+        object: lazy.ObjectIndex,
+        chunk: u32,
+        source: u8,
+        outcomes: *const [sources_max]lazy.Outcome,
+    ) void {
+        assert(source < schedule.sources_count);
+        const state = &schedule.objects[object];
+        if (state.bad & bit(source) != 0) return;
+        state.bad |= bit(source);
+        schedule.emit(.lied, object, chunk, schedule.names[source], outcomes);
     }
 
     /// Ends every queued entry (`Stopped`) and takes no more jobs.

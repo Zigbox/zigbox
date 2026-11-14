@@ -622,7 +622,7 @@ pub const Resolver = struct {
     }
 
     /// Hands queued events to the log, without the lock.
-    fn drain_events(resolver: *Resolver) void {
+    pub fn drain_events(resolver: *Resolver) void {
         assert(resolver.sources_count <= constants.lazy_sources_max);
         var batch: [16]lazy.Event = undefined;
         while (true) {

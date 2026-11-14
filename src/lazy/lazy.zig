@@ -207,4 +207,5 @@ test {
     _ = @import("land.zig");
     _ = @import("schedule.zig");
     _ = @import("resolver.zig");
+    _ = @import("sim.zig");
 }
