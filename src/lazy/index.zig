@@ -64,8 +64,11 @@ pub const Header = struct {
     order: u32,
 
     pub fn encode(header: *const Header, out: *[header_bytes]u8) void {
-        assert(header.names <= constants.lazy_nodes_max or !header.complete);
-        assert(header.complete or header.trees + header.objects + header.chunks == 0);
+        if (header.complete) {
+            assert(header.names <= constants.lazy_nodes_max);
+        } else {
+            assert(header.trees + header.objects + header.chunks == 0);
+        }
         @memcpy(out[0..8], magic);
         std.mem.writeInt(u32, out[8..12], format_version, .little);
         std.mem.writeInt(u32, out[12..16], @intFromBool(header.complete), .little);

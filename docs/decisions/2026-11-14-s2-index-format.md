@@ -86,8 +86,10 @@ refuses an index whose trees or objects are not that walk.
 **Bounds.** An index longer than `lazy_index_bytes_max`, or with more than `lazy_nodes_max` names,
 is too large (`E1207`), not malformed (`E1202`). The writer's memory is bounded by the same
 `lazy_nodes_max`: for a tree with more names, or whose index would pass `lazy_index_bytes_max`, it
-writes a **stub**: the header alone, complete 0, the tree and the names count set, every other
-count 0. A lazy run of it is refused as too large rather than pulled whole with "no index".
+writes **no index and no annotation**, so the image runs eagerly with "no index" (`W1201`)
+(supervisor, 2026-11-14: an image that cannot be lazy must still run). `E1207` stays for an index
+read over the bound, such as one another tool wrote. The parser also refuses a **stub** (the
+header alone, complete 0, every count but names 0) as too large; zigbox writes none.
 
 ## What `index.verify` checks (the `E1202` checks)
 
