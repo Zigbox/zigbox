@@ -245,6 +245,8 @@ fn value_fix(diag: *Diag, problem: *const file_mod.Problem) void {
             "example \"0755\"" }),
         .bad_pattern => diag.fix(.{ .sentence = "write a glob: * ? [a-z] and ** work, a \\ " ++
             "quotes a byte, and no part is .." }),
+        .bad_project_source => diag.fix(.{ .sentence = "name project paths plainly, with no " ++
+            "trailing /: for the whole project write .src = .{\"*\"} and a .to ending in /" }),
         .bad_from => diag.fix(.{ .sentence = "write .from as step:<name> of a step, or as " ++
             "an image reference like alpine:3.20" }),
         .bad_source => diag.fix(.{ .sentence = "write .source as a path in the project, or " ++
@@ -352,6 +354,8 @@ fn describe_value(writer: *std.Io.Writer, kind: ProblemKind, word: []const u8) !
             "plainly, which may end in /", .{word}),
         .bad_mode => try writer.print("the mode \"{s}\" is not 3 or 4 octal digits", .{word}),
         .bad_pattern => try writer.print("the pattern \"{s}\" is not a valid glob", .{word}),
+        .bad_project_source => try writer.print("the project source \"{s}\" has an empty " ++
+            "or . part; a project source is a relative path written plainly", .{word}),
         .bad_from => try writer.print(".from \"{s}\" is not step:<name> or an image " ++
             "reference", .{word}),
         .bad_source => try writer.print(".source \"{s}\" is not a path inside what it " ++
@@ -853,6 +857,12 @@ pub fn assembly_refused(
             });
             diag.fix(.{ .sentence = "shorten the destination in .image.add of zbx.build.zon" });
         },
+        .bad_name => {
+            diag.cause("a name in .image.add {s} -> {s} is longer than {d} bytes", .{
+                from_shown, to_shown, constants.store_name_bytes_max,
+            });
+            diag.fix(.{ .sentence = "shorten the names in the destination of .image.add" });
+        },
         .too_large, .too_common => {
             diag.cause("the image is too large to assemble at .image.add {s} -> {s}", .{
                 from_shown, to_shown,
@@ -888,6 +898,9 @@ pub fn copy_refused(
         .too_large, .too_common, .conflict => {
             diag.cause("the tree the copy to {s} makes is too large to assemble", .{to_shown});
         },
+        .bad_name => diag.cause("a name the copy to {s} makes is longer than {d} bytes", .{
+            to_shown, constants.store_name_bytes_max,
+        }),
         .io, .damaged => unreachable,
     }
     diag.fix(.{ .sentence = "copy fewer or smaller directories, or a shorter destination" });
@@ -911,6 +924,27 @@ pub fn copy_nothing(diag: *Diag, step: []const u8, pattern: []const u8, from: []
     diag.fix(.{ .sentence = "name a path the source has, or fix the glob" });
     diag.context("step", "{s}", .{step_shown});
     diag.context("src", "{s}", .{pattern_shown});
+    assert(diag.code.? == .E0803);
+}
+
+/// `E0803` for a copy whose sources match more than one path and whose `.to` does not end in
+/// `/`: every match would land on `to`, the last one winning, so it is refused as Docker does.
+pub fn copy_many_to_one(diag: *Diag, step: []const u8, to: []const u8, count: u32) void {
+    assert(diag.code == null);
+    assert(count > 1);
+    assert(to.len > 0);
+    var step_echo: Echo = undefined;
+    var to_echo: Echo = undefined;
+    const step_shown = text_util.sanitise(&step_echo, step);
+    const to_shown = text_util.sanitise(&to_echo, to);
+    diag.raise(.E0803);
+    diag.while_("copying files in step \"{s}\"", .{step_shown});
+    diag.cause("the sources match {d} paths, and .to \"{s}\" names one path, not a " ++
+        "directory ending in /", .{ count, to_shown });
+    diag.fix(.{ .sentence = "end .to with / to copy each match into it, or narrow the " ++
+        "sources to one path" });
+    diag.context("step", "{s}", .{step_shown});
+    diag.context("to", "{s}", .{to_shown});
     assert(diag.code.? == .E0803);
 }
 
