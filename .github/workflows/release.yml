@@ -276,7 +276,11 @@ jobs:
           set -euo pipefail
           notes="docs/releases/$VERSION.md"
           if [ -n "$ID" ]; then
+            # tag_name and target_commitish are passed again: a PATCH of a draft without them
+            # turns its tag into an "untagged-..." placeholder, and every later find-draft,
+            # upload and download by tag then misses it (0.5.1, run 43621485097).
             gh api -X PATCH "repos/$GITHUB_REPOSITORY/releases/$ID" -f name="zigbox $VERSION" \
+              -f tag_name="$TAG" -f target_commitish="$SHA" \
               -F body=@"$notes" -F prerelease="$PRERELEASE" > /dev/null
             echo "draft: refreshed the notes of release $ID"
             exit 0
@@ -1059,8 +1063,14 @@ jobs:
         run: |
           set -euo pipefail
           echo "second notes" > "$RUNNER_TEMP/notes.md"
+          # The same refresh as the draft job's: the draft must still be found by its tag after
+          # it, for the signing jobs' find-draft and upload (0.5.1, run 43621485097).
           gh api -X PATCH "repos/$GITHUB_REPOSITORY/releases/$ID" -f name="draft check" \
+            -f tag_name="$TAG" -f target_commitish="$GITHUB_SHA" \
             -F body=@"$RUNNER_TEMP/notes.md" -F prerelease=true > /dev/null
+          tag=$(gh api "repos/$GITHUB_REPOSITORY/releases/$ID" --jq .tag_name)
+          [ "$tag" = "$TAG" ] || { echo "draft-test: a refresh left the tag $tag" >&2; exit 1; }
+          "$GH" release upload "$TAG" "$RUNNER_TEMP/f.txt" --clobber --repo "$GITHUB_REPOSITORY"
           gh api -X PATCH "repos/$GITHUB_REPOSITORY/releases/$ID" -F draft=false \
             -f tag_name="$TAG" -f target_commitish="$GITHUB_SHA" \
             -F prerelease=true -f make_latest=false > /dev/null
