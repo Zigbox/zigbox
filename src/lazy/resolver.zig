@@ -288,12 +288,14 @@ pub const Resolver = struct {
             return .{ .failed = error.StoreFull };
         }
         const ticket = resolver.schedule.request(object, chunk, .on_demand, now);
+        // The table is full: more readers than the FUSE server has threads. Said in an event.
+        if (ticket == null) resolver.schedule.table_full(object, chunk);
         resolver.wake_workers();
         resolver.unlock();
         if (ticket) |held| {
             return .{ .wait = .{ .ticket = held, .until_ms = now + constants.lazy_read_deadline_ms } };
         }
-        // The table is full: more readers than the FUSE server has threads. Wait a little.
+        resolver.drain_events();
         return .{ .failed = error.Unavailable };
     }
 

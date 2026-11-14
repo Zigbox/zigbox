@@ -676,6 +676,16 @@ pub const Schedule = struct {
         schedule.report.errors += 1;
     }
 
+    /// A read refused because the pending table is full: still an event, so no failed read goes
+    /// unexplained.
+    pub fn table_full(schedule: *Schedule, object: lazy.ObjectIndex, chunk: u32) void {
+        assert(object < schedule.objects.len);
+        assert(chunk < schedule.catalog.objects[object].wanted.hashes.len);
+        const outcomes: [sources_max]lazy.Outcome = @splat(.not_tried);
+        schedule.emit(.unavailable, object, chunk, "", &outcomes);
+        schedule.report.errors += 1;
+    }
+
     /// Fill entries waiting for a slot.
     pub fn queued_fill(schedule: *const Schedule) u32 {
         var count: u32 = 0;
