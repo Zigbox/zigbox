@@ -110,6 +110,7 @@ pub const Workspace = struct {
     /// the stamp leaves it (the selection itself when the entry has neither).
     copy_stamps: [constants.build_copy_entries_max]copy_owner.Stamp,
     copy_tos: [constants.build_copy_entries_max][]const u8,
+    copy_chowns: [constants.build_copy_entries_max]?[]const u8,
     copy_stamped: [constants.build_copy_entries_max]Digest,
     copy_selections: [constants.build_copy_entries_max]Digest,
     copy_owner: copy_owner.Workspace,
@@ -893,6 +894,7 @@ pub const Context = struct {
                 // The stamped trees are written under this lock, so `store gc` cannot take them
                 // before the cache entry holds the output they go into.
                 try context.copy_stamp(index, spec.base_tree, entries.len);
+                try context.check_interrupt(); // A restamp of a large selection takes seconds.
                 const made = try context.copy_assemble(spec.base_tree, entries.len);
                 break :blk cache.record(store, &ws.cache, &ws.key, made, &failure) catch
                     return context.cache_failed(&failure);
@@ -1077,16 +1079,23 @@ pub const Context = struct {
             ws.copy_tos[at] = part.to;
             ws.copy_stamps[at] = .{};
             if (part.chmod) |text| ws.copy_stamps[at].mode = copy_owner.mode_of(text);
+            ws.copy_chowns[at] = part.chown;
             const text = part.chown orelse continue;
             const found = image_user.resolve(context.store, &ws.user_ws, base, text, context.diag);
             const resolved = found catch {
                 context.diag.reset();
-                diagnose.copy_owner_not_found(context.diag, name, text, false);
+                const refusal: diagnose.OwnerRefusal = if (ws.user_ws.too_large) |file|
+                    .{ .too_large = file }
+                else
+                    .missing;
+                diagnose.copy_owner_not_found(context.diag, name, text, refusal);
                 return error.Failed;
             };
-            const owner: copy_owner.Owner = .{ .uid = resolved.user.uid, .gid = resolved.user.gid };
+            var owner: copy_owner.Owner = .{ .uid = resolved.user.uid, .gid = resolved.user.gid };
+            // BuildKit: a uid alone, as a number, is its own group, whatever passwd says.
+            if (copy_owner.uid_alone(text)) owner.gid = owner.uid;
             if (owner.uid == copy_owner.id_unowned or owner.gid == copy_owner.id_unowned) {
-                diagnose.copy_owner_not_found(context.diag, name, text, true);
+                diagnose.copy_owner_not_found(context.diag, name, text, .unowned);
                 return error.Failed;
             }
             ws.copy_stamps[at].owner = owner;
@@ -1098,6 +1107,7 @@ pub const Context = struct {
             .name = name,
             .selections = ws.copy_selections[0..count],
             .tos = ws.copy_tos[0..count],
+            .chowns = ws.copy_chowns[0..count],
             .stamps = ws.copy_stamps[0..count],
             .ws = &ws.copy_owner,
             .stamped = ws.copy_stamped[0..count],
@@ -1421,7 +1431,7 @@ pub const Context = struct {
             // The name may come from the base image's config, which the file never wrote.
             const set_here = context.loaded.file.image.config.user != null;
             const where = if (set_here) ".image .config" else "the base image's config";
-            diagnose.user_not_found(context.diag, where, text);
+            diagnose.user_not_found(context.diag, where, text, ws.user_ws.too_large);
             return error.Failed;
         };
         var buffer: [24]u8 = undefined;

@@ -7,13 +7,16 @@ Closes the cut slice 2 left (`copy_unrunnable` gave E0802 for both fields). Foll
 
 - **Where.** The parent selects (`copy.select`) as before. If any entry has a stamp,
   `copy_job.restamp` runs one `namespace.run` child, single-threaded, before any exec. It rewrites
-  each stamped selection tree (`copy_owner.restamp`, iterative, bounded by `depth_max`). It
+  each stamped selection tree (`copy_owner.restamp`, iterative, bounded by `depth_max` and by `store_walk_entries_max` entries). It
   writes each new file object from the source object's path with the new attributes, and sends
   the new digests back on a pipe, or an encoded diagnostic. The step's shared store lock is held
   from the cache lookup to `cache.record`, so the new trees need no roots.
 - **Names.** `.chown` resolves through `image_user.resolve` against the step's base tree, the
-  same lookup as `.user`. A user alone takes its primary group, and numbers are taken as
-  written. An unknown name is E0817, with the cause naming the step and the text. 4294967295 (in
+  same lookup as `.user`. A name alone takes its primary group; a uid alone as a number takes
+  the group of the same number, as BuildKit does (corrected by the review rulings,
+  `2026-11-14-m9-copy-chown-rulings.md`; this line first said numbers were taken as written,
+  which gave `1000` the group 0). An id the full map cannot hold (above 65536) is E0817, and a
+  passwd past its 128 KiB bound says so. An unknown name is E0817, with the cause naming the step and the text. 4294967295 (in
   either part) is refused under E0817 too. It passes `is_user_part` but means "no owner" to the
   kernel, and the tree writer asserts against it. No new code was registered.
 - **What gets stamped.** Every entry the patterns took gets the owner. Files and directories get

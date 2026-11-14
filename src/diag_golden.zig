@@ -2584,7 +2584,7 @@ fn build_network_steps(diag: *Diag) void {
 }
 
 fn build_user_not_found(diag: *Diag) void {
-    build_diagnose.user_not_found(diag, "step \"a\"", "nobody2");
+    build_diagnose.user_not_found(diag, "step \"a\"", "nobody2", null);
 }
 
 fn build_interrupted(diag: *Diag) void {

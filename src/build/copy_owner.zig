@@ -61,6 +61,19 @@ pub fn mode_of(text: []const u8) u16 {
     return mode;
 }
 
+/// True if a `.chown` text is a uid alone, as a number: BuildKit gives it the group of the same
+/// number, where `.user` takes the group /etc/passwd gives that uid. A name alone still takes its
+/// primary group (`image_user.resolve`).
+pub fn uid_alone(text: []const u8) bool {
+    assert(text.len > 0);
+    if (std.mem.indexOfScalar(u8, text, ':') != null) return false;
+    for (text) |byte| {
+        if (byte < '0') return false;
+        if (byte > '9') return false;
+    }
+    return true;
+}
+
 /// `entry` as `stamp` leaves it: the owner on every kind, the mode on a file and a directory, and
 /// a file's object id for its new attributes.
 pub fn stamped(entry: *const tree.Entry, stamp: Stamp) tree.Entry {
@@ -95,8 +108,6 @@ pub fn stamped(entry: *const tree.Entry, stamp: Stamp) tree.Entry {
 const Frame = struct {
     /// The directory's tree, for a failure to name.
     dir: Digest,
-    /// The directory is `/` or on the way to `.to`: its directory entries may be too.
-    on_path: bool,
     /// Its bytes: `arena[at..][0..len]`; the finished subdirectories' digests follow them.
     at: u32,
     len: u32,
@@ -116,6 +127,8 @@ pub const Workspace = struct {
     path_len: u32,
     /// Objects this restamp wrote (the rest were in the store).
     objects_written: u32,
+    /// Entries this restamp decoded, at most `Context.entries_max`.
+    entries: u32,
 };
 
 comptime {
@@ -127,6 +140,9 @@ comptime {
 pub const Context = struct {
     store: *Store,
     failure: *assemble.Failure,
+    /// The entries a restamp may decode. Always `store_walk_entries_max` but in tests, which
+    /// reach it with a small tree.
+    entries_max: u32 = constants.store_walk_entries_max,
 };
 
 /// The selection `root`, laid at `to`, with `stamp` on every entry below the root (the mode not
@@ -142,7 +158,9 @@ pub fn restamp(
     assert(stamp.changes());
     assert(to.len > 0);
     assert(to[0] == '/');
+    assert(context.entries_max <= constants.store_walk_entries_max);
     ws.objects_written = 0;
+    ws.entries = 0;
     ws.path_len = 0;
     var names = std.mem.tokenizeScalar(u8, to, '/');
     while (names.next()) |name| {
@@ -154,19 +172,18 @@ pub fn restamp(
         ws.path_len += 1;
     }
     var depth: u32 = 0;
-    try push(context, ws, 0, root, 0, true);
-    // Each pass enters a directory or finishes one: a tree has at most `store_walk_entries_max`
-    // entries.
-    for (0..2 * @as(usize, constants.store_walk_entries_max) + 2) |_| {
+    try push(context, ws, 0, root, 0);
+    // Each pass enters a directory or finishes one, and a directory is entered only for an entry
+    // `next_dir` counted against `entries_max`.
+    for (0..2 * @as(usize, context.entries_max) + 2) |_| {
         const frame = &ws.frames[depth];
         var child: tree.Entry = undefined;
-        if (try next_dir(context, frame, &child)) {
+        if (try next_dir(context, ws, frame, &child)) {
             if (depth + 1 == ws.frames.len) {
                 context.failure.* = .too_deep;
                 return error.Failed;
             }
-            const on_path = on_the_way(ws, frame, depth, &child);
-            try push(context, ws, depth + 1, child.subtree, top(frame), on_path);
+            try push(context, ws, depth + 1, child.subtree, top(frame));
             depth += 1;
             continue;
         }
@@ -175,7 +192,8 @@ pub fn restamp(
         depth -= 1;
         try append(context, ws, &ws.frames[depth], digest);
     }
-    unreachable; // The bound above is more than the walk can take.
+    // Not reached: the budget refuses first. Were it reached, it is still a refusal.
+    return too_large(context);
 }
 
 /// Where the frame's region of the arena ends.
@@ -183,20 +201,16 @@ fn top(frame: *const Frame) u32 {
     return frame.at + frame.len + frame.finished * constants.store_digest_bytes;
 }
 
-/// True if `entry`, in the frame's directory at `depth`, is a directory on the way to `.to` (or
-/// `.to` itself).
-fn on_the_way(
-    ws: *const Workspace,
-    frame: *const Frame,
-    depth: u32,
-    entry: *const tree.Entry,
-) bool {
+/// True if `entry`, in a directory at `depth`, is a directory on the way to `.to` (or `.to`
+/// itself). `copy.select` lays every match under `.to`, so above `.to`'s depth a selection holds
+/// only the way there: a directory at such a depth is always the next name of `.to`.
+fn on_the_way(ws: *const Workspace, depth: u32, entry: *const tree.Entry) bool {
     assert(depth < ws.frames.len);
     assert(ws.path_len <= ws.path.len);
-    if (!frame.on_path) return false;
     if (entry.kind != .dir) return false;
     if (depth >= ws.path_len) return false;
-    return std.mem.eql(u8, entry.name, ws.path[depth]);
+    assert(std.mem.eql(u8, entry.name, ws.path[depth]));
+    return true;
 }
 
 fn push(
@@ -205,7 +219,6 @@ fn push(
     depth: u32,
     dir: Digest,
     at: u32,
-    on_path: bool,
 ) Error!void {
     assert(depth < ws.frames.len);
     assert(at <= ws.arena.len);
@@ -233,7 +246,6 @@ fn push(
     const frame = &ws.frames[depth];
     frame.* = .{
         .dir = dir,
-        .on_path = on_path,
         .at = at,
         .len = @intCast(bytes.len),
         .decoder = undefined,
@@ -248,9 +260,13 @@ fn damaged(context: Context, dir: Digest) Error {
 }
 
 /// The next subdirectory of the frame not yet entered, in `entry`; false when every one is.
-fn next_dir(context: Context, frame: *Frame, entry: *tree.Entry) Error!bool {
+/// Every entry decoded counts against `entries_max` (each is decoded here once per visit).
+fn next_dir(context: Context, ws: *Workspace, frame: *Frame, entry: *tree.Entry) Error!bool {
     assert(frame.len > 0);
+    assert(ws.entries <= context.entries_max);
     while (frame.decoder.next(entry) catch return damaged(context, frame.dir)) {
+        if (ws.entries == context.entries_max) return too_large(context);
+        ws.entries += 1;
         if (entry.kind == .dir) return true;
     }
     return false;
@@ -284,7 +300,7 @@ fn finish(
     var subdirs: u32 = 0;
     while (decoder.next(&entry) catch return damaged(context, frame.dir)) {
         const owner_only: Stamp = .{ .owner = stamp.owner };
-        const kept = on_the_way(ws, frame, depth, &entry);
+        const kept = on_the_way(ws, depth, &entry);
         var result = stamped(&entry, if (kept) owner_only else stamp);
         const r = &result;
         writer.begin(r.name, r.kind, r.mode, r.uid, r.gid, r.xattrs) catch {

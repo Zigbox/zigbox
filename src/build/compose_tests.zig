@@ -1590,13 +1590,19 @@ const trees_mod = @import("../store/trees.zig");
 /// Step 0 `base` copies the project's `etc` (a passwd naming `app`) into the fixture image;
 /// step 1 `put` copies `a.txt` onto it with `owner` and `mode` (empty: not given).
 fn owned_copy_loaded(owner: []const u8, mode: []const u8) !void {
+    try owned_copy_loaded_with(owner, mode, owned_passwd);
+}
+
+const owned_passwd = "root:x:0:0:root:/root:/bin/sh\napp:x:1000:1001::/home/app:/bin/sh\n";
+
+/// `owned_copy_loaded` with `passwd` as the base's /etc/passwd.
+fn owned_copy_loaded_with(owner: []const u8, mode: []const u8, passwd: []const u8) !void {
     registry_started(&registry.fixture.oci.amd64.digest);
     sim.files = &sim_run.files; // A host that maps a full range of ids: owners are kept.
     try owned_copy_parsed(owner, mode);
     files.put_dir("/p", 0o755);
     files.put_dir("/p/etc", 0o755);
-    files.put_file("/p/etc/passwd", 0o644, "root:x:0:0:root:/root:/bin/sh\n" ++
-        "app:x:1000:1001::/home/app:/bin/sh\n");
+    files.put_file("/p/etc/passwd", 0o644, passwd);
     files.put_file("/p/etc/group", 0o644, "root:x:0:\napp:x:1001:\nstaff:x:50:\n");
     files.put_file("/p/a.txt", 0o644, "a\n");
     set_path(&loaded.project, "/p");
@@ -1733,4 +1739,215 @@ test "a copy's .chown that its base lacks, or the id 4294967295, is one E0817 li
         try testing.expect(std.mem.indexOf(u8, cause, owner) != null);
         try testing.expectEqual(@as(u32, 1), context.misses);
     }
+}
+
+test "a copy's .chown of a lone uid gives that uid as its group too, as BuildKit does" {
+    // Goal: Docker gives `--chown=1000` the owner 1000:1000, and a name alone keeps the primary
+    // group its passwd line gives. Method: `1000` and then `app` (1000, group 1001) on one copy.
+    try owned_copy_loaded("1000", "");
+    try owned_base_built();
+    try testing.expect(try context.begin(1) == .hit);
+    const numbered = try owned_entry(composed.outputs[1], &.{ "opt", "app", "a.txt" });
+    try testing.expectEqual(@as(u32, 1000), numbered.uid);
+    try testing.expectEqual(@as(u32, 1000), numbered.gid);
+    try owned_copy_parsed("app", "");
+    try testing.expect(try context.begin(0) == .hit);
+    try testing.expect(try context.begin(1) == .hit);
+    const named = try owned_entry(composed.outputs[1], &.{ "opt", "app", "a.txt" });
+    try testing.expectEqual(@as(u32, 1000), named.uid);
+    try testing.expectEqual(@as(u32, 1001), named.gid);
+}
+
+test "a copy's .chown past the id map is one E0817 line naming the id; 65536 is kept" {
+    // Goal: an id the full map does not reach is the user's input, refused before any write and
+    // never an errno dump; the map's last id is kept; the one-id map squashes any id to root.
+    // Method: three owners past 65536, then 65536, then 100000 on a host with no range.
+    const refused = [_][2][]const u8{
+        .{ "65537", "65537" }, .{ "app:70000", "70000" }, .{ "100000:0", "100000" },
+    };
+    for (refused) |pair| {
+        try owned_copy_loaded(pair[0], "");
+        try owned_base_built();
+        try testing.expectError(error.Failed, context.begin(1));
+        try testing.expectEqual(codes.Code.E0817, diag.code.?);
+        try testing.expectEqual(@as(u32, 1), diag.causes.count);
+        const cause = diag.causes.slice()[0].slice();
+        try testing.expect(std.mem.indexOf(u8, cause, pair[0]) != null);
+        try testing.expect(std.mem.indexOf(u8, cause, pair[1]) != null);
+        try testing.expect(std.mem.indexOf(u8, cause, "it maps 0 to 65536") != null);
+        try testing.expectEqual(@as(u32, 1), context.misses);
+    }
+    try owned_copy_loaded("65536", "");
+    try owned_base_built();
+    try testing.expect(try context.begin(1) == .hit);
+    const last = try owned_entry(composed.outputs[1], &.{ "opt", "app", "a.txt" });
+    try testing.expectEqual(@as(u32, 65536), last.uid);
+    try testing.expectEqual(@as(u32, 65536), last.gid);
+    try owned_copy_loaded("100000", "");
+    sim.files = &.{};
+    try owned_base_built();
+    try testing.expect(try context.begin(1) == .hit);
+    const squashed = try owned_entry(composed.outputs[1], &.{ "opt", "app", "a.txt" });
+    try testing.expectEqual(@as(u32, 0), squashed.uid);
+    try testing.expectEqual(@as(u32, 0), squashed.gid);
+}
+
+var passwd_large: [@import("../image_user.zig").passwd_bytes_max + 1]u8 = undefined;
+
+test "a passwd larger than zbx reads is named too large, for a copy's .chown and for .user" {
+    // Goal: a name looked up in a passwd past its bound says the file is too large, not that the
+    // name is missing. Method: a passwd one byte past 128 KiB that names `app` on its second
+    // line; `.chown = "app"` and then the image's `.user = "app"` against that base.
+    @memset(&passwd_large, '\n');
+    @memcpy(passwd_large[0..owned_passwd.len], owned_passwd);
+    try owned_copy_loaded_with("app", "", &passwd_large);
+    try owned_base_built();
+    try testing.expectError(error.Failed, context.begin(1));
+    try testing.expectEqual(codes.Code.E0817, diag.code.?);
+    const cause = diag.causes.slice()[diag.causes.count - 1].slice();
+    try testing.expect(std.mem.indexOf(u8, cause, "/etc/passwd") != null);
+    try testing.expect(std.mem.indexOf(u8, cause, "larger than the 128 KiB") != null);
+    diag.reset();
+    composed.record.tree = composed.outputs[0];
+    composed.record.config.clear();
+    _ = composed.record.config.settings.set(.user, "app");
+    try testing.expectError(error.Failed, context.numeric_user());
+    try testing.expectEqual(codes.Code.E0817, diag.code.?);
+    const user_cause = diag.causes.slice()[diag.causes.count - 1].slice();
+    try testing.expect(std.mem.indexOf(u8, user_cause, "larger than the 128 KiB") != null);
+}
+
+test "a copy whose .chmod alone changes misses, with the new mode in its output" {
+    // Goal: the mode is in the key on its own, not only beside an owner. Method: `600`, then
+    // `644` with the same `.chown`.
+    try owned_copy_loaded("app", "600");
+    try owned_base_built();
+    try testing.expect(try context.begin(1) == .hit);
+    const first = composed.outputs[1];
+    const misses = context.misses;
+    try owned_copy_parsed("app", "644");
+    try testing.expect(try context.begin(0) == .hit);
+    try testing.expect(try context.begin(1) == .hit);
+    try testing.expectEqual(misses + 1, context.misses);
+    try testing.expect(!first.eql(composed.outputs[1]));
+    const file = try owned_entry(composed.outputs[1], &.{ "opt", "app", "a.txt" });
+    try testing.expectEqual(@as(u16, 0o644), file.mode);
+    try testing.expectEqual(@as(u32, 1000), file.uid);
+}
+
+/// Builds `put` with no stamp, so its selection's objects are in the store, then gives it the
+/// stamp `app` and `600`, and builds `base` again. Returns the path of `a.txt`'s object.
+fn owned_selection_kept(path: *@import("../store/fs.zig").PathBuf) ![]const u8 {
+    try owned_copy_loaded("", "");
+    try owned_base_built();
+    try testing.expect(try context.begin(1) == .hit);
+    const plain = try owned_entry(composed.outputs[1], &.{ "opt", "app", "a.txt" });
+    try owned_copy_parsed("app", "600");
+    try testing.expect(try context.begin(0) == .hit);
+    return store.object_path(path, plain.object);
+}
+
+/// The step `put` built again with no fault: a miss, so the failed run recorded nothing.
+fn owned_nothing_recorded() !void {
+    diag.reset();
+    const hits = context.hits;
+    const misses = context.misses;
+    try testing.expect(try context.begin(1) == .hit);
+    try testing.expectEqual(misses + 1, context.misses);
+    try testing.expectEqual(hits, context.hits);
+    const file = try owned_entry(composed.outputs[1], &.{ "opt", "app", "a.txt" });
+    try testing.expectEqual(@as(u16, 0o600), file.mode);
+}
+
+test "a damaged file object in a copy's selection is E0417 from the child, recording nothing" {
+    // Goal: the child's diagnostic reaches the parent whole (decoded, not replaced by E0419) and
+    // a damaged object is a store failure, not a refusal of the step. Method: the selection's
+    // `a.txt` object loses a byte after the unstamped build; the stamped build reads it in the
+    // child. The byte put back, the same build is a miss.
+    var path: @import("../store/fs.zig").PathBuf = undefined;
+    const object = try owned_selection_kept(&path);
+    files.flip_byte_quietly(object, 0);
+    try testing.expectError(error.Failed, context.begin(1));
+    try testing.expectEqual(codes.Code.E0417, diag.code.?);
+    const cause = diag.causes.slice()[0].slice();
+    try testing.expect(std.mem.startsWith(u8, cause, "reading a tree to copy"));
+    files.flip_byte_quietly(object, 0);
+    try owned_nothing_recorded();
+}
+
+fn never_in_user_namespace(raw: *anyopaque) bool {
+    assert(@intFromPtr(raw) != 0);
+    return false;
+}
+
+test "a write the child cannot make is E0417 naming it, recording nothing" {
+    // Goal: an io failure in the restamp reaches the parent as the child's own diagnostic.
+    // Method: after the unstamped build, the sim refuses every change of owner, so the child's
+    // first stamped object fails; with the gate back, the same build is a miss.
+    var path: @import("../store/fs.zig").PathBuf = undefined;
+    _ = try owned_selection_kept(&path);
+    const gate = files.faults.owner_gate;
+    files.faults.owner_gate = .{
+        .context = &sim,
+        .in_new_user_namespace = never_in_user_namespace,
+    };
+    try testing.expectError(error.Failed, context.begin(1));
+    try testing.expectEqual(codes.Code.E0417, diag.code.?);
+    const cause = diag.causes.slice()[0].slice();
+    const expected = "writing a copied file with its owner failed: operation not permitted (EPERM)";
+    try testing.expectEqualStrings(expected, cause);
+    files.faults.owner_gate = gate;
+    try owned_nothing_recorded();
+}
+
+test "a child that ends well with a short report is E0419 for the copy, recording nothing" {
+    // Goal: exit 0 is not enough; the report must hold one digest per stamped entry. Method:
+    // walk a one-shot host failure back from the end of the stamped build until one cuts the
+    // child's report (its write or the parent's read) and the child still exits 0.
+    var path: @import("../store/fs.zig").PathBuf = undefined;
+    _ = try owned_selection_kept(&path);
+    const before = sim.call_count;
+    try testing.expect(try context.begin(1) == .hit);
+    const after = sim.call_count;
+    try testing.expect(after > before);
+    var index = after;
+    const found = while (index > before) {
+        index -= 1;
+        _ = try owned_selection_kept(&path);
+        try testing.expectEqual(before, sim.call_count);
+        sim.faults.fail_call_index = index;
+        const outcome = context.begin(1);
+        sim.faults.fail_call_index = null;
+        if (outcome) |_| continue else |_| {}
+        if (diag.code != .E0419) continue;
+        const cause = diag.causes.slice()[0].slice();
+        if (std.mem.startsWith(u8, cause, "copy")) break true;
+    } else false;
+    try testing.expect(found);
+    try owned_nothing_recorded();
+}
+
+/// An owner gate that lets the change through and delivers SIGINT, as a Ctrl-C mid-restamp.
+fn interrupted_in_restamp(raw: *anyopaque) bool {
+    const world: *host_sim.HostSim = @ptrCast(@alignCast(raw));
+    assert(world.world.processes[world.world.current].new_user);
+    world.interrupt_arrived = constants.signal_interrupt;
+    return true;
+}
+
+test "a signal during a copy's restamp ends the step before its cache entry" {
+    // Goal: a Ctrl-C while the child restamps a large selection stops the build there, not
+    // after the next step's import. Method: the sim's owner gate delivers SIGINT at the child's
+    // first change of owner; the step is E0808 naming it, and the same build after is a miss.
+    var path: @import("../store/fs.zig").PathBuf = undefined;
+    _ = try owned_selection_kept(&path);
+    sim.interface().catch_interrupts(true);
+    const gate = files.faults.owner_gate;
+    files.faults.owner_gate = .{ .context = &sim, .in_new_user_namespace = interrupted_in_restamp };
+    try testing.expectError(error.Failed, context.begin(1));
+    try testing.expectEqual(codes.Code.E0808, diag.code.?);
+    try testing.expect(std.mem.indexOf(u8, diag.last_cause().?, "SIGINT") != null);
+    sim.interface().catch_interrupts(false);
+    files.faults.owner_gate = gate;
+    try owned_nothing_recorded();
 }

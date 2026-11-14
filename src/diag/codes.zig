@@ -3584,7 +3584,7 @@ pub const registry = [_]Entry{
         .code = .E0817,
         .severity = .@"error",
         .blame = .user,
-        .summary = "a user or group name is not in the image",
+        .summary = "a user, group or owner id cannot be used",
         .explanation =
         \\A step's .user, a copy's .chown, or the image's .config .user names a user
         \\or group, and zbx looks the name up in /etc/passwd and /etc/group of the
@@ -3596,8 +3596,13 @@ pub const registry = [_]Entry{
         \\The cause names where the name was written (the step or .image.config) and
         \\the name. To fix it, add the user or group in an earlier step (for example a
         \\step that runs adduser) and base this step on it with .base = "step:NAME",
-        \\or write the id as a number. A copy's .chown of 4294967295 is refused the
-        \\same way: to the kernel that id means no owner, so no file can have it.
+        \\or write the id as a number. When /etc/passwd (over 128 KiB) or /etc/group
+        \\(over 256 KiB) is too large to read, the cause says so: write numbers.
+        \\
+        \\A copy's .chown is refused the same way for an id no file can have: an id
+        \\of 4294967295, which the kernel reads as no owner, and, on a host that maps
+        \\the full range, an id above 65536, which the store's user namespace does
+        \\not map. The cause names the id and the range the namespace maps.
         ,
     },
     .{
