@@ -37,7 +37,7 @@ jobs:
             m0|m1|m2|m3|m4|m5|m6|m6b|m7|m8b|m10|z7) steps="demo-$demo" ;;
             m8) steps="demo-m8 demo-m8-packages" ;;
             s2lazy) steps="demo-s2-lazy" ;;
-            all) steps="demo-m0 demo-m1 demo-m2 demo-m3 demo-m4 demo-m5 demo-m6 demo-m6b demo-m7 demo-m8 demo-m8b demo-m10 demo-z7" ;;
+            all) steps="demo-m0 demo-m1 demo-m2 demo-m3 demo-m4 demo-m5 demo-m6 demo-m6b demo-m7 demo-m8 demo-m8b demo-m10 demo-z7 demo-s2-lazy" ;;
             *) echo "vm: branch $GITHUB_REF_NAME names no demo (vm/m0..m6-<x>, vm/m6b-<x>, vm/m7-<x>, vm/m8-<x>, vm/m8b-<x>, vm/m10-<x>, vm/s2lazy-<x>, vm/z7-<x> or vm/all-<x>)"; exit 1 ;;
           esac
           # The slice 12 check pushes to GHCR from the runner and runs no guest demo.

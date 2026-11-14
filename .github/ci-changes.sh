@@ -3,7 +3,7 @@
 # `name=true|false` lines (to $GITHUB_OUTPUT, or stdout when that is unset):
 #
 #   code      the build, tidy, test, errors-site, fuzz and dbus-live jobs
-#   demo_<d>  one VM demo, <d> in m0 m1 m2 m3 m4 m5 m6 m6b m7 m8 m8b m10
+#   demo_<d>  one VM demo, <d> in m0 m1 m2 m3 m4 m5 m6 m6b m7 m8 m8b m10 s2_lazy
 #   demo_m8_packages  the four-guest packages demo (demo-m8-packages): the package sources, the
 #             packaging files and the packages harness (not the m8 demo's own rules)
 #
@@ -15,7 +15,7 @@
 # for the package files, the VM guests, the build and the workflow (docs/demos/m8.md).
 set -euo pipefail
 
-demos=(m0 m1 m2 m3 m4 m5 m6 m6b m7 m8 m8b m10)
+demos=(m0 m1 m2 m3 m4 m5 m6 m6b m7 m8 m8b m10 s2_lazy)
 declare -A want=()
 want_packages=0
 
@@ -88,6 +88,7 @@ classify() {
     # every later one, which repeat its parts. The files named for no demo are shared.
     src/testing/vm/m8b/* | src/testing/vm/*_m8b.zig) want_one m8b; return ;;
     src/testing/vm/*_m10.zig | src/testing/vm/m10_fixture/*) want_one m10; return ;;
+    src/testing/vm/*_s2_lazy.zig) want_one s2_lazy; return ;;
     src/testing/vm/*_m8.zig | src/testing/vm/m8_*) want_one m8; return ;;
     src/testing/vm/m7_* | src/testing/vm/*_m7.zig) want_from m7; return ;;
     src/testing/vm/*_m6b.zig) want_from m6b; return ;;
@@ -100,6 +101,7 @@ classify() {
     # The source areas only some demos exercise. Anything else under src/ is the runtime every
     # demo runs on.
     src/build/* | src/build_commands.zig) want_one m7; return ;;
+    src/fuse/* | src/host_real_fuse.zig | src/lazy/*) want_one s2_lazy; return ;;
     src/trust/* | src/push/*) want_one m8; return ;;
     src/registry/* | src/pull*.zig | src/lock_*.zig) want_from m4; return ;;
     src/state/* | src/*state*.zig) want_from m6; return ;;
