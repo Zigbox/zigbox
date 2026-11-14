@@ -1,7 +1,8 @@
 //! Seeded fuzz runner: `zig build fuzz -- <fuzzer> [seed] [iterations]`.
 //!
-//! The seed is printed first, before any fuzzing, so that a crash (a failed assertion) can be
-//! replayed exactly: `zig build fuzz -- <fuzzer> <seed>`. Without a seed the runner draws one
+//! The seed is printed first, to stderr (which `zig build` shows for a crashed run, where it keeps
+//! stdout to itself), before any fuzzing, so that a crash (a failed assertion) can be replayed
+//! exactly: `zig build fuzz -- <fuzzer> <seed>`. Without a seed the runner draws one
 //! from the OS and prints it. Each iteration derives its own seed from the master seed with
 //! SplitMix64, so the whole run is a pure function of (fuzzer, seed, iterations).
 
@@ -1009,8 +1010,7 @@ fn check_doctor_cli(
             assert(std.mem.startsWith(u8, start, sim.stdout()) or
                 std.mem.startsWith(u8, sim.stdout(), start));
         } else {
-            const shown = report_part(sim.stdout());
-            assert(std.mem.startsWith(u8, doctor.render(report, false, &buffer), shown));
+            assert(doctor_text_cut_is_whole(sim.stdout(), doctor.render(report, false, &buffer)));
         }
         return;
     }
@@ -1052,13 +1052,35 @@ fn every_gpu_line_is_whole(stdout: []const u8) bool {
     if (rest[rest.len - 1] != '\n') return false;
     var lines = std.mem.splitScalar(u8, rest[0 .. rest.len - 1], '\n');
     while (lines.next()) |line| {
-        if (!std.mem.startsWith(u8, line, "gpu  ")) return false;
-        const kind = line["gpu  ".len..];
-        if (!std.mem.startsWith(u8, kind, "ok ") and !std.mem.startsWith(u8, kind, "gap ")) {
-            return false;
-        }
+        if (!gpu_line_is_whole(line)) return false;
     }
     return true;
+}
+
+fn gpu_line_is_whole(line: []const u8) bool {
+    if (!std.mem.startsWith(u8, line, "gpu  ")) return false;
+    const kind = line["gpu  ".len..];
+    return std.mem.startsWith(u8, kind, "ok ") or std.mem.startsWith(u8, kind, "gap ");
+}
+
+/// A text run whose stdout a write fault cut: what reached stdout is the start of the report,
+/// or the whole report, whole GPU lines and perhaps the start of one more. The cut can land on
+/// the first byte of the GPU section, so the stdout need not contain `\ngpu  ` to have one
+/// (seed 30296192162667, 200000 iterations, cut after the `g`).
+fn doctor_text_cut_is_whole(stdout: []const u8, rendered: []const u8) bool {
+    assert(rendered.len > 0);
+    if (stdout.len <= rendered.len) return std.mem.startsWith(u8, rendered, stdout);
+    if (!std.mem.startsWith(u8, stdout, rendered)) return false;
+    const rest = stdout[rendered.len..];
+    const cut = if (std.mem.lastIndexOfScalar(u8, rest, '\n')) |at| at + 1 else 0;
+    if (cut > 0) {
+        var lines = std.mem.splitScalar(u8, rest[0 .. cut - 1], '\n');
+        while (lines.next()) |line| {
+            if (!gpu_line_is_whole(line)) return false;
+        }
+    }
+    const start = rest[cut..];
+    return std.mem.startsWith(u8, start, "gpu  ") or std.mem.startsWith(u8, "gpu  ", start);
 }
 
 /// True if the interrupts the simulator injected could have made a write give up
@@ -1171,6 +1193,9 @@ pub fn main(init: std.process.Init) u8 {
     var buffer: [4096]u8 = undefined;
     var file_writer: std.Io.File.Writer = .init(.stdout(), init.io, &buffer);
     const out = &file_writer.interface;
+    var error_buffer: [256]u8 = undefined;
+    var error_writer: std.Io.File.Writer = .init(.stderr(), init.io, &error_buffer);
+    const seeds: Seeds = .{ .out = out, .err = &error_writer.interface };
 
     var arguments_storage: [4][]const u8 = undefined;
     var iterator = init.minimal.args.iterate();
@@ -1182,7 +1207,7 @@ pub fn main(init: std.process.Init) u8 {
         count += 1;
     }
     if (count >= 1 and std.mem.eql(u8, arguments_storage[0], "all")) {
-        return run_all(init.io, out, arguments_storage[1..count]);
+        return run_all(init.io, seeds, arguments_storage[1..count]);
     }
     const parsed = parse_arguments(arguments_storage[0..count]) catch |err| {
         print_usage(out, err) catch {};
@@ -1198,10 +1223,8 @@ pub fn main(init: std.process.Init) u8 {
         seed = std.mem.readInt(u64, &entropy, .little);
     }
     // The seed goes out, and is flushed, before the first iteration can crash.
-    out.print("fuzz: {s} seed={d} iterations={d}\n", .{
-        parsed.fuzzer.name, seed, parsed.iterations,
-    }) catch return constants.tool_exit_failed;
-    out.flush() catch return constants.tool_exit_failed;
+    seeds.announce(parsed.fuzzer.name, seed, parsed.iterations) catch
+        return constants.tool_exit_failed;
 
     var splitmix = std.Random.SplitMix64.init(seed);
     for (0..parsed.iterations) |_| {
@@ -1212,11 +1235,27 @@ pub fn main(init: std.process.Init) u8 {
     return constants.tool_exit_ok;
 }
 
+/// Where a fuzzer's seed line goes: stderr, which `zig build` shows when the run crashes (it
+/// keeps a crashed run's stdout to itself) and `zig build check` passes through, so a failure
+/// under either names the line that replays it. The result lines stay on stdout.
+const Seeds = struct {
+    out: *std.Io.Writer,
+    err: *std.Io.Writer,
+
+    fn announce(seeds: Seeds, name: []const u8, seed: u64, iterations: u32) !void {
+        assert(name.len > 0);
+        assert(iterations > 0);
+        try seeds.err.print("fuzz: {s} seed={d} iterations={d}\n", .{ name, seed, iterations });
+        try seeds.err.flush();
+    }
+};
+
 /// `fuzz all [iterations]`, which `zig build check` runs: every fuzzer once, each with a fresh
 /// seed, which is printed and flushed before its first iteration, so a crash names the line that
 /// replays it (`zig build fuzz -- <fuzzer> <seed> <iterations>`).
-fn run_all(io: std.Io, out: *std.Io.Writer, arguments: []const []const u8) u8 {
+fn run_all(io: std.Io, seeds: Seeds, arguments: []const []const u8) u8 {
     assert(fuzzers.len > 0);
+    const out = seeds.out;
     var iterations = constants.fuzz_check_iterations;
     if (arguments.len > 1) {
         print_usage(out, error.TooManyArguments) catch {};
@@ -1234,9 +1273,7 @@ fn run_all(io: std.Io, out: *std.Io.Writer, arguments: []const []const u8) u8 {
         var entropy: [8]u8 = undefined;
         io.random(&entropy);
         const seed = std.mem.readInt(u64, &entropy, .little);
-        out.print("fuzz: {s} seed={d} iterations={d}\n", .{ fuzzer.name, seed, iterations }) catch
-            return constants.tool_exit_failed;
-        out.flush() catch return constants.tool_exit_failed;
+        seeds.announce(fuzzer.name, seed, iterations) catch return constants.tool_exit_failed;
         var splitmix = std.Random.SplitMix64.init(seed);
         for (0..iterations) |_| fuzzer.run_iteration(splitmix.next());
     }
@@ -1293,6 +1330,27 @@ test "doctor: interrupts that make a write give up are not a missing diagnostic"
     var splitmix = std.Random.SplitMix64.init(23333462);
     for (0..86254) |_| _ = splitmix.next();
     fuzz_doctor(splitmix.next());
+}
+
+test "doctor: a write cut on the first byte of the GPU section is a cut, not a wrong report" {
+    // Goal: a regression found by `zig build fuzz -- doctor 30296192162667 200000` (iteration
+    // 52443): the whole text report reached stdout, then a write fault cut the first GPU line
+    // after its `g`. The oracle looked for `\ngpu  ` to find the GPU section, did not see the
+    // cut line, took the `g` for part of the report and failed. Method: that iteration's seed,
+    // and the oracle on that stdout and its neighbours.
+    var splitmix = std.Random.SplitMix64.init(30296192162667);
+    for (0..52442) |_| _ = splitmix.next();
+    fuzz_doctor(splitmix.next());
+
+    const rendered = "ok   kernel  6.8\nwarn net  pasta not found\n";
+    try std.testing.expect(doctor_text_cut_is_whole(rendered ++ "g", rendered));
+    try std.testing.expect(doctor_text_cut_is_whole(rendered ++ "gpu  ok nv", rendered));
+    try std.testing.expect(doctor_text_cut_is_whole(rendered ++ "gpu  ok a\ngpu", rendered));
+    try std.testing.expect(doctor_text_cut_is_whole(rendered[0..9], rendered));
+    try std.testing.expect(doctor_text_cut_is_whole(rendered, rendered));
+    try std.testing.expect(!doctor_text_cut_is_whole(rendered ++ "x", rendered));
+    try std.testing.expect(!doctor_text_cut_is_whole(rendered ++ "gpu  half\ng", rendered));
+    try std.testing.expect(!doctor_text_cut_is_whole("ok   kernel  6.9\n", rendered));
 }
 
 test "a run word after an over-long --output value is not seen: collection stops there" {

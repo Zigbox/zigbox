@@ -3465,7 +3465,10 @@ pub const registry = [_]Entry{
         \\link that leads out is refused naming where it leads, as a --mount
         \\outside the project is: a build sees only what the project holds.
         \\
-        \\Inputs are checked before anything runs.
+        \\Inputs are checked before anything runs. A copy step's .src is refused
+        \\when it matches nothing, and when it matches more than one path while
+        \\its .to does not end in /: every match would land on the one path, so,
+        \\as Docker does, end .to with / to copy each match into a directory.
         ,
     },
     .{
