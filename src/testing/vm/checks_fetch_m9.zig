@@ -20,6 +20,8 @@ pub const entry = ".{ .fetch = .{ .url = \"" ++ url ++ "\", .sha256 = \"" ++ hel
     "\" }, .to = \"/opt/hello.txt\" },";
 /// The two steps of the import: the fetch, then the `RUN`.
 pub const step_names = [_][]const u8{ "stage0-1", "stage0-2" };
+/// The build report's rows: the two steps, then the image.
+pub const row_names = step_names ++ [_][]const u8{"image"};
 
 /// `zbx import` of the fetch project: exit 0, nothing flagged, no warning, no error. The report
 /// is on stderr; stdout is empty.
@@ -51,15 +53,15 @@ pub fn check_requests(log: []const u8, want: u32) Error!void {
     if (lines != want) return error.ReportWrong;
 }
 
-/// Both steps of the build: `hit` says whether each was a hit.
+/// Both steps and the image row of the build: `hit` says whether each was a hit.
 pub fn check_rows(report: *const Report, hit: bool) Error!void {
     assert(report.count <= m7.rows_max);
-    if (report.count != step_names.len) return error.ReportWrong;
-    for (step_names) |name| {
+    if (report.count != row_names.len) return error.ReportWrong;
+    for (row_names) |name| {
         const row = report.row(name) orelse return error.ReportWrong;
         if (row.hit != hit) return error.CacheWrong;
     }
-    if (report.hits != (if (hit) step_names.len else 0)) return error.CacheWrong;
+    if (report.hits != (if (hit) row_names.len else 0)) return error.CacheWrong;
 }
 
 /// `stat -c '%u:%g %a'` of /opt/hello.txt: Docker's defaults for a remote `ADD`.
@@ -112,12 +114,12 @@ test "requests are counted by lines" {
 
 fn report_of(first: bool, second: bool) Report {
     var report: Report = undefined;
-    report.count = 2;
+    report.count = 3;
     report.digest = "";
     report.elapsed_ms = 0;
-    report.hits = @as(u32, @intFromBool(first)) + @intFromBool(second);
-    report.misses = 2 - report.hits;
-    for (step_names, [_]bool{ first, second }, 0..) |name, hit, index| {
+    report.hits = @as(u32, @intFromBool(first)) * 2 + @intFromBool(second);
+    report.misses = 3 - report.hits;
+    for (row_names, [_]bool{ first, second, first }, 0..) |name, hit, index| {
         report.rows[index] = .{
             .name = name,
             .hit = hit,
@@ -136,9 +138,9 @@ test "rows: all hits, all misses, never a mix" {
     try check_rows(&report_of(false, false), false);
     try testing.expectError(error.CacheWrong, check_rows(&report_of(true, false), true));
     try testing.expectError(error.CacheWrong, check_rows(&report_of(true, false), false));
-    var three = report_of(true, true);
-    three.count = 3;
-    try testing.expectError(error.ReportWrong, check_rows(&three, true));
+    var two = report_of(true, true);
+    two.count = 2;
+    try testing.expectError(error.ReportWrong, check_rows(&two, true));
 }
 
 test "the owner and mode of a remote ADD" {
