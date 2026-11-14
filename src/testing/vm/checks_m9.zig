@@ -436,11 +436,11 @@ test "the tools stage: flagged with its match and cache, W0810 then W0811" {
     // Goal: step 6's import check. Method: the recorded output, then without the flag, without
     // either warning and with the two warnings swapped.
     const stdout = "tools-1  Dockerfile:11  run  net (matched \"apk add\")  cache\n" ++
-        "imported 1 steps from 1 stages (target tools) to tools.build.zon; 1 flagged\n";
+        "imported 1 step from 1 stage (target tools) to tools.build.zon; 1 flagged\n";
     const stderr = "warning[ZBX-W0810]: the import has steps that are not hermetic\n" ++
         "warning[ZBX-W0811]: parts of the Dockerfile did not carry over\n";
     try check_tools(stdout, stderr, 0);
-    const bare = "tools-1  Dockerfile:11  run\nimported 1 steps; 0 flagged\n";
+    const bare = "tools-1  Dockerfile:11  run\nimported 1 step; 0 flagged\n";
     try testing.expectError(error.ImportWrong, check_tools(bare, stderr, 0));
     const no_w0810 = stderr[std.mem.indexOf(u8, stderr, "warning[ZBX-W0811]").?..];
     try testing.expectError(error.ImportWrong, check_tools(stdout, no_w0810, 0));

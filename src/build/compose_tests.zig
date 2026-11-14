@@ -1583,7 +1583,6 @@ fn command_project_loaded() !void {
     set_path(&loaded.path, "/p/zbx.build.zon");
 }
 
-const graph_mod = @import("graph.zig");
 const sim_run = @import("../runtime/sim_run.zig");
 const tree_mod = @import("../store/tree.zig");
 const trees_mod = @import("../store/trees.zig");
