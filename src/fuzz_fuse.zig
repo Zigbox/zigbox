@@ -61,7 +61,9 @@ const sections = [_][]const u8{
 };
 
 /// Names a request may ask for: some the trees hold, some they never do.
-const asked_names = [_][]const u8{ "e00", "e01", "e05", "e11", "zz", "user.a", "user.b", "user.overlay.opaque" };
+const asked_names = [_][]const u8{
+    "e00", "e01", "e05", "e11", "zz", "user.a", "user.b", "user.overlay.opaque",
+};
 
 pub fn fuzz_fuse_request(seed: u64) void {
     var prng = std.Random.Xoshiro256.init(seed);
@@ -149,7 +151,8 @@ fn add_entry(random: std.Random, name: []const u8, earlier: []const Digest) !voi
             const start = random.uintAtMost(usize, 2) * 17;
             const mode: u16 = if (random.boolean()) 0o644 else 0o755;
             const section = sections[random.uintLessThan(usize, sections.len)];
-            _ = try fixture.file(name, pool[start..][0..@min(length, pool.len - start)], mode, section);
+            const content = pool[start..][0..@min(length, pool.len - start)];
+            _ = try fixture.file(name, content, mode, section);
         },
     }
 }
@@ -278,7 +281,8 @@ fn random_body(random: std.Random, opcode: abi.Opcode, server: *const ops.Server
         },
         .open, .opendir => {
             const flags = [_]u32{ 0, 0, 0o1, 0o2, 0o1000, 0o100000 };
-            const in: abi.OpenIn = .{ .flags = flags[random.uintLessThan(usize, 6)], .open_flags = 0 };
+            const flag = flags[random.uintLessThan(usize, flags.len)];
+            const in: abi.OpenIn = .{ .flags = flag, .open_flags = 0 };
             return put_body(out, std.mem.asBytes(&in), "");
         },
         .init => {
@@ -403,7 +407,10 @@ fn check_read(server: *const ops.Server, nodeid: u64, body: []const u8, data: []
     }
     const length = @min(in.size, constants.fuse_read_bytes_max, content.len - in.offset);
     assert(std.mem.eql(u8, data, content[@intCast(in.offset)..][0..@intCast(length)]));
-    if (fixture.failing) |failing| assert(data.len == 0 or !failing.eql(found.digest));
+    // An object whose chunks fail never gives bytes.
+    if (data.len > 0) {
+        if (fixture.failing) |failing| assert(!failing.eql(found.digest));
+    }
     if (data.len > 0) reached.reads_with_data += 1;
 }
 
