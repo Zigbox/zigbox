@@ -96,7 +96,9 @@ pub fn is_mount(kind: Kind) bool {
 pub fn group_of(step: *const Step) u8 {
     if (!is_etc(step.kind)) return 0;
     assert(step.index < 3);
-    assert(step.tolerant);
+    // The caller's hosts file (ZB-6) is bound by non-tolerant etc steps: its failure fails the
+    // start, and it has no group, since there is no generated copy to fall back on.
+    if (!step.tolerant) return 0;
     return step.index + 1;
 }
 
@@ -415,6 +417,9 @@ pub const Input = struct {
     network: spec.Network = .none,
     /// The host's `resolv.conf`, whole lines within `etc_file_bytes_max`; read for `--net host`.
     host_resolv: []const u8 = "",
+    /// The caller's file bound read-only at /etc/hosts (ZB-6); empty: the generated one. Only
+    /// with `network` `none`; the caller has looked at it (`run.check_hosts_file`).
+    hosts_file: []const u8 = "",
     /// Set exactly when `network` is `user`: how pasta is started.
     pasta: ?PastaInput = null,
     /// The state volumes, in the order given (`spec.zig`'s `state` rules hold for them).
@@ -553,6 +558,9 @@ pub const Plan = struct {
     /// The other mounts: how many, the steps they add, and each one's shape, source and target.
     mount_count: u32,
     mount_steps: u32,
+    /// Whether the caller's hosts file is bound at /etc/hosts (ZB-6), and its host path.
+    hosts_file: bool,
+    hosts_path: Text,
     mount_shapes: [constants.mounts_max]MountShape,
     mount_sources: [constants.mounts_max]Text,
     mount_targets: [constants.mounts_max]Text,
@@ -598,6 +606,9 @@ pub const Plan = struct {
         plan.network = input.network;
         plan.has_listener = input.listen != null;
         plan.listen_port = input.listen orelse 0;
+        plan.hosts_file = input.hosts_file.len > 0;
+        if (plan.hosts_file) assert(input.network == .none);
+        plan.hosts_path = if (plan.hosts_file) plan.add_text(&.{input.hosts_file}) else empty_text;
         if (plan.has_listener) assert(input.network == .none);
         if (plan.has_listener) assert(plan.listen_port > 0);
         plan.has_workdir = input.workdir.len > 0;
@@ -686,9 +697,10 @@ pub const Plan = struct {
             state_read_only_steps_count * plan.state_read_only_count;
         const listener = listener_steps_count * @as(u32, @intFromBool(plan.has_listener));
         const scope = scope_steps_count * @intFromBool(plan.scoped);
+        const given_hosts: u32 = if (plan.hosts_file) 2 else 0; // The hosts file's stage/unstage.
         const user_devices = user_device_steps_count * plan.device_count;
         return plan.cdi_steps() + base + scope + read_only + extras + pasta + state +
-            plan.mount_steps + listener + user_devices;
+            plan.mount_steps + listener + user_devices - given_hosts;
     }
 
     /// The steps the CDI devices add: the nodes (one), the mounts (two), ldconfig (one).
@@ -1296,7 +1308,8 @@ pub const Plan = struct {
     /// fresh tmpfs by now.
     fn push_etc_files(plan: *Plan, rootfs: []const u8) void {
         const start = plan.count;
-        defer assert(plan.count == start + 11 + read_only_hostname_steps_count *
+        const given: u32 = if (plan.hosts_file) 2 else 0; // No stage, no unstage.
+        defer assert(plan.count == start + 11 - given + read_only_hostname_steps_count *
             @intFromBool(plan.read_only));
         assert(rootfs.len > 0);
         assert(plan.etc_texts[0].offset != plan.etc_texts[1].offset);
@@ -1305,6 +1318,10 @@ pub const Plan = struct {
             const index: u8 = @backingInt(file);
             const staged = plan.add_text(&.{ rootfs, "/dev/", file.stage_name() });
             const inside = plan.add_text(&.{ rootfs, "/etc/", file.etc_name() });
+            if (file == .hosts and plan.hosts_file) {
+                plan.push_given_hosts(inside);
+                continue;
+            }
             plan.push(.stage_etc_file, staged, plan.etc_texts[index], index);
             plan.push(.bind_etc_file, inside, staged, index);
             // The hostname stays writable, a program may rewrite it and what it writes is the
@@ -1315,6 +1332,22 @@ pub const Plan = struct {
             }
             plan.push(.unstage_etc_file, staged, empty_text, index);
         }
+    }
+
+    /// The caller's hosts file (ZB-6) in place of the generated one: the host's file itself,
+    /// bound over the mount point and made read-only, with no staged copy. Not tolerant: the
+    /// caller asked for this file, and a container that would resolve names from another is a
+    /// failed start.
+    fn push_given_hosts(plan: *Plan, inside: Text) void {
+        const start = plan.count;
+        defer assert(plan.count == start + 2);
+        assert(plan.hosts_file);
+        assert(plan.hosts_path.len > 0);
+        const index: u8 = @backingInt(netfiles.File.hosts);
+        plan.push(.bind_etc_file, inside, plan.hosts_path, index);
+        plan.steps[plan.count - 1].tolerant = false;
+        plan.push(.remount_etc_file, inside, empty_text, index);
+        plan.steps[plan.count - 1].tolerant = false;
     }
 
     /// The container's /sys: the host's, bound recursively and made read-only, when it shares

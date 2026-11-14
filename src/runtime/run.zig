@@ -414,6 +414,7 @@ pub fn start(
     try check_root(host, container, options, handle, diag);
     try check_limits(container.limits, diag);
     try check_listen(container, diag);
+    try check_hosts_file(host, container, diag);
     try check_network(host, container, handle, diag);
     try resolve_mounts(host, container, handle, diag);
     try resolve_devices(host, container, handle, &cdi_storage, diag);
@@ -626,6 +627,7 @@ fn build_plan(
         .network = container.network,
         .listen = if (container.listen) |listen| listen.port else null,
         .host_resolv = host_resolv,
+        .hosts_file = container.hosts_file,
         .pasta = if (container.network == .user) .{
             .path = handle.pasta_path.slice(),
             .log = handle.pasta_log.slice(),
@@ -975,6 +977,24 @@ fn check_rootfs(host: Host, rootfs: []const u8, handle: *Handle, diag: *Diag) Er
     }
     @memcpy(handle.rootfs[0..rootfs.len], rootfs);
     handle.rootfs_len = @intCast(rootfs.len);
+}
+
+/// A run with `--hosts-file` (ZB-6): `--net none`, an absolute path, and a regular file now. The
+/// plan binds the path at /etc/hosts, so a failure there is a failed start, not a note.
+fn check_hosts_file(host: Host, container: *const Spec, diag: *Diag) Error!void {
+    assert(diag.code == null);
+    const path = container.hosts_file;
+    if (path.len == 0) return;
+    const problem = spec_mod.hosts_file_problem(container.network, path) orelse blk: {
+        const found = host.stat(path) catch break :blk spec_mod.HostsFileProblem.missing;
+        const regular = found.mode & 0o170000 == 0o100000;
+        break :blk if (regular) null else spec_mod.HostsFileProblem.not_a_file;
+    };
+    if (problem) |found| {
+        diagnose.hosts_file_invalid(diag, found, path);
+        return error.StartFailed;
+    }
+    assert(container.network == .none);
 }
 
 /// A run with `--listen`: it needs `--net none`, and no forwards (which imply `--net user`). The

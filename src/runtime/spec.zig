@@ -276,6 +276,31 @@ pub fn listen_options_problem(network: Network, send_given: bool) ?ListenOptions
     return null;
 }
 
+/// What is wrong with a `--hosts-file` (ZBX-E0612). The first two are known from the options
+/// alone; the rest from looking at the host.
+pub const HostsFileProblem = enum { network_not_none, not_absolute, too_long, missing, not_a_file };
+
+/// The problems of a hosts file path that need no look at the host.
+pub fn hosts_file_problem(network: Network, path: []const u8) ?HostsFileProblem {
+    assert(path.len > 0);
+    if (network != .none) return .network_not_none;
+    if (path[0] != '/' or std.mem.indexOfScalar(u8, path, 0) != null) return .not_absolute;
+    if (path.len > constants.mount_path_bytes_max) return .too_long;
+    return null;
+}
+
+test "hosts_file_problem names the network first, then the path" {
+    try testing.expectEqual(HostsFileProblem.network_not_none, hosts_file_problem(.user, "/h").?);
+    try testing.expectEqual(HostsFileProblem.network_not_none, hosts_file_problem(.host, "x").?);
+    try testing.expectEqual(HostsFileProblem.not_absolute, hosts_file_problem(.none, "hosts").?);
+    try testing.expectEqual(HostsFileProblem.not_absolute, hosts_file_problem(.none, "/a\x00b").?);
+    var long: [constants.mount_path_bytes_max + 1]u8 = undefined;
+    @memset(&long, 'a');
+    long[0] = '/';
+    try testing.expectEqual(HostsFileProblem.too_long, hosts_file_problem(.none, &long).?);
+    try testing.expect(hosts_file_problem(.none, "/srv/mesh/hosts") == null);
+}
+
 /// What a policy statement about the run's tree may name: nothing (a bare tree), the build
 /// result the run named, or the image manifest it resolved to. The digests are raw bytes.
 pub const Binding = union(enum) {
@@ -326,6 +351,9 @@ pub const Spec = struct {
     publish: []const Publish = &.{},
     /// A listener on the container's loopback, handed to the caller (`--listen`); only `none`.
     listen: ?Listen = null,
+    /// A host file bound read-only at /etc/hosts in place of the generated one (`--hosts-file`,
+    /// Zigcube's ZB-6); only `none`. Empty: the generated file. Not kept in the run record.
+    hosts_file: []const u8 = "",
     /// The state volumes it mounts (`--state`): each made on first use, held for the run's whole
     /// life (one writer, or readers), and named in the run record.
     state: []const volume.Mount = &.{},

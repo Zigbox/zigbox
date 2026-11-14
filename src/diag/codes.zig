@@ -198,6 +198,7 @@ pub const Code = enum(u8) {
     E0609,
     E0610,
     E0611,
+    E0612,
     E0701,
     E0702,
     E0703,
@@ -3156,6 +3157,24 @@ pub const registry = [_]Entry{
         \\
         \\The helper is a child of the caller and never enters the container's PID
         \\namespace, so nothing inside the container can see or signal it.
+        ,
+    },
+    .{
+        .code = .E0612,
+        .severity = .@"error",
+        .blame = .user,
+        .summary = "the hosts file cannot be bound at /etc/hosts",
+        .explanation =
+        \\--hosts-file binds a file you own, read-only, at /etc/hosts in place of the
+        \\one zbx generates. It is refused for a container with a network (a
+        \\container with --net user or --net host resolves names through DNS, and a
+        \\hosts file would shadow it), for a path that is not absolute, and for a
+        \\path that is missing, unreadable or not a regular file when the container
+        \\starts.
+        \\
+        \\The file itself is bound, not a copy: rewriting it in place is seen inside
+        \\at once, replacing it by renaming another file over it is not.
+        \\/etc/resolv.conf and /etc/hostname are generated as before.
         ,
     },
     .{

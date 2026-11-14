@@ -1305,6 +1305,33 @@ pub fn listen_options_invalid(
     assert(diag.code.? == .E0606);
 }
 
+/// ZBX-E0612: `--hosts-file` that cannot be bound at /etc/hosts. The path is echoed once,
+/// sanitised and cut.
+pub fn hosts_file_invalid(diag: *Diag, problem: spec.HostsFileProblem, path: []const u8) void {
+    assert(diag.code == null);
+    assert(path.len > 0);
+    var storage: [constants.arg_echo_bytes_max]u8 = undefined;
+    const echo = @import("../text.zig").sanitise(&storage, path);
+    diag.raise(.E0612);
+    diag.while_("checking --hosts-file", .{});
+    switch (problem) {
+        .network_not_none => diag.cause("--hosts-file is for a container with no network " ++
+            "(--net none), whose /etc/hosts is all there is to resolve names with", .{}),
+        .not_absolute => diag.cause("--hosts-file '{s}' is not an absolute path", .{echo}),
+        .too_long => diag.cause("--hosts-file '{s}' is longer than {d} bytes", .{
+            echo, constants.mount_path_bytes_max,
+        }),
+        .missing => diag.cause("--hosts-file '{s}' does not exist or cannot be read", .{echo}),
+        .not_a_file => diag.cause("--hosts-file '{s}' is not a regular file", .{echo}),
+    }
+    diag.fix(.{
+        .sentence = "give the absolute path of a hosts file you own, with --net none:",
+        .command = "zbx run --net none --hosts-file /srv/mesh/hosts alpine -- sh",
+        .template = true,
+    });
+    assert(diag.code.? == .E0612);
+}
+
 /// ZBX-E0607: a `--listen` value that is not an IPv4 loopback address and a port.
 pub fn listen_value_invalid(diag: *Diag, value: []const u8, problem: spec.ListenProblem) void {
     assert(diag.code == null);

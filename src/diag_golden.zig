@@ -28,6 +28,7 @@ const render = @import("diag/render.zig");
 const test_util = @import("test_util.zig");
 const vm_golden = @import("mac/vm_golden.zig");
 const socket_diagnose = @import("runtime/socket_diagnose.zig");
+const run_diagnose = @import("runtime/diagnose.zig");
 const fixtures = @import("doctor_fixtures.zig");
 const run = @import("runtime/run.zig");
 const doctor = @import("doctor.zig");
@@ -807,6 +808,7 @@ const build_cases = [_]Case{
     .{ .code = .E0803, .args = &build_graph_args, .prepare = prepare_build_escape, .exit = 1 },
     .{ .code = .E0610, .args = &.{}, .direct = socket_shares_host_network, .exit = 1 },
     .{ .code = .E0611, .args = &.{}, .direct = socket_step_failed, .exit = 1 },
+    .{ .code = .E0612, .args = &.{}, .direct = hosts_file_missing, .exit = 1 },
     .{ .code = .E0804, .args = &.{}, .direct = build_base_not_locked, .exit = 1 },
     .{ .code = .E0805, .args = &.{}, .direct = build_step_failed, .exit = 1 },
     .{ .code = .E0806, .args = &.{}, .direct = build_output_refused, .exit = 1 },
@@ -2582,6 +2584,10 @@ fn socket_shares_host_network(diag: *Diag) void {
 fn socket_step_failed(diag: *Diag) void {
     const failure: socket_diagnose.Failure = .{ .err = error.AccessDenied, .errno = 1 };
     socket_diagnose.step_failed(diag, "web", .join_user, failure);
+}
+
+fn hosts_file_missing(diag: *Diag) void {
+    run_diagnose.hosts_file_invalid(diag, .missing, "/srv/mesh/hosts");
 }
 
 fn build_user_not_found(diag: *Diag) void {

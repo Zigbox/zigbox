@@ -9,11 +9,11 @@ const testing = std.testing;
 const script = ".github/ci-changes.sh";
 const max_paths = 8;
 
-/// Every output the script writes: `code`, the twelve demos and the packages demo.
+/// Every output the script writes: `code`, the thirteen demos and the packages demo.
 const all_outputs = [_][]const u8{
     "code",     "demo_m0",          "demo_m1",  "demo_m2", "demo_m3", "demo_m4",
     "demo_m5",  "demo_m6",          "demo_m6b", "demo_m7", "demo_m8", "demo_m8b",
-    "demo_m10", "demo_m8_packages",
+    "demo_m10", "demo_c4",          "demo_m8_packages",
 };
 
 const Row = struct {
@@ -69,7 +69,7 @@ const rows = [_]Row{
         .true_outputs = &.{
             "code",     "demo_m0",          "demo_m1",  "demo_m2", "demo_m3", "demo_m4",
             "demo_m5",  "demo_m6",          "demo_m6b", "demo_m7", "demo_m8", "demo_m8b",
-            "demo_m10", "demo_m8_packages",
+            "demo_m10", "demo_c4",          "demo_m8_packages",
         },
     },
     // The runtime every demo runs on selects every VM demo, not the packages demo.
@@ -78,8 +78,13 @@ const rows = [_]Row{
         .true_outputs = &.{
             "code",     "demo_m0", "demo_m1",  "demo_m2", "demo_m3", "demo_m4",
             "demo_m5",  "demo_m6", "demo_m6b", "demo_m7", "demo_m8", "demo_m8b",
-            "demo_m10",
+            "demo_m10", "demo_c4",
         },
+    },
+    // The C4 demo: its harness files select demo_c4 alone.
+    .{
+        .paths = &.{ "src/testing/vm/checks_c4.zig", "src/testing/vm/c4/net.py" },
+        .true_outputs = &.{ "code", "demo_c4" },
     },
     // The M8b demo: its harness files select demo_m8b alone.
     .{

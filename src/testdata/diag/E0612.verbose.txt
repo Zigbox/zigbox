@@ -1,0 +1,6 @@
+error[ZBX-E0612]: the hosts file cannot be bound at /etc/hosts
+  while  checking --hosts-file
+  cause  --hosts-file '/srv/mesh/hosts' does not exist or cannot be read
+  fix    give the absolute path of a hosts file you own, with --net none:   zbx run --net none --hosts-file /srv/mesh/hosts alpine -- sh
+  more   zbx explain E0612
+  docs   https://zigbox.github.io/zigbox/errors/E0612.html
