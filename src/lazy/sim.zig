@@ -867,6 +867,24 @@ test "schedule: a chunk read again keeps the sequential streak" {
     try std.testing.expect(queued > 0); // Readahead started.
 }
 
+test "sim: reads through stored chunks extend the sequential streak" {
+    setup(&sim_state, 41, honest_scenario(1, true, true));
+    run(&sim_state);
+    defer teardown(&sim_state);
+    const schedule = &sim_state.resolver.schedule;
+    schedule.stopping = false; // Running again, over a store the fill made whole.
+    defer schedule.stop();
+    const object = longest_object(&sim_state);
+    const count = sim_state.objects[object].wanted.hashes.len;
+    var chunk: u32 = 0;
+    while (chunk < count) : (chunk += 1) {
+        var out: [chunk_bytes]u8 = @splat(0xaa);
+        const step = sim_state.resolver.read_begin(object, chunk, &out, 400_000);
+        try std.testing.expect(step == .done);
+    }
+    try std.testing.expectEqual(@as(u8, @intCast(count)), schedule.objects[object].streak);
+}
+
 /// A FUSE READ of any size at any offset, as slice 4 passes it on: one read per chunk it
 /// touches, in order. Sequential access is seen from where reads start, never from their size.
 fn fuse_read(schedule: *Schedule, object: u32, offset: u64, length: u64) void {
