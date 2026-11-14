@@ -1,26 +1,25 @@
 from lib import *
 import shutil, threading
 s = Sup()
-P = ("sh", "-c", "ls /proc | grep -c '^[0-9]'")
+# One shell globs /proc before any fork: exact, less itself.
+P = ("sh", "-c", "cd /proc; set -- [0-9]*; echo $(($#-1))")
 procs = ex(*P)[1]
 say("PROCS", procs)
 cmd = "kill -9 %s 2>&1; echo kill-rc=$?; ls /proc/%s 2>&1" % (s.pid, s.pid)
 say("KILL-SUPERVISOR", ex("sh", "-c", cmd)[1].replace("\n", " | "))
-# The supervisor binary, copied inside, tries to ptrace it.
+# A copy of the supervisor tries to ptrace it.
 shutil.copy("/home/demo/c4-supervisor", R + "/tmp/c4-tracer")
 say("PTRACE-SUPERVISOR", ex("/tmp/c4-tracer", "ptrace", s.pid)[1])
-# /proc inside never grows while 3000 helpers come and go. Samples begun after CHURNING (the
-# first) and done before CHURNED count as during.
-s.p.stdin.write("churn 5 c4 3000\n")
-s.p.stdin.flush()
+# /proc never changes while 3000 helpers come and go; samples begun
+# after CHURNING and done before CHURNED count as during.
+s.send("churn 5 c4 3000")
 go, end, lines = threading.Event(), threading.Event(), []
 def read():
     for _ in range(2):
         lines.append(s.p.stdout.readline().strip())
+        go.set()
         if not lines[-1].startswith("CHURNING"):
             break
-        go.set()
-    go.set()
     end.set()
 t = threading.Thread(target=read, daemon=True)
 t.start()

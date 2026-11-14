@@ -12,9 +12,11 @@ class Sup:
     def __init__(s):
         s.p = S.Popen(["/home/demo/c4-supervisor"], stdin=S.PIPE, stdout=S.PIPE, text=True, bufsize=1)
         s.pid = s.p.stdout.readline().split()[1]
-    def do(s, line):
+    def send(s, line):
         s.p.stdin.write(line + "\n")
         s.p.stdin.flush()
+    def do(s, line):
+        s.send(line)
         return s.p.stdout.readline().strip()
     def end(s):
         s.do("quit")

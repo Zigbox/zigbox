@@ -320,6 +320,7 @@ test "hostile fails on a visible, killed or traced supervisor, a helper seen, or
         .{ "SAMPLES-DURING-CHURN: 7", "SAMPLES-DURING-CHURN: 2" },
         .{ "SAMPLES-DURING-CHURN: 7", "SAMPLES-DURING-CHURN: x" },
         .{ "PROCS-DURING-CHURN: 2", "PROCS-DURING-CHURN: 2 3" },
+        .{ "PROCS-DURING-CHURN: 2", "PROCS-DURING-CHURN: 1 2" },
         .{ "PROCS-STEADY: 1", "PROCS-STEADY: 0" },
     };
     for (swaps) |swap| {
