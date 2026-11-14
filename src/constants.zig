@@ -2008,8 +2008,9 @@ pub const lazy_store_free_bytes_min: u64 = 1024 * 1024 * 1024;
 pub const lazy_sources_max: u32 = 8;
 /// The readers that may wait on the resolver at once: the FUSE server's threads.
 pub const lazy_fuse_threads: u32 = 4;
-/// The chunks one request may carry: a range of `lazy_range_bytes_max` holds at most this many
-/// whole chunks of incompressible data.
+/// The chunks one request may carry: a range of `lazy_range_bytes_max` holds this many chunks
+/// that compress at all. Stored incompressible, each chunk carries a header and 7 fit; the
+/// job takes what the range holds, so the bound is never passed.
 pub const lazy_job_chunks_max: u32 = lazy_range_bytes_max / store_chunk_bytes;
 /// Fetch slots: each has a range buffer and a chunk buffer, fixed at start.
 pub const lazy_slots: u32 = lazy_fetches_max + lazy_fill_fetches_max;

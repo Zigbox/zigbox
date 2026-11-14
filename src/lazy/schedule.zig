@@ -83,11 +83,15 @@ pub const Job = struct {
     offset: u64,
     length: u32,
     timeout_ms: u32,
+    /// When the job was taken: a failure counts from the start of the attempt that failed.
+    started_ms: u64,
     entries: [job_chunks_max]u16,
 };
 
 const SourceState = struct {
     failing_since_ms: ?u64,
+    /// The last answer's time: a failure of an attempt begun before it counts from it.
+    answered_ms: u64,
     down: bool,
     probe_at_ms: u64,
 };
@@ -155,7 +159,12 @@ pub const Schedule = struct {
             .names = @splat(""),
             .sources_count = @intCast(count),
             .registry = if (registry) peers else null,
-            .sources = @splat(.{ .failing_since_ms = null, .down = false, .probe_at_ms = 0 }),
+            .sources = @splat(.{
+                .failing_since_ms = null,
+                .answered_ms = 0,
+                .down = false,
+                .probe_at_ms = 0,
+            }),
             .pending = undefined,
             .jobs = undefined,
             .events = undefined,
@@ -441,6 +450,11 @@ pub const Schedule = struct {
         assert(schedule.sources_count <= sources_max);
         assert(schedule.events_count <= pending_max);
         var wake: ?u64 = null;
+        var source_index: u8 = 0;
+        // Stopping ticks at time 0: no source's health is judged then.
+        while (!schedule.stopping and source_index < schedule.sources_count) : (source_index += 1) {
+            schedule.note_down(source_index, now);
+        }
         for (&schedule.pending, 0..) |*entry, at| {
             const index: u16 = @intCast(at);
             if (entry.state != .queued and entry.state != .fetching) continue;
@@ -527,6 +541,7 @@ pub const Schedule = struct {
             .offset = 0,
             .length = 0,
             .timeout_ms = attempt_timeout(entry, now),
+            .started_ms = now,
             .entries = undefined,
         };
         schedule.take(job, first);
@@ -636,7 +651,7 @@ pub const Schedule = struct {
         assert(job.active);
         assert(results.len == job.count);
         schedule.report.source_bytes[job.source] += sent;
-        schedule.note_health(job.source, results, now);
+        schedule.note_health(job.source, results, job.started_ms, now);
         for (job.entries[0..job.count], results) |index, result| {
             const entry = &schedule.pending[index];
             assert(entry.in_job);
@@ -646,9 +661,15 @@ pub const Schedule = struct {
         job.active = false;
     }
 
-    fn note_health(schedule: *Schedule, source: u8, results: []const Result, now: u64) void {
+    fn note_health(
+        schedule: *Schedule,
+        source: u8,
+        results: []const Result,
+        started_ms: u64,
+        now: u64,
+    ) void {
         assert(source < schedule.sources_count);
-        assert(results.len > 0);
+        assert(started_ms <= now);
         const state = &schedule.sources[source];
         var answered = false;
         var failed = false;
@@ -659,15 +680,27 @@ pub const Schedule = struct {
         };
         if (answered) {
             state.failing_since_ms = null;
+            state.answered_ms = now;
             state.down = false;
         } else if (failed) {
-            const since = state.failing_since_ms orelse now;
-            state.failing_since_ms = since;
-            if (!state.down and now - since >= constants.lazy_read_deadline_ms) {
-                state.down = true;
-                state.probe_at_ms = now + constants.lazy_down_probe_ms;
+            if (state.failing_since_ms == null) {
+                state.failing_since_ms = @max(started_ms, state.answered_ms);
             }
+            schedule.note_down(source, now);
         }
+    }
+
+    /// A source failing, with no answer, since a whole `lazy_read_deadline_ms` ago is down. Checked
+    /// as time passes, not only when a job ends: a read that fails on its deadline leaves its
+    /// source down, so the next read gives up in `lazy_down_fail_ms` (the demo's cut network).
+    fn note_down(schedule: *Schedule, source: u8, now: u64) void {
+        assert(source < schedule.sources_count);
+        const state = &schedule.sources[source];
+        const since = state.failing_since_ms orelse return;
+        assert(since <= now);
+        if (state.down or now - since < constants.lazy_read_deadline_ms) return;
+        state.down = true;
+        state.probe_at_ms = now + constants.lazy_down_probe_ms;
     }
 
     fn settle(schedule: *Schedule, index: u16, source: u8, result: Result, now: u64) void {

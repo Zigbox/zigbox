@@ -1,12 +1,13 @@
 //! The resolver's simulation: the real `Resolver` (its reader and slot steps, on one thread),
 //! the real store on the simulated file system, a simulated clock, and seeded sources that are
-//! slow, cut, missing chunks or lying (wrong bytes, wrong lengths, wrong offsets, short
-//! answers). The `lazy_resolver` fuzzer runs one seed per iteration; the unit tests run fixed
-//! scenarios.
+//! slow, cut, missing chunks, short (a failed fetch, never a lie) or lying (wrong bytes, wrong
+//! offsets); and a gc that removes, damages or makes unreadable what the store holds. The
+//! `lazy_resolver` fuzzer runs one seed per iteration; the unit tests run fixed scenarios.
 //!
 //! The properties, checked as the run goes and at its end:
 //!   1. A read that succeeds returns the object's true bytes (whatever the sources sent).
-//!   2. A read that fails ends within `lazy_read_deadline_ms` of its start, and within
+//!   2. A read that fails ends within `lazy_read_deadline_ms` of its start (however often it
+//!      asks again, and whoever else waits on its chunk), and within
 //!      `lazy_down_fail_ms` when every source it could use was down when it started; it has
 //!      its coded event (`unavailable` or `store_full`).
 //!   3. A lying source never changes a chunk in the store: every chunk file and object holds
@@ -14,7 +15,8 @@
 //!      write point too.
 //!   4. With honest sources that answer in time and a disk with room, every read succeeds and
 //!      the fill makes every object whole.
-//!   5. A source that sent wrong bytes is named in a `lied` event, and a peer is told.
+//!   5. A source that sent wrong bytes is named in a `lied` event, and a peer is told; a
+//!      source is named only for an object it sent wrong bytes of.
 
 const std = @import("std");
 const assert = std.debug.assert;
