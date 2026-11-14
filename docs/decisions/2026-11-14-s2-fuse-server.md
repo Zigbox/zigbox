@@ -32,23 +32,39 @@ table (25 MiB), the cache (8 MiB) and the threads' buffers (about 4 MiB); the re
 
 ## Reads
 
-Brief line 100 ("`FUSE_MAX_PAGES` for 1 MiB reads") is overtaken by the probe
-(docs/decisions/2026-11-14-s2-probe-findings.md): a buffered read reaches the server as 128 KiB
-`READ`s, eight to a 1 MiB chunk, and only `O_DIRECT` sends 1 MiB ones. The server still asks for
-`max_pages` of a whole chunk, so a direct read is one request, and its reply buffer holds one.
+A `READ`'s size and offset are the reader's, up to `max_pages` × 4 KiB, and the server assumes
+neither. Measured live through an overlay on kernel 6.18 (this slice; the probe,
+docs/decisions/2026-11-14-s2-probe-findings.md, saw only the first case):
 
-So that the eight `READ`s of a chunk cost one chunk read, the serving threads share a cache of
+- a buffered read reaches the server as 128 KiB `READ`s;
+- after `posix_fadvise(SEQUENTIAL)`, as 256 KiB ones;
+- a small `pread` as one 4 KiB `READ` at the reader's offset, aligned to nothing;
+- an `O_DIRECT` read as one `READ` of the reader's size, up to 1 MiB, at the reader's offset, so
+  1 MiB at 512 KiB spans two chunks.
+
+So the server serves any size and offset: a `READ` is cut at the chunk boundaries it crosses (at
+most two, since it is at most one chunk long) and each part is copied from that chunk. Brief line
+100 ("`FUSE_MAX_PAGES` for 1 MiB reads") still holds for direct reads; the server asks for
+`max_pages` of a whole chunk, and its reply buffer holds one.
+
+So that the several `READ`s of a chunk cost one chunk read, the serving threads share a cache of
 whole, verified chunks. The first thread to want a chunk reads it into a free slot (unlocked: the
 other threads go on serving); a thread that wants the same chunk meanwhile waits on that slot and
-copies from it. A slot in use is never given up; otherwise the least recently used one is. Each
-thread uses at most one slot at a time, and there are twice as many slots as threads, so a free
-slot always exists (asserted). A failed read is not kept: the threads waiting on it answer `EIO`
-and the next request asks again. A unit test checks that eight 128 KiB `READ`s of a chunk make one
-chunk read, from one thread and spread over four.
+copies from it. A slot in use is never given up; otherwise the least recently used one is. A
+`READ` holds at most one slot at a time (it copies one chunk's part before it asks for the next),
+and there are twice as many slots as threads, so a free slot always exists (asserted). A failed
+read is not kept: the threads waiting on it answer `EIO` and the next request asks again.
 
-Readahead (`lazy_readahead_chunks`) is the resolver's (`Schedule.note_read`). It counts chunk
-reads, not `READ`s, and with the cache a file read front to back reaches it as one read per chunk,
-in order, so adjacent 128 KiB `READ`s count as sequential with nothing more in the server.
+Unit tests (`fuse/ops.zig`) check: eight 128 KiB `READ`s of a chunk make one chunk read, from one
+thread and spread over four; one 1 MiB `READ` at 512 KiB returns two chunks' bytes from one read
+of each; a 4 KiB `READ` at an unaligned offset, and one across a chunk boundary; a run of 256 KiB
+`READ`s reads each chunk once. The real-kernel test (`fuse/kernel_tests.zig`) reads through the
+mount with a 4 KiB `pread` at an unaligned offset, an `O_DIRECT` 1 MiB `pread` at 512 KiB, and
+whole files in 256 KiB reads after `posix_fadvise(SEQUENTIAL)`.
+
+Readahead (`lazy_readahead_chunks`) is the resolver's (`Schedule.note_read`). It goes by offsets,
+never by `READ` size: it counts chunk reads, and with the cache a file read front to back reaches
+it as one read per chunk, in order, whatever size the kernel's `READ`s were.
 
 Internal buffer constants (no user-visible bound): `cache.slots` = `2 × lazy_fuse_threads`,
 `fuse_request_bytes` 8 KiB, `fuse_max_write` 4 KiB, `fuse_reply_bytes` 1 MiB + 16.

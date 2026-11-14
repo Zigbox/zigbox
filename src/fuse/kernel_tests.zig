@@ -21,11 +21,20 @@ const fixture_mod = @import("fixture.zig");
 
 var kernel_fixture: fixture_mod.Fixture = undefined;
 const chunk_bytes = 64 * 1024;
-const file_bytes = fixture_mod.content_bytes - 1000; // Sixteen chunks, the last one short.
+const file_bytes = fixture_mod.content_bytes - 1000; // 48 chunks, the last one short.
 /// The child's exit status when this host cannot run the test.
 const status_skip = 77;
 /// The child gives up (SIGALRM) after this long, so a hung mount fails the test, never hangs it.
 const child_seconds = 60;
+/// The child's direct read: 1 MiB at 512 KiB, which the kernel sends as one `READ` of that size
+/// at that offset, spanning chunks.
+const direct_offset = 512 * 1024;
+const direct_bytes = 1024 * 1024;
+/// A small pread at an offset aligned to nothing: one 4 KiB `READ` there.
+const small_offset = 12345;
+const small_bytes = 4096;
+var direct_buffer: [direct_bytes]u8 align(4096) = undefined;
+var sequential_buffer: [256 * 1024]u8 = undefined;
 
 test "a real kernel mount serves a tree: reads through it match, byte for byte" {
     const fixture = &kernel_fixture;
@@ -132,6 +141,11 @@ fn child(channel: u32, target: [:0]const u8, content: []const u8) u8 {
     _ = linux.close(fd);
     var path: [96]u8 = undefined;
     const file = std.mem.printSentinel(&path, "{s}/a", .{target}, 0) catch unreachable; // 96 bytes.
+    const buffered: linux.O = .{ .ACCMODE = .RDONLY };
+    const buffer = &direct_buffer;
+    if (!pread_matches(file, buffered, buffer, small_offset, small_bytes, content)) return 6;
+    const direct: linux.O = .{ .ACCMODE = .RDONLY, .DIRECT = true };
+    if (!pread_matches(file, direct, buffer, direct_offset, direct_bytes, content)) return 7;
     if (!read_matches(file, content)) return 3;
     const link = std.mem.printSentinel(&path, "{s}/l", .{target}, 0) catch unreachable; // 96 bytes.
     if (!read_matches(link, content)) return 4;
@@ -150,16 +164,40 @@ fn write_file(path: [:0]const u8, text: []const u8) bool {
     return linux.write(fd, text.ptr, text.len) == text.len;
 }
 
-/// Reads `path` in 128 KiB reads, as the kernel's readahead would ask, and compares.
+/// One pread of `length` bytes at `offset` into `buffer`, opened with `flags`; compares.
+fn pread_matches(
+    path: [:0]const u8,
+    flags: linux.O,
+    buffer: []u8,
+    offset: u32,
+    length: u32,
+    expected: []const u8,
+) bool {
+    assert(length <= buffer.len);
+    assert(offset + length <= expected.len);
+    const opened = linux.open(path, flags, 0);
+    if (linux.errno(opened) != .SUCCESS) return false;
+    const fd: linux.fd_t = @intCast(opened);
+    defer _ = linux.close(fd);
+    const got = linux.pread(fd, buffer.ptr, length, offset);
+    if (linux.errno(got) != .SUCCESS) return false;
+    if (got != length) return false;
+    return std.mem.eql(u8, buffer[0..length], expected[offset..][0..length]);
+}
+
+/// Reads `path` front to back in 256 KiB reads after posix_fadvise(SEQUENTIAL), as a reader
+/// that asks for the kernel's larger readahead would, and compares.
 fn read_matches(path: [:0]const u8, expected: []const u8) bool {
     const opened = linux.open(path, .{ .ACCMODE = .RDONLY }, 0);
     if (linux.errno(opened) != .SUCCESS) return false;
     const fd: linux.fd_t = @intCast(opened);
     defer _ = linux.close(fd);
-    var buffer: [128 * 1024]u8 = undefined;
+    const advised = linux.fadvise(fd, 0, 0, linux.POSIX_FADV.SEQUENTIAL);
+    if (linux.errno(advised) != .SUCCESS) return false;
+    const buffer = &sequential_buffer;
     var at: usize = 0;
     while (true) {
-        const got = linux.read(fd, &buffer, buffer.len);
+        const got = linux.read(fd, buffer, buffer.len);
         if (linux.errno(got) != .SUCCESS) return false;
         if (got == 0) break;
         if (at + got > expected.len) return false;
@@ -170,7 +208,8 @@ fn read_matches(path: [:0]const u8, expected: []const u8) bool {
 }
 
 comptime {
-    assert(file_bytes > 15 * chunk_bytes);
+    assert(file_bytes > 47 * chunk_bytes);
+    assert(file_bytes > direct_offset + direct_bytes);
     assert(file_bytes <= fixture_mod.content_bytes);
     assert(@sizeOf(abi.InHeader) == 40);
 }

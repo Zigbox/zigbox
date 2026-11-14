@@ -369,7 +369,12 @@ fn readdirplus(server: *const Server, worker: *Worker, nodeid: u64, body: []cons
             },
         };
         const bytes = abi.direntplus_bytes(@intCast(name.len));
-        if (used + bytes > room) break;
+        if (used + bytes > room) {
+            // An empty reply is the end of the directory to the kernel: refuse instead when
+            // entries remain and not even the first fits.
+            if (used == 0) return error.Inval;
+            break;
+        }
         put_direntplus(server, worker, name, id, entry + 1, entry >= 2);
         used += bytes;
     }
@@ -670,7 +675,8 @@ fn listing(reply: []const u8, out: []u8) struct { names: []const u8, next: u64 }
 
 test "READDIRPLUS lists . .. and the children, and resumes from an offset" {
     // Goal: a directory reads whole however the kernel splits it. Method: one read with room
-    // for everything; then reads with room for two records each, resumed from the last `off`.
+    // for everything; then reads with room for two records each, resumed from the last `off`;
+    // then room for less than one record, before the end and at it.
     var harness: Harness = undefined;
     try harness.init();
     defer harness.deinit();
@@ -693,6 +699,17 @@ test "READDIRPLUS lists . .. and the children, and resumes from an offset" {
         in.offset = part.next;
     }
     try testing.expectEqualStrings(". .. a d l ", joined[0..joined_len]);
+    // Room for less than one record: an empty reply would read as the end, so EINVAL; at the
+    // end itself, the empty reply is right.
+    in = read_in(2, abi.direntplus_bytes(1) - 1);
+    try testing.expectEqual(
+        negated(.inval),
+        harness.errno(.readdirplus, abi.root_id, &.{std.mem.asBytes(&in)}),
+    );
+    in = read_in(5, abi.direntplus_bytes(1) - 1);
+    const end = harness.ask(.readdirplus, abi.root_id, &.{std.mem.asBytes(&in)});
+    try testing.expectEqual(@as(usize, 16), end.len);
+    try testing.expectEqual(@as(i32, 0), fixture_mod.reply_header(end).@"error");
     try testing.expectEqual(
         negated(.notdir),
         harness.errno(.readdirplus, harness.id_of("a"), &.{std.mem.asBytes(&in)}),
@@ -787,8 +804,8 @@ test "writes are EROFS, unknown calls ENOSYS, and forgets get no reply" {
 /// The kernel's buffered read: 128 KiB `READ`s (docs/decisions/2026-11-14-s2-probe-findings.md).
 const kernel_read_bytes = 128 * 1024;
 
-/// A table over one file, `f`, of one whole chunk of `store_chunk_bytes`, served from a cache
-/// in `cache_memory`.
+/// A table over one file, `f`, of `size` bytes in chunks of `store_chunk_bytes`, served from a
+/// cache in `cache_memory`.
 const ChunkHarness = struct {
     region: []align(8) u8,
     cache_memory: []u8,
@@ -797,11 +814,13 @@ const ChunkHarness = struct {
     server: Server,
     file: u64,
 
-    fn init(harness: *ChunkHarness) !void {
+    fn init(harness: *ChunkHarness, size: u32) !void {
         const chunk_bytes = constants.store_chunk_bytes;
+        assert(size > 0);
+        assert(size <= fixture_mod.content_bytes);
         const fixture = &test_fixture;
         fixture.init(chunk_bytes);
-        const content = try testing.allocator.alloc(u8, chunk_bytes);
+        const content = try testing.allocator.alloc(u8, size);
         defer testing.allocator.free(content);
         for (content, 0..) |*byte, index| byte.* = @truncate(index *% 31 +% index / 4096);
         _ = fixture.begin();
@@ -834,23 +853,36 @@ const ChunkHarness = struct {
         testing.allocator.free(harness.region);
     }
 
-    /// Reads piece `piece` (128 KiB) of the chunk on `worker` and checks its bytes.
-    fn read_piece(harness: *ChunkHarness, worker: *Worker, request: []u8, piece: u32) !void {
-        var in = read_in(@as(u64, piece) * kernel_read_bytes, kernel_read_bytes);
+    /// One `READ` of `size` bytes at `offset` on `worker`; checks that its bytes are the file's.
+    fn read_at(
+        harness: *ChunkHarness,
+        worker: *Worker,
+        request: []u8,
+        offset: u64,
+        size: u32,
+    ) !void {
+        var in = read_in(offset, size);
         const body = std.mem.asBytes(&in);
-        const bytes = fixture_mod.request(request, .read, harness.file, piece, &.{body});
+        const bytes = fixture_mod.request(request, .read, harness.file, offset, &.{body});
         const reply = handle(&harness.server, worker, bytes);
         const header = fixture_mod.reply_header(reply);
         try testing.expectEqual(@as(i32, 0), header.@"error");
         const content = test_fixture.content_of(harness.table.node(harness.file).?.digest).?;
-        const start = piece * kernel_read_bytes;
-        try testing.expectEqualSlices(u8, content[start..][0..kernel_read_bytes], reply[16..]);
+        const start: usize = @intCast(@min(offset, content.len));
+        const end: usize = @intCast(@min(offset + size, content.len));
+        try testing.expectEqualSlices(u8, content[start..end], reply[16..]);
+    }
+
+    /// Reads piece `piece` (128 KiB) of the first chunk on `worker` and checks its bytes.
+    fn read_piece(harness: *ChunkHarness, worker: *Worker, request: []u8, piece: u32) !void {
+        const offset = @as(u64, piece) * kernel_read_bytes;
+        try harness.read_at(worker, request, offset, kernel_read_bytes);
     }
 };
 
 test "the kernel's eight 128 KiB READs of one chunk read it once" {
     var harness: ChunkHarness = undefined;
-    try harness.init();
+    try harness.init(constants.store_chunk_bytes);
     defer harness.deinit();
     var worker = Worker.init(test_fixture.chunks(), &test_reply);
     const pieces = constants.store_chunk_bytes / kernel_read_bytes;
@@ -861,7 +893,7 @@ test "the kernel's eight 128 KiB READs of one chunk read it once" {
 
 test "serving threads share a chunk: one read for READs spread over them" {
     var harness: ChunkHarness = undefined;
-    try harness.init();
+    try harness.init(constants.store_chunk_bytes);
     defer harness.deinit();
     const threads = constants.lazy_fuse_threads;
     const pieces = constants.store_chunk_bytes / kernel_read_bytes;
@@ -899,4 +931,52 @@ test "serving threads share a chunk: one read for READs spread over them" {
     for (spawned) |thread| thread.join();
     try testing.expectEqual(@as(u32, 0), failures.load(.monotonic));
     try testing.expectEqual(@as(u32, 1), test_fixture.chunk_reads);
+}
+
+/// Two and a half chunks: the last one short.
+const two_chunks_and_a_half = constants.store_chunk_bytes * 5 / 2;
+
+test "a direct 1 MiB READ at 512 KiB spans two chunks: their bytes, from one read of each" {
+    // Goal: a READ is the reader's size at the reader's offset, and may span two chunks
+    // (O_DIRECT sends 1 MiB at any offset). Method: one 1 MiB READ at 512 KiB, then a READ
+    // that runs past the end of the file.
+    var harness: ChunkHarness = undefined;
+    try harness.init(two_chunks_and_a_half);
+    defer harness.deinit();
+    var worker = Worker.init(test_fixture.chunks(), &test_reply);
+    const half = constants.store_chunk_bytes / 2;
+    try harness.read_at(&worker, &test_request, half, constants.fuse_read_bytes_max);
+    try testing.expectEqual(@as(u32, 2), test_fixture.chunk_reads);
+    const tail = two_chunks_and_a_half - half;
+    try harness.read_at(&worker, &test_request, tail, constants.fuse_read_bytes_max);
+    try testing.expectEqual(@as(u32, 3), test_fixture.chunk_reads);
+}
+
+test "a 4 KiB READ at an unaligned offset, and one across a chunk boundary" {
+    // Goal: a small pread reaches the server as 4 KiB at the reader's offset, aligned to
+    // nothing. Method: one inside a chunk at an odd offset, one straddling the first boundary.
+    var harness: ChunkHarness = undefined;
+    try harness.init(two_chunks_and_a_half);
+    defer harness.deinit();
+    var worker = Worker.init(test_fixture.chunks(), &test_reply);
+    try harness.read_at(&worker, &test_request, 12345, 4096);
+    try testing.expectEqual(@as(u32, 1), test_fixture.chunk_reads);
+    const boundary: u64 = constants.store_chunk_bytes;
+    try harness.read_at(&worker, &test_request, boundary - 1000, 4096);
+    try testing.expectEqual(@as(u32, 2), test_fixture.chunk_reads);
+}
+
+test "a sequential run of 256 KiB READs reads each chunk once" {
+    // Goal: with posix_fadvise(SEQUENTIAL) the kernel asks 256 KiB at a time; the cache turns
+    // the run into one read per chunk. Method: the whole file front to back in 256 KiB READs.
+    var harness: ChunkHarness = undefined;
+    try harness.init(two_chunks_and_a_half);
+    defer harness.deinit();
+    var worker = Worker.init(test_fixture.chunks(), &test_reply);
+    const step: u32 = 256 * 1024;
+    var offset: u64 = 0;
+    while (offset < two_chunks_and_a_half) : (offset += step) {
+        try harness.read_at(&worker, &test_request, offset, step);
+    }
+    try testing.expectEqual(@as(u32, 3), test_fixture.chunk_reads);
 }

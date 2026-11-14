@@ -20,7 +20,7 @@ const Digest = digest_mod.Digest;
 pub const trees_max = 512;
 pub const files_max = 1024;
 pub const tree_bytes = 512 * 1024;
-pub const content_bytes = 1024 * 1024;
+pub const content_bytes = 3 * 1024 * 1024;
 pub const writer_bytes = 64 * 1024;
 
 const Stored = struct { digest: Digest, at: u32, len: u32 };

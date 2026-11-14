@@ -14,7 +14,8 @@
 //!      length equal to its bytes, and either no error or one of the server's errors with no data.
 //!   4. A `READ` that succeeds returns exactly the file's bytes at that offset (the oracle is the
 //!      fixture's content), and one of an object whose chunks fail never succeeds with data.
-//!   5. A `READDIRPLUS` that succeeds holds whole records, in order, within the asked size.
+//!   5. A `READDIRPLUS` that succeeds holds whole records, in order, within the asked size, and
+//!      is empty only at or past the directory's end.
 //!   6. A built table's file ordinals are first appearance in a preorder walk of the fixture's own
 //!      trees (the index's object order), its object count is that walk's distinct objects, and
 //!      its arena holds each distinct tree once.
@@ -505,7 +506,10 @@ fn check_listing(server: *const ops.Server, nodeid: u64, body: []const u8, data:
     }
     assert(at == data.len);
     if (at > 0) reached.listings += 1;
-    if (at > 0) assert(next -% 1 <= @as(u64, server.table.children(found).len) + 2);
+    const total = @as(u64, server.table.children(found).len) + 2;
+    if (at > 0) assert(next -% 1 <= total);
+    // An empty listing is the end to the kernel: it is answered only at or past the end.
+    if (at == 0) assert(in.offset >= total);
 }
 
 test "fuse_request fuzzer: a few hundred seeds reach every property" {
