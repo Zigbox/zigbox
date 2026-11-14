@@ -168,8 +168,10 @@ pub fn fuzz_pack(seed: u64) void {
     assert((other.index != null) == (version == 2));
     if (first.index) |anchor| {
         const same = other.index.?;
-        assert(anchor.offset == same.offset and anchor.length == same.length);
-        assert(anchor.size == same.size and anchor.digest.eql(same.digest));
+        assert(anchor.offset == same.offset);
+        assert(anchor.length == same.length);
+        assert(anchor.size == same.size);
+        assert(anchor.digest.eql(same.digest));
         _ = lazy_index_fuzz.check_layer(&store, &first, imported.digest);
     }
 

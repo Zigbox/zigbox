@@ -114,7 +114,7 @@ pub const Recorder = struct {
 
     fn put(recorder: *Recorder, fs: Fs, section: Section, data: []const u8) fs_mod.Error!void {
         assert(recorder.recording);
-        try recorder.spills[@intFromEnum(section)].put(fs, data);
+        try recorder.spills[@backingInt(section)].put(fs, data);
         if (recorder.index_bytes() > constants.lazy_index_bytes_max) recorder.recording = false;
     }
 

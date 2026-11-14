@@ -348,7 +348,7 @@ fn link_find_or_add(ws: *Workspace, object: Digest, path: []const u8) ?[]const u
 /// writer 2, the stream is cut before the body and after each chunk of it, and the chunks are
 /// recorded when `record` (the object's first appearance).
 fn write_body(walk: *Walk, entry: *const tree_mod.Entry, record: bool) Error!void {
-    assert(!record or walk.lazy);
+    if (record) assert(walk.lazy);
     const fs = walk.fs;
     var path_storage: PathBuf = undefined;
     const path = walk.store.object_path(&path_storage, entry.object);
@@ -442,7 +442,7 @@ fn write_entry(walk: *Walk, entry: *const tree_mod.Entry) Error!void {
     }
     // The first name of an object always carries its bytes: the link table finds only names
     // after it.
-    assert(!first_appearance or item.kind == .file);
+    if (first_appearance) assert(item.kind == .file);
     try walk.write_header(item);
     if (item.kind == .file) try write_body(walk, entry, first_appearance);
     if (entry.kind == .dir) {
