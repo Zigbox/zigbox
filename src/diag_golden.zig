@@ -824,6 +824,8 @@ const build_cases = [_]Case{
     .{ .code = .E0816, .args = &.{}, .direct = import_output_exists, .exit = 1 },
     .{ .code = .W0810, .args = &.{}, .direct = import_not_hermetic, .warning = true, .exit = 0 },
     .{ .code = .W0811, .args = &.{}, .direct = import_dropped, .warning = true, .exit = 0 },
+    .{ .code = .E0822, .args = &.{}, .direct = build_pin_drifted, .exit = 3 },
+    .{ .code = .W0803, .args = &.{}, .direct = build_pin_warned, .warning = true, .exit = 0 },
 };
 
 const key_directory = "/home/alice/.config/zbx/keys";
@@ -2656,6 +2658,14 @@ fn import_not_hermetic(diag: *Diag) void {
 
 fn import_dropped(diag: *Diag) void {
     import_diagnose.dropped(diag, "EXPOSE 8080 (label)", 1);
+}
+
+fn build_pin_drifted(diag: *Diag) void {
+    build_diagnose.pin_drifted(diag, true, "fetch", Digest.of("pinned"), Digest.of("served"));
+}
+
+fn build_pin_warned(diag: *Diag) void {
+    build_diagnose.pin_drifted(diag, false, "fetch", Digest.of("pinned"), Digest.of("served"));
 }
 
 fn build_tag_not_recorded(diag: *Diag) void {
