@@ -1981,3 +1981,47 @@ comptime {
     assert(pack_config_bytes_max >= image_settings_bytes_max);
     assert(layer_writer_version >= 1);
 }
+
+// Lazy start (S2): the FUSE server (slice 4). `lazy_nodes_max`, `lazy_fuse_threads` and
+// `lazy_index_bytes_max` are the S2 brief's bounds, approved by the owner on 2026-11-14; the rest
+// follow from them and from the store's chunk size.
+
+/// The FUSE node table, fixed at start: one node per directory, per symlink and per file object
+/// (a file's hard links share a node). A tree with more entries is not served lazily.
+pub const lazy_nodes_max: u32 = 262_144;
+/// Server threads reading `/dev/fuse`.
+pub const lazy_fuse_threads: u32 = 4;
+/// The lazy index's longest form. Its directory objects are what the server keeps in memory to
+/// answer lookups, so their total is held to it too (the room is reserved, and touched as used).
+pub const lazy_index_bytes_max: u32 = 64 * 1024 * 1024;
+/// The most bytes one FUSE `READ` asks for (`max_read` and `max_pages`): one whole chunk.
+pub const fuse_read_bytes_max: u32 = store_chunk_bytes;
+pub const fuse_max_pages: u16 = @intCast(fuse_read_bytes_max / 4096);
+/// A request read from `/dev/fuse`: the kernel's minimum read buffer. The server is read-only and
+/// asks for `max_write` of one page, so every request it answers fits; the kernel refuses a longer
+/// one (a large `setxattr`) to its caller without sending it.
+pub const fuse_request_bytes: u32 = 8192;
+pub const fuse_max_write: u32 = 4096;
+/// A reply: the out-header and the longest data, a read of `fuse_read_bytes_max`.
+pub const fuse_reply_bytes: u32 = 16 + fuse_read_bytes_max;
+/// How long the kernel may cache names and attributes: the tree never changes while it is served.
+pub const fuse_valid_seconds: u64 = 365 * 24 * 60 * 60;
+/// FUSE requests the kernel keeps in flight to the server, and when it starts to throttle.
+pub const fuse_max_background: u16 = 64;
+pub const fuse_congestion_threshold: u16 = 48;
+
+comptime {
+    assert(lazy_nodes_max > 0);
+    assert(lazy_nodes_max < std.math.maxInt(u32) / 4);
+    assert(lazy_fuse_threads >= 1);
+    assert(lazy_fuse_threads <= 64);
+    assert(lazy_index_bytes_max >= store_tree_bytes_max);
+    assert(fuse_read_bytes_max == store_chunk_bytes);
+    assert(fuse_read_bytes_max % 4096 == 0);
+    assert(fuse_max_pages <= 256); // The kernel's `FUSE_MAX_MAX_PAGES`.
+    assert(fuse_request_bytes >= 8192); // The kernel's `FUSE_MIN_READ_BUFFER`.
+    assert(fuse_request_bytes >= 40 + 40 + fuse_max_write);
+    assert(fuse_request_bytes >= 40 + 1024 + 1); // A lookup of the longest name the kernel sends.
+    assert(fuse_reply_bytes > fuse_read_bytes_max);
+    assert(fuse_congestion_threshold < fuse_max_background);
+}
