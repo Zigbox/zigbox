@@ -72,11 +72,13 @@ The flag-by-flag companion to `M9-dockerfile-import.md`, from Docker's Dockerfil
 | COPY | heredoc `COPY <<EOF path` | Writes inline text to a file | Refused | E0811 | Mapping, COPY heredoc row |
 | ADD | local file or directory | Copies local files, as COPY does | Supported: as `COPY` | — | Mapping, ADD row |
 | ADD | local tar archive | Extracts a local archive | Refused | E0811 | Mapping, ADD tar row |
-| ADD | URL source | Fetches a remote file | Refused; fix shows a RUN with checksum | E0811 | Mapping, ADD URL row |
+| ADD | URL source without `--checksum` | Fetches a remote file | Refused; the fix shows `ADD --checksum=sha256:<hex>`, or a `RUN curl` flagged `net` | E0811 | Mapping, ADD URL row; owner, 2026-11-14 |
 | ADD | git URL source | Clones a git repository | Refused | E0811 | Mapping, ADD git row |
 | ADD | `--keep-git-dir=<bool>` | Keeps `.git` when adding a git repo | Refused (git sources are refused) | E0811 | Supervisor, 2026-11-11 |
 | ADD | `--checksum=<hash>` on a local file | Verifies a commit SHA or `sha256:` digest | Refused (Docker allows it only for URLs) | E0811 | Supervisor, 2026-11-11 |
-| ADD | `--checksum=<hash>` on a URL | Verifies a fetched URL's digest | Refused (URL refused) | E0811 | Mapping, ADD URL row |
+| ADD | `--checksum=sha256:<hex>` on a URL | Verifies a fetched URL's digest | Supported: a `copy` step with `.fetch = .{ .url, .sha256 }`, downloaded by the parent, keyed by the hash and not the URL, mode `0600` and owner `0:0` unless `--chmod`/`--chown`; not flagged, accepted under `--hermetic` | — (supported); E0820, E0821 at build | Pinned fetches; owner, 2026-11-14 |
+| ADD | `--checksum=sha384:`/`sha512:` on a URL | Verifies with another algorithm | Refused: only SHA-256 is kept in the store | E0811 | Pinned fetches; owner, 2026-11-14 |
+| ADD | `--unpack=true` on a URL | Extracts a fetched archive | Refused: a fetch is never unpacked | E0811 | Pinned fetches; owner, 2026-11-14 |
 | ADD | `--chmod` | Permissions, as COPY | Supported: `.chmod` | — | Mapping, ADD row (as COPY) |
 | ADD | `--chown` | Ownership, as COPY | Supported: `.chown` | — | Mapping, ADD row (as COPY) |
 | ADD | `--link` | Copies into a separate layer | Noted: ignored, as for COPY | W0811 | Supervisor, 2026-11-11 |

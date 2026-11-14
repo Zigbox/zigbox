@@ -9,6 +9,9 @@ Read these first:
   instruction. Every number below comes from it. Its "hard cases" are this brief's acceptance set.
 - `zbx commit` (M3) and the store's tree format (`src/store/tree.zig`): a root step's output is a
   commit of its upper layer.
+- `docs/decisions/2026-11-14-m9-pinned-fetches-and-output-pins.md`: the owner's rulings on fetches
+  pinned by hash and on output pins for network steps. They amend this brief (sections marked
+  *owner, 2026-11-14*).
 
 M9 starts after Zigbox 0.5.0 is tagged and targets 0.6.0. Every earlier demo keeps passing, and
 `demo-m7`'s golden digest must not change: a build file without the new fields builds exactly as
@@ -26,7 +29,9 @@ The demo imports a two-stage Go project (ARG in `FROM`, `COPY --from`, a glob, a
 a user created in a `RUN` and named in `USER` and `--chown`, `EXPOSE`, `HEALTHCHECK`), builds it,
 runs it, rebuilds it with every step a hit, gets the same import bytes and the same result digest
 on a second clean VM (checked against a golden), and shows a network target flagged on import and
-refused under `--hermetic`.
+refused under `--hermetic`. It then imports and builds an `ADD --checksum` from a local test
+server (downloaded once, never again, refused when the bytes differ), and pins a network step
+with `zbx build --pin`, then shows `--locked` refusing it when its output drifts.
 
 ## How a Dockerfile maps (fixed)
 
@@ -89,6 +94,116 @@ changes to a whole root file system. M9 adds what that needs, and nothing else:
   within the run's 8 mounts), `build_copy_entries_max` 64, `build_exclude_lines_max` 256.
   Each with a comptime assert against what it feeds.
 
+### Pinned fetches and output pins (*owner, 2026-11-14*)
+
+Two additions let a build use the network and still get the same result twice. A file fetched by
+hash is content-addressed from the start. A network step's output can be pinned, so a change in
+what it fetched is caught and reported rather than passed on silently. Neither changes a build
+file that does not use it: the `demo-m7` golden and the M9 import golden stay as they are.
+
+**Fetches.** A copy entry may name a download instead of `.from`/`.src`:
+
+```zig
+.{ .name = "fetch-tool", .base = "step:final-1", .copy = .{
+    .{ .fetch = .{ .url = "https://example.org/tool-1.2.tar.gz", .sha256 = "<64 hex>" },
+       .to = "/opt/tool.tar.gz", .chmod = "0644" },
+} },
+```
+
+- A fetch is a copy source, so a `RUN` reaches the file the way it reaches any copied file: the
+  copy step goes in its chain, or a copy step on `scratch` is one of its `needs`. That adds no new
+  mount kind, and the step that uses the file runs with no network. Reason: the Dockerfile form
+  is `ADD` then `RUN`, so this is the shape import already emits for `ADD`, and the builder needs
+  only one new source kind.
+- The download happens in the parent, before any step runs, outside every sandbox, through the
+  pull's HTTP client (proxies from the environment, `SSL_CERT_FILE` honoured). Only `https://`
+  is fetched. Plain `http://` is allowed only for a loopback host, the rule the registry client
+  has followed since M8. A redirect may not go from `https` to `http`, and may not go from a
+  non-loopback host to a loopback one. Every hop counts against the redirect bound.
+- The bytes stream to `blobs/partial/` and are hashed as they arrive. When the SHA-256 matches,
+  the file is renamed to `blobs/sha256/<hex>`, where downloaded registry blobs already live. When
+  it does not, the partial file is deleted and the build fails with `E0821` before any step runs.
+  If the store already has `blobs/sha256/<hex>`, from an earlier build or a pull of a layer with
+  that digest, nothing is downloaded.
+- **The key** of a copy entry with a fetch is tagged `fetch` and covers the SHA-256, `.to`,
+  `.chown` and `.chmod`. It never covers the URL. A mirror URL serving the same bytes is a hit,
+  and the same URL serving different bytes is refused, not rebuilt. A copy step that hits its
+  cache needs no bytes, so a warm store builds with no network at all.
+- Defaults follow Docker's remote `ADD`: mode `0600` unless `.chmod` is given, owner `0:0` unless
+  `.chown` is given, and the file name taken from the URL's last path segment when `.to` ends in
+  `/`. The file is never unpacked.
+- `zbx store gc` treats a fetched blob as it treats a build cache entry: it is kept while a step
+  record names it.
+- At load time, a URL that is not `https://` (or loopback `http://`), a URL longer than the URL
+  bound, or a `sha256` that is not 64 lowercase hex characters is `E0801`.
+
+**Output pins.** A pin is the output digest a network step is expected to produce.
+
+- **`.expect = "b3:<hex>"`** on a step with `network = true` is a pin written by hand. On any
+  other step it is `E0801`: a step without the network is already keyed by what it reads. On a
+  step with `.caches` it is also `E0801`, because the step's output depends on a cache that is
+  outside its key (*supervisor, 2026-11-14*); `zbx build --pin` leaves such a step unpinned.
+- **`zbx build --pin`** records, in `zbx.lock`, the output of every network step that has no
+  `.expect` and no current pin. A pin is current when its recorded key equals the step's key, so
+  a step whose key has changed gets a new pin. The lock is written once, atomically, and only
+  when the build succeeds. Pins sit next to the image pins:
+
+  ```zig
+  .pins = .{
+      .{ .file = "zbx.build.zon", .step = "fetch-deps", .key = "b3:<hex>", .output = "b3:<hex>" },
+  },
+  ```
+
+  Pins are sorted by file, then step. A lock with no pins keeps `.version = 1` and is
+  byte-identical to the lock M7 writes. A lock with pins is `.version = 2`, so an older `zbx`
+  refuses it rather than ignoring the pins.
+- A **pinned step** is one with `.expect`, one with a current lock pin, or one this build is
+  pinning. When a pinned step's output equals its pin, the steps after it are keyed by the pin.
+  In M9 the pin and the output are then the same bytes; keying by the pin is what lets a later
+  shared cache skip the network step on a host whose dependents already hit (not built here).
+- **Drift** is a pinned step whose output differs from its pin. Under `--locked` or `--hermetic`
+  it is `E0822`, naming the step, the pinned digest and the new one. No step that depends on it
+  runs, and the lock is not changed. Without those flags it is `W0803`, naming the same three:
+  the new output is used, every step after it misses and rebuilds, and the pin stays as it was,
+  so the warning repeats on every build until the pin is updated. A person accepts drift by
+  deleting the pin and running `zbx build --pin`, or by editing `.expect`. There is no `--repin`
+  flag (*supervisor, 2026-11-14*).
+- **`.output_exclude`** on a step is a list of absolute paths whose changes are dropped from the
+  output before it is hashed. In a root output, an excluded path is left as the base had it. In
+  an `/out` output, it is absent. A pinned step without `.output_exclude` gets
+  `.{ "/var/log", "/var/cache", "/var/lib/apt/lists", "/tmp" }`. The list, whether written or defaulted, enters the
+  step's key, so the first `--pin` of an existing network step re-runs it once. A lock pin is found
+by file and step name, and is current when its key equals the step's key computed with the
+defaults applied, so the defaults never make a pin look stale. Package databases
+  (`/var/lib/dpkg`, `/lib/apk/db`, `/var/lib/rpm`) are content and must not be excluded. What M7
+  already normalises, and what it does not, is under *Spec notes*.
+
+**`zbx build --locked`** (no such flag exists on `build` under any name; `cli.zig` has `-f`,
+`--graph`, `--clear-caches`, `--output` and `--verbose`). The build adds nothing to the lock and
+enforces every pin. A stale pin, one whose key no longer matches, is `E0822` rather than a
+re-pin. A network step with no pin runs as it does today, with `W0801`. `--pin --locked` is a
+usage refusal, `E0005`, and the message names both flags.
+
+**`zbx build --hermetic`** (new on `build`; `zbx import` already has it): `--locked`, plus a
+refusal of any network step without a pin and of any step with `.caches`. It reuses `E0814`,
+naming the step instead of a Dockerfile line. *Supervisor choice, 2026-11-14*: the ruling
+names the flag but does not define it. It is cuttable to an alias of `--locked`.
+
+**Mirror snapshots are out of scope** (owner). An apt or apk mirror that publishes a new package
+version changes what a step installs. That is drift, and it is reported loudly by `W0803` or
+`E0822`. It is not prevented.
+
+**Bounds (approved by the owner, 2026-11-14; added to `constants.zig` in slices 3b and 3c):**
+
+| Constant | Value | Reason |
+|---|---|---|
+| `build_fetch_bytes_max` | 1 GiB | The largest common `ADD` payloads are toolchains and JDKs, 50 to 200 MB. The bytes go to disk, not memory, so the bound only stops a runaway server. The alternative is 4 GiB, the store's largest object. |
+| `build_fetch_redirects_max` | 4 | Equals `registry_redirects_max`. GitHub release assets take one redirect and most CDNs take one or two. |
+| URL length | 2048 bytes | Reuses `registry_url_bytes_max`. |
+| Timeouts | 30 s idle | Reuse `net_idle_timeout_ms` (30 s). There is no total-time bound, because a 1 GiB file on a slow link must be able to finish. |
+| `build_output_excludes_max` | 32 | Four defaults, room for one per package manager's log and cache directories. |
+| `lock_pins_max` | 256 | Equals `build_steps_max`: a build file cannot pin more steps than it has. |
+
 ### `zbx import`
 
 ```
@@ -139,7 +254,9 @@ zbx import [<Dockerfile>] [--context <dir>] [--target <stage>] [--build-arg K=V]
 | `COPY --exclude` | | the copy entry's `.exclude` |
 | `COPY <<EOF` heredoc, `--parents` | | `E0811` |
 | `ADD` local file or directory | 11% | as `COPY` (a local archive only with `--unpack=false`) |
-| `ADD` URL, git URL, or a local tar | 3%, 2%, 0% | `E0811`, the fix showing a `RUN` with a checksum |
+| `ADD --checksum=sha256:<hex> <url> <dest>` | | a `copy` step with `.fetch = .{ .url, .sha256 }` (*owner, 2026-11-14*); `--chmod`, `--chown` kept; not flagged, and accepted under `--hermetic` |
+| `ADD <url>` without `--checksum`, a git URL, or a local tar | 3%, 2%, 0% | `E0811`; for a URL the fix shows `ADD --checksum=sha256:<hex>`, or a `RUN curl` that import flags `net` |
+| `ADD --checksum=sha256:` on a git URL or a local file; `sha384`/`sha512` | | `E0811` naming the form |
 | `ENV` | 79% | resolved and carried into each later step's `env` and the config |
 | `ARG` | 79% | resolved at import from `--build-arg` or the default; a needed `ARG` with neither is `E0812`. `TARGETOS`, `TARGETARCH`, `TARGETPLATFORM`, `BUILDPLATFORM` and friends are the host's. A `RUN` sees in-scope args in its env, as Docker's does |
 | `WORKDIR` | 79% | `.workdir` on later steps (created by the next step, `0755`); the config's `workdir` |
@@ -197,6 +314,29 @@ the builder's. Registered by the supervisor with this brief.
 
 An import that is refused exits 1 and writes nothing.
 
+**For fetches and pins (approved by the owner, 2026-11-14; registered in slices 3b and 3c).**
+They come after the import range (`E0810`–`E0819`). `W0803` is the next free
+builder warning.
+
+- `E0820` a fetch could not be downloaded: the url, and why (the HTTP status, the network error,
+  over `build_fetch_bytes_max`, too many redirects, a redirect to `http` or to loopback, a URL
+  that is not `https`). Blame: external, exit 3. Fix: check the URL, or put the bytes in the
+  store with an earlier build on a host that can reach it.
+- `E0821` the fetched bytes do not match: the url, the expected `sha256:<hex>` and the received
+  one. Blame: external, exit 3. Two fixes, because either side can be wrong: correct `.sha256`
+  (or `--checksum`) if the hash was copied wrongly, or find out why the server's file changed
+  before trusting it.
+- `E0822` a pinned step's output differs from its pin under `--locked` or `--hermetic`, or its pin
+  is stale: the step, the pinned digest and the new one (or, for a stale pin, the two keys).
+  Blame: external, exit 3, since what the network served changed. Fix: run without `--locked`
+  to see the new output, then delete the pin and `zbx build --pin` (or edit `.expect`) to accept
+  it.
+- `W0803` a pinned step drifted and the new output was used: the step, the pinned digest and the
+  new one, and that the steps after it rebuild.
+
+Under `--pin --locked` the usage refusal is `E0005`. Build `--hermetic` reuses `E0814`. Neither
+needs a new code.
+
 ## Slices (commit and stop for review after each; do not push to the working branch)
 
 1. **The build file grows.** Parser, validation and canonical printer for every builder addition
@@ -226,7 +366,31 @@ An import that is refused exits 1 and writes nothing.
    fixtures (below), each with a golden output. **Slice 3 may start as soon as slice 1 merges, in
    parallel with slice 2**: it needs only the file format. *Mechanical:* registration, error
    pages, explain entries, golden copying.
-4. **VM, CI and the corpus.** `zig build demo-m9` exactly as below, every assertion a
+3b. **Pinned fetches** (*owner, 2026-11-14*; after slice 2 merges, and after slice 3 for the
+   import half). The `.fetch` source in the parser, printer and validation; the download in the
+   parent through the pull's client (https only, loopback http, the redirect rules and bound,
+   the size bound); `blobs/partial` → `blobs/sha256` with the hash checked while streaming; the
+   tagged key (URL not in it); Docker's remote-`ADD` defaults; gc keeping fetched blobs that a
+   record names; `E0820`, `E0821`; the `ADD --checksum` mapping rows and fixtures. Tests: a fetch
+   key ignores the URL and changes with each other field; a present blob is never downloaded (a
+   test client that fails on any request); a mismatch leaves nothing in `blobs/sha256`; the
+   simulator crashes at every write of a fetch and finds no half blob. The `build_file` and
+   `dockerfile` fuzzers learn the new forms. The test HTTP server (below) and VM check
+   `vm/m9-fetch`: demo step 7. *Mechanical, for Haiku:* the constants and asserts, `E0820`/`E0821`
+   registration, error pages, explain entries, goldens, the
+   flags-table rows.
+3c. **Output pins** (after 3b). `.expect` and `.output_exclude` in the parser and key, the
+   defaults for pinned steps; lock version 2 with `.pins` (read, write, sort, the version rule:
+   no pins means byte-identical version 1); `zbx build --pin`, `--locked`, `--hermetic`; keying
+   dependents by the pin; drift as `E0822` or `W0803`. Tests: an M7 lock and an M9 golden lock
+   read and write back byte for byte; a lock with a version this build does not know is refused (`E0804`'s lock reader); drift under each
+   flag; the lock is written only on success; an excluded path never changes the output digest.
+   The simulator learns pins: a crash during the lock write leaves the old lock or the new one,
+   never a mix; a drifted step never lets a dependent hit on the old key under `--locked`. A
+   `lock_file` fuzzer case for `.pins`. VM check `vm/m9-pins`: demo step 8. *Mechanical:*
+   constants, `E0822`/`W0803` registration, error pages, explain entries, goldens,
+   the lock-format test fixtures copied from the recorded run.
+4. **VM, CI and the corpus.** `zig build demo-m9` exactly as below (steps 7 and 8 included), every assertion a
    unit-tested pure function in `checks_m9.zig`; the second VM; the golden import bytes and
    golden digest; ACCEPT; the agent test by JSON only (`import`, `build`, `explain`); the
    `demo-m9` CI job and its path rule in `.github/ci-changes.sh` (with a table-test row);
@@ -249,6 +413,8 @@ refusal.
   `--build-arg`, and with no default (`E0812`).
 - `ARG` in `COPY` paths and in `USER` (vault:85, vault:132, grafana:290).
 - `ADD` of a URL built from an `ARG` (mastodon:219), and of a git URL (moby:113): `E0811`.
+- `ADD --checksum=sha256:<hex>` of a URL with `--chmod`, and with a `/`-ending destination: a
+  fetch entry. The same with `sha512:`, and `ADD --checksum` of a local file: `E0811`.
 - Heredoc `RUN` (docker/cli `Dockerfile.dev`:59, moby:158).
 - Shell logic in `RUN` (grafana:51, 70, 189): passed through to the shell untouched.
 - `SHELL` (mastodon:75).
@@ -284,7 +450,10 @@ FROM alpine:3.20 AS tools
 RUN --mount=type=cache,target=/var/cache/apk apk add curl
 
 FROM alpine:3.20
-RUN adduser -D -u 10001 app
+RUN echo 'app:x:10001:10001::/home/app:/bin/sh' >> /etc/passwd && \
+    echo 'app:x:10001:' >> /etc/group && \
+    echo 'app:!:3652:0:99999:7:::' >> /etc/shadow && \
+    mkdir -p /home/app && chown 10001:10001 /home/app
 COPY --from=build /usr/local/bin/hello /usr/local/bin/hello
 COPY --chown=app:app --chmod=0644 VERSION LICENSE /etc/hello/
 USER app
@@ -308,7 +477,7 @@ The harness copies it into the guest as the ordinary user's `~/hello`. Images co
 3. **Again.** `zbx build --output json`: every step `hit`, the same digest.
 4. **Globs and excludes.** `echo more >> README.md && zbx build`: all hits, the same digest.
    `cp main.go extra.go` with a second `func` renamed so it compiles, `zbx build`: the
-   `build` stage's copy and compile steps miss, the final stage's `adduser` step hits, a new
+   `build` stage's copy and compile steps miss, the final stage's user step hits, a new
    digest. Remove `extra.go`; `zbx build` gives the first digest with every step a hit.
 5. **A second clean VM.** As `demo-m7`'s step 5: the same project, `zbx import` gives the same
    bytes, `zbx build` gives step 2's digest, which equals the golden in
@@ -320,12 +489,55 @@ The harness copies it into the guest as the ordinary user's `~/hello`. Images co
    `zbx build -f tools.build.zon` exits 0 with `W0801` and `W0802`; `zbx run <it> -- curl
    --version` exits 0.
 
+Steps 7 and 8 (*owner, 2026-11-14*) use a second project, `src/testing/vm/m9_fetch/`, so that the
+first project's import golden and digest are not touched. It holds a `Dockerfile`, a `zbx.lock`
+pinning `alpine:3.20` (M7's pin), `hello.txt` (the payload), and `drift.build.zon`. The files are
+served by `src/testing/vm/fixture_http.zig`, a small plain-HTTP static server written in Zig and
+built with the harness. It runs in the guest on `127.0.0.1:<port>` and logs one line per
+request. It has a `/r/<name>` route that redirects to `/<name>`, and a `/loop` route that
+redirects to itself. Nothing in steps 7 and 8 reaches the internet. The Dockerfile:
+
+```dockerfile
+FROM alpine:3.20
+ADD --checksum=sha256:<sha256 of hello.txt> http://127.0.0.1:<port>/hello.txt /opt/hello.txt
+RUN cat /opt/hello.txt > /opt/copy.txt
+```
+
+7. **A pinned `ADD`.** `cd ~/fetch && zbx import` exits 0, flags nothing, and the fetch step's
+   entry has `.fetch` with the URL and hash. `zbx import --hermetic -o h.build.zon` also exits 0.
+   `zbx build` exits 0, and the server logged exactly one request. In the result, `/opt/hello.txt`
+   has mode `0600`, owner `0:0` and `hello.txt`'s bytes. `zbx build` again: every step a hit, the
+   same digest, and no new request. The URL is then changed to `/r/hello.txt`, so the file is
+   served through a redirect: the fetch step hits and there is no request, because the URL is not
+   in the key. Adding `.chmod = "0644"` misses the copy and the `RUN`, and there is still no
+   request, because the blob is in the store. With a wrong `.sha256` in a fresh store (a second
+   `XDG_DATA_HOME`), `zbx build` exits 3, stderr starts `error[ZBX-E0821]:`, it names the URL, the
+   expected hash and the received one, and no step ran.
+8. **Pin, then drift.** `drift.build.zon` has a network step `fetch` that runs
+   `cat /proc/sys/kernel/random/uuid > /out/id`, and a step `use` that needs it. That output
+   differs on every run, which is what a mirror publishing a new package looks like. *Deviation,
+   recorded in `docs/demos/m9.md`:* a network step cannot reach the guest's loopback, because pasta
+   runs with `--no-map-gw`, and CI must not fetch from the internet, so the uuid stands in for a
+   changed download. `zbx build -f drift.build.zon --pin` exits 0, and `zbx.lock` gains one pin for
+   `fetch` with `.version = 2`. `zbx build -f drift.build.zon --locked`: every step a hit, the lock
+   unchanged. In a fresh store, the second host, `zbx build -f drift.build.zon --locked` exits 3,
+   stderr starts `error[ZBX-E0822]:` and names `fetch`, the pinned digest and the new one, `use`
+   did not run, and the lock is byte for byte unchanged. Without `--locked` in that store, the
+   build exits 0 with `W0803` naming the same digests, and `use` misses.
+
 ACCEPT also checks: every fixture's golden, through the binary; `zbx build --graph` on the
 imported file against its golden; reordering nothing in the Dockerfile but its comments gives the
 same bytes; an unlocked `FROM` with the network down is the pull's own `05xx` refusal;
 `zbx import` over an existing file is `E0816`; the steps' run records and `build/work/` are gone
-after the build. AGENT: `zbx import --output json` against `zbx schema import`, `zbx explain
-E0811`.
+after the build. For steps 7 and 8, ACCEPT also checks: a step `steady` with `.expect`, which
+writes a constant file and the date into `/out/var/log/when`, gives the same output digest in two
+stores a minute apart, and a step that needs it has the same key in both (the default excludes
+at work); `--pin --locked` is refused with `E0005`; `zbx build --locked` in `~/hello` is all hits and
+leaves that lock byte for byte unchanged (a lock without pins stays version 1); `/r/hello.txt`
+is followed and `/loop` is `E0820`, naming the redirect bound; an `https` URL redirected to `http`
+is not tested in the VM (the server has no TLS) and is covered by a unit test of the redirect
+rule. AGENT: `zbx import --output json` against `zbx schema import`, `zbx explain E0811`, and
+`zbx build --output json --locked` on the drift case (the code and both digests are fields).
 
 ## Non-goals
 
@@ -333,8 +545,14 @@ E0811`.
   interface (the Docker parity decision).
 - BuildKit frontends (`# syntax=` is ignored), `RUN --security`, multi-platform builds, and
   cross-building.
-- Secret and ssh mounts, tmpfs mounts, `ADD` of URLs, git repositories or tar archives,
-  `COPY <<EOF`, `ONBUILD`, named build contexts. Each is refused by name.
+- Secret and ssh mounts, tmpfs mounts, `ADD` of a URL without `--checksum=sha256:`, `ADD` of git
+  repositories or tar archives, `COPY <<EOF`, `ONBUILD`, named build contexts. Each is refused by
+  name. (`ADD --checksum` of a URL is in scope, *owner, 2026-11-14*.)
+- Snapshots of apt or apk mirrors, and any other way of making a network step's output stable
+  (*owner, 2026-11-14*). Drift is reported, loudly, and never prevented.
+- Fetching by hash in a `RUN` (a fetch is a copy source only), checksums other than SHA-256,
+  authenticated or cookie-carrying downloads, and a shared cache that would let a host skip a
+  pinned step.
 - Keeping a Dockerfile and its build file in sync, or importing on every build. The build file is
   the source once written.
 - Compose files, `docker-compose build`, and anything that needs several containers (Zigcube).
@@ -350,9 +568,15 @@ Record any cut in `docs/demos/m9.md`.
 - **`--network all|none`**: keep `detect`.
 - **`--clear-caches`**: document `rm -rf` of the directory instead.
 - **Slice 5 (the Mac).**
+- **`zbx build --hermetic`**: make it an alias of `--locked`.
+- **`.output_exclude` written by hand**: keep only the defaults for pinned steps.
+- **The `/r/` redirect and `/loop` cases in the VM**: keep them as unit tests of the redirect
+  rule.
 
 Not cuttable: root output and `step:` chains, build-time user names, globs and excludes at build
-time, network detection with the report, `--hermetic`, and the second-VM golden.
+time, network detection with the report, `--hermetic` on import, the second-VM golden, the
+pinned `ADD` with its hash refusal, and `--pin` then `--locked` refusing drift (*owner,
+2026-11-14*).
 
 ## Choices the supervisor made (the owner may overrule)
 
@@ -368,6 +592,31 @@ The owner asked for sane assumptions, documented. These are the brief's:
 5. **Cache mounts are kept** (28% of files), out of the key and flagged, rather than dropped.
 6. **The bounds above** grow to fit the survey's largest translated target.
 
+For the owner's 2026-11-14 rulings, these details are the supervisor's:
+
+7. **A fetch is a copy source, not a mount.** "Step input" in the ruling is read as an input to
+   the step that places the file. A `RUN` gets the file through its chain or a `needs`, so no new
+   mount kind is added, and `ADD` maps one to one.
+8. **Docker's remote-`ADD` defaults** (mode `0600`, `0:0`, the basename for a `/` destination),
+   so an imported file behaves as it did under Docker.
+9. **Pins live in `zbx.lock`**, next to the image pins, with a version bump only when there are
+   pins. A separate file would be a second thing to commit and keep in step. Bumping the version
+   for every lock would change `demo-m7`'s and `m9_project`'s locks.
+10. **A pin records its step's key**, so a changed step is re-pinned by `--pin` and refused by
+    `--locked` as stale, rather than compared with an output from a different command.
+11. **`--hermetic` on build** is `--locked`, plus a refusal of unpinned network steps and of
+    caches. That matches what `--hermetic` refuses on import.
+12. **Drift without `--locked` keeps the old pin.** The warning repeats until a person accepts
+    the new output. A pin that moved by itself would not be a pin.
+13. **Bounds:** 1 GiB per fetch and 4 redirects (see the table under *Pinned fetches*), approved
+    by the owner on 2026-11-14.
+14. **Picks on the open questions** (*supervisor, 2026-11-14*): a fetch stays a copy source;
+    `--hermetic` on build stays as defined; `/var/lib/apt/lists` joins the default excludes; a pin
+    changes only by deleting it and running `zbx build --pin` (no `--repin`); `.expect` on a step
+    with `.caches` is refused; the demo writes its user's `/etc/passwd`, `/etc/group` and
+    `/etc/shadow` lines directly, and `zbx` normalises nothing in them; `E0820`–`E0822` are blame
+    external, exit 3.
+
 ## Spec notes (flagged, not changed)
 
 - **SPEC.md's non-goals** still say Dockerfile import is a stretch (S4) and GPU passthrough a
@@ -377,4 +626,38 @@ The owner asked for sane assumptions, documented. These are the brief's:
 - **M7's "user is numeric; names are not resolved at build time"** is reversed. The build record
   stays numeric.
 - **DIAGNOSTICS.md** gives `08xx` to build; this brief takes `E0810`–`E0817` and `W0802`,
-  `W0810`, `W0811` from it, and leaves the rest of `08xx` free.
+  `W0810`, `W0811` from it, and `E0820`–`E0822` and `W0803` (approved by the owner,
+  2026-11-14). It leaves the rest of `08xx` free.
+- **What M7's timestamp rules cover, and what they miss** (checked 2026-11-14). M7 fixes
+  timestamps in metadata: the store keeps no times, farm mtimes are `SOURCE_DATE_EPOCH`
+  (315532800), and every step's environment has `SOURCE_DATE_EPOCH`, `TZ=UTC` and `LC_ALL=C`. It
+  does nothing about times, or random values, that a program writes into the contents of a file.
+  - *Verified,* by installing Alpine 3.20.3's minirootfs twice, about two seconds apart, and
+    running `apk add curl` in each with `SOURCE_DATE_EPOCH` set: the two trees are identical
+    (`diff -r` empty). `/lib/apk/db/installed` records no install time (its `t:` field is the
+    package's build time), and the mtimes of `scripts.tar` members come from the packages. The
+    index files sit under `/var/cache/apk`, which the defaults exclude. So for apk, drift means a
+    new package version on the mirror, which is exactly what a pin should report.
+  - *Verified,* on Ubuntu 24.04's `passwd` 4.13: `useradd` honours `SOURCE_DATE_EPOCH` (the
+    shadow `lastchg` field was 3652 with it set and today's day number without it). On the same
+    host, `/var/log/dpkg.log` and apt's history carry timestamps, which `/var/log` covers;
+    `/var/cache/debconf` and `/var/cache/ldconfig/aux-cache` are under `/var/cache`;
+    `/var/lib/dpkg/status` and `/var/lib/apt/extended_states` hold no dates; but
+    `/var/lib/apt/lists/*InRelease` hold the mirror's `Date:`. *Decided (supervisor,
+    2026-11-14):* `/var/lib/apt/lists` is in the defaults, since it is an index, not installed
+    content, so a pinned `apt-get update` does not drift merely because the mirror published.
+  - *Verified, and a risk to this brief's own golden:* BusyBox `adduser -D -u 10001 app`, the
+    final stage's first step in the brief's first draft of the demo, writes `app:!:<days since 1970>:0:99999:7:::` to
+    `/etc/shadow` and ignores `SOURCE_DATE_EPOCH`. That step is not a network step, so pins do not
+    apply. Its output, and so the demo's result digest, changes from one day to the next, and
+    step 5's golden would fail on any day but the one it was recorded. Neither the slice-2 check
+    nor the earlier steps notice, because they build twice on the same day. *Decided
+    (supervisor, 2026-11-14):* the demo's Dockerfile writes the `/etc/passwd`, `/etc/group` and
+    `/etc/shadow` lines directly instead of running `adduser`, with `lastchg` fixed at 3652, and
+    `zbx` normalises nothing in those files. The slice-2 check and the fixtures may still run
+    `adduser`, since they never compare across days.
+  - *Not verified:* a full Debian install diffed against a second one (no `debootstrap` here);
+    Python's `.pyc` files (documented: under `SOURCE_DATE_EPOCH`, `py_compile` writes
+    hash-checked `.pyc` files with no time in them); programs that read the clock or a random
+    source directly (machine ids, generated keys, uuids, build ids). The drift codes are how those
+    show up.
