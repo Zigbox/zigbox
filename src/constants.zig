@@ -972,6 +972,12 @@ pub const build_step_binds_max: u32 = 4;
 pub const build_root_holds_max: u32 = build_parallel_max * (1 + build_step_binds_max) +
     2 * build_copy_entries_max;
 pub const build_copy_entries_max: u32 = 64;
+/// A pinned fetch (`.fetch = .{ .url, .sha256 }`, docs/briefs/M9-dockerfile-import.md): the bytes
+/// one download may hold (more is E0820, and the partial file is removed), and the redirects it
+/// follows, as a pull does. Its URL is bounded by `registry_url_bytes_max` and its idle time by
+/// `net_idle_timeout_ms` (owner, 2026-11-14).
+pub const build_fetch_bytes_max: u64 = 1024 * 1024 * 1024;
+pub const build_fetch_redirects_max: u32 = 4;
 /// The lines of one `.exclude` list (`.dockerignore` syntax).
 pub const build_exclude_lines_max: u32 = 256;
 /// The paths in one step's `.output_exclude` (M9 slice 3c, owner 2026-11-14): the four defaults
@@ -1128,6 +1134,10 @@ comptime {
     assert(build_file_copies_max >= build_steps_max);
     assert(build_exclude_lines_max <= build_file_list_texts_max);
     assert(build_copy_sources_max <= build_file_list_texts_max);
+    // A fetched file is one store object, its hash read in chunks; it follows a pull's redirects.
+    assert(build_fetch_bytes_max <= store_file_bytes_max);
+    assert(build_fetch_redirects_max == registry_redirects_max);
+    assert(build_fetch_redirects_max > 0);
     // Needs and binds together are mounts beside `/src` and `/out`; the parser holds the sum.
     assert(build_step_binds_max + 2 <= mounts_max);
     assert(build_step_caches_max + 2 <= mounts_max);

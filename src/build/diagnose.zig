@@ -18,6 +18,8 @@ const fs_mod = @import("../store/fs.zig");
 const assemble_mod = @import("assemble.zig");
 const result_mod = @import("result.zig");
 const tree_mod = @import("../store/tree.zig");
+const fetch_mod = @import("fetch.zig");
+const net_mod = @import("../registry/net.zig");
 const Diag = @import("../diag/diag.zig").Diag;
 const Digest = @import("../store/digest.zig").Digest;
 
@@ -218,6 +220,19 @@ fn pin_fix(diag: *Diag, kind: file_mod.ProblemKind) void {
     diag.fix(.{ .sentence = sentence });
 }
 
+/// The fixes of a `.fetch` that does not load (`value_fix`'s).
+fn fetch_fix(diag: *Diag, kind: file_mod.ProblemKind) void {
+    assert(diag.code != null);
+    assert(kind != .bad_step_name);
+    diag.fix(.{ .sentence = switch (kind) {
+        .bad_fetch_url => "write .url as an https:// URL (http:// only to localhost or 127.x), " ++
+            "ending in a file name when .to ends in /",
+        .bad_sha256 => "write .sha256 as the file's 64 lowercase hex digits, as sha256sum " ++
+            "prints them",
+        else => "give a copy entry .fetch or .from and .src, not both; a fetch takes no .exclude",
+    } });
+}
+
 /// The fixes of the problems of one value (`describe_value`'s).
 fn value_fix(diag: *Diag, problem: *const file_mod.Problem) void {
     assert(diag.code != null);
@@ -263,12 +278,13 @@ fn value_fix(diag: *Diag, problem: *const file_mod.Problem) void {
             "empty, . or .. part, for example \"/cache\"" }),
         .bad_copy_to => diag.fix(.{ .sentence = "write .to as an absolute path written " ++
             "plainly, ending in / for a directory, for example \"/app/\"" }),
+        .bad_fetch_url, .bad_sha256, .fetch_and_source => fetch_fix(diag, problem.kind),
         .bad_mode => diag.fix(.{ .sentence = "write the mode as 3 or 4 octal digits, for " ++
             "example \"0755\"" }),
         .bad_pattern => diag.fix(.{ .sentence = "write a glob: * ? [a-z] and ** work, a \\ " ++
             "quotes a byte, and no part is .." }),
         .bad_project_source => diag.fix(.{ .sentence = "name project paths plainly, with no " ++
-            "trailing /: for the whole project write .src = .{\"*\"} and a .to ending in /" }),
+            "./ or trailing /; .src = .{\".\"} copies the whole project" }),
         .bad_from => diag.fix(.{ .sentence = "write .from as step:<name> of a step, or as " ++
             "an image reference like alpine:3.20" }),
         .bad_source => diag.fix(.{ .sentence = "write .source as a path in the project, or " ++
@@ -331,6 +347,8 @@ fn describe(writer: *std.Io.Writer, problem: *const file_mod.Problem) std.Io.Wri
         .text_too_long => try writer.print("the strings of the file come to more than {d} bytes", .{
             constants.build_pool_bytes,
         }),
+        .fetch_and_source => try writer.print("a copy entry has .fetch and .{s}; a fetch " ++
+            "is the entry's only source", .{field}),
         else => try describe_value(writer, problem.kind, word),
     }
 }
@@ -407,10 +425,16 @@ fn describe_value(writer: *std.Io.Writer, kind: ProblemKind, word: []const u8) !
             "plainly (no empty, . or .. part)", .{word}),
         .bad_copy_to => try writer.print(".to \"{s}\" is not an absolute path written " ++
             "plainly, which may end in /", .{word}),
+        .bad_fetch_url => try writer.print(".url \"{s}\" is not an https:// URL (or http:// " ++
+            "to loopback) of at most {d} bytes naming a file", .{
+            word,
+            constants.registry_url_bytes_max,
+        }),
+        .bad_sha256 => try writer.print(".sha256 \"{s}\" is not 64 lowercase hex digits", .{word}),
         .bad_mode => try writer.print("the mode \"{s}\" is not 3 or 4 octal digits", .{word}),
         .bad_pattern => try writer.print("the pattern \"{s}\" is not a valid glob", .{word}),
         .bad_project_source => try writer.print("the project source \"{s}\" has an empty " ++
-            "or . part; a project source is a relative path written plainly", .{word}),
+            "or . part; a project source is . or a relative path written plainly", .{word}),
         .bad_from => try writer.print(".from \"{s}\" is not step:<name> or an image " ++
             "reference", .{word}),
         .bad_source => try writer.print(".source \"{s}\" is not a path inside what it " ++
@@ -705,6 +729,7 @@ fn level_name(level: Level) []const u8 {
         .copy => "a copy entry",
         .cache => "a cache entry",
         .bind => "a bind entry",
+        .fetch => "a copy entry's .fetch",
     };
     assert(name.len > 0);
     return name;
@@ -1515,6 +1540,93 @@ pub fn result_operand(diag: *Diag, operand: []const u8, absent: bool) void {
     }
     diag.context("cmd", "inspect", .{});
     diag.context("arg", "{s}", .{echo});
+}
+
+/// The URL of a fetch as a message shows it: control bytes replaced, a long one cut.
+const UrlEcho = [256]u8;
+
+/// ZBX-E0820: a fetch could not be downloaded. A failure to write the blob cache is not this
+/// code: it is E0416 or E0417, as a pull's is (`registry/diagnose.zig` `cache_failed`).
+pub fn fetch_failed(diag: *Diag, step: []const u8, url: []const u8, reason: fetch_mod.Reason) void {
+    assert(diag.code == null);
+    assert(reason != .mismatch);
+    assert(reason != .io);
+    var url_echo: UrlEcho = undefined;
+    const shown = text_util.sanitise(&url_echo, url);
+    diag.raise(.E0820);
+    diag.while_("downloading the .fetch of build step \"{s}\"", .{step});
+    switch (reason) {
+        .status => |status| diag.cause("{s} answered HTTP {d}, not 200", .{ shown, status }),
+        .network => |err| diag.cause("{s} could not be read: {s}", .{ shown, network_words(err) }),
+        .too_large => diag.cause("{s} sent more than {d} MiB, the most a fetch may hold", .{
+            shown, constants.build_fetch_bytes_max / (1024 * 1024),
+        }),
+        .redirects => diag.cause("{s} redirected more than {d} times", .{
+            shown, constants.build_fetch_redirects_max,
+        }),
+        .refused => |refusal| diag.cause("{s} redirected {s}", .{ shown, refusal_words(refusal) }),
+        .io, .mismatch => unreachable, // Asserted above.
+    }
+    diag.context("step", "{s}", .{step});
+    diag.context("url", "{s}", .{shown});
+    diag.fix(.{ .sentence = "check the URL, or put the bytes in the store with an earlier " ++
+        "build on a host that can reach it" });
+    assert(diag.code.? == .E0820);
+}
+
+fn network_words(err: net_mod.Error) []const u8 {
+    assert(@errorName(err).len > 0);
+    return switch (err) {
+        error.UnknownHost => "no address was found for its host",
+        error.ConnectFailed, error.TimedOut => "the connection could not be made",
+        error.ProxyFailed => "the proxy refused the connection",
+        error.TlsUntrusted => "its certificate is not signed by a trusted authority",
+        error.TlsExpired => "its certificate has expired",
+        error.TlsHostMismatch => "its certificate names another host",
+        error.TlsFailed => "the TLS handshake failed",
+        error.NoCertificates => "no CA certificates could be loaded to check it",
+        error.Stalled => "the server stopped sending",
+        error.Truncated => "the connection closed before the whole file arrived",
+        error.TooLarge, error.BadResponse => "the answer is not usable HTTP",
+        error.Unsupported => "the request is not one this build can make",
+        error.SinkFailed, error.SourceFailed, error.IoFailed => "the connection failed",
+    };
+}
+
+fn refusal_words(refusal: fetch_mod.Refusal) []const u8 {
+    assert(@backingInt(refusal) <= @backingInt(fetch_mod.Refusal.malformed));
+    return switch (refusal) {
+        .http => "to plain http, which only a loopback host may use",
+        .loopback => "from a host that is not loopback to one that is",
+        .malformed => "to a place that cannot be followed (no Location, or not an http URL)",
+    };
+}
+
+/// ZBX-E0821: the fetched bytes are not the ones `.sha256` pins. Either side can be wrong, so
+/// there are two fixes.
+pub fn fetch_mismatch(
+    diag: *Diag,
+    step: []const u8,
+    url: []const u8,
+    expected: *const [64]u8,
+    received: *const [64]u8,
+) void {
+    assert(diag.code == null);
+    assert(!std.mem.eql(u8, expected, received));
+    var url_echo: UrlEcho = undefined;
+    const shown = text_util.sanitise(&url_echo, url);
+    diag.raise(.E0821);
+    diag.while_("downloading the .fetch of build step \"{s}\"", .{step});
+    diag.cause("the bytes downloaded are not those .sha256 pins", .{});
+    diag.cause("{s} sent sha256:{s}", .{ shown, received });
+    diag.context("step", "{s}", .{step});
+    diag.context("url", "{s}", .{shown});
+    diag.context("expect", "sha256:{s}", .{expected});
+    diag.context("actual", "sha256:{s}", .{received});
+    fix_sentence(diag, "if .sha256 (or ADD --checksum) was copied wrongly, correct it; it " ++
+        "pins sha256:{s}", .{expected});
+    diag.fix(.{ .sentence = "otherwise find out why the file changed before trusting it" });
+    assert(diag.code.? == .E0821);
 }
 
 test "network_names joins the names and cuts what does not fit with an ellipsis" {

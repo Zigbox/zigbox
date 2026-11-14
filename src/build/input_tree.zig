@@ -379,9 +379,14 @@ const Run = struct {
         for (run.inputs, 0..) |input, index| {
             run.input = input;
             const text = run.request.file.text(input);
-            if (glob.is_glob(text)) {
+            if (file_mod.is_whole_project(text)) {
+                // The whole project is every top-level entry, found and excluded as the glob
+                // `*` finds them; `.` is never kept as a path.
+                try run.expand("*", @intCast(index));
+            } else if (glob.is_glob(text)) {
                 try run.expand(text, @intCast(index));
             } else if (!run.is_excluded(text)) {
+                assert(!file_mod.is_whole_project(text));
                 assert(inputs_mod.is_plain_relative(text));
                 try run.keep(text, @intCast(index));
             }

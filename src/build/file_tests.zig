@@ -477,18 +477,66 @@ fn step_refused(comptime fields: []const u8, kind: ProblemKind) !void {
 
 test "a project source with an empty or . part is refused, not asserted on" {
     // Goal: every spelling the input tree would not read as plain parts is refused at parse
-    // (0.5.1: `COPY . /app` crashed on an assertion in `input_tree.collect`). Method: each
-    // spelling, plain and glob; then the same spellings from a step, which stay accepted.
-    const spellings = [_][]const u8{ ".", "./a.txt", "a/", "a//b", "a/./b", "./*.go", "src/" };
+    // (0.5.1: `COPY . /app` crashed on an assertion in `input_tree.collect`), except `.`, the
+    // whole project. Method: each spelling, plain and glob; then `.` alone, and `.` beside
+    // another source, accepted; then the same spellings from a step, which stay accepted.
+    const spellings = [_][]const u8{ "./", "./a.txt", "a/", "a//b", "a/./b", "./*.go", "src/" };
     inline for (spellings) |spelling| {
         const fields = ".copy = .{ .{ .src = .{\"" ++ spelling ++ "\"}, .to = \"/app/\" } }";
         try step_refused(fields, .bad_project_source);
+    }
+    inline for ([_][]const u8{ "\".\"", "\".\", \"a.txt\"" }) |sources| {
+        const fields = ".copy = .{ .{ .src = .{" ++ sources ++ "}, .to = \"/app/\" } }";
+        try testing.expectEqual(ProblemKind.syntax, kind_of(m9_head ++ fields ++ " } } }"));
     }
     inline for ([_][]const u8{ ".", "/", "a/" }) |spelling| {
         const fields = ".copy = .{ .{ .from = \"step:b\", .src = .{\"" ++ spelling ++
             "\"}, .to = \"/app/\" } }";
         try testing.expectEqual(ProblemKind.syntax, kind_of(m9_head ++ fields ++ " } } }"));
     }
+}
+
+test "a fetch is a copy entry's only source, pinned by a SHA-256" {
+    // Goal: the `.fetch` source's forms and negative space. Method: accepted spellings (https,
+    // loopback http, a `/`-ending `.to` with a file name), then one refusal per rule.
+    const hash = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+    const fetch = ".copy = .{ .{ .fetch = .{ .url = ";
+    const pin = ", .sha256 = \"" ++ hash ++ "\" }";
+    const accepted = [_][]const u8{
+        "\"https://e.example/t.gz\"" ++ pin ++ ", .to = \"/t\", .chmod = \"0644\" } }",
+        "\"http://127.0.0.1:8080/r/x.txt?a=b\"" ++ pin ++ ", .to = \"/opt/\" } }",
+        "\"http://localhost/x\"" ++ pin ++ ", .to = \"/x\", .chown = \"1:1\" } }",
+    };
+    inline for (accepted) |fields| {
+        try testing.expectEqual(ProblemKind.syntax, kind_of(m9_head ++ fetch ++ fields ++
+            " } } }"));
+    }
+    const url = "\"https://e.example/t.gz\"";
+    const refused = [_]struct { []const u8, ProblemKind }{
+        .{ "\"http://e.example/t.gz\"" ++ pin ++ ", .to = \"/t\" } }", .bad_fetch_url },
+        .{ "\"ftp://e.example/t.gz\"" ++ pin ++ ", .to = \"/t\" } }", .bad_fetch_url },
+        .{ "\"https://u@e.example/t\"" ++ pin ++ ", .to = \"/t\" } }", .bad_fetch_url },
+        .{ "\"https://e.example/\"" ++ pin ++ ", .to = \"/t/\" } }", .bad_fetch_url },
+        .{ "\"https://e.example/..\"" ++ pin ++ ", .to = \"/t/\" } }", .bad_fetch_url },
+        .{ url ++ ", .sha256 = \"" ++ hash[1..] ++ "\" }, .to = \"/t\" } }", .bad_sha256 },
+        .{ url ++ ", .sha256 = \"" ++ hash[0..63] ++ "A\" }, .to = \"/t\" } }", .bad_sha256 },
+        .{ url ++ " }, .to = \"/t\" } }", .missing_field },
+        .{ url ++ pin ++ " } }", .missing_field },
+        .{ url ++ pin ++ ", .src = .{\"a\"}, .to = \"/t\" } }", .fetch_and_source },
+        .{ url ++ pin ++ ", .from = \"step:b\", .to = \"/t\" } }", .fetch_and_source },
+        .{ url ++ pin ++ ", .to = \"/t\", .exclude = .{\"a\"} } }", .fetch_and_source },
+    };
+    inline for (refused) |case| {
+        try step_refused(fetch ++ case[0], case[1]);
+    }
+    const long_head = m9_head ++ fetch ++ "\"https://e.example/";
+    const long_tail = "\"" ++ pin ++ ", .to = \"/t\" } } } } }";
+    var long: [long_head.len + constants.registry_url_bytes_max + long_tail.len]u8 = undefined;
+    @memcpy(long[0..long_head.len], long_head);
+    @memset(long[long_head.len..][0..constants.registry_url_bytes_max], 'a');
+    @memcpy(long[long.len - long_tail.len ..], long_tail);
+    try testing.expectEqual(ProblemKind.bad_fetch_url, kind_of(&long));
+    try testing.expectEqualStrings("x.txt", file_mod.fetch_name("http://h/r/x.txt?q=/a").?);
 }
 
 test "each M9 refusal names its kind" {
