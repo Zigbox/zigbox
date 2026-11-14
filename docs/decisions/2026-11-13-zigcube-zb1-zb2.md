@@ -92,10 +92,13 @@ try pkg.check_tree(source.source(), memory, log, strict);
   (`TooManyFiles`). An apt tree that keeps past versions for two architectures fills 32 after
   16 releases; keep only the versions users need.
 - `dnf.write` takes rpms `rpm.write` made for the tree's architecture. Other bytes in a `Built`
-  (a cut rpm, a changed main header, another package's rpm, another architecture's) are refused
-  with `ForeignRpm` before anything is written (follow-up, 2026-11-14; it was an assertion). The
-  signature header is not compared, so a header signature placed with `.header_signature` passes.
-  The `dnf` fuzzer (`zig build fuzz -- dnf`) damages rpms and checks this.
+  are refused with `ForeignRpm` before anything is written (follow-up, 2026-11-14; it was an
+  assertion). Each rpm is written again from its package, with the build host its header names
+  and the header signature it carries, and compared whole, so a cut, a changed lead, header,
+  digest or payload, another package's rpm or another architecture's is refused. The header
+  signature's own bytes are not judged here; `check_tree` reads them. The rewrite costs about one
+  more rpm of memory per package, freed before the next. The `dnf` fuzzer
+  (`zig build fuzz -- dnf`) damages rpms, signed and unsigned, and checks this.
 - The same files are also the `zigbox_package` module. A compilation that links the runtime
   uses `zigbox.package` and never imports `zigbox_package` as well. Importing both fails the
   build with `error: file exists in modules 'zigbox' and 'zigbox_package'` (reviewer B checked

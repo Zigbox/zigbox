@@ -226,10 +226,11 @@ fn built_less(_: void, left: model.Built, right: model.Built) bool {
     return std.mem.order(u8, left.package.version, right.package.version) == .lt;
 }
 
-/// `built.bytes` is the rpm `rpm.write` makes for `built.package` on `architecture`: it splits,
-/// names a build host, and its main header is the one that package and build host give. The
-/// signature header is not compared, since the caller may have placed a header signature there.
-/// Anything else is `ForeignRpm`, a refusal: the bytes come from the caller.
+/// `built.bytes` is the rpm `rpm.write` makes for `built.package` on `architecture`, byte for
+/// byte, with the build host its main header names and the header signature, if any, its
+/// signature header carries (both are the caller's to choose). The rpm is written again with
+/// those and compared whole, so a changed lead, header, digest or payload is caught, not only a
+/// changed main header. Anything else is `ForeignRpm`, a refusal: the bytes come from the caller.
 fn check_built(
     memory: Allocator,
     architecture: model.Architecture,
@@ -239,8 +240,14 @@ fn check_built(
     const parts = rpm.split(built.bytes) orelse return error.ForeignRpm;
     const build_host = rpm.build_host_of(parts.main_header) orelse return error.ForeignRpm;
     model.check_line(build_host) catch return error.ForeignRpm;
-    const expected = try rpm.header_bytes(memory, built.package, build_host);
-    if (!std.mem.eql(u8, expected, parts.main_header)) return error.ForeignRpm;
+    const signature = rpm.binary_tag(parts.signature_header, rpm.sig_tag.rsa);
+    if (signature) |bytes| {
+        if (bytes.len > constants.openpgp_signature_bytes_max) return error.ForeignRpm;
+    }
+    const options: rpm.Options = .{ .build_host = build_host, .header_signature = signature };
+    const expected = try rpm.write(memory, built.package, options);
+    defer memory.free(expected);
+    if (!std.mem.eql(u8, expected, built.bytes)) return error.ForeignRpm;
 }
 
 /// The tree of one architecture: paths are relative to `rpm/<basearch>/`. Every rpm must be one
@@ -331,27 +338,38 @@ test "the tree has the rpm, three checksum-named metadata files and repomd.xml" 
 test "bytes rpm.write did not make for the package are refused, not trusted" {
     // Goal: `dnf.write` takes its rpms from the caller, so foreign bytes are a refusal
     // (`ForeignRpm`), never a panic or a tree that describes other bytes. Method: empty bytes,
-    // a deb, a cut rpm, one flipped byte in the main header, another package's rpm, an rpm of
-    // the other architecture; then an rpm whose signature header changed (as a placed header
-    // signature changes it) is still accepted.
+    // a deb, a cut rpm, one flipped byte in each of the main header, the signature header, the
+    // build host and the payload, another package's rpm, an rpm of the other architecture; then
+    // an rpm carrying a header signature, as the caller places one, is accepted.
     var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
     defer arena.deinit();
     const memory = arena.allocator();
     const sample = &@import("deb.zig").sample;
     const good = try rpm.write(memory, sample, .{ .build_host = "zigbox-build" });
     const parts = rpm.split(good).?;
+    const host_at = std.mem.indexOf(u8, good, "zigbox-build").?;
+    assert(host_at >= parts.header_start);
 
     var other = sample.*;
     other.version = "1.2.4";
     var aarch64 = sample.*;
     aarch64.architecture = .aarch64;
-    const flipped = try memory.dupe(u8, good);
-    flipped[parts.header_start + parts.main_header.len / 2] ^= 0x20;
+    const flips = [_]usize{
+        parts.header_start + parts.main_header.len / 2,
+        parts.header_start - 1,
+        host_at + "zigbox".len, // "zigbox=build": a build host rpm.write would take.
+        good.len - 1,
+    };
+    for (flips) |at| {
+        const flipped = try memory.dupe(u8, good);
+        flipped[at] ^= 0x10;
+        const built = [_]model.Built{.{ .package = sample, .bytes = flipped }};
+        try std.testing.expectError(error.ForeignRpm, write(memory, .x86_64, &built));
+    }
     const foreign = [_][]const u8{
         "",
         try @import("deb.zig").write(memory, sample),
         good[0 .. parts.header_end - 1],
-        flipped,
         try rpm.write(memory, &other, .{ .build_host = "zigbox-build" }),
     };
     for (foreign) |bytes| {
@@ -362,8 +380,12 @@ test "bytes rpm.write did not make for the package are refused, not trusted" {
     const wrong_tree = [_]model.Built{.{ .package = &aarch64, .bytes = elsewhere }};
     try std.testing.expectError(error.ForeignRpm, write(memory, .x86_64, &wrong_tree));
 
-    const resigned = try memory.dupe(u8, good);
-    resigned[parts.header_start - 1] ^= 0x01; // Padding or data of the signature header.
-    const accepted = [_]model.Built{.{ .package = sample, .bytes = resigned }};
+    const signature: [120]u8 = @splat(0x88); // Opaque here: `check_tree` reads signatures.
+    const signed = try rpm.write(
+        memory,
+        sample,
+        .{ .build_host = "other-build", .header_signature = &signature },
+    );
+    const accepted = [_]model.Built{.{ .package = sample, .bytes = signed }};
     _ = try write(memory, .x86_64, &accepted);
 }
