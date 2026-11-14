@@ -162,6 +162,10 @@ test {
     _ = @import("push/pack.zig");
     _ = @import("fuzz_pack.zig");
     _ = @import("push/pack_tests.zig");
+    _ = @import("lazy/index.zig");
+    _ = @import("lazy/seen.zig");
+    _ = @import("lazy/verify.zig");
+    _ = @import("lazy/index_tests.zig");
     _ = @import("push/export.zig");
     _ = @import("push/source.zig");
     _ = @import("push/diagnose.zig");
