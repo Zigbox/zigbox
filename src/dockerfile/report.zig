@@ -126,9 +126,23 @@ pub fn render_text(report: *const Report, output: []const u8, writer: *Writer) !
             report.dockerfile, dropped.line, dropped.what_text(), dropped.became_text(),
         });
     }
-    try writer.print("imported {d} steps from {d} stages (target {s}) to {s}; {d} flagged\n", .{
-        report.steps_count, report.stages_count, report.target, output, report.flagged_count(),
+    const steps = report.steps_count;
+    const stages = report.stages_count;
+    try writer.print("imported {d} {s} from {d} {s} (target {s}) to {s}; {d} flagged\n", .{
+        steps,
+        plural(steps, "step", "steps"),
+        stages,
+        plural(stages, "stage", "stages"),
+        report.target,
+        output,
+        report.flagged_count(),
     });
+}
+
+fn plural(count: u32, one: []const u8, many: []const u8) []const u8 {
+    assert(one.len > 0);
+    assert(many.len > one.len);
+    return if (count == 1) one else many;
 }
 
 /// The `zbx.import/1` document.
@@ -168,8 +182,9 @@ pub fn render_json(report: *const Report, output: []const u8, writer: *Writer) !
 const testing = std.testing;
 
 test "the report shows each step's line and flags, then what was dropped" {
-    // Goal: the text and JSON forms carry the same facts. Method: a report with a flagged
-    // step and a dropped line, rendered both ways and searched.
+    // Goal: the text and JSON forms carry the same facts, and the counts read in the singular
+    // for one. Method: a report with a flagged step and a dropped line, rendered both ways and
+    // searched, then with two steps and two stages.
     var report: Report = undefined;
     report.dockerfile = "Dockerfile";
     report.target = "tools";
@@ -202,4 +217,13 @@ test "the report shows each step's line and flags, then what was dropped" {
     const parsed = try std.json.parseFromSlice(std.json.Value, testing.allocator, json, .{});
     defer parsed.deinit();
     try testing.expectEqual(@as(i64, 1), parsed.value.object.get("flagged").?.integer);
+    try testing.expect(std.mem.endsWith(u8, text, "imported 1 step from 1 stage (target tools) " ++
+        "to t.zon; 1 flagged\n"));
+    report.steps_count = 2;
+    report.steps[1] = report.steps[0];
+    report.stages_count = 2;
+    writer = .fixed(&buffer);
+    try render_text(&report, "t.zon", &writer);
+    try testing.expect(std.mem.endsWith(u8, writer.buffered(), "imported 2 steps from 2 stages " ++
+        "(target tools) to t.zon; 2 flagged\n"));
 }
