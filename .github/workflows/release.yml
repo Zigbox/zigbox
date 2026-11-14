@@ -123,8 +123,11 @@ jobs:
           if [ "$EVENT" = workflow_dispatch ]; then
             version="$INPUT_VERSION"
             [[ "$version" =~ $re ]] || fail "'$version' is not a version such as 0.5.1"
-            # The release commit is the one that ADDED the notes (an edit of them does not count).
-            sha=$(git log --diff-filter=A --format=%H origin/main -- "docs/releases/$version.md" | tail -n 1)
+            # The release commit is the one that ADDED the notes (an edit of them does not count);
+            # --first-parent makes a merged pull request's merge commit, which ci ran on, the release
+            # commit, as workflow_run does.
+            sha=$(git log --first-parent --diff-filter=A --format=%H origin/main \
+              -- "docs/releases/$version.md" | tail -n 1)
             [ -n "$sha" ] || fail "no commit of main added docs/releases/$version.md"
             [ "$(zon_version "$sha")" = "$version" ] || fail "build.zig.zon at $sha is not $version"
             git merge-base --is-ancestor "$sha" origin/main || fail "$sha is not on main"
@@ -228,7 +231,7 @@ jobs:
           owner: Zigbox
           repositories: |
             homebrew-tap
-            zigbox.github.io
+            website
           permission-contents: write
           permission-actions: read
       - name: Read the tap and the site's deploy workflow
@@ -237,7 +240,7 @@ jobs:
         run: |
           set -euo pipefail
           gh api "repos/Zigbox/homebrew-tap/contents/Formula/zigbox.rb?ref=main" --jq .path
-          gh api "repos/Zigbox/zigbox.github.io/actions/workflows/deploy.yml" --jq .state
+          gh api "repos/Zigbox/website/actions/workflows/deploy.yml" --jq .state
 
   # The draft: notes from docs/releases/<version>.md, targeting the release commit. A draft makes
   # no tag. An existing draft is reused (its notes refreshed), so a re-run finishes the release.
@@ -383,6 +386,7 @@ jobs:
         run: |
           echo "KEYCHAIN=$RUNNER_TEMP/zbx-release.keychain-db" >> "$GITHUB_ENV"
           echo "SECRETS_DIR=$RUNNER_TEMP/zbx-release-secrets" >> "$GITHUB_ENV"
+          echo "APPLE_CA_DIR=$RUNNER_TEMP/zbx-apple-ca" >> "$GITHUB_ENV"
           echo "ZIG_GLOBAL_CACHE_DIR=$RUNNER_TEMP/zig-global" >> "$GITHUB_ENV"
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -394,6 +398,26 @@ jobs:
       # Before the keychain exists: this step downloads, and the build needs the file.
       - name: The VM kernel
         run: test -f .zig-cache/zbx-vm/kernel/Image || zig build vm-kernel-fetch
+      # Apple's public Developer ID intermediates, pinned by SHA-256: the .p12 holds only the
+      # leaf, and without its intermediate `find-identity -v` counts no valid identity. Fetched
+      # in a step of its own, so curl never runs with a secret in its environment.
+      - name: Apple's Developer ID intermediate certificates
+        run: |
+          export PATH=/usr/bin:/bin:/usr/sbin:/sbin
+          mkdir "$APPLE_CA_DIR"
+          # G2 (valid until 2031) and the original Developer ID CA (until 2027-02).
+          while read -r name sum; do
+            /usr/bin/curl -fsS --proto '=https' --tlsv1.2 --retry 3 \
+              -o "$APPLE_CA_DIR/$name" "https://www.apple.com/certificateauthority/$name"
+            got=$(/usr/bin/shasum -a 256 "$APPLE_CA_DIR/$name" | /usr/bin/cut -d ' ' -f 1)
+            if [ "$got" != "$sum" ]; then
+              echo "::error::mac: Apple's $name has SHA-256 $got, not the pinned $sum"
+              exit 1
+            fi
+          done <<'PINS'
+          DeveloperIDG2CA.cer f16cd3c54c7f83cea4bf1a3e6a0819c8aaa8e4a1528fd144715f350643d2df3a
+          DeveloperIDCA.cer 7afc9d01a62f03a2de9637936d4afe68090d2de18d03f29c88cfb0b1ba63587f
+          PINS
       - uses: ./.github/actions/find-draft
         env:
           GH_TOKEN: ${{ github.token }}
@@ -404,9 +428,12 @@ jobs:
       # Secrets come in through `env:` and are written only to mode-600 files that are deleted
       # in this step. `security import` takes the .p12 password only on argv, so the .p12 is
       # first re-wrapped under a random password made here; MAC_CERT_PASSWORD reaches only
-      # openssl, through its environment. The keychain is passed to codesign and notarytool by
-      # path; the next step also puts it on the user search list (mac-test showed codesign needs
-      # that), and the cleanup restores the list this step found.
+      # openssl, through its environment. The decrypted PEM goes through a mode-600 file, not a
+      # pipe: macOS openssl (LibreSSL) `pkcs12 -export` reads -in once for the key and again for
+      # the certificates, and stdin is empty the second time. Apple's intermediates, fetched in
+      # the step before, are imported so the leaf has its chain. The keychain is passed to
+      # codesign and notarytool by path; the next step also puts it on the user search list
+      # (mac-test showed codesign needs that), and the cleanup restores the list this step found.
       - name: Temporary keychain with the Developer ID certificate and the notary key
         env:
           MAC_CERT_P12: ${{ secrets.MAC_CERT_P12 }}
@@ -429,20 +456,25 @@ jobs:
           /usr/bin/security unlock-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN"
           printf '%s' "$MAC_CERT_P12" | /usr/bin/openssl base64 -d -A -out "$SECRETS_DIR/cert.p12"
           unset MAC_CERT_P12
-          /usr/bin/openssl pkcs12 -in "$SECRETS_DIR/cert.p12" -passin env:MAC_CERT_PASSWORD -nodes |
-            /usr/bin/openssl pkcs12 -export -passout env:WRAP_PASSWORD -out "$SECRETS_DIR/wrapped.p12"
+          /usr/bin/openssl pkcs12 -in "$SECRETS_DIR/cert.p12" -passin env:MAC_CERT_PASSWORD -nodes \
+            -out "$SECRETS_DIR/cert.pem"
           unset MAC_CERT_PASSWORD
-          /bin/rm -f "$SECRETS_DIR/cert.p12"
+          /usr/bin/openssl pkcs12 -export -in "$SECRETS_DIR/cert.pem" -inkey "$SECRETS_DIR/cert.pem" \
+            -passout env:WRAP_PASSWORD -out "$SECRETS_DIR/wrapped.p12"
+          /bin/rm -f "$SECRETS_DIR/cert.p12" "$SECRETS_DIR/cert.pem"
           /usr/bin/security import "$SECRETS_DIR/wrapped.p12" -k "$KEYCHAIN" -P "$WRAP_PASSWORD" -x -T /usr/bin/codesign
           /bin/rm -f "$SECRETS_DIR/wrapped.p12"
+          /usr/bin/security import "$APPLE_CA_DIR/DeveloperIDG2CA.cer" -k "$KEYCHAIN"
+          /usr/bin/security import "$APPLE_CA_DIR/DeveloperIDCA.cer" -k "$KEYCHAIN"
           # Lets codesign use the key from a session with no GUI (else errSecInternalComponent).
           /usr/bin/security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "$KEYCHAIN_PASSWORD" "$KEYCHAIN" > /dev/null
-          # `find-identity` exits 0 with no valid identity (e.g. the Developer ID intermediate
-          # is missing), so the count is checked. Signing is by this hash, not by name.
+          # `find-identity` exits 0 with no valid identity (e.g. the certificate is not issued
+          # by either Developer ID intermediate, or has expired), so the count is checked.
+          # Signing is by this hash, not by name.
           found=$(/usr/bin/security find-identity -v -p codesigning "$KEYCHAIN")
           valid=$(printf '%s\n' "$found" | sed -n 's/^ *\([0-9]*\) valid identities found$/\1/p')
           if [ "$valid" != "1" ]; then
-            echo "::error::mac: the release keychain has '$valid' valid signing identities, not 1 (is the Developer ID intermediate certificate in the .p12?)"
+            echo "::error::mac: the release keychain has '$valid' valid signing identities, not 1 (is MAC_CERT_P12 a current Developer ID Application certificate with its key, issued by Apple's Developer ID CA or G2 CA?)"
             exit 1
           fi
           # The hash is public certificate data, not a secret.
@@ -515,7 +547,7 @@ jobs:
             /usr/bin/security list-keychains -d user -s ${saved[@]+"${saved[@]}"} || true
           fi
           /usr/bin/security delete-keychain "$KEYCHAIN" || true
-          /bin/rm -rf "$KEYCHAIN" "$RUNNER_TEMP/keychain-list" "$RUNNER_TEMP/keychain-list.tmp" "$SECRETS_DIR" "$RUNNER_TEMP/gh-pinned" "$RUNNER_TEMP"/zig-aarch64-macos-* "$RUNNER_TEMP/zig-global" "$RUNNER_TEMP/macos-assets"
+          /bin/rm -rf "$KEYCHAIN" "$RUNNER_TEMP/keychain-list" "$RUNNER_TEMP/keychain-list.tmp" "$SECRETS_DIR" "$APPLE_CA_DIR" "$RUNNER_TEMP/gh-pinned" "$RUNNER_TEMP"/zig-aarch64-macos-* "$RUNNER_TEMP/zig-global" "$RUNNER_TEMP/macos-assets"
 
   # The last stop before the release is public: the draft holds exactly the assets (the Linux
   # ones, the sums, the signature, the Mac zip and the formula), each checked, and
@@ -563,7 +595,7 @@ jobs:
           owner: Zigbox
           repositories: |
             homebrew-tap
-            zigbox.github.io
+            website
           permission-contents: write
           permission-actions: read
       # The diff against the tap is checked now, while a refusal still leaves only a draft.
@@ -721,7 +753,7 @@ jobs:
           app-id: ${{ vars.RELEASE_APP_ID }}
           private-key: ${{ secrets.RELEASE_APP_PRIVATE_KEY }}
           owner: Zigbox
-          repositories: zigbox.github.io
+          repositories: website
           permission-contents: write
           permission-actions: read
       - name: Dispatch the site deploy and wait for it
@@ -729,7 +761,7 @@ jobs:
           GH_TOKEN: ${{ steps.app.outputs.token }}
         run: |
           set -euo pipefail
-          site=Zigbox/zigbox.github.io
+          site=Zigbox/website
           since=$(date -u -d '30 seconds ago' +%Y-%m-%dT%H:%M:%SZ)
           gh api -X POST "repos/$site/dispatches" -f event_type=site
           run_id=""
@@ -870,12 +902,32 @@ jobs:
         run: |
           echo "KEYCHAIN=$RUNNER_TEMP/zbx-release-test.keychain-db" >> "$GITHUB_ENV"
           echo "SECRETS_DIR=$RUNNER_TEMP/zbx-release-test-secrets" >> "$GITHUB_ENV"
+          echo "APPLE_CA_DIR=$RUNNER_TEMP/zbx-release-test-apple-ca" >> "$GITHUB_ENV"
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
       - uses: ./.github/actions/setup-zig-macos
       - name: The VM kernel
         run: test -f .zig-cache/zbx-vm/kernel/Image || zig build vm-kernel-fetch
+      # Apple's public Developer ID intermediates, pinned by SHA-256: imported here as in `mac`
+      # (the throwaway identity does not need them). Fetched in a step of its own, as in `mac`.
+      - name: Apple's Developer ID intermediate certificates
+        run: |
+          export PATH=/usr/bin:/bin:/usr/sbin:/sbin
+          mkdir "$APPLE_CA_DIR"
+          # G2 (valid until 2031) and the original Developer ID CA (until 2027-02).
+          while read -r name sum; do
+            /usr/bin/curl -fsS --proto '=https' --tlsv1.2 --retry 3 \
+              -o "$APPLE_CA_DIR/$name" "https://www.apple.com/certificateauthority/$name"
+            got=$(/usr/bin/shasum -a 256 "$APPLE_CA_DIR/$name" | /usr/bin/cut -d ' ' -f 1)
+            if [ "$got" != "$sum" ]; then
+              echo "::error::mac: Apple's $name has SHA-256 $got, not the pinned $sum"
+              exit 1
+            fi
+          done <<'PINS'
+          DeveloperIDG2CA.cer f16cd3c54c7f83cea4bf1a3e6a0819c8aaa8e4a1528fd144715f350643d2df3a
+          DeveloperIDCA.cer 7afc9d01a62f03a2de9637936d4afe68090d2de18d03f29c88cfb0b1ba63587f
+          PINS
       - name: Temporary keychain with a throwaway self-signed identity
         run: |
           set -euo pipefail
@@ -905,6 +957,8 @@ jobs:
           /usr/bin/security set-keychain-settings -t 3600 "$KEYCHAIN"
           /usr/bin/security unlock-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN"
           /usr/bin/security import "$SECRETS_DIR/wrapped.p12" -k "$KEYCHAIN" -P "$WRAP_PASSWORD" -x -T /usr/bin/codesign
+          /usr/bin/security import "$APPLE_CA_DIR/DeveloperIDG2CA.cer" -k "$KEYCHAIN"
+          /usr/bin/security import "$APPLE_CA_DIR/DeveloperIDCA.cer" -k "$KEYCHAIN"
           /usr/bin/security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "$KEYCHAIN_PASSWORD" "$KEYCHAIN" > /dev/null
           # codesign refuses an identity whose certificate is not trusted for code signing
           # (CSSMERR_TP_NOT_TRUSTED), so the throwaway certificate is trusted for code signing.
@@ -956,7 +1010,7 @@ jobs:
             /usr/bin/security list-keychains -d user -s ${saved[@]+"${saved[@]}"} || true
           fi
           /usr/bin/security delete-keychain "$KEYCHAIN" || true
-          /bin/rm -rf "$KEYCHAIN" "$RUNNER_TEMP/keychain-list" "$RUNNER_TEMP/keychain-list.tmp" "$SECRETS_DIR" "$RUNNER_TEMP"/zig-aarch64-macos-* "$RUNNER_TEMP/zig-global"
+          /bin/rm -rf "$KEYCHAIN" "$RUNNER_TEMP/keychain-list" "$RUNNER_TEMP/keychain-list.tmp" "$SECRETS_DIR" "$APPLE_CA_DIR" "$RUNNER_TEMP"/zig-aarch64-macos-* "$RUNNER_TEMP/zig-global"
 
   # Tries, on a scratch branch only, what the release depends on and the docs do not promise:
   # that gh uploads to, downloads from, edits and publishes a DRAFT by its tag, that a draft makes

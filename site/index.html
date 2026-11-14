@@ -224,12 +224,12 @@ footer .wrap{display:flex;justify-content:space-between;gap:12px;flex-wrap:wrap}
 <script>
 // ===== Site data: update STATUS and the milestone entries as work lands. =====
 const SITE = {
-  updated: "2026-11-12",
+  updated: "2026-11-13",
   sisterUrl: "../zigcube/", // Zigcube site
-  stage: "Pre-alpha · 0.5.0 released",
+  stage: "0.5.0 released · 0.5.1 public beta (Debian, Fedora) in release",
   stageStatus: "done",
 };
-// status: "done" | "wip" | "plan"
+// status: "done" | "wip" | "plan"; experimental: the release that ships it marked experimental
 const MILESTONES = [
   // M0's demo below is output recorded by demo-m0 in CI (Ubuntu 24.04 VM, KVM), trimmed where marked.
   // "#" lines ran as root in the VM; "$" lines ran as the unprivileged user demo.
@@ -282,10 +282,10 @@ const MILESTONES = [
   {id:"M8b", name:"Listener handoff", status:"done", slices:{green:1, total:1, note:"demo-m8b passed with KVM on main (20773e2); released in 0.5.0"}, goal:"Let a network-less container serve loopback while the host program holds the listening socket (--listen).",
    recorded:{url:"https://github.com/Zigbox/zigbox/actions/runs/43099904380", date:"2026-11-11"},
    demo:[["$","/home/demo/m8b_hello.py"],["","HELLO-DESCRIPTORS: 1"],["","HELLO-RC: 0"],["","HELLO-OUT: hello from outside"],["$","/home/demo/m8b_refuse.py"],["","REFUSED remote rc=125 error[ZBX-E0607]: --listen takes 127.0.0.1 and a port from 1 to 65535"],["","REFUSED gone rc=125 error[ZBX-E0609]: the listener could not be handed on to --listen-send"],["","demo-m8b: PASSED in 83 s"]]},
-  {id:"M9", name:"Dockerfile import", status:"wip", slices:{green:2, total:5, note:"slices 1 and 2 built and reviewed, merged as #122 and #134; slice 3 in progress; slices 4 and 5 not started"}, goal:"Translate a Dockerfile into a build file that zbx build runs; the Dockerfile is never executed.",
+  {id:"M9", name:"Dockerfile import", status:"wip", experimental:"0.5.1", slices:{green:2, total:5, note:"slices 1 and 2 built and reviewed, merged as #122 and #134; slice 3 in progress; slices 4 and 5 not started. 0.5.1 ships the builder additions as experimental, without zbx import"}, goal:"Translate a Dockerfile into a build file that zbx build runs; the Dockerfile is never executed.",
    demo:[]},
   // M10's demo below is output recorded by demo-m10 in CI (Ubuntu 24.04 VM, KVM), trimmed where marked; --gpu dri was not run (no render node in the guest)
-  {id:"M10", name:"Devices and GPUs", status:"done", slices:{green:4, total:4, note:"all slices built and reviewed; slice 4 merged as #140; demo-m10 passed with KVM in CI; --gpu dri not run (no render node in the guest)"}, goal:"Give one container a host device or GPU, with its supplementary groups kept.",
+  {id:"M10", name:"Devices and GPUs", status:"done", experimental:"0.5.1", slices:{green:4, total:4, note:"all slices built and reviewed; slice 4 merged as #140; demo-m10 passed with KVM in CI; --gpu dri not run (no render node in the guest); the real-GPU run not made; experimental in 0.5.1"}, goal:"Give one container a host device or GPU, with its supplementary groups kept.",
    recorded:{url:"https://github.com/Zigbox/zigbox/actions/runs/43468270943", date:"2026-11-13"},
    demo:[["#","demo-m10: STEP 1: doctor lists the spec and the device"],["$","runuser -u demo -- env … /home/demo/zbx doctor   (exit 0)"],["","gpu  ok  spec /etc/cdi/zbx-gpu.json  zigbox.test/gpu, 1 devices"],["","gpu  ok  device zigbox.test/gpu=0  every node can be opened by you"],["#","demo-m10: STEP 2: --device zigbox.test/gpu=0: node, variable, library"],["$","runuser -u demo -- env … /home/demo/zbx run --rootfs /home/demo/glibc --name gpu-dev --device zigbox.test/gpu=0 …   (exit 0)"],["","ZBXGPU=on"],["","LDP="],["","zbxgpu-probe: answer 42"],["","warning[ZBX-W0209]: groups show as nogroup inside the container"],["#","demo-m10: STEP 3: --gpu all and --gpu dri on this guest"],["","demo-m10: the guest has a render node: false"],["","error[ZBX-E0228]: --gpu found no GPU device to give"],["","demo-m10: NOT RUN: --gpu dri (the guest has no render node)"],["#","demo-m10: STEP 4: a user outside the node's group is refused"],["$","take demo out of render   (exit 0)"],["","Removing user demo from group render"],["","error[ZBX-E0225]: can't bind that device into the container"],["","  cause  you cannot open /dev/zbx-gpu for reading and writing: mode 0660, owner"],["","         0, group 992 (you are not in that group)"],["#","demo-m10: STEP 5: a YAML spec beside the JSON one"],["","gpu  gap spec /etc/cdi/zbx-yaml.yaml  refused: a YAML spec, which zbx does not read"],["","gpu  gap fix a YAML spec  write the spec as JSON, which zbx reads: nvidia-ctk cdi generate --format=json --output=/etc/cdi/nvidia.json"],["","error[ZBX-E0226]: can't use a CDI spec"],["","  cause  zbx-yaml.yaml: YAML specs are not read (at the document)"],["#","demo-m10: STEP 6: an image with no ldconfig"],["","warning[ZBX-W0208]: driver libraries found through LD_LIBRARY_PATH"],["#","demo-m10: STEP 7: a run without devices is as before"],["","UID=0"],["","demo-m10: PASSED in 34 s"]]},
 ];
@@ -322,7 +322,7 @@ $("#ms-count").textContent = `${done} of ${MILESTONES.length} shipped` + (wip?` 
 $("#progress").innerHTML = MILESTONES.map(m=>`<span class="${m.status}"></span>`).join("");
 $("#milestones").innerHTML = MILESTONES.map(m=>`
   <article class="ms" id="${m.id.toLowerCase()}">
-    <div class="meta"><span class="code">${m.id}</span><h3>${m.name}</h3><p>${m.goal}</p><span class="pill s-${m.status}">${label[m.status]}</span>${m.slices?`<span class="slices"><b>${m.slices.green} of ${m.slices.total}</b> ${m.slices.note}</span>`:""}</div>
+    <div class="meta"><span class="code">${m.id}</span><h3>${m.name}</h3><p>${m.goal}</p><span class="pill s-${m.status}">${label[m.status]}</span>${m.experimental?`<span class="pill s-wip">experimental in ${m.experimental}</span>`:""}${m.slices?`<span class="slices"><b>${m.slices.green} of ${m.slices.total}</b> ${m.slices.note}</span>`:""}</div>
     <div class="term"><div class="bar"><span>demo · ${m.id.toLowerCase()}</span>${m.recorded?`<a class="rec" href="${m.recorded.url}">✓ recorded in CI · ${m.recorded.date}</a>`:(m.status==="done"?"<span>recorded output</span>":'<span class="planned">planned output</span>')}</div><pre>${termHTML(m.demo)}</pre></div>
   </article>`).join("");
 $("#docs-list").innerHTML = DOCS.map(d=>{const ms=MILESTONES.find(x=>x.id===d.m); const st=ms?ms.status:"plan";
