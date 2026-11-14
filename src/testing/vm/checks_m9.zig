@@ -603,8 +603,8 @@ test "the import check refuses each way the import can go wrong alone" {
     try testing.expectError(error.ImportWrong, check_import("", around, 0));
     const errored = import_stderr ++ "error[ZBX-E0001]: x\n";
     try testing.expectError(error.ImportWrong, check_import("", errored, 0));
-    const step_line = "stage2-4  Dockerfile:17  run\nnot carried";
-    const extra = edited(&buffer, import_stderr, "not carried", step_line);
+    const step_line = "stage2-4  Dockerfile:17  run\nnot carried over as";
+    const extra = edited(&buffer, import_stderr, "not carried over as", step_line);
     try testing.expectError(error.ImportWrong, check_import("", extra, 0));
     const flagged = edited(&buffer, import_stderr, "; 0 flagged", "; 1 flagged");
     try testing.expectError(error.ImportWrong, check_import("", flagged, 0));
@@ -632,8 +632,10 @@ test "a fixture's translation: the footer, W0810 with a flagged step, nothing el
     try testing.expectError(error.ImportWrong, check_fixture_imported("", "build-1  x\n", 0));
     const elsewhere = "imported 1 step from 1 stage (target stage0) to t.zon; 0 flagged\n";
     try testing.expectError(error.ImportWrong, check_fixture_imported("", elsewhere, 0));
-    const errored = plain ++ "error[ZBX-E0001]: x\n";
+    const errored = plain ++ "warning[ZBX-W0811]: x\nerror[ZBX-E0001]: y\n";
     try testing.expectError(error.ImportWrong, check_fixture_imported("", errored, 0));
+    const no_footer = "stage0-1  Dockerfile:3  run to zbx.build.zon; 0 flagged\n";
+    try testing.expectError(error.ImportWrong, check_fixture_imported("", no_footer, 0));
     const errno = plain ++ "warning[ZBX-W0811]: errno 2\n";
     try testing.expectError(error.ImportWrong, check_fixture_imported("", errno, 0));
 }
@@ -666,6 +668,9 @@ test "the cache checks refuse each wrong row, count or total alone" {
     var miss_counted = report_of(&row_names, digest_a);
     miss_counted.misses = 1;
     try testing.expectError(error.CacheWrong, check_all_hits(&miss_counted));
+    var hit_short = report_of(&row_names, digest_a);
+    hit_short.hits = 6;
+    try testing.expectError(error.CacheWrong, check_all_hits(&hit_short));
     var hit_counted = report_of(&.{ "build-1", "stage2-1" }, digest_b);
     hit_counted.hits = 3;
     try testing.expectError(error.CacheWrong, check_extra(&hit_counted));
@@ -724,7 +729,8 @@ test "same bytes: one byte off, same length, fails" {
 test "the comment variant refuses a Dockerfile whose line 9 or 12 is not blank" {
     // Goal: with_comments never overwrites an instruction. Method: twelve lines, none blank.
     var buffer: [256]u8 = undefined;
-    const full = "FROM a\n" ** 12;
+    const four = "FROM a\nFROM a\nFROM a\nFROM a\n";
+    const full = four ++ four ++ four;
     try testing.expectEqual(null, with_comments(&buffer, full, "x", "y"));
 }
 
