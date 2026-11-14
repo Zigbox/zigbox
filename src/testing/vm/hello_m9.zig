@@ -185,20 +185,23 @@ fn first_build(session: *Session, out: *Io.Writer) !void {
         return fail_step(out, step2, "expected every step a miss", err);
     };
     remember_first(report.digest);
-    const said = try run_image(session, out, report.digest, "");
+    // The report's slices point into the session's output buffer, which the next command's
+    // output overwrites: keep to the copy.
+    const digest = first_digest();
+    const said = try run_image(session, out, digest, "");
     m7.check_stdout_is(said, greeting) catch |err| {
         return fail_step(out, step2, "expected the image to print its greeting", err);
     };
     // The brief's command: `--` replaces the image's cmd and keeps its entrypoint, so the path
     // is hello's first argument; main.go reads `--whoami` from its last.
-    const whoami = try run_image(session, out, report.digest, " -- /usr/local/bin/hello --whoami");
+    const whoami = try run_image(session, out, digest, " -- /usr/local/bin/hello --whoami");
     m7.check_stdout_is(whoami, "10001") catch |err| {
         return fail_step(out, step2, "expected the image to run as uid 10001", err);
     };
     const pattern = "{s} inspect {s} --output json";
-    const inspect = try common.format(session, pattern, .{ zh, report.digest });
+    const inspect = try common.format(session, pattern, .{ zh, digest });
     const shown = try state.expect_long_split(session, out, inspect, 0, short_s);
-    checks.check_inspect(shown.streams.stdout, report.digest) catch |err| {
+    checks.check_inspect(shown.streams.stdout, digest) catch |err| {
         return fail_step(out, step2, "expected the user, workdir and labels in inspect", err);
     };
     const tree = checks.inspect_tree(shown.streams.stdout) orelse {
