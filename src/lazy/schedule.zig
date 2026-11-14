@@ -602,12 +602,14 @@ pub const Schedule = struct {
 
     fn settle(schedule: *Schedule, index: u16, source: u8, result: Result) void {
         const entry = &schedule.pending[index];
-        assert(entry.state == .fetching or entry.state == .failed);
+        if (entry.state != .failed) assert(entry.state == .fetching);
         assert(source < schedule.sources_count);
         if (entry.state == .failed) {
             // The reader gave up, but a lie is still a lie: the source is not asked for this
             // object again, and it is named.
-            if (result == .lied) schedule.mark_bad(entry.object, entry.chunk, source, &entry.outcomes);
+            if (result == .lied) {
+                schedule.mark_bad(entry.object, entry.chunk, source, &entry.outcomes);
+            }
             return schedule.free_if_done(index);
         }
         entry.state = .queued;
@@ -630,7 +632,7 @@ pub const Schedule = struct {
     fn land(schedule: *Schedule, index: u16, result: Result) void {
         const entry = &schedule.pending[index];
         assert(entry.state == .queued);
-        assert(result == .landed or result == .local);
+        if (result != .local) assert(result == .landed);
         entry.state = .landed;
         schedule.settled += 1;
         if (result == .landed) {

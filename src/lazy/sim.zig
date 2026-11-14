@@ -46,7 +46,8 @@ const reads_per_reader_max = 12;
 const events_max = 1024;
 /// A stored deflate block's header: BFINAL 0, BTYPE 00, padding, LEN, NLEN.
 const stored_header_bytes = 5;
-const blob_bytes_max = content_bytes_max + objects_max * chunks_per_object_max * stored_header_bytes;
+const blob_bytes_max = content_bytes_max +
+    objects_max * chunks_per_object_max * stored_header_bytes;
 
 const attrs: object_mod.Attrs = .{ .mode = 0o644, .uid = 0, .gid = 0, .xattrs = &xattrs.empty };
 
@@ -116,14 +117,14 @@ pub const Sim = struct {
     files: fs_sim.SimFs,
     store: layout.Store,
     content: [content_bytes_max]u8,
-    content_len: usize,
+    content_len: u32,
     hashes: [objects_max * chunks_per_object_max]Digest,
     objects: [objects_max]lazy.Object,
-    starts: [objects_max]usize,
+    starts: [objects_max]u32,
     locations: [objects_max * chunks_per_object_max]lazy.Location,
     objects_count: u32,
     blob: [blob_bytes_max]u8,
-    blob_len: usize,
+    blob_len: u32,
     sources: [peers_max + 1]SimSource,
     peer_interfaces: [peers_max]lazy.Source,
     resolver: Resolver,
@@ -165,7 +166,7 @@ fn make_objects(sim: *Sim) void {
         random.bytes(bytes);
         if (size > 0) bytes[0] = @intCast(at); // Distinct objects.
         sim.starts[at] = sim.content_len;
-        sim.content_len += size;
+        sim.content_len += @intCast(size);
         var reader = object_mod.Reader.init(chunk_bytes);
         const hashes = sim.hashes[hashes_used..][0..chunks_per_object_max];
         if (size > 0) _ = reader.update(bytes, hashes);
@@ -179,8 +180,11 @@ fn make_objects(sim: *Sim) void {
             .hashes = sim.hashes[hashes_used..][0..count],
         };
         const locations = sim.locations[hashes_used..][0..count];
-        for (locations, 0..) |*location, chunk| location.* = append_block(sim, bytes, @intCast(chunk));
-        sim.objects[at] = .{ .wanted = wanted, .locations = if (sim.scenario.registry) locations else &.{} };
+        for (locations, 0..) |*location, chunk| {
+            location.* = append_block(sim, bytes, @intCast(chunk));
+        }
+        const served: []const lazy.Location = if (sim.scenario.registry) locations else &.{};
+        sim.objects[at] = .{ .wanted = wanted, .locations = served };
         hashes_used += count;
     }
     assert(sim.content_len <= content_bytes_max);
@@ -196,7 +200,7 @@ fn append_block(sim: *Sim, bytes: []const u8, chunk: u32) lazy.Location {
     std.mem.writeInt(u16, sim.blob[at + 1 ..][0..2], length, .little);
     std.mem.writeInt(u16, sim.blob[at + 3 ..][0..2], ~length, .little);
     @memcpy(sim.blob[at + stored_header_bytes ..][0..piece.len], piece);
-    sim.blob_len += stored_header_bytes + piece.len;
+    sim.blob_len += @intCast(stored_header_bytes + piece.len);
     return .{ .offset = at, .length = @intCast(stored_header_bytes + piece.len) };
 }
 
@@ -221,10 +225,21 @@ pub fn setup(sim: *Sim, seed: u64, scenario: Scenario) void {
     start_store(sim);
     make_objects(sim);
     for (&sim.sources, 0..) |*source, at| {
-        source.* = .{ .sim = sim, .index = @intCast(at), .behaviour = scenario.behaviours[at], .lied_told = 0, .calls = 0 };
+        source.* = .{
+            .sim = sim,
+            .index = @intCast(at),
+            .behaviour = scenario.behaviours[at],
+            .lied_told = 0,
+            .calls = 0,
+        };
     }
     for (sim.peer_interfaces[0..scenario.peers], 0..) |*peer, at| {
-        peer.* = .{ .context = &sim.sources[at], .name = peer_names[at], .fetch = peer_fetch, .lied = peer_lied };
+        peer.* = .{
+            .context = &sim.sources[at],
+            .name = peer_names[at],
+            .fetch = peer_fetch,
+            .lied = peer_lied,
+        };
     }
     const options: resolver_mod.Options = .{
         .store = &sim.store,
@@ -293,7 +308,13 @@ fn per_mille(random: std.Random, value: u16) bool {
     return random.uintLessThan(u16, 1000) < value;
 }
 
-fn peer_fetch(context: *anyopaque, id: Digest, index: u32, out: []u8, deadline_ms: u32) lazy.FetchError!usize {
+fn peer_fetch(
+    context: *anyopaque,
+    id: Digest,
+    index: u32,
+    out: []u8,
+    deadline_ms: u32,
+) lazy.FetchError!usize {
     const source = source_of(context);
     const sim = source.sim;
     try plan_call(source, deadline_ms);
@@ -342,7 +363,12 @@ fn find_object(sim: *const Sim, id: Digest) ?lazy.ObjectIndex {
     return null;
 }
 
-fn registry_fetch(context: *anyopaque, offset: u64, out: []u8, deadline_ms: u32) lazy.FetchError!usize {
+fn registry_fetch(
+    context: *anyopaque,
+    offset: u64,
+    out: []u8,
+    deadline_ms: u32,
+) lazy.FetchError!usize {
     const source = source_of(context);
     const sim = source.sim;
     assert(out.len > 0);
@@ -444,7 +470,8 @@ fn faults(sim: *Sim) void {
     if (sim.files.crashed) {
         sim.files.restart();
         sim.crashes += 1;
-        support.check_whole(&sim.files, root_path, chunk_bytes) catch @panic("store not whole after a crash");
+        support.check_whole(&sim.files, root_path, chunk_bytes) catch
+            @panic("store not whole after a crash");
     }
     if (sim.now_ms < sim.gc_at_ms) return;
     sim.gc_at_ms = next_gc(sim);
@@ -524,7 +551,7 @@ fn reader_wake(sim: *Sim, reader: *const Reader) u64 {
 }
 
 fn later(current: ?u64, candidate: u64, now: u64, stalled: *bool) ?u64 {
-    assert(current == null or current.? > now);
+    if (current) |at| assert(at > now);
     if (candidate <= now) {
         stalled.* = true;
         return current;
@@ -553,7 +580,8 @@ fn begin(sim: *Sim, reader: *Reader) void {
     assert(reader.reads_left > 0);
     const object = reader.object;
     const sequential = object < sim.objects_count and
-        reader.chunk + 1 < sim.objects[object].wanted.hashes.len and random.uintLessThan(u8, 4) != 0;
+        reader.chunk + 1 < sim.objects[object].wanted.hashes.len and
+        random.uintLessThan(u8, 4) != 0;
     if (sequential) {
         reader.chunk += 1;
     } else {
@@ -596,7 +624,7 @@ fn settle(sim: *Sim, reader: *Reader, step: resolver_mod.Step) void {
     assert(reader.reads_left > 0);
     switch (step) {
         .wait => |waiting| {
-            assert(waiting.until_ms > sim.now_ms or sim.resolver.schedule.stopping);
+            if (!sim.resolver.schedule.stopping) assert(waiting.until_ms > sim.now_ms);
             reader.state = .waiting;
             reader.waiting = waiting;
             return;
@@ -605,7 +633,8 @@ fn settle(sim: *Sim, reader: *Reader, step: resolver_mod.Step) void {
             // Property 1.
             const truth = chunk_bytes_of(sim, reader.object, reader.chunk);
             assert(length == truth.len);
-            if (!std.mem.eql(u8, reader.out[0..length], truth)) @panic("a read returned wrong bytes");
+            const right = std.mem.eql(u8, reader.out[0..length], truth);
+            if (!right) @panic("a read returned wrong bytes");
             sim.reads_ok += 1;
         },
         .failed => |err| failed(sim, reader, err),
@@ -627,10 +656,16 @@ fn failed(sim: *Sim, reader: *const Reader, err: lazy.ReadError) void {
         @panic("a read with every source down failed late");
     }
     const kind: lazy.Event.Kind = if (err == error.StoreFull) .store_full else .unavailable;
-    if (find_event(sim, kind, reader.object, reader.chunk) == null) @panic("a failed read has no event");
+    const event = find_event(sim, kind, reader.object, reader.chunk);
+    if (event == null) @panic("a failed read has no event");
 }
 
-pub fn find_event(sim: *const Sim, kind: lazy.Event.Kind, object: lazy.ObjectIndex, chunk: u32) ?*const Event {
+pub fn find_event(
+    sim: *const Sim,
+    kind: lazy.Event.Kind,
+    object: lazy.ObjectIndex,
+    chunk: u32,
+) ?*const Event {
     assert(sim.events_count <= events_max);
     for (sim.events[0..sim.events_count]) |*logged| {
         const event = &logged.event;
@@ -653,7 +688,8 @@ fn check_end(sim: *Sim) void {
     if (sim.reads_failed != 0) @panic("a read failed with honest sources");
     if (sim.scenario.fill) {
         for (sim.objects[0..sim.objects_count]) |*object| {
-            if (!land.object_is_whole(&sim.store, &object.wanted)) @panic("the fill left an object");
+            const whole = land.object_is_whole(&sim.store, &object.wanted);
+            if (!whole) @panic("the fill left an object");
         }
     }
 }
@@ -665,7 +701,8 @@ fn check_chunks(sim: *Sim) void {
     for (sim.objects[0..sim.objects_count], 0..) |*object, at| {
         for (0..object.wanted.hashes.len) |chunk| {
             const index: u32 = @intCast(chunk);
-            const length = land.read_local(&sim.store, &object.wanted, index, &out) catch |err| switch (err) {
+            const read = land.read_local(&sim.store, &object.wanted, index, &out);
+            const length = read catch |err| switch (err) {
                 error.NotLocal => continue,
                 error.Damaged, error.Unreadable => @panic("the store holds a damaged chunk"),
             };
@@ -720,7 +757,10 @@ pub fn random_scenario(random: std.Random) Scenario {
     if (scenario.honest) return scenario;
     for (&scenario.behaviours) |*behaviour| random_behaviour(random, behaviour);
     switch (random.uintLessThan(u8, 6)) {
-        0 => scenario.free_bytes = random.uintLessThan(u64, constants.lazy_store_free_bytes_min * 2),
+        0 => {
+            const free_max = constants.lazy_store_free_bytes_min * 2;
+            scenario.free_bytes = random.uintLessThan(u64, free_max);
+        },
         1 => scenario.bytes_max = random.uintLessThan(u64, content_bytes_max * 2),
         2 => scenario.crash_mutation = random.uintLessThan(u32, 400),
         3 => scenario.gc_per_mille = random.intRangeAtMost(u16, 1, 100),
@@ -763,13 +803,19 @@ pub fn fuzz_lazy_resolver(seed: u64) void {
     setup(&sim_state, seed, scenario);
     run(&sim_state);
     teardown(&sim_state);
-    assert(sim_state.reads_ok + sim_state.reads_failed > 0 or sim_state.objects_count > 0);
+    if (sim_state.objects_count == 0) assert(sim_state.reads_ok + sim_state.reads_failed > 0);
 }
 
 fn honest_scenario(peers: u8, registry: bool, fill: bool) Scenario {
     assert(peers <= peers_max);
-    assert(peers > 0 or registry);
-    return .{ .peers = peers, .registry = registry, .behaviours = @splat(.{}), .fill = fill, .honest = true };
+    if (!registry) assert(peers > 0);
+    return .{
+        .peers = peers,
+        .registry = registry,
+        .behaviours = @splat(.{}),
+        .fill = fill,
+        .honest = true,
+    };
 }
 
 test "sim: honest sources serve every read and the fill makes every object whole" {

@@ -50,7 +50,7 @@ pub const InitError = error{ OutOfMemory, TooManySources };
 /// What a reader step decided.
 pub const Step = union(enum) {
     /// The chunk is in `out`, verified, this many bytes.
-    done: usize,
+    done: u32,
     failed: lazy.ReadError,
     /// Wait for a wake-up or until this time (ms), then `read_poll` again.
     wait: Waiting,
@@ -125,7 +125,9 @@ pub const Resolver = struct {
         errdefer gpa.free(resolver.objects);
         var made: u32 = 0;
         errdefer for (resolver.memory[0..made]) |memory| free_slot(gpa, memory);
-        while (made < slots) : (made += 1) resolver.memory[made] = try alloc_slot(gpa, options.store);
+        while (made < slots) : (made += 1) {
+            resolver.memory[made] = try alloc_slot(gpa, options.store);
+        }
         resolver.schedule.init(
             options.catalog,
             resolver.objects,
@@ -133,7 +135,13 @@ pub const Resolver = struct {
             resolver.names[0..resolver.sources_count],
             options.registry != null,
         );
-        resolver.fill = .{ .object = 0, .chunk = 0, .whole = 0, .paused_until_ms = 0, .done = !options.fill };
+        resolver.fill = .{
+            .object = 0,
+            .chunk = 0,
+            .whole = 0,
+            .paused_until_ms = 0,
+            .done = !options.fill,
+        };
         resolver.io = null;
         resolver.mutex = .init;
         resolver.store_mutex = .init;
@@ -193,7 +201,8 @@ pub const Resolver = struct {
         resolver.io = io;
         errdefer resolver.stop();
         for (&resolver.threads, 0..) |*thread, slot| {
-            thread.* = try std.Thread.spawn(.{}, slot_loop, .{ resolver, @as(u32, @intCast(slot)) });
+            const slot_index: u32 = @intCast(slot);
+            thread.* = try std.Thread.spawn(.{}, slot_loop, .{ resolver, slot_index });
         }
     }
 
@@ -227,7 +236,12 @@ pub const Resolver = struct {
 
     /// Chunk `chunk` of object `object`, verified, into `out` (at least the chunk's length).
     /// Blocks until it is local or the read gives up (`lazy_read_deadline_ms` at most).
-    pub fn read(resolver: *Resolver, object: lazy.ObjectIndex, chunk: u32, out: []u8) lazy.ReadError!usize {
+    pub fn read(
+        resolver: *Resolver,
+        object: lazy.ObjectIndex,
+        chunk: u32,
+        out: []u8,
+    ) lazy.ReadError!usize {
         const io = resolver.io.?;
         assert(object < resolver.options.catalog.objects.len);
         var step = resolver.read_begin(object, chunk, out, now_ms(io));
@@ -273,7 +287,8 @@ pub const Resolver = struct {
     ) Step {
         const wanted = &resolver.options.catalog.objects[object].wanted;
         assert(chunk < wanted.hashes.len);
-        assert(out.len >= schedule_mod.chunk_length(wanted, resolver.options.store.chunk_bytes, chunk));
+        const chunk_bytes = resolver.options.store.chunk_bytes;
+        assert(out.len >= schedule_mod.chunk_length(wanted, chunk_bytes, chunk));
         if (resolver.read_store(object, chunk, out)) |length| {
             // Local already (resolved before, or another image's): no fetch, but the read still
             // counts towards sequential readahead.
@@ -281,7 +296,7 @@ pub const Resolver = struct {
             resolver.schedule.note_read(object, chunk, now);
             resolver.wake_workers();
             resolver.unlock();
-            return .{ .done = length };
+            return .{ .done = @intCast(length) };
         }
         return resolver.ask(object, chunk, now);
     }
@@ -306,7 +321,8 @@ pub const Resolver = struct {
         resolver.wake_workers();
         resolver.unlock();
         if (ticket) |held| {
-            return .{ .wait = .{ .ticket = held, .until_ms = now + constants.lazy_read_deadline_ms } };
+            const until_ms = now + constants.lazy_read_deadline_ms;
+            return .{ .wait = .{ .ticket = held, .until_ms = until_ms } };
         }
         resolver.drain_events();
         return .{ .failed = error.Unavailable };
@@ -336,7 +352,7 @@ pub const Resolver = struct {
                     resolver.schedule.note_read(object, chunk, now);
                     resolver.wake_workers();
                     resolver.unlock();
-                    return .{ .done = length };
+                    return .{ .done = @intCast(length) };
                 }
                 // Gone again (a gc, a damaged file): ask once more, a fresh entry.
                 return resolver.ask(object, chunk, now);
@@ -381,7 +397,10 @@ pub const Resolver = struct {
                 // A deadline the tick failed is news to its readers.
                 if (resolver.schedule.settled != settled) resolver.readers.broadcast(io);
                 if (resolver.slot_take(slot, &work, now)) break true;
-                const wait_ms = if (wake) |at| @max(at, now + 1) - now else constants.lazy_down_probe_ms;
+                const wait_ms = if (wake) |at|
+                    @max(at, now + 1) - now
+                else
+                    constants.lazy_down_probe_ms;
                 const timeout: Io.Timeout = .{ .duration = .{
                     .raw = .fromMilliseconds(@intCast(@min(wait_ms, constants.lazy_down_probe_ms))),
                     .clock = .awake,
@@ -485,7 +504,8 @@ pub const Resolver = struct {
         assert(work.job.count == 1);
         const object = &resolver.options.catalog.objects[work.objects[0]];
         const buffer = resolver.memory[slot].chunk;
-        const got = peer.fetch(peer.context, object.wanted.id, work.chunks[0], buffer, work.job.timeout_ms);
+        const id = object.wanted.id;
+        const got = peer.fetch(peer.context, id, work.chunks[0], buffer, work.job.timeout_ms);
         const length = got catch |err| {
             work.results[0] = switch (err) {
                 error.NotFound => .not_found,
@@ -531,17 +551,26 @@ pub const Resolver = struct {
                 work.results[at] = .lied; // A short answer: this chunk's bytes did not come.
                 continue;
             }
-            work.results[at] = resolver.inflate_and_keep(slot, work, at, segment_start, location.length);
+            const stored_length = location.length;
+            work.results[at] = resolver.inflate_and_keep(slot, work, at, segment_start, stored_length);
         }
     }
 
     /// Inflates the chunk whose compressed bytes are at `offset` in the slot's range buffer.
     /// `inflate_range` writes its trailer over the next chunk's first bytes, so they are kept
     /// and put back.
-    fn inflate_and_keep(resolver: *Resolver, slot: u32, work: *Work, at: usize, offset: u64, length: u32) Result {
+    fn inflate_and_keep(
+        resolver: *Resolver,
+        slot: u32,
+        work: *Work,
+        at: usize,
+        offset: u64,
+        length: u32,
+    ) Result {
         const memory = &resolver.memory[slot];
         const wanted = &resolver.options.catalog.objects[work.objects[at]].wanted;
-        const size = schedule_mod.chunk_length(wanted, resolver.options.store.chunk_bytes, work.chunks[at]);
+        const chunk_bytes = resolver.options.store.chunk_bytes;
+        const size = schedule_mod.chunk_length(wanted, chunk_bytes, work.chunks[at]);
         assert(size <= memory.chunk.len);
         assert(length > 0);
         const from: usize = @intCast(offset);
@@ -555,7 +584,13 @@ pub const Resolver = struct {
     }
 
     /// Checks `bytes` and keeps them; the free-space rule first.
-    fn keep(resolver: *Resolver, slot: u32, work: *const Work, at: usize, bytes: []const u8) Result {
+    fn keep(
+        resolver: *Resolver,
+        slot: u32,
+        work: *const Work,
+        at: usize,
+        bytes: []const u8,
+    ) Result {
         const object = &resolver.options.catalog.objects[work.objects[at]];
         assert(at < work.job.count);
         const free = resolver.options.free.query(resolver.options.free.context);
@@ -572,7 +607,8 @@ pub const Resolver = struct {
         resolver.lock_store();
         defer resolver.unlock_store();
         const put = resolver.memory[slot].put;
-        return switch (land_mod.land(resolver.options.store, put, &object.wanted, work.chunks[at], bytes)) {
+        const store = resolver.options.store;
+        return switch (land_mod.land(store, put, &object.wanted, work.chunks[at], bytes)) {
             .landed => .landed,
             .lied => unreachable, // Hashed just above.
             .content_mismatch => .content_mismatch,
@@ -605,7 +641,8 @@ pub const Resolver = struct {
         var looked: u32 = 0;
         resolver.lock_store();
         defer resolver.unlock_store();
-        while (plan.count < job_chunks_max and looked < constants.lazy_pending_max) : (looked += 1) {
+        const looked_max = constants.lazy_pending_max;
+        while (plan.count < job_chunks_max and looked < looked_max) : (looked += 1) {
             if (resolver.fill.object == objects.len) {
                 resolver.fill_pass_ended(now);
                 return;
@@ -673,7 +710,8 @@ pub const Resolver = struct {
                 batch[count] = resolver.schedule.pop_event() orelse break;
             }
             resolver.unlock();
-            for (batch[0..count]) |*event| resolver.options.log.event(resolver.options.log.context, event);
+            const log = resolver.options.log;
+            for (batch[0..count]) |*event| log.event(log.context, event);
             if (count < batch.len) return;
         }
     }
