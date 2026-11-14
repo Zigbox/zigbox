@@ -91,7 +91,8 @@ pub const Server = struct {
             .idle, .prepared => {},
             .serving => {
                 server.serving.wait();
-                _ = linux.close(server.fd);
+                // Through the host, which counted the descriptor when it was received.
+                server.host.close(@intCast(server.fd));
                 server.fd = -1;
             },
         }
@@ -186,7 +187,7 @@ pub const Server = struct {
             &server.thread_memory,
         );
         server.serving.handshake() catch |err| {
-            _ = linux.close(server.fd);
+            server.host.close(@intCast(server.fd));
             server.fd = -1;
             server.state = .idle;
             return switch (err) {
