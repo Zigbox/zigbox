@@ -21,10 +21,12 @@ pub const entry = ".{ .fetch = .{ .url = \"" ++ url ++ "\", .sha256 = \"" ++ hel
 /// The two steps of the import: the fetch, then the `RUN`.
 pub const step_names = [_][]const u8{ "stage0-1", "stage0-2" };
 
-/// `zbx import` of the fetch project: exit 0, nothing flagged, no warning, no error.
+/// `zbx import` of the fetch project: exit 0, nothing flagged, no warning, no error. The report
+/// is on stderr; stdout is empty.
 pub fn check_import(stdout: []const u8, stderr: []const u8, status: u8) Error!void {
     if (status != 0) return error.ImportWrong;
-    if (std.mem.indexOf(u8, stdout, "; 0 flagged\n") == null) return error.ImportWrong;
+    if (stdout.len != 0) return error.ImportWrong;
+    if (std.mem.indexOf(u8, stderr, "; 0 flagged\n") == null) return error.ImportWrong;
     if (std.mem.indexOf(u8, stderr, "warning[") != null) return error.ImportWrong;
     if (std.mem.indexOf(u8, stderr, "error[") != null) return error.ImportWrong;
 }
@@ -75,12 +77,13 @@ const testing = std.testing;
 
 test "the import: nothing flagged, no warning" {
     const report = "imported 2 steps from 1 stage (target stage0) to zbx.build.zon; 0 flagged\n";
-    try check_import(report, "", 0);
-    try testing.expectError(error.ImportWrong, check_import(report, "", 1));
+    try check_import("", report, 0);
+    try testing.expectError(error.ImportWrong, check_import("", report, 1));
+    try testing.expectError(error.ImportWrong, check_import(report, "", 0));
     const flagged = "imported 2 steps from 1 stage (target stage0) to zbx.build.zon; 1 flagged\n";
-    try testing.expectError(error.ImportWrong, check_import(flagged, "", 0));
-    const warned = "warning[ZBX-W0811]: EXPOSE\n";
-    try testing.expectError(error.ImportWrong, check_import(report, warned, 0));
+    try testing.expectError(error.ImportWrong, check_import("", flagged, 0));
+    const warned = "warning[ZBX-W0811]: EXPOSE\n" ++ report;
+    try testing.expectError(error.ImportWrong, check_import("", warned, 0));
 }
 
 test "the entry names the URL and the hash" {
