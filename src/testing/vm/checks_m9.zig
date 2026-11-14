@@ -344,7 +344,7 @@ const testing = std.testing;
 const digest_a = "b3:" ++ @as([64]u8, @splat('a'));
 const digest_b = "b3:" ++ @as([64]u8, @splat('b'));
 
-/// Recorded from the binary on 2026-11-14 (slice 3 and the copy chown work merged): stderr is
+/// Recorded from the binary on 2026-11-14 (chown built, so no copy notes): stderr is
 /// the report, then W0811; stdout is empty.
 const import_report =
     "build-1  Dockerfile:5  copy\n" ++
@@ -355,17 +355,15 @@ const import_report =
     "stage2-3  Dockerfile:16  copy\n" ++
     "not carried over as instructions:\n" ++
     "  Dockerfile:1  # syntax: ignored: zbx reads the file\n" ++
-    "  Dockerfile:16  COPY --chown: kept, but zbx build refuses it (E0802) for now\n" ++
-    "  Dockerfile:16  COPY --chmod: kept, but zbx build refuses it (E0802) for now\n" ++
     "  Dockerfile:19  EXPOSE: label org.zigbox.import.expose\n" ++
     "  Dockerfile:20  HEALTHCHECK: label org.zigbox.import.healthcheck\n" ++
     footer ++ "\n";
 
 const import_warning =
     "warning[ZBX-W0811]: parts of the Dockerfile did not carry over\n" ++
-    "  cause  not carried over: # syntax:1 (ignored: zbx reads the file), COPY\n" ++
-    "         --chown:16 (kept, but zbx build refuses it (E0802) for now), COPY\n" ++
-    "         --chmod:16 (kept, but zbx build refuses it (E0802) for now)...\n" ++
+    "  cause  not carried over: # syntax:1 (ignored: zbx reads the file), EXPOSE:19\n" ++
+    "         (label org.zigbox.import.expose), HEALTHCHECK:20 (label\n" ++
+    "         org.zigbox.import.healthcheck)\n" ++
     "  fix    nothing to do unless one matters; the report says what became of each\n";
 const import_stderr = import_report ++ import_warning;
 

@@ -26,6 +26,7 @@ const tree = @import("../store/tree.zig");
 const trees = @import("../store/trees.zig");
 const key_mod = @import("key.zig");
 const step = @import("step.zig");
+const volume = @import("../state/volume.zig");
 
 const testing = std.testing;
 const Digest = digest_mod.Digest;
@@ -594,23 +595,34 @@ test "clear-caches empties this group's caches under the exclusive lock; busy is
     // Goal: `zbx build --clear-caches` removes `build/caches/<group>` and nothing of another
     // group, and never under a running step. Method: plant two groups' caches; a shared hold
     // refuses with E0436 and removes nothing; without it the group's directory is gone.
+    // The groups are `log_group`'s, of two projects' build files.
     const fixture = try setup(43, "fetch");
-    const mine = store_root ++ "/build/caches/" ++ group;
-    const theirs = store_root ++ "/build/caches/fedcba9876543210";
+    var mine_group: [step.log_group_bytes]u8 = undefined;
+    var their_group: [step.log_group_bytes]u8 = undefined;
+    const caches = store_root ++ "/build/caches/";
+    var mine_buffer: [caches.len + step.log_group_bytes]u8 = undefined;
+    var theirs_buffer: [caches.len + step.log_group_bytes]u8 = undefined;
+    const group_mine = step.log_group(&mine_group, "/home/alice/hello/zbx.build.zon");
+    const group_theirs = step.log_group(&their_group, "/home/alice/other/zbx.build.zon");
+    const mine = try std.fmt.bufPrint(&mine_buffer, caches ++ "{s}", .{group_mine});
+    const theirs = try std.fmt.bufPrint(&theirs_buffer, caches ++ "{s}", .{group_theirs});
     files.put_dir(store_root ++ "/build", 0o755);
     files.put_dir(store_root ++ "/build/caches", 0o755);
-    inline for ([_][]const u8{ mine, theirs }) |path| {
+    var entry_buffer: [theirs_buffer.len + "/go/entry".len]u8 = undefined;
+    for ([_][]const u8{ mine, theirs }) |path| {
         files.put_dir(path, 0o755);
-        files.put_dir(path ++ "/go", 0o755);
-        files.put_file(path ++ "/go/entry", 0o644, "cached");
+        files.put_dir(try std.fmt.bufPrint(&entry_buffer, "{s}/go", .{path}), 0o755);
+        const entry = try std.fmt.bufPrint(&entry_buffer, "{s}/go/entry", .{path});
+        files.put_file(entry, 0o644, "cached");
     }
+    const mine_entry = try std.fmt.bufPrint(&entry_buffer, "{s}/go/entry", .{mine});
     const spec = spec_for(&fixture);
     const request: step.Request = .{
         .host = sim.interface(),
         .facts = &facts,
         .spec = &spec,
         .file = "zbx.build.zon",
-        .group = group,
+        .group = group_mine,
     };
     var other: layout.Store = undefined;
     other.at(sim.interface(), store_root);
@@ -618,15 +630,31 @@ test "clear-caches empties this group's caches under the exclusive lock; busy is
     diag.reset();
     try testing.expectError(error.Failed, step.clear_caches(&request, &workspace, &diag));
     try testing.expectEqual(@as(?codes.Code, .E0436), diag.code);
-    try testing.expect(files.kind_of(mine ++ "/go/entry") != null);
+    try testing.expect(files.kind_of(mine_entry) != null);
     lock.release(&other);
     diag.reset();
     try step.clear_caches(&request, &workspace, &diag);
     try testing.expect(diag.code == null);
     try testing.expect(files.kind_of(mine) == null);
-    try testing.expect(files.kind_of(theirs ++ "/go/entry") != null);
+    const their_entry = try std.fmt.bufPrint(&entry_buffer, "{s}/go/entry", .{theirs});
+    try testing.expect(files.kind_of(their_entry) != null);
     try step.clear_caches(&request, &workspace, &diag); // Nothing left: not an error.
     try testing.expectEqual(@as(u32, 0), files.open_count());
+}
+
+test "a build file's cache directory is a path a mount accepts" {
+    // Goal: `build/caches/<group>/<id>` passes the mount check of a host path, which refuses a
+    // ':'; the group was once "b3:" and 13 digits, and every step with a cache was E0012.
+    // Method: `log_group` of a real path, its 16 lowercase hex digits, the path checked.
+    var buffer: [step.log_group_bytes]u8 = undefined;
+    const got = step.log_group(&buffer, "/home/alice/hello/zbx.build.zon");
+    try testing.expectEqual(@as(usize, step.log_group_bytes), got.len);
+    for (got) |c| try testing.expect(std.ascii.isDigit(c) or (c >= 'a' and c <= 'f'));
+    const hex = Digest.of("/home/alice/hello/zbx.build.zon").hex();
+    try testing.expectEqualStrings(hex[0..step.log_group_bytes], got);
+    var path_buffer: [256]u8 = undefined;
+    const path = try std.fmt.bufPrint(&path_buffer, store_root ++ "/build/caches/{s}/go", .{got});
+    try testing.expectEqual(@as(?volume.TargetProblem, null), volume.path_problem(path));
 }
 
 test "a sweep of a store that does not exist yet is not an error" {

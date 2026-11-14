@@ -251,9 +251,9 @@ test "the report names each step's line, its network reason and what was dropped
 }
 
 test "the report notes each copy part that zbx build refuses for now" {
-    // Goal: a copy with --chown or --chmod, from an image, or with --exclude from a stage is
-    // kept in the build file but noted (W0811), since `zbx build` refuses it (E0802). Method:
-    // one COPY of each shape, and one plain copy from a stage, which gets no note.
+    // Goal: a copy from an image, or with --exclude from a stage, is kept in the build file but
+    // noted (W0811), since `zbx build` refuses it (E0802); --chown and --chmod are built, so
+    // they get none. Method: one COPY of each shape, and one plain copy from a stage.
     const ws = try workspace();
     defer testing.allocator.destroy(ws);
     var table: Table = .{};
@@ -272,8 +272,6 @@ test "the report notes each copy part that zbx build refuses for now" {
     _ = try translate.translate(ws, &options);
     const dropped = ws.report.dropped_slice();
     const wanted = [_]struct { line: u32, what: []const u8 }{
-        .{ .line = 4, .what = "COPY --chown" },
-        .{ .line = 4, .what = "COPY --chmod" },
         .{ .line = 5, .what = "COPY --from an image" },
         .{ .line = 6, .what = "COPY --exclude with --from a stage" },
     };

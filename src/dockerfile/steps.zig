@@ -563,26 +563,19 @@ pub fn copy(t: *Translator, instruction: *const Instruction) Error!void {
             break :image name;
         };
     }
-    note_unbuilt(t, line, instruction.keyword == .add, &given, from_text);
+    note_unbuilt(t, line, &given, from_text);
     const name = try begin(t, instruction, .copy);
     try put_copy(t, &given, from_text, sources, to);
     try end(t, name);
 }
 
-/// Notes the parts of a copy the build file keeps but `zbx build` does not run yet (graph.zig,
-/// the slice 2 cuts), so the import report says so before a build is refused with E0802.
-fn note_unbuilt(
-    t: *Translator,
-    line: u32,
-    is_add: bool,
-    given: *const CopyFlags,
-    from_text: ?[]const u8,
-) void {
+/// Notes the parts of a copy the build file keeps but `zbx build` does not run yet
+/// (`graph.copy_unrunnable`), so the import report says so before a build is refused with E0802.
+/// `--chown` and `--chmod` are built (`.chown`, `.chmod`), so they get no note.
+fn note_unbuilt(t: *Translator, line: u32, given: *const CopyFlags, from_text: ?[]const u8) void {
     assert(line > 0);
     if (from_text != null) assert(given.from != null);
     const became = "kept, but zbx build refuses it (E0802) for now";
-    if (given.chown != null) t.drop(line, if (is_add) "ADD --chown" else "COPY --chown", became);
-    if (given.chmod != null) t.drop(line, if (is_add) "ADD --chmod" else "COPY --chmod", became);
     const text = from_text orelse return;
     if (!std.mem.startsWith(u8, text, "step:")) {
         t.drop(line, "COPY --from an image", became);

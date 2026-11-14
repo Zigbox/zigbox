@@ -245,7 +245,8 @@ fn user(t: *Translator, instruction: *const Instruction) Error!void {
     const name = try words.word_of(text, &context, &t.out, t.refusal());
     if (name.len == 0) {
         return refuse(t.refusal(), .E0810, instruction.line, "Dockerfile:{d} has USER with " ++
-            "an empty value", .{instruction.line}, "name a user, or give the ARG a value", .{});
+            "an empty value", .{instruction.line}, "name a user, or give its variable a " ++
+            "value (`--build-arg` for an ARG; an ENV of the base image counts once pulled)", .{});
     }
     t.state().user = name;
 }
