@@ -48,6 +48,7 @@ jobs:
       demo_m8: ${{ steps.pick.outputs.demo_m8 }}
       demo_m8_packages: ${{ steps.pick.outputs.demo_m8_packages }}
       demo_m8b: ${{ steps.pick.outputs.demo_m8b }}
+      demo_m9: ${{ steps.pick.outputs.demo_m9 }}
       demo_m10: ${{ steps.pick.outputs.demo_m10 }}
     steps:
       # Two commits: on a pull request the checkout is the merge commit, whose first parent is the
@@ -641,6 +642,35 @@ jobs:
           key: vm-alpine-${{ hashFiles('src/testing/vm/alpine.zon') }}
       - name: Run the M8b demo
         run: zig build demo-m8b -Daccel=kvm
+
+  # The M9 demo (docs/demos/m9.md): zbx import of a Dockerfile and the builder additions, in a VM.
+  demo-m9:
+    name: demo-m9 (Ubuntu 24.04 VM, KVM, zbx import of a Dockerfile)
+    needs: changes
+    if: ${{ needs.changes.outputs.demo_m9 == 'true' }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    env:
+      ZBX_REGISTRY_MIRRORS: mirror.gcr.io
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: ./.github/actions/setup-zig
+      - name: Install QEMU
+        uses: ./.github/actions/install-apt
+        with:
+          packages: qemu-system-x86 qemu-utils
+      - name: Enable KVM
+        run: |
+          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' | sudo tee /etc/udev/rules.d/99-kvm4all.rules
+          sudo udevadm control --reload-rules
+          sudo udevadm trigger --name-match=kvm
+      - name: Cache the VM base image
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: .zig-cache/zbx-vm/ubuntu-24.04-server-cloudimg-amd64.img
+          key: vm-image-${{ hashFiles('src/testing/vm/lib/image.zon') }}
+      - name: Run the M9 demo
+        run: zig build demo-m9 -Daccel=kvm
 
   # The M10 demo (docs/demos/m10.md): `--device` and `--gpu` with a fake vendor spec, doctor's GPU
   # section and the refusals. The container runs from the pinned Alpine minirootfs, so nothing is

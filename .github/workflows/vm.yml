@@ -1,6 +1,6 @@
 # VM runs on demand, for work in progress. A push to a branch named vm/<demo>-<anything> runs that
 # one demo in the KVM VM, where it takes minutes instead of the quarter hour TCG takes in a build
-# container without KVM. <demo> is m0 to m6, m6b, m7, m8b (the listener handoff), m10 (the --device and --gpu demo), m8 (the slice 10 export check, then slice 7's packages on four guests, demo-m8-packages), z7 (the zigbox_vm hostfwd check), or all. Nothing else runs: no build matrix, no fuzzers
+# container without KVM. <demo> is m0 to m6, m6b, m7, m8b (the listener handoff), m9 (the zbx import demo), m10 (the --device and --gpu demo), m8 (the slice 10 export check, then slice 7's packages on four guests, demo-m8-packages), z7 (the zigbox_vm hostfwd check), or all. Nothing else runs: no build matrix, no fuzzers
 # (ci.yml does those on the PR). The run deletes its own scratch branch when it ends, pass or fail,
 # because a cloud session's git proxy cannot delete branches; the run and its logs stay readable.
 # A newer push to the same branch cancels the run it supersedes. See AGENTS.md, "Git".
@@ -34,10 +34,10 @@ jobs:
           name="${GITHUB_REF_NAME#vm/}"
           demo="${name%%-*}"
           case "$demo" in
-            m0|m1|m2|m3|m4|m5|m6|m6b|m7|m8b|m10|z7) steps="demo-$demo" ;;
+            m0|m1|m2|m3|m4|m5|m6|m6b|m7|m8b|m9|m10|z7) steps="demo-$demo" ;;
             m8) steps="demo-m8 demo-m8-packages" ;;
-            all) steps="demo-m0 demo-m1 demo-m2 demo-m3 demo-m4 demo-m5 demo-m6 demo-m6b demo-m7 demo-m8 demo-m8b demo-m10 demo-z7" ;;
-            *) echo "vm: branch $GITHUB_REF_NAME names no demo (vm/m0..m6-<x>, vm/m6b-<x>, vm/m7-<x>, vm/m8-<x>, vm/m8b-<x>, vm/m10-<x>, vm/z7-<x> or vm/all-<x>)"; exit 1 ;;
+            all) steps="demo-m0 demo-m1 demo-m2 demo-m3 demo-m4 demo-m5 demo-m6 demo-m6b demo-m7 demo-m8 demo-m8b demo-m9 demo-m10 demo-z7" ;;
+            *) echo "vm: branch $GITHUB_REF_NAME names no demo (vm/m0..m6-<x>, vm/m6b-<x>, vm/m7-<x>, vm/m8-<x>, vm/m8b-<x>, vm/m9-<x>, vm/m10-<x>, vm/z7-<x> or vm/all-<x>)"; exit 1 ;;
           esac
           # The slice 12 check pushes to GHCR from the runner and runs no guest demo.
           if [ "$name" = "m8-push-ghcr" ]; then steps=""; fi
