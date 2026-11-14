@@ -11,8 +11,9 @@
 //!   restart                  re-executes this program in place (same pid, a new image, no
 //!                            Zigbox state), keeping only the held sockets, and prints
 //!                            SUPERVISOR-PID then INHERITED with the slots it kept
-//!   churn ID NAME COUNT      a thread makes and closes COUNT sockets in NAME, then prints
-//!                            CHURNED ID and how many it made
+//!   churn ID NAME COUNT      a thread makes and closes COUNT sockets in NAME; it prints
+//!                            CHURNING ID after the first, then CHURNED ID and how many it
+//!                            made
 //!   ping                     prints PONG (the process is alive)
 //! Every thread uses a `HostReal` of its own: the real host counts its open files in it.
 //! Run as `c4-supervisor ptrace PID` (inside the container, from the rootfs), it tries to
@@ -171,18 +172,24 @@ fn adopt(name: []const u8) void {
 
 /// Re-executes this program with the held sockets kept: each held slot's descriptor loses
 /// close-on-exec and is named on the new command line as `ID=FD`. Listener slots are refused:
-/// their threads would not survive the exec.
+/// their threads would not survive the exec. If the exec fails, the descriptors get
+/// close-on-exec back, so the next helper or `zbx exec` this program forks inherits none.
 fn restart() void {
-    var words: [slots_max + 2]?[*:0]const u8 = @splat(null);
+    // The program name, the verb, one word per slot and the null that ends argv.
+    var words: [slots_max + 3]?[*:0]const u8 = @splat(null);
     var texts: [slots_max][16:0]u8 = undefined;
     words[0] = "c4-supervisor";
     words[1] = "inherit";
     var count: usize = 2;
     for (&slots, 0..) |*slot, id| {
-        if (slot.thread != null) return say("BAD a listener is open in slot {d}", .{id});
+        if (slot.thread != null) {
+            restore_close_on_exec();
+            return say("BAD a listener is open in slot {d}", .{id});
+        }
         const fd = slot.fd.load(.acquire);
         if (fd == free_fd) continue;
         if (linux.errno(linux.fcntl(fd, linux.F.SETFD, 0)) != .SUCCESS) {
+            restore_close_on_exec();
             return say("BAD fcntl {d}", .{id});
         }
         const text = std.fmt.bufPrintSentinel(&texts[id], "{d}={d}", .{ id, fd }, 0) catch {
@@ -191,14 +198,27 @@ fn restart() void {
         words[count] = text.ptr;
         count += 1;
     }
-    assert(count <= words.len - 1);
+    assert(count <= slots_max + 2);
+    assert(words[count] == null); // The null that ends argv.
     const argv: [*:null]const ?[*:0]const u8 = @ptrCast(&words);
     const envp: [*:null]const ?[*:0]const u8 = @ptrCast(process_environ.block.slice.ptr);
     const rc = linux.execve("/proc/self/exe", argv, envp);
+    restore_close_on_exec();
     say("BAD execve {s}", .{@tagName(linux.errno(rc))});
 }
 
-/// The new image's side of `restart`: takes back each `ID=FD`, close-on-exec again.
+/// Puts close-on-exec back on every held descriptor after a restart that did not happen.
+fn restore_close_on_exec() void {
+    for (&slots) |*slot| {
+        const fd = slot.fd.load(.acquire);
+        if (fd == free_fd) continue;
+        _ = linux.fcntl(fd, linux.F.SETFD, linux.FD_CLOEXEC); // A held descriptor is valid.
+    }
+}
+
+/// The new image's side of `restart`: takes back each `ID=FD`, close-on-exec again, once it has
+/// checked that the number names an open socket. A slot whose descriptor did not survive the
+/// exec, or names something else, is refused (`BAD inherit ID errno`) and left free.
 fn inherit(args: []const [*:0]const u8) void {
     assert(args.len >= 2);
     var buffer: [line_bytes_max]u8 = undefined;
@@ -209,12 +229,31 @@ fn inherit(args: []const [*:0]const u8) void {
         const id = std.fmt.parseInt(usize, word[0..split], 10) catch continue;
         const fd = std.fmt.parseInt(i32, word[split + 1 ..], 10) catch continue;
         if (id >= slots_max) continue;
-        _ = linux.fcntl(fd, linux.F.SETFD, linux.FD_CLOEXEC);
+        if (inherited_socket_errno(fd)) |errno| {
+            say("BAD inherit {d} {s}", .{ id, errno });
+            continue;
+        }
         slots[id].fd.store(fd, .release);
         const added = std.fmt.bufPrint(buffer[length..], " {d}", .{id}) catch break;
         length += added.len;
     }
     say("INHERITED{s}", .{buffer[0..length]});
+}
+
+/// Null when `fd` is an open socket, now close-on-exec; otherwise why not, as an errno name
+/// (`ENOTSOCK` for a descriptor that is open but not a socket).
+fn inherited_socket_errno(fd: i32) ?[]const u8 {
+    if (fd < 0) return "EBADF";
+    const set = linux.errno(linux.fcntl(fd, linux.F.SETFD, linux.FD_CLOEXEC));
+    if (set != .SUCCESS) return @tagName(set);
+    var buffer: linux.Statx = undefined;
+    const mask: linux.STATX = .{ .TYPE = true };
+    const flags: u32 = linux.AT.EMPTY_PATH;
+    const stat = linux.errno(linux.statx(fd, "", flags, mask, &buffer));
+    if (stat != .SUCCESS) return @tagName(stat);
+    if (!buffer.mask.TYPE) return "EIO";
+    if (buffer.mode & linux.S.IFMT != linux.S.IFSOCK) return "ENOTSOCK";
+    return null;
 }
 
 const Churn = struct { id: usize, name: []const u8, count: u32 };
@@ -226,6 +265,8 @@ fn churn_main(churn: *const Churn) void {
         const fd = make_socket(churn.name, "CHURN-FAILED") orelse break;
         _ = linux.close(fd);
         made += 1;
+        // Tells the script the churn is under way, so it can show its samples overlap it.
+        if (made == 1) say("CHURNING {d}", .{churn.id});
     }
     say("CHURNED {d} {d}", .{ churn.id, made });
 }

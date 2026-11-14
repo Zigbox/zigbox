@@ -95,6 +95,9 @@ pub fn check_net(output: []const u8) Error!void {
     if (!expect_value(output, "ADDRS:", "1")) return error.NetWrong;
 }
 
+/// How many `/proc` samples of the hostile step must fall inside the churn of 3000 helpers.
+const churn_samples_min: u32 = 3;
+
 /// From inside: the supervisor's pid is not there and can be neither signalled nor traced, no
 /// helper ever shows in /proc while thousands are made, `kill -1` leaves the supervisor and the
 /// container alive, and `/etc/hosts` is not writable.
@@ -112,6 +115,12 @@ pub fn check_hostile(output: []const u8) Error!void {
     if (!std.mem.endsWith(u8, traced, " SRCH")) return wrong;
     const churned = value_of(output, "CHURN:") orelse return wrong;
     if (!std.mem.eql(u8, churned, "CHURNED 5 3000")) return wrong;
+    if (!expect_value(output, "CHURN-START:", "CHURNING 5")) return wrong;
+    // Samples of an idle container would make PROCS-STEADY vacuous: enough must overlap the
+    // churn, each begun after its first helper and finished before its last.
+    const during = value_of(output, "SAMPLES-DURING-CHURN:") orelse return wrong;
+    const samples = std.fmt.parseInt(u32, during, 10) catch return wrong;
+    if (samples < churn_samples_min) return wrong;
     if (!expect_value(output, "PROCS-DURING-CHURN:", procs)) return wrong;
     if (!expect_value(output, "PROCS-STEADY:", "1")) return wrong;
     if (!expect_value(output, "KILL-ALL:", "ran")) return wrong;
@@ -281,7 +290,9 @@ const hostile_good =
     \\PROCS: 2
     \\KILL-SUPERVISOR: kill: (4242) - No such process | kill-rc=1 | ls: /proc/4242: No such file
     \\PTRACE-SUPERVISOR: PTRACE 4242 SRCH
+    \\CHURN-START: CHURNING 5
     \\CHURN: CHURNED 5 3000
+    \\SAMPLES-DURING-CHURN: 7
     \\PROCS-DURING-CHURN: 2
     \\PROCS-STEADY: 1
     \\KILL-ALL: ran
@@ -305,6 +316,9 @@ test "hostile fails on a visible, killed or traced supervisor, a helper seen, or
         .{ "PROCS: 2", "PROCS: 40" },
         .{ "PTRACE 4242 SRCH", "PTRACE 4242 SUCCESS" },
         .{ "CHURNED 5 3000", "CHURNED 5 12" },
+        .{ "CHURN-START: CHURNING 5", "CHURN-START: none" },
+        .{ "SAMPLES-DURING-CHURN: 7", "SAMPLES-DURING-CHURN: 2" },
+        .{ "SAMPLES-DURING-CHURN: 7", "SAMPLES-DURING-CHURN: x" },
         .{ "PROCS-DURING-CHURN: 2", "PROCS-DURING-CHURN: 2 3" },
         .{ "PROCS-STEADY: 1", "PROCS-STEADY: 0" },
     };
