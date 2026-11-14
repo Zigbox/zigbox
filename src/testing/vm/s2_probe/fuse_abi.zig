@@ -5,7 +5,8 @@
 const std = @import("std");
 const assert = std.debug.assert;
 
-/// The protocol the probe speaks: 7.31 is the first with `FUSE_MAX_PAGES`, which 1 MiB reads need.
+/// The protocol the probe speaks: 7.31, the brief's floor. `FUSE_MAX_PAGES`, which 1 MiB READs
+/// need, came in 7.28; 7.31 added `map_alignment` for DAX, which the probe does not use.
 pub const kernel_version_major: u32 = 7;
 pub const kernel_minor_version_min: u32 = 31;
 

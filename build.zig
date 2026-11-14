@@ -671,7 +671,8 @@ fn add_harness_imports(b: *std.Build, step: []const u8, module: *std.Build.Modul
 }
 
 /// demo-s2-probe's throwaway FUSE server (S2 slice 1), static x86_64 with no libc, embedded in
-/// the harness, which serves it to the guest.
+/// the harness, which serves it to the guest. It is x86_64 because the test VM's guest is; if an
+/// arm64 guest is added, this target must follow the guest's architecture.
 fn add_s2_probe_fixture(b: *std.Build, harness_module: *std.Build.Module) void {
     const target = b.resolveTargetQuery(.{ .cpu_arch = .x86_64, .os_tag = .linux });
     const probe = b.addExecutable(.{

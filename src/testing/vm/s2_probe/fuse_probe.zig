@@ -140,7 +140,7 @@ fn mount_and_serve(path: [:0]const u8) u8 {
     var byte: [1]u8 = undefined;
     const got = linux.read(pipe[0], &byte, 1);
     if (got != 1) {
-        say("fuse_probe: the server ended before it answered FUSE_INIT\n", .{});
+        say("fuse_probe: refused: the server ended without accepting FUSE_INIT\n", .{});
         return 1;
     }
     var line: [64]u8 = undefined;
@@ -151,10 +151,12 @@ fn mount_and_serve(path: [:0]const u8) u8 {
 }
 
 /// The serving loop: one request at a time until the kernel ends the connection (`ENODEV`).
-/// `ready` gets one byte once FUSE_INIT is answered, and is closed then.
+/// `ready` gets one byte once FUSE_INIT is accepted, and is closed then. A refused FUSE_INIT ends
+/// the server, which closes `ready` without a byte, so `mount` reports the refusal.
 fn serve(fd: linux.fd_t, ready: linux.fd_t) void {
     var ready_open = true;
     var requests: u64 = 0;
+    defer flush_read_log();
     while (true) {
         const got = linux.read(fd, &request_buffer, request_buffer.len);
         switch (linux.errno(got)) {
@@ -167,27 +169,46 @@ fn serve(fd: linux.fd_t, ready: linux.fd_t) void {
             },
         }
         requests += 1;
-        const opcode = handle(fd, request_buffer[0..got]);
+        const request = request_buffer[0..got];
         if (ready_open) {
-            if (opcode == .init) {
-                _ = linux.write(ready, "y", 1);
-                _ = linux.close(ready);
-                ready_open = false;
-            }
+            if (!accept_init(fd, request)) return;
+            _ = linux.write(ready, "y", 1);
+            _ = linux.close(ready);
+            ready_open = false;
+        } else {
+            handle(fd, request);
         }
     }
     say("fuse_probe: server: connection ended after {d} requests\n", .{requests});
 }
 
-/// Answers one request and returns its opcode.
-fn handle(fd: linux.fd_t, request: []const u8) abi.Opcode {
+/// Answers the first request, which the kernel always makes FUSE_INIT, and returns whether the
+/// server accepted it.
+fn accept_init(fd: linux.fd_t, request: []const u8) bool {
+    assert(request.len >= @sizeOf(abi.InHeader));
+    const header = std.mem.bytesToValue(abi.InHeader, request[0..@sizeOf(abi.InHeader)]);
+    assert(header.len == request.len);
+    const opcode: abi.Opcode = @fromBackingInt(@intCast(header.opcode));
+    if (opcode != .init) {
+        say("fuse_probe: refused: the kernel's first request was {d}, not INIT\n", .{
+            header.opcode,
+        });
+        reply_error(fd, &header, .PROTO);
+        return false;
+    }
+    return reply_init(fd, &header, request[@sizeOf(abi.InHeader)..]);
+}
+
+/// Answers one request after FUSE_INIT.
+fn handle(fd: linux.fd_t, request: []const u8) void {
     assert(request.len >= @sizeOf(abi.InHeader));
     const header = std.mem.bytesToValue(abi.InHeader, request[0..@sizeOf(abi.InHeader)]);
     assert(header.len == request.len);
     const body = request[@sizeOf(abi.InHeader)..];
     const opcode: abi.Opcode = @fromBackingInt(@intCast(header.opcode));
     switch (opcode) {
-        .init => reply_init(fd, &header, body),
+        // The connection is set up once; a second INIT is a kernel bug.
+        .init => reply_error(fd, &header, .PROTO),
         .lookup => reply_lookup(fd, &header, body),
         .getattr => reply_getattr(fd, &header),
         .open, .opendir => reply_open(fd, &header, opcode),
@@ -203,7 +224,6 @@ fn handle(fd: linux.fd_t, request: []const u8) abi.Opcode {
         .readlink => reply_error(fd, &header, .INVAL),
         else => reply_error(fd, &header, .NOSYS),
     }
-    return opcode;
 }
 
 fn reply_error(fd: linux.fd_t, header: *const abi.InHeader, err: linux.E) void {
@@ -238,15 +258,23 @@ fn write_reply(fd: linux.fd_t, bytes: []const u8) void {
     }
 }
 
-fn reply_init(fd: linux.fd_t, header: *const abi.InHeader, body: []const u8) void {
-    if (body.len < @sizeOf(abi.InitIn)) return reply_error(fd, header, .PROTO);
+/// Answers FUSE_INIT and returns whether the server accepted the kernel's protocol. A refusal is
+/// one line on stderr and an EPROTO reply.
+fn reply_init(fd: linux.fd_t, header: *const abi.InHeader, body: []const u8) bool {
+    if (body.len < @sizeOf(abi.InitIn)) {
+        say("fuse_probe: refused: INIT of {d} bytes is too short\n", .{body.len});
+        reply_error(fd, header, .PROTO);
+        return false;
+    }
     const in = std.mem.bytesToValue(abi.InitIn, body[0..@sizeOf(abi.InitIn)]);
     say("fuse_probe: server: INIT from kernel {d}.{d}, max_readahead {d}, flags 0x{x}\n", .{
         in.major, in.minor, in.max_readahead, in.flags,
     });
-    if (in.major != abi.kernel_version_major) return reply_error(fd, header, .PROTO);
-    if (in.minor < abi.kernel_minor_version_min) return reply_error(fd, header, .PROTO);
-    if (in.flags & abi.init_max_pages == 0) return reply_error(fd, header, .PROTO);
+    if (init_refusal(&in)) |reason| {
+        say("fuse_probe: refused: kernel FUSE {d}.{d} {s}\n", .{ in.major, in.minor, reason });
+        reply_error(fd, header, .PROTO);
+        return false;
+    }
     const wanted = abi.init_async_read | abi.init_do_readdirplus | abi.init_parallel_dirops |
         abi.init_max_pages;
     const out: abi.InitOut = .{
@@ -268,6 +296,16 @@ fn reply_init(fd: linux.fd_t, header: *const abi.InHeader, body: []const u8) voi
         out.major, out.minor, out.max_pages, out.flags,
     });
     reply_bytes(fd, header, std.mem.asBytes(&out));
+    return true;
+}
+
+/// Why the server cannot speak the kernel's protocol, or null when it can.
+fn init_refusal(in: *const abi.InitIn) ?[]const u8 {
+    if (in.major != abi.kernel_version_major) return "is not major version 7";
+    if (in.minor < abi.kernel_minor_version_min) return "is older than 7.31";
+    if (in.flags & abi.init_max_pages == 0) return "lacks max_pages";
+    assert(in.minor >= abi.kernel_minor_version_min);
+    return null;
 }
 
 fn attr_of(id: u64) abi.Attr {
@@ -284,7 +322,7 @@ fn attr_of(id: u64) abi.Attr {
         .mtimensec = 0,
         .ctimensec = 0,
         .mode = if (is_directory) linux.S.IFDIR | 0o755 else linux.S.IFREG | 0o644,
-        .nlink = if (is_directory) 2 else 1,
+        .nlink = if (is_directory) 2 + subdirectory_count(id) else 1,
         .uid = 0,
         .gid = 0,
         .rdev = 0,
@@ -293,6 +331,18 @@ fn attr_of(id: u64) abi.Attr {
     };
     assert(attr.ino == id);
     return attr;
+}
+
+/// A directory's subdirectories, each of which adds one link (its `..`) to the directory.
+fn subdirectory_count(id: u64) u32 {
+    assert(node_of(id).?.kind == .directory);
+    var count: u32 = 0;
+    for (nodes[1..]) |node| {
+        if (node.parent != id) continue;
+        if (node.kind == .directory) count += 1;
+    }
+    assert(count < nodes.len);
+    return count;
 }
 
 fn entry_of(id: u64) abi.EntryOut {
@@ -353,7 +403,7 @@ fn reply_read(fd: linux.fd_t, header: *const abi.InHeader, body: []const u8) voi
     const in = std.mem.bytesToValue(abi.ReadIn, body[0..@sizeOf(abi.ReadIn)]);
     const node = node_of(header.nodeid) orelse return reply_error(fd, header, .NOENT);
     if (node.kind != .file) return reply_error(fd, header, .ISDIR);
-    say("fuse_probe: server: READ {s} offset {d} size {d}\n", .{ node.name, in.offset, in.size });
+    log_read(node.name, in.offset, in.size);
     if (node.broken) return reply_error(fd, header, .IO);
     const start = @min(in.offset, node.size);
     const count: usize = @intCast(@min(node.size - start, in.size, read_bytes_max));
@@ -392,7 +442,12 @@ fn reply_readdirplus(fd: linux.fd_t, header: *const abi.InHeader, body: []const 
         position += 1;
         if (position <= in.offset) continue;
         const size = abi.direntplus_size(node.name.len);
-        if (used + size > room) break;
+        if (used + size > room) {
+            // Zero bytes would read as the end of the directory, so a buffer too small for even
+            // one remaining entry is an error.
+            if (used == 0) return reply_error(fd, header, .INVAL);
+            break;
+        }
         write_direntplus(data[used..][0..size], id, position, node);
         used += size;
     }
@@ -421,6 +476,9 @@ fn write_direntplus(slot: []u8, id: u64, position: u64, node: Node) void {
 }
 
 fn reply_statfs(fd: linux.fd_t, header: *const abi.InHeader) void {
+    // The probe script asks for STATFS before it reads the log, so the log is written here,
+    // outside any timed read.
+    flush_read_log();
     var out = std.mem.zeroes(abi.Kstatfs);
     out.files = nodes.len;
     out.bsize = 4096;
@@ -437,6 +495,29 @@ fn reply_listxattr(fd: linux.fd_t, header: *const abi.InHeader, body: []const u8
     if (in.size != 0) return reply_bytes(fd, header, &.{});
     const out: abi.GetxattrOut = .{ .size = 0, .padding = 0 };
     reply_bytes(fd, header, std.mem.asBytes(&out));
+}
+
+/// The READ log: one line per READ, kept in memory and written to stderr only on STATFS, when it
+/// is full, and when the connection ends, so a write to the log is never inside a timed read.
+var read_log: [64 * 1024]u8 = undefined;
+var read_log_used: usize = 0;
+
+fn log_read(name: []const u8, offset: u64, size: u32) void {
+    var line_buffer: [128]u8 = undefined;
+    const format = "fuse_probe: server: READ {s} offset {d} size {d}\n";
+    // 128 bytes hold the fixed text, a name of at most 16 bytes and two numbers of 20 digits.
+    const line = std.fmt.bufPrint(&line_buffer, format, .{ name, offset, size }) catch
+        unreachable;
+    if (read_log_used + line.len > read_log.len) flush_read_log();
+    assert(read_log_used + line.len <= read_log.len);
+    @memcpy(read_log[read_log_used..][0..line.len], line);
+    read_log_used += line.len;
+}
+
+fn flush_read_log() void {
+    assert(read_log_used <= read_log.len);
+    _ = linux.write(2, &read_log, read_log_used);
+    read_log_used = 0;
 }
 
 fn now_ns() u64 {
@@ -501,6 +582,37 @@ test "the tree's ids and parents are consistent" {
         try std.testing.expect(node.parent < id);
         try std.testing.expectEqual(Kind.directory, node_of(node.parent).?.kind);
     }
+}
+
+test "a directory counts its subdirectories as links" {
+    // Goal: `st_nlink` of a directory is 2 plus its subdirectories. Method: the root holds `sub`,
+    // which holds only a file.
+    try std.testing.expectEqual(@as(u32, 3), attr_of(1).nlink);
+    try std.testing.expectEqual(@as(u32, 2), attr_of(5).nlink);
+    try std.testing.expectEqual(@as(u32, 1), attr_of(2).nlink);
+}
+
+test "INIT is refused without max_pages, before 7.31 and for another major version" {
+    // Goal: each refusal names its reason and an acceptable kernel has none. Method: change one
+    // field of an acceptable INIT at a time.
+    var in = std.mem.zeroes(abi.InitIn);
+    in.major = 7;
+    in.minor = 39;
+    in.flags = abi.init_max_pages;
+    try std.testing.expectEqual(@as(?[]const u8, null), init_refusal(&in));
+    in.flags = 0;
+    try std.testing.expectEqualStrings("lacks max_pages", init_refusal(&in).?);
+    in.flags = abi.init_max_pages;
+    in.minor = 30;
+    try std.testing.expectEqualStrings("is older than 7.31", init_refusal(&in).?);
+    in.minor = 39;
+    in.major = 8;
+    try std.testing.expectEqualStrings("is not major version 7", init_refusal(&in).?);
+}
+
+test "every name fits a READ log line" {
+    // Goal: `log_read`'s 128-byte line holds every node's name. Method: check the longest.
+    for (nodes) |node| try std.testing.expect(node.name.len <= 16);
 }
 
 test {

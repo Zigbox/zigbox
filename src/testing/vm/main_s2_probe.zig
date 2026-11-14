@@ -3,9 +3,10 @@
 //! `demo` inside a user and mount namespace with the full subordinate id map, a `userxattr`
 //! overlay stacked on it, and the facts slice 4 depends on: the kernel, /dev/fuse's mode,
 //! AppArmor's userns setting, 1 MiB read latency, reads as uid 0 and uid 1000, copy-up, EIO
-//! reaching `cat`, and ENOTCONN once the server is killed. The guest script (`probe_script`)
-//! prints one `probe: <check>: ok` line per check; checks_s2_probe.zig judges it. Throwaway: the
-//! real server is slice 2's. `zig build demo-s2-probe` (KVM) or `-Daccel=tcg`.
+//! reaching `cat`, ENOTCONN once the server is killed, and what a cached file gives then. The
+//! guest script (`probe_script`) prints one `probe: <check>: ok` line per check;
+//! checks_s2_probe.zig judges it. Throwaway: the real server is slice 2's.
+//! `zig build demo-s2-probe` (KVM) or `-Daccel=tcg`.
 
 const std = @import("std");
 const Io = std.Io;
@@ -139,7 +140,9 @@ const probe_script =
     \\echo "probe: latency uncached: $R"
     \\R=$($P read $D/merged/big.bin 2>&1)
     \\echo "probe: latency cached: $R"
-    \\sizes() { sed -n "s/.*READ $1 offset [0-9]* size //p" $D/server.log | sort -n | uniq -c |
+    \\# STATFS makes the server write its READ log, which it keeps out of the timed reads.
+    \\sizes() { stat -f $D/lower > /dev/null
+    \\  sed -n "s/.*READ $1 offset [0-9]* size //p" $D/server.log | sort -n | uniq -c |
     \\  tr -s ' \n' ' '; }
     \\echo "probe: READ requests for big.bin (count size): $(sizes big.bin)"
     \\R=$($U1 $P read $D/merged/other.bin 2>&1) && ok "read as uid 1000 through the overlay" ||
@@ -158,16 +161,22 @@ const probe_script =
     \\  fail "lower unchanged" "$(cat $D/lower/hello.txt 2>&1)"
     \\echo new > $D/merged/new.txt && [ -f $D/upper/new.txt ] && ok "new file in the upper" ||
     \\  fail "new file in the upper" "missing"
-    \\T=$(touch $D/lower/x 2>&1) && fail "lower is read-only" "touch worked" ||
-    \\  { echo "probe: touch on the FUSE mount: $T"; ok "lower is read-only"; }
+    \\T=$(touch $D/lower/x 2>&1); echo "probe: touch on the FUSE mount: $T"
+    \\case "$T" in *"Read-only file system"*) ok "lower is read-only" ;;
+    \\  *) fail "lower is read-only" "$T" ;; esac
     \\T=$(cat $D/merged/broken.bin 2>&1 >/dev/null); echo "probe: cat broken.bin: $T"
     \\case "$T" in *"Input/output error"*) ok "EIO reaches cat" ;;
     \\  *) fail "EIO reaches cat" "$T" ;; esac
+    \\exec 3< $D/merged/big.bin
     \\kill -9 "$SERVER"; sleep 1
     \\T=$(cat $D/merged/sub/nested.txt 2>&1 >/dev/null); echo "probe: cat after kill: $T"
     \\case "$T" in *"not connected"*) ok "ENOTCONN after kill" ;;
     \\  *) fail "ENOTCONN after kill" "$T" ;; esac
     \\T=$(ls $D/lower 2>&1); echo "probe: ls on the FUSE mount after kill: $T"
+    \\T=$(cat $D/merged/big.bin 2>&1 >/dev/null); echo "probe: new open of cached big.bin: $T"
+    \\N=$(cat <&3 2> $D/err | wc -c)
+    \\echo "probe: fd opened before the kill: $N bytes of big.bin $(cat $D/err)"
+    \\exec 3<&-
     \\grep -v ' READ ' $D/server.log | sed 's/^/probe: server log: /' | head -40
     \\[ $FAILED = 0 ] && echo "probe: all ok" || { echo "probe: some checks FAILED"; exit 1; }
     \\

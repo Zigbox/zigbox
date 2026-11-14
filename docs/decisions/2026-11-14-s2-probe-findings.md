@@ -1,34 +1,57 @@
-# S2 probe: FUSE under a userxattr overlay works rootless on Ubuntu 24.04; buffered READs are 128 KiB
+# S2 probe: rootless FUSE under a userxattr overlay works on Ubuntu 24.04; READ sizes vary
 
-*Decided 2026-11-14, by S2 slice 1 (the probe), at the supervisor's request.*
+*Decided 2026-11-14, by S2 slice 1 (the probe), at the supervisor's request. Corrected the same
+day, before the slice merged, after its two reviews: the first version said every read reaches the
+server as 128 KiB READs, which is false.*
 
 The slice 1 probe (`zig build demo-s2-probe`; the guest script is in
 `src/testing/vm/main_s2_probe.zig`, the throwaway server in `src/testing/vm/s2_probe/`) passed on
-CI's KVM runner on 2026-11-14: [run 43626834366](https://github.com/Zigbox/zigbox/actions/runs/43626834366).
-It confirms item 1 of [2026-11-14-s2-lazy-start-brief.md](2026-11-14-s2-lazy-start-brief.md) on
-Ubuntu 24.04 (kernel 6.8.0, FUSE 7.39, `/dev/fuse` 0666). As user `demo` in a user and mount
-namespace with the full subordinate id map, a no-libc server mounted FUSE with `mount(2)`, a
-`userxattr` overlay stacked on it, and reads worked as uid 0 and uid 1000. Copy-up worked. An `EIO`
-reply reached `cat`. After the server was killed, reads got `ENOTCONN`. Run detail is in
-[docs/demos/s2.md](../demos/s2.md).
+CI's KVM runner on 2026-11-14:
+[run 43626834366](https://github.com/Zigbox/zigbox/actions/runs/43626834366), and again after the review fixes in RUN_FIX. It confirms item 1 of
+[2026-11-14-s2-lazy-start-brief.md](2026-11-14-s2-lazy-start-brief.md) on Ubuntu 24.04 (kernel
+6.8.0, FUSE 7.39, `/dev/fuse` 0666). As user `demo` in a user and mount namespace with the full
+subordinate id map, a no-libc server mounted FUSE with `mount(2)`, a `userxattr` overlay stacked
+on it, and reads worked as uid 0 and uid 1000. Copy-up worked. An `EIO` reply reached `cat`. After
+the server was killed, reads got `ENOTCONN`. Run detail is in [docs/demos/s2.md](../demos/s2.md).
 
-Two points are recorded:
+Four points are recorded:
 
-1. **Brief line 100 is overtaken: buffered reads do not arrive as 1 MiB READs.** The line reads
-   "`FUSE_MAX_PAGES` for 1 MiB reads". Every read through the overlay is a buffered read, and each
-   one reaches the server as 128 KiB READ requests: 16 MiB arrived as 128 requests. The kernel's
-   INIT offers `max_readahead` 131072, and the server may only lower that value. The bdi's
-   `read_ahead_kb` could raise it, but changing it needs root in the initial namespace, so that is
-   not rootless. A 1 MiB READ arrives only for `O_DIRECT` (`dd iflag=direct bs=1M` gave two of
-   them). The behaviour is the same on kernel 6.18 (FUSE 7.45).
+1. **A READ's size and offset are the reader's, bounded by `max_pages`.** The server negotiates
+   `max_pages` 256 (1 MiB), and any READ from one page up to that is normal. What decides the size
+   is how the file is read, not the server:
 
-   This changes nothing in the design: chunks stay 1 MiB and `FUSE_MAX_PAGES` stays. It does mean
-   the server (slice 2) must:
-   - fetch and verify a chunk once, and answer its eight 128 KiB READs from that one chunk;
-   - count consecutive 128 KiB READs as sequential when it decides on readahead
-     (`lazy_readahead_chunks`).
+   - buffered `read(2)`, e.g. `cat` (VM, 6.8; also 6.18): 128 KiB, the default readahead window
+     (the kernel's INIT offers `max_readahead` 131072);
+   - after `posix_fadvise(SEQUENTIAL)` (6.18): 256 KiB, because the overlay passes the advice to
+     the FUSE file, which doubles its readahead window;
+   - with the bdi's `read_ahead_kb` raised to 1024 (6.18, set as kuid 0, so not rootless): 1 MiB;
+   - a small `pread` (6.18): 4 KiB, at the reader's unaligned offset;
+   - `O_DIRECT` (VM, 6.8: `dd iflag=direct bs=1M` on the FUSE mount; 6.18: through the overlay):
+     1 MiB, and on 6.18 at offset 512 KiB.
 
-2. **AppArmor's userns restriction was off.** The probe ran with
+   The VM figures are from the probe runs above. The 6.18 figures were measured by the slice's
+   review in the Claude Code cloud container (kernel 6.18.44, FUSE 7.45), not in the VM; the first
+   version of this file stated "the same on 6.18" without saying so.
+
+   So a READ may start anywhere and may span two 1 MiB chunks. This changes nothing in the design
+   (chunks stay 1 MiB, `FUSE_MAX_PAGES` stays), but the server (slice 2) must:
+   - accept any READ size up to `max_pages` and any offset, and answer a READ that spans two chunks
+     from both, fetching and verifying each chunk once whatever number of READs it serves;
+   - detect sequential access from offsets (a READ starting where the previous one on that file
+     ended), never from READ sizes, when it decides on readahead (`lazy_readahead_chunks`).
+
+2. **`FUSE_MAX_PAGES` came in protocol 7.28, not 7.31.** The brief's line 100 says "7.31 or later:
+   `FUSE_MAX_PAGES`". 7.28 brought `FUSE_MAX_PAGES`; 7.31 brought `map_alignment` (DAX). The probe
+   still speaks 7.31, the brief's floor, which Ubuntu 24.04 (7.39) meets; slice 4 may lower the
+   floor to 7.28 if it needs nothing newer.
+
+3. **The page cache does not outlive the server.** After `kill -9` of the server, a new open of a
+   file whose pages were all cached, opened with `FOPEN_KEEP_CACHE`, fails with `ENOTCONN`: the
+   open itself goes to the dead connection (measured by the review on 6.18; the VM run RUN_FIX
+   records RESULT_NEW_OPEN). A descriptor opened before the kill: RESULT_OLD_FD in the same run.
+   Slice 4's "if the server dies first" handling must not assume that cached files stay readable.
+
+4. **AppArmor's userns restriction was off.** The probe ran with
    `kernel.apparmor_restrict_unprivileged_userns=0`, which the harness's provisioning sets for
    every Zigbox demo; Ubuntu ships 1. The shipped value was not tested. S2 needs nothing beyond
    the user namespace `zbx` already needs, so it adds no new requirement here.
