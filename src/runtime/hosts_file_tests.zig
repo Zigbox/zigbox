@@ -56,7 +56,8 @@ test "--hosts-file: the file is bound read-only at /etc/hosts and nothing is sta
     try testing.expect(problem == null);
     const table = &sim.world.tables[sim.world.processes[1].table];
     var path: [64]u8 = undefined;
-    const inside = std.fmt.bufPrint(&path, "{s}/etc/hosts", .{rootfs}) catch unreachable; // 64 bytes hold the rootfs path and the suffix.
+    // 64 bytes hold the rootfs path and the suffix.
+    const inside = std.fmt.bufPrint(&path, "{s}/etc/hosts", .{rootfs}) catch unreachable;
     const found = table.find(inside).?;
     try testing.expect(table.mounts[found].read_only);
     try no_leak(&sim, &before);
