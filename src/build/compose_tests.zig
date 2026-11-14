@@ -1990,3 +1990,53 @@ test "a signal during a copy's restamp ends the step before its cache entry" {
     files.faults.owner_gate = gate;
     try owned_nothing_recorded();
 }
+
+fn whole_project_parsed(source: []const u8) !void {
+    var buffer: [512]u8 = undefined;
+    const text = try std.fmt.bufPrint(&buffer, "{s}{s}{s}{s}{s}", .{
+        ".{ .version = 1, .exclude = .{ \"skip\" }, .image = .{}, .steps = .{ .{ .name = " ++
+            "\"put\", .base = \"",
+        locked_reference,
+        "\", .copy = .{ .{ .src = .{\"",
+        source,
+        "\"}, .to = \"/app/\" } } } } }\n",
+    });
+    var problem: file_mod.Problem = undefined;
+    const parsed = file_mod.parse(text, &loaded.file, &problem);
+    try testing.expectEqual(file_mod.ParseResult.parsed, parsed);
+}
+
+test "a copy of . takes the whole project as Docker's COPY . does, and * flattens it" {
+    // Goal: `.src = .{"."}` keeps nested directories (`src/a.txt` at `/app/src/a.txt`), takes
+    // dotfiles, honours the file's excludes, keeps its key from one build to the next, and is a
+    // different key from `*`, which lays each top-level directory's contents into `.to`
+    // (docs/decisions/2026-11-14-m9-copy-dot-is-whole-project.md). Method: build `.` twice, look
+    // at the output, then build `*` and look again.
+    registry_started(&registry.fixture.oci.amd64.digest);
+    try whole_project_parsed(".");
+    files.put_dir("/p", 0o755);
+    files.put_dir("/p/src", 0o755);
+    files.put_file("/p/src/a.txt", 0o644, "a\n");
+    files.put_file("/p/.env", 0o644, "e\n");
+    files.put_file("/p/skip", 0o644, "s\n");
+    set_path(&loaded.project, "/p");
+    set_path(&loaded.path, "/p/zbx.build.zon");
+    try testing.expect(try context.begin(0) == .hit);
+    try testing.expect(diag.code == null);
+    try testing.expectEqual(@as(u32, 1), context.misses);
+    const whole = composed.outputs[0];
+    _ = try owned_entry(whole, &.{ "app", "src", "a.txt" });
+    _ = try owned_entry(whole, &.{ "app", ".env" });
+    try testing.expectError(error.TestUnexpectedResult, owned_entry(whole, &.{ "app", "skip" }));
+    try testing.expectError(error.TestUnexpectedResult, owned_entry(whole, &.{ "app", "a.txt" }));
+    try testing.expect(try context.begin(0) == .hit);
+    try testing.expectEqual(@as(u32, 1), context.misses);
+    try testing.expect(whole.eql(composed.outputs[0]));
+    try whole_project_parsed("*");
+    try testing.expect(try context.begin(0) == .hit);
+    try testing.expectEqual(@as(u32, 2), context.misses);
+    const flat = composed.outputs[0];
+    try testing.expect(!whole.eql(flat));
+    _ = try owned_entry(flat, &.{ "app", "a.txt" });
+    try testing.expectError(error.TestUnexpectedResult, owned_entry(flat, &.{ "app", "src" }));
+}

@@ -9,6 +9,7 @@ const assert = std.debug.assert;
 const testing = std.testing;
 const constants = @import("../constants.zig");
 const translate = @import("translate.zig");
+const file_mod = @import("../build/file.zig");
 const report_mod = @import("report.zig");
 
 pub const fixtures = "../build/dockerfile_fixtures/";
@@ -91,6 +92,7 @@ pub const cases = [_]Case{
     .{ .dockerfile = "heredoc_redirect", .golden = "heredoc_redirect" },
     .{ .dockerfile = "network_forms", .golden = "network_forms" },
     .{ .dockerfile = "bind_hermetic", .golden = "bind_hermetic", .hermetic = true },
+    .{ .dockerfile = "copy_dot_spellings", .golden = "copy_dot_spellings" },
 };
 
 pub fn options_of(case: *const Case, dockerfile: []const u8, table: *Table) translate.Options {
@@ -147,6 +149,33 @@ test "every fixture translates to its golden, or is refused as its golden says" 
         }
     }
     if (failed) return error.TestUnexpectedResult;
+}
+
+test "every translated fixture parses back as a build file" {
+    // Goal: no translation is one the builder's parser refuses (0.5.1 refused `.src = .{"."}`
+    // and every `COPY .` golden stopped parsing). Method: each fixture that translates, its
+    // output through `file.parse`, which must take it whole.
+    const ws = try workspace();
+    defer testing.allocator.destroy(ws);
+    const parsed = try testing.allocator.create(file_mod.BuildFile);
+    defer testing.allocator.destroy(parsed);
+    var translated: u32 = 0;
+    inline for (cases) |case| {
+        var table: Table = .{};
+        const dockerfile = @embedFile(fixtures ++ case.dockerfile ++ ".Dockerfile");
+        const options = options_of(&case, dockerfile, &table);
+        if (translate.translate(ws, &options)) |output| {
+            var problem: file_mod.Problem = undefined;
+            const result = file_mod.parse(output, parsed, &problem);
+            if (result != .parsed) std.debug.print("fixture {s}: does not parse\n", .{case.golden});
+            try testing.expectEqual(file_mod.ParseResult.parsed, result);
+            translated += 1;
+        } else |err| {
+            try testing.expectEqual(error.Refused, err);
+            try testing.expect(!comptime exists(case.golden));
+        }
+    }
+    try testing.expect(translated > 0);
 }
 
 fn golden(comptime name: []const u8) []const u8 {

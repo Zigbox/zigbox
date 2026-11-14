@@ -263,7 +263,7 @@ fn value_fix(diag: *Diag, problem: *const file_mod.Problem) void {
         .bad_pattern => diag.fix(.{ .sentence = "write a glob: * ? [a-z] and ** work, a \\ " ++
             "quotes a byte, and no part is .." }),
         .bad_project_source => diag.fix(.{ .sentence = "name project paths plainly, with no " ++
-            "trailing /: for the whole project write .src = .{\"*\"} and a .to ending in /" }),
+            "./ or trailing /; .src = .{\".\"} copies the whole project" }),
         .bad_from => diag.fix(.{ .sentence = "write .from as step:<name> of a step, or as " ++
             "an image reference like alpine:3.20" }),
         .bad_source => diag.fix(.{ .sentence = "write .source as a path in the project, or " ++
@@ -380,7 +380,7 @@ fn describe_value(writer: *std.Io.Writer, kind: ProblemKind, word: []const u8) !
         .bad_mode => try writer.print("the mode \"{s}\" is not 3 or 4 octal digits", .{word}),
         .bad_pattern => try writer.print("the pattern \"{s}\" is not a valid glob", .{word}),
         .bad_project_source => try writer.print("the project source \"{s}\" has an empty " ++
-            "or . part; a project source is a relative path written plainly", .{word}),
+            "or . part; a project source is . or a relative path written plainly", .{word}),
         .bad_from => try writer.print(".from \"{s}\" is not step:<name> or an image " ++
             "reference", .{word}),
         .bad_source => try writer.print(".source \"{s}\" is not a path inside what it " ++

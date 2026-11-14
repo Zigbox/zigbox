@@ -477,12 +477,17 @@ fn step_refused(comptime fields: []const u8, kind: ProblemKind) !void {
 
 test "a project source with an empty or . part is refused, not asserted on" {
     // Goal: every spelling the input tree would not read as plain parts is refused at parse
-    // (0.5.1: `COPY . /app` crashed on an assertion in `input_tree.collect`). Method: each
-    // spelling, plain and glob; then the same spellings from a step, which stay accepted.
-    const spellings = [_][]const u8{ ".", "./a.txt", "a/", "a//b", "a/./b", "./*.go", "src/" };
+    // (0.5.1: `COPY . /app` crashed on an assertion in `input_tree.collect`), except `.`, the
+    // whole project. Method: each spelling, plain and glob; then `.` alone, and `.` beside
+    // another source, accepted; then the same spellings from a step, which stay accepted.
+    const spellings = [_][]const u8{ "./", "./a.txt", "a/", "a//b", "a/./b", "./*.go", "src/" };
     inline for (spellings) |spelling| {
         const fields = ".copy = .{ .{ .src = .{\"" ++ spelling ++ "\"}, .to = \"/app/\" } }";
         try step_refused(fields, .bad_project_source);
+    }
+    inline for ([_][]const u8{ "\".\"", "\".\", \"a.txt\"" }) |sources| {
+        const fields = ".copy = .{ .{ .src = .{" ++ sources ++ "}, .to = \"/app/\" } }";
+        try testing.expectEqual(ProblemKind.syntax, kind_of(m9_head ++ fields ++ " } } }"));
     }
     inline for ([_][]const u8{ ".", "/", "a/" }) |spelling| {
         const fields = ".copy = .{ .{ .from = \"step:b\", .src = .{\"" ++ spelling ++

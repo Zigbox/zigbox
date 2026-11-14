@@ -182,9 +182,17 @@ fn gen_step(gen: *Gen, shape: *const Shape, index: u32) void {
     gen.put(".{");
     gen_builder_fields(gen, shape, index);
     for (order, 0..) |which, at| {
-        gen.field(switch (which) {
+        // A step runs a command or copies, never both: a copy step writes `.copy` where `.run`
+        // would be.
+        const copies = which == .run and gen.random.uintLessThan(u8, 4) == 0;
+        gen.field(if (copies) ".copy" else switch (which) {
             inline else => |tag| "." ++ @tagName(tag),
         });
+        if (copies) {
+            gen_copy(gen);
+            gen.comma(@intCast(at), order.len);
+            continue;
+        }
         switch (which) {
             .name => gen.string(step_names[index]),
             .base => gen_step_base(gen, index),
@@ -201,6 +209,37 @@ fn gen_step(gen: *Gen, shape: *const Shape, index: u32) void {
             .network => gen.put(if (gen.random.boolean()) "true" else "false"),
         }
         gen.comma(@intCast(at), order.len);
+    }
+    gen.put(" }");
+}
+
+const hash_a = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+const hash_b = "fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210";
+
+/// Copy entries a build file can hold: the whole project (`.`), plain paths and globs, and a
+/// fetch pinned by its SHA-256, to a directory or to a file.
+const copy_entries = [_][]const u8{
+    ".{ .src = .{ \".\" }, .to = \"/app/\" }",
+    ".{ .src = .{ \".\" }, .to = \"/app\" }",
+    ".{ .src = .{ \"src\", \"*.go\" }, .to = \"/app/\", .exclude = .{ \"*_test.go\" } }",
+    ".{ .src = .{ \"go.mod\" }, .to = \"/app/go.mod\", .chmod = \"0644\" }",
+    ".{ .fetch = .{ .url = \"https://example.test/a.tar.gz\", .sha256 = \"" ++
+        hash_a ++
+        "\" }, .to = \"/opt/\" }",
+    ".{ .fetch = .{ .url = \"http://127.0.0.1:8080/r/tool\", .sha256 = \"" ++
+        hash_b ++
+        "\" }, .to = \"/usr/local/bin/tool\", .chmod = \"0755\", " ++
+        ".chown = \"0:0\" }",
+};
+
+/// One to three copy entries.
+fn gen_copy(gen: *Gen) void {
+    const count = 1 + gen.random.uintLessThan(u32, 3);
+    assert(count <= constants.build_copy_entries_max);
+    gen.put(".{ ");
+    for (0..count) |at| {
+        gen.put(copy_entries[gen.random.uintLessThan(usize, copy_entries.len)]);
+        gen.comma(@intCast(at), count);
     }
     gen.put(" }");
 }
@@ -502,6 +541,10 @@ const pieces = [_][]const u8{
     "\"HOME=/\"",
     "\"A=1\", \"A=2\"",
     ".version = 01",
+    "\".\"",
+    "\"./\"",
+    ".src = .{ \".\" }",
+    ".fetch = .{ .url = \"https://example.test/a\", .sha256 = \"00\" }",
 };
 
 /// Damages `text` into `damaged` one of several ways, and returns the damaged length.

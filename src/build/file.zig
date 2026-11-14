@@ -940,7 +940,7 @@ fn check_fetch(
 }
 
 /// Each `.src` entry is a pattern with no `..` part, and rooted (`/`) only for a tree; one
-/// from the project has no empty or `.` part either.
+/// from the project has no empty or `.` part either, except `.` itself, the whole project.
 fn check_sources(parser: *Parser, entry: *const CopyEntry, open: Token) Refused!void {
     assert(entry.src.given);
     if (entry.src.count == 0) return parser.fail(.empty_list, open, .copy, .src);
@@ -952,7 +952,7 @@ fn check_sources(parser: *Parser, entry: *const CopyEntry, open: Token) Refused!
         if (bad) return parser.fail_value(.bad_pattern, source, .copy, .src);
         // The input tree reads a project source as plain parts (`inputs.is_plain_relative`),
         // so a spelling it would read otherwise is refused here, not asserted on there.
-        if (entry.from == null and has_dot_or_empty_part(text)) {
+        if (entry.from == null and !is_whole_project(text) and has_dot_or_empty_part(text)) {
             return parser.fail_value(.bad_project_source, source, .copy, .src);
         }
     }
@@ -1653,6 +1653,13 @@ pub fn is_project_path(text: []const u8) bool {
     if (text[0] == '/') return false;
     if (std.mem.eql(u8, text, ".")) return true;
     return !has_parent_part(text) and !has_dot_or_empty_part(text);
+}
+
+/// Whether a project copy source is `.`, the whole project: what the glob `*` matches at its
+/// top, each match whole (docs/decisions/2026-11-14-m9-copy-dot-is-whole-project.md). It is the
+/// one spelling with a `.` part that the parser takes.
+pub fn is_whole_project(text: []const u8) bool {
+    return std.mem.eql(u8, text, ".");
 }
 
 fn has_dot_or_empty_part(text: []const u8) bool {
