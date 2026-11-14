@@ -226,6 +226,7 @@ test {
 }
 
 test {
+    _ = @import("fuzz_fuse_serve.zig");
     // The images: settings, the lock, running by name.
     _ = @import("registry/config.zig");
     _ = @import("lock_file.zig");
