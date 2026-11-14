@@ -25,6 +25,7 @@ const lock_file = @import("../lock_file.zig");
 const image_diagnose = @import("../image_diagnose.zig");
 const Diag = @import("../diag/diag.zig").Diag;
 const layout = @import("../store/layout.zig");
+const open = @import("../store/open.zig");
 const images = @import("../store/images.zig");
 const lock = @import("../store/lock.zig");
 const store_diagnose = @import("../store/diagnose.zig");
@@ -1374,19 +1375,25 @@ pub const Context = struct {
 
     /// Every `.fetch` whose blob the store lacks is downloaded here, before any step runs, and
     /// checked against its `.sha256` (`fetch.zig`). A blob already there (an earlier build, a
-    /// pull) is not asked for, so a warm store builds with no network.
+    /// pull) is not asked for, so a warm store builds with no network. The first download makes
+    /// the store if there is none yet, as a pull does: in a fresh store it comes before the base.
     pub fn download_fetches(context: *Context) Error!void {
         const file = &context.loaded.file;
         const store = context.store;
         const fetcher = &context.ws.fetcher;
         const blobs: blobs_mod.Blobs = .{ .fs = store.fs, .root = store.root_text() };
         assert(blobs.root.len > 0);
+        var store_ready = false;
         for (file.steps_slice()) |*step| {
             for (file.copy_entries(step)) |entry| {
                 const fetch = entry.fetch orelse continue;
                 const sha256 = digest_sha.Sha256.from_hex(file.text(fetch.sha256)).?; // Load.
                 fetcher.init(blobs, context.host.network());
                 if (fetcher.has(sha256)) continue;
+                if (!store_ready) {
+                    _ = open.check(store, .create, context.diag) catch return error.Failed;
+                    store_ready = true;
+                }
                 const url = file.text(fetch.url);
                 _ = fetcher.fetch(url, sha256) catch {
                     context.fetch_failed(file.text(step.name), url, sha256);

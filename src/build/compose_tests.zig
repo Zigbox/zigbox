@@ -2157,6 +2157,25 @@ test "a fetch that cannot be downloaded is E0820 naming the step and the URL" {
     try testing.expectEqual(codes.Code.E0820, diag.code.?);
 }
 
+test "a fetch into a store not made yet makes it first, as a pull does" {
+    // Goal: in a fresh data directory the fetch comes before the base's pull, so it is the
+    // first write to the store and must make it (demo-m9 step 7 found this). Method: a store
+    // root with no directory; download; the store's format file and the blob are there.
+    registry_started(&registry.fixture.oci.amd64.digest);
+    store.at(sim.interface(), "/data/zbx/fresh");
+    try testing.expect(files.kind_of("/data/zbx/fresh") == null);
+    const pinned = oci_digest.Sha256.of(fetch_payload);
+    const hex = pinned.hex();
+    try fetch_parsed("http://127.0.0.1:8080/hello.txt", &hex, "/opt/", "");
+    try fetches_downloaded();
+    try testing.expect(diag.code == null);
+    try testing.expectEqual(@as(u32, 1), fetch_wire.requests);
+    try testing.expect(files.kind_of("/data/zbx/fresh/store.zon") != null);
+    const blobs: blobs_mod.Blobs = .{ .fs = store.fs, .root = store.root_text() };
+    var path: @import("../store/fs.zig").PathBuf = undefined;
+    try testing.expect(files.kind_of(blobs.final_path(&path, pinned)) != null);
+}
+
 test "a blob damaged after its download is E0511 when the copy reads it, and no entry is made" {
     // Goal: fetch_tree checks the SHA-256 again as it reads, so damage on disk never reaches a
     // step. Method: put other bytes under the pinned hash's name; begin the copy step.
