@@ -333,11 +333,11 @@ test "the package writer's surface is exactly what the decision names" {
     // The check exposes nothing of the OpenPGP module: no test key, no signing error.
     try std.testing.expectEqual(1, std.meta.fieldNames(package.CheckOptions).len);
     try std.testing.expect(@hasField(package.CheckOptions, "signatures_required"));
-    const check_errors = @typeInfo(package.CheckError).error_set.?;
+    const check_errors = @typeInfo(package.CheckError).error_set.error_names.?;
     try std.testing.expectEqual(2, check_errors.len);
     for (check_errors) |found| {
-        const known = std.mem.eql(u8, found.name, "CheckFailed") or
-            std.mem.eql(u8, found.name, "OutOfMemory");
+        const known = std.mem.eql(u8, found, "CheckFailed") or
+            std.mem.eql(u8, found, "OutOfMemory");
         try std.testing.expect(known);
     }
 }
