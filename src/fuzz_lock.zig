@@ -12,7 +12,9 @@
 //!   3. Damaged text never crashes the reader. If it still parses, writing it and reading that
 //!      again gives the same entries.
 //!   4. Noise of any bytes, including NUL and bytes over 127, never crashes either reader.
-//!   5. A record with one tag, written as M4's version 1 (`.reference`), reads as that one tag.
+//!   5. A lock with pins (M9 slice 3c) is version 2 and its pins read back exactly, sorted by
+//!      file then step; a lock without pins is version 1.
+//!   6. A record with one tag, written as M4's version 1 (`.reference`), reads as that one tag.
 
 const std = @import("std");
 const assert = std.debug.assert;
@@ -67,7 +69,21 @@ fn random_manifest(random: std.Random) Sha256 {
     return Sha256.of(&bytes);
 }
 
+const pin_files = [_][]const u8{ "zbx.build.zon", "drift.build.zon", "sub/a b.zon", "q\"z" };
+const pin_steps = [_][]const u8{ "fetch", "use", "a", "steady-1" };
+
+fn same_pins(one: *const lock_file.Lock, other: *const lock_file.Lock) bool {
+    if (one.pin_count != other.pin_count) return false;
+    for (one.pins[0..one.pin_count], other.pins[0..other.pin_count]) |*left, *right| {
+        if (!std.mem.eql(u8, one.pin_file(left), other.pin_file(right))) return false;
+        if (!std.mem.eql(u8, one.pin_step(left), other.pin_step(right))) return false;
+        if (!left.key.eql(right.key) or !left.output.eql(right.output)) return false;
+    }
+    return true;
+}
+
 fn same_lock(one: *const lock_file.Lock, other: *const lock_file.Lock) bool {
+    if (!same_pins(one, other)) return false;
     if (one.count != other.count) return false;
     for (one.entries[0..one.count], other.entries[0..other.count]) |*left, *right| {
         if (!std.mem.eql(u8, one.reference(left), other.reference(right))) return false;
@@ -87,7 +103,27 @@ fn fuzz_lock_text(random: std.Random) void {
             unreachable; // Twelve entries of short references fit.
         };
     }
+    const pins_wanted = if (random.boolean()) 0 else random.uintAtMost(u32, 10);
+    for (0..pins_wanted) |_| {
+        const file = pin_files[random.uintLessThan(usize, pin_files.len)];
+        const step = pin_steps[random.uintLessThan(usize, pin_steps.len)];
+        first.put_pin(file, step, random_digest(random), random_digest(random)) catch {
+            unreachable; // Ten pins of short names fit.
+        };
+    }
+    for (1..first.pin_count) |index| {
+        const before = &first.pins[index - 1];
+        const after = &first.pins[index];
+        const files = std.mem.order(u8, first.pin_file(before), first.pin_file(after));
+        assert(files != .gt);
+        if (files == .eq) {
+            assert(std.mem.order(u8, first.pin_step(before), first.pin_step(after)) == .lt);
+        }
+    }
     const written = lock_file.render(&first, &text);
+    // 5. The version follows the pins.
+    const shown: []const u8 = if (first.pin_count == 0) "version = 1," else "version = 2,";
+    assert(std.mem.indexOf(u8, written, shown) != null);
     // 1. Written and read back.
     assert(lock_file.parse(written, &second) == null);
     assert(same_lock(&first, &second));
