@@ -8,6 +8,7 @@
 //! (`codes.exit_code_in`: blame for most commands, 125 to 127 for `run`), once, in `fail`.
 
 const std = @import("std");
+const builtin = @import("builtin");
 const assert = std.debug.assert;
 const build_options = @import("build_options");
 const constants = @import("constants.zig");
@@ -4147,7 +4148,10 @@ fn run_foreground(
 pub var lazy_server: ?*lazy_server_mod.Server = null;
 
 /// A lazy run's server: the real one, or one that refuses to serve (no real host).
+/// The real server is Linux only (FUSE, `host_real`). A host tool built for another system (the
+/// fuzzers on a Mac reach `cli.run`) must not analyse it, so the test is at comptime there.
 fn lazy_of(refusing: *RefusingLazy) runtime.Lazy {
+    if (comptime builtin.os.tag != .linux) return refusing.lazy();
     const server = lazy_server orelse return refusing.lazy();
     return server.lazy();
 }
@@ -4155,6 +4159,7 @@ fn lazy_of(refusing: *RefusingLazy) runtime.Lazy {
 /// After a lazy run: the summary line when the resolver served it, then the server's teardown,
 /// and the registry client's token wiped when the image came from one.
 fn lazy_finish(storage: *Storage) void {
+    if (comptime builtin.os.tag != .linux) return; // As in `lazy_of`: no real server there.
     const server = lazy_server orelse return;
     if (server.report()) |report| {
         storage.lazy_remote.lines.summary(&report, server.source_names());

@@ -93,6 +93,9 @@ jobs:
       # The pure trust surface Zigcube links must compile for wasm32-freestanding.
       - name: Trust surface for wasm32-freestanding
         run: zig build trust-wasm
+      # The fuzzers, which the macOS job builds natively, must compile for a Mac (analysis only).
+      - name: Fuzzers for aarch64-macos
+        run: zig build fuzz-macos
 
   tidy:
     name: tidy
