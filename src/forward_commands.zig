@@ -77,7 +77,9 @@ pub fn has_terminal(words: []const []const u8) bool {
 
 test "the trust, build and import commands are forwarded, inspect is not" {
     // Goal: the forwarding table. Method: each name, bare and after global options.
-    const names = [_][]const u8{ "key", "sign", "verify", "trust", "policy", "run", "exec", "build", "import" };
+    const names = [_][]const u8{
+        "key", "sign", "verify", "trust", "policy", "run", "exec", "build", "import",
+    };
     for (names) |name| {
         try std.testing.expect(forwarded(&.{name}));
         try std.testing.expect(forwarded(&.{ "--output", "json", name }));
