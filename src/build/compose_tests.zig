@@ -30,6 +30,7 @@ const cache = @import("cache.zig");
 const schedule = @import("schedule.zig");
 const verify = @import("../store/verify.zig");
 const gc = @import("../store/gc.zig");
+const store_lock = @import("../store/lock.zig");
 
 const assert = std.debug.assert;
 const testing = std.testing;
@@ -71,6 +72,9 @@ fn start() void {
     composed.outputs = @splat(Digest.of("unset"));
     composed.wants = @splat(.none);
     composed.locking.lock.clear();
+    // No zbx.lock on disk: a test that located one (`pinning_started`) must not leave it to the
+    // next, whose image record would read a file this world does not have.
+    composed.locking.located.exists = false;
     context = .{
         .host = sim.interface(),
         .facts = &facts,
@@ -2354,12 +2358,40 @@ fn fetch_answer(
         return;
     }
     fetch_requests += 1;
+    if (fetch_gc_probe) |*probe| probe.at_request = gc_would_lock();
     const known = std.mem.endsWith(u8, request.target, "/hello.txt");
     served.* = if (known) .{ .body = fetch_payload } else .{ .status = 404 };
 }
 
 /// The requests the fetch hosts answered since `fetches_wired`.
 var fetch_requests: u32 = 0;
+
+/// What a `store gc` would have found at a fetch's request and at its step's cache entry.
+const GcProbe = struct {
+    at_request: ?bool = null,
+    at_record: ?bool = null,
+    blob_at_record: bool = false,
+
+    fn look(raw: *anyopaque) void {
+        const probe: *GcProbe = @ptrCast(@alignCast(raw));
+        probe.at_record = gc_would_lock();
+        const blobs: blobs_mod.Blobs = .{ .fs = store.fs, .root = store.root_text() };
+        var path: @import("../store/fs.zig").PathBuf = undefined;
+        probe.blob_at_record = files.kind_of(blobs.final_path(&path, fetch_pin())) != null;
+    }
+};
+
+/// Set by a test to have the fetch server record a `GcProbe.at_request`.
+var fetch_gc_probe: ?GcProbe = null;
+
+/// True if another open of the store's lock file, as `store gc`'s, gets it exclusively now.
+fn gc_would_lock() bool {
+    var storage: @import("../store/fs.zig").PathBuf = undefined;
+    const path = store.path(&storage, &.{store_lock.file_name});
+    const fd = store.fs.lock(path, true, "1 gc") catch return false;
+    store.fs.close(fd);
+    return true;
+}
 
 /// A copy step with one fetch entry; `extra` goes after `.to` (a `.chmod`, say).
 fn fetch_parsed(url: []const u8, sha256: []const u8, to: []const u8, extra: []const u8) !void {
@@ -2436,6 +2468,32 @@ test "a fetch lands at .to with Docker's remote ADD defaults, and its key never 
     try testing.expectError(error.TestUnexpectedResult, owned_entry(composed.outputs[0], &.{
         "opt", "hello.txt",
     }));
+}
+
+test "store gc cannot take the lock from a fetch's request to its step's cache entry" {
+    // Goal: a blob just downloaded cannot be removed by `store gc` before the cache entry that
+    // keeps it is written (the 3b review: fetch on a miss, under the store's shared lock).
+    // Method: the server, and a hook at the cache entry's rename, each try the store's lock
+    // exclusively from another open file, as gc does; both are refused, and the blob is in
+    // `blobs/sha256` at the rename. After the build the lock is free again.
+    registry_started(&registry.fixture.oci.amd64.digest);
+    fetches_wired();
+    fetch_gc_probe = .{};
+    defer fetch_gc_probe = null;
+    const hex = fetch_pin().hex();
+    try fetch_parsed("http://127.0.0.1:8080/hello.txt", &hex, "/opt/", "");
+    files.hook = .{
+        .rename_to_contains = "/build/cache",
+        .context = &fetch_gc_probe.?,
+        .call = GcProbe.look,
+    };
+    try testing.expect(try context.begin(0) == .hit);
+    try testing.expect(diag.code == null);
+    try testing.expectEqual(@as(u32, 1), fetch_requests);
+    try testing.expectEqual(@as(?bool, false), fetch_gc_probe.?.at_request);
+    try testing.expectEqual(@as(?bool, false), fetch_gc_probe.?.at_record);
+    try testing.expect(fetch_gc_probe.?.blob_at_record);
+    try testing.expect(gc_would_lock());
 }
 
 test "a step that hits the cache never downloads: the blob gone and the URL dead do not matter" {
