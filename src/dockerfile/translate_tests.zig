@@ -101,6 +101,7 @@ pub const cases = [_]Case{
     .{ .dockerfile = "add_checksum_arg", .golden = "add_checksum_arg" },
     .{ .dockerfile = "add_checksum_http", .golden = "add_checksum_http" },
     .{ .dockerfile = "add_checksum_noname", .golden = "add_checksum_noname" },
+    .{ .dockerfile = "env_blank_name", .golden = "env_blank_name" },
 };
 
 pub fn options_of(case: *const Case, dockerfile: []const u8, table: *Table) translate.Options {
@@ -214,6 +215,7 @@ fn exists(comptime name: []const u8) bool {
         "add_checksum_git",
         "add_checksum_http",
         "add_checksum_noname",
+        "env_blank_name",
     };
     for (refusals) |refused| {
         if (std.mem.eql(u8, refused, name)) return false;
@@ -260,6 +262,30 @@ test "the step bound is E0815 one past it, and the bound itself translates" {
             try testing.expectEqual(.E0815, ws.refusal.code);
             try testing.expectEqual(steps + 1, ws.refusal.line);
         }
+    }
+}
+
+test "a blank name in ENV or LABEL is E0810, in every spelling" {
+    // Goal: a word whose `=` comes first never reaches the config as an empty key (the fuzzer
+    // once tripped `is_fixed_env`'s assertion on `ENV =x`). Method: each way to write a blank
+    // name, in both instructions, after a pair that is fine.
+    const ws = try workspace();
+    defer testing.allocator.destroy(ws);
+    var table: Table = .{};
+    const case: Case = .{ .dockerfile = "generated", .golden = "generated" };
+    const texts = [_][]const u8{
+        "FROM alpine:3.20\nENV A=b =x\n",
+        "FROM alpine:3.20\nENV A=b \"\"=x\n",
+        "FROM alpine:3.20\nARG EMPTY=\nENV A=b ${EMPTY}=x\n",
+        "FROM alpine:3.20\nLABEL a=b =x\n",
+        "FROM alpine:3.20\nLABEL a=b \"\"=x\n",
+    };
+    for (texts) |text| {
+        const options = options_of(&case, text, &table);
+        try testing.expectError(error.Refused, translate.translate(ws, &options));
+        try testing.expectEqual(.E0810, ws.refusal.code);
+        try testing.expect(ws.refusal.line >= 2);
+        try testing.expect(std.mem.indexOf(u8, ws.refusal.what_text(), "no name") != null);
     }
 }
 

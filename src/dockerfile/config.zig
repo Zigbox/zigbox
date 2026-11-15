@@ -64,6 +64,8 @@ fn plain(t: *Translator, instruction: *const Instruction) Refused![]const u8 {
 }
 
 /// `KEY=VALUE` words (or the legacy `KEY VALUE` when `legacy` and the first word has no `=`).
+/// A blank name (`=x`, `""=x`, `$EMPTY=x`) is refused, as Docker refuses it: every key returned
+/// is at least one byte.
 fn pairs(
     t: *Translator,
     instruction: *const Instruction,
@@ -77,6 +79,7 @@ fn pairs(
     const first = text[0..first_end];
     if (legacy and std.mem.indexOfScalar(u8, first, '=') == null) {
         const value = std.mem.trim(u8, text[first_end..], " \t");
+        if (first.len == 0) return blank_name(t, instruction, text);
         list.items[0] = try t.keep(instruction.line, first);
         values[0] = try words.word_of(value, &context, &t.out, t.refusal());
         list.count = 1;
@@ -89,10 +92,18 @@ fn pairs(
                 "in {s}, which is not KEY=VALUE", .{
                 instruction.line, word, instruction.keyword.upper(),
             }, "write KEY=VALUE, quoting a value with spaces", .{});
+        if (equals == 0) return blank_name(t, instruction, word);
         list.items[index] = word[0..equals];
         values[index] = word[equals + 1 ..];
     }
     return list.count;
+}
+
+fn blank_name(t: *Translator, instruction: *const Instruction, word: []const u8) Refused {
+    const keyword = instruction.keyword.upper();
+    return refuse(t.refusal(), .E0810, instruction.line, "Dockerfile:{d} has `{s}` in {s}, " ++
+        "which has no name before the `=`", .{ instruction.line, word, keyword }, "write a " ++
+        "name before the `=`", .{});
 }
 
 fn env(t: *Translator, instruction: *const Instruction) Error!void {

@@ -3759,8 +3759,9 @@ pub const registry = [_]Entry{
         \\--context) and translates it into a build file. It is refused when the file
         \\is not there, cannot be read or is larger than 256 KiB, and when its text is
         \\not a Dockerfile: an unknown instruction, a line continued past the end, a
-        \\heredoc with no end, a bad escape directive, or an instruction missing its
-        \\arguments.
+        \\heredoc with no end, a bad escape directive, an instruction missing its
+        \\arguments, or an ENV or LABEL word that is not KEY=VALUE or has no name
+        \\before the `=`.
         \\
         \\The cause names the line and what was expected there. Nothing is written: an
         \\import that is refused leaves the project as it was.
