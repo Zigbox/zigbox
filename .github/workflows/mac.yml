@@ -55,9 +55,10 @@ jobs:
         run: test -f .zig-cache/zbx-vm/kernel/Image || zig build vm-kernel-fetch
       - name: Every gate
         run: zig build check --summary all
-      # Pulls Alpine and nginx (Docker Hub, through ZBX_REGISTRY_MIRRORS when the runner sets it)
-      # and fetches the pinned Alpine minirootfs from dl-cdn.
-      - name: Demos M1 to M4 and M4b steps 2 to 4, from macOS
+      # Pulls Alpine, nginx, python and, for M9, the amd64 golang and Alpine of demo-m9's lock
+      # (Docker Hub, through ZBX_REGISTRY_MIRRORS when the runner sets it; the M9 steps need
+      # Rosetta) and fetches the pinned Alpine minirootfs from dl-cdn.
+      - name: Demos M1 to M4, M4b, M6b and M9, from macOS
         run: zig build demo-mac
       - name: Stop the machine
         if: always()

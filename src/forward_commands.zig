@@ -8,8 +8,8 @@ const constants = @import("constants.zig");
 
 /// The Linux `zbx` commands: forwarded into the VM, whole, to the zbx that runs there.
 pub const linux_commands = [_][]const u8{
-    "run",  "ps",  "stop", "commit", "store", "state",  "lock", "pull", "bundle", "logs",
-    "exec", "key", "sign", "verify", "trust", "policy",
+    "run",  "ps",  "stop", "commit", "store", "state",  "lock",  "pull",   "bundle", "logs",
+    "exec", "key", "sign", "verify", "trust", "policy", "build", "import",
 };
 
 /// The commands that may ask for a key's passphrase on a terminal. On the Mac they run with no
@@ -75,15 +75,16 @@ pub fn has_terminal(words: []const []const u8) bool {
     return !listed(&no_terminal_commands, operand);
 }
 
-test "the trust commands are forwarded, build and inspect are not" {
+test "the trust, build and import commands are forwarded, inspect is not" {
     // Goal: the forwarding table. Method: each name, bare and after global options.
-    for ([_][]const u8{ "key", "sign", "verify", "trust", "policy", "run", "exec" }) |name| {
+    const names = [_][]const u8{ "key", "sign", "verify", "trust", "policy", "run", "exec", "build", "import" };
+    for (names) |name| {
         try std.testing.expect(forwarded(&.{name}));
         try std.testing.expect(forwarded(&.{ "--output", "json", name }));
         try std.testing.expect(forwarded(&.{ "-v", "--output=json", name }));
     }
-    try std.testing.expect(!forwarded(&.{"build"}));
     try std.testing.expect(!forwarded(&.{"inspect"}));
+    try std.testing.expect(!forwarded(&.{"explain"}));
     try std.testing.expect(!forwarded(&.{ "--bogus", "key" }));
     try std.testing.expect(!forwarded(&.{}));
 }

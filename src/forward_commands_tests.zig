@@ -31,6 +31,8 @@ const command_sources = [_]struct { command: []const u8, source: []const u8 }{
     .{ .command = "run", .source = @embedFile("trust/exec_gate.zig") },
     .{ .command = "bundle", .source = @embedFile("bundle.zig") },
     .{ .command = "pull", .source = @embedFile("trust/gate.zig") },
+    .{ .command = "build", .source = @embedFile("build_commands.zig") },
+    .{ .command = "import", .source = @embedFile("import_commands.zig") },
 };
 
 test "every forwarded command that can ask for a passphrase runs with no terminal" {

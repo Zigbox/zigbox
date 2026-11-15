@@ -1,6 +1,7 @@
-//! `zig build demo-mac`: the milestone demos M1 to M4, steps 2 to 4 of M4b and the five steps of
-//! M6b (with `exec` and `logs` on a terminal, with signals and exit codes), driven from macOS
-//! through the macOS `zbx`, which runs them in its virtual machine. Each step is one shell
+//! `zig build demo-mac`: the milestone demos M1 to M4, steps 2 to 4 of M4b, the five steps of
+//! M6b (with `exec` and `logs` on a terminal, with signals and exit codes) and M9's import and
+//! build of its demo project, driven from macOS through the macOS `zbx`, which runs them in its
+//! virtual machine. Each step is one shell
 //! command line with what it must print and how it must end; the steps are the ones the Linux
 //! demos check (docs/demos/m1.md to m4.md), taken by number, so a step that passes on Linux and
 //! fails here is a difference between the two `zbx`es. The Linux demos drive a QEMU console
@@ -8,12 +9,33 @@
 //! shared; this table is the macOS side of the same steps.
 //!
 //! Run from a directory below the home (the machine shares the home and nothing else). It uses
-//! `$HOME/zbx-demo-mac` as its working directory and leaves it for the next run.
+//! `$HOME/zbx-demo-mac` as its working directory and leaves it for the next run. The M9 steps
+//! need Rosetta: the demo project's lock pins `linux/amd64`, as `demo-m9`'s does, so that its
+//! digest is `demo-m9`'s golden.
 
 const std = @import("std");
+const builtin = @import("builtin");
 const assert = std.debug.assert;
 const Io = std.Io;
 const alpine = @import("mac_alpine.zon");
+const m9_golden = @import("vm/m9_expected.zon");
+
+/// M9's demo project (`vm/m9_project/`, the files `demo-m9` writes, `hello_m9.project_files`),
+/// written afresh under the work directory for each run, with no build file.
+pub const m9_project_files = [_]struct { name: []const u8, text: []const u8 }{
+    .{ .name = "Dockerfile", .text = @embedFile("vm/m9_project/Dockerfile") },
+    .{ .name = ".dockerignore", .text = @embedFile("vm/m9_project/.dockerignore") },
+    .{ .name = "zbx.lock", .text = @embedFile("vm/m9_project/zbx.lock") },
+    .{ .name = "go.mod", .text = @embedFile("vm/m9_project/go.mod") },
+    .{ .name = "main.go", .text = @embedFile("vm/m9_project/main.go") },
+    .{ .name = "VERSION", .text = @embedFile("vm/m9_project/VERSION") },
+    .{ .name = "LICENSE", .text = @embedFile("vm/m9_project/LICENSE") },
+    .{ .name = "README.md", .text = @embedFile("vm/m9_project/README.md") },
+};
+/// The build file `zbx import` must write for the project, `demo-m9`'s golden. Written beside the
+/// project (not in it) for `cmp`.
+const m9_golden_build = @embedFile("vm/m9_expected.build.zon");
+const m9_project = "m9-project";
 
 /// One step: the shell line (`$Z` is the zbx, `$R` the unpacked rootfs, `$W` the work
 /// directory), how it must end and what each stream must hold.
@@ -285,6 +307,39 @@ pub const steps = [_]Step{
         .stdout_lacks = &.{"STILL-OPEN"},
         .stderr_has = &.{"ZBX-E0220"},
     },
+    // ---- M9: the demo project imported from its Dockerfile and built (docs/demos/m9.md) ---------
+    // `$W/m9-project` is written afresh by `prepare_m9_project`; `$W/m9.digest` carries step 2's
+    // digest to the steps after it.
+    .{
+        .id = "m9.1",
+        .what = "import writes demo-m9's golden build file, owned by the Mac user, with W0811",
+        .line = "cd $W/m9-project && $Z import && cmp zbx.build.zon ../m9_expected.build.zon && " ++
+            "test \"$(stat -f %u zbx.build.zon)\" = \"$(id -u)\" && echo imported",
+        .stdout_has = &.{"imported"},
+        .stderr_has = &.{"ZBX-W0811"},
+    },
+    .{
+        .id = "m9.2",
+        .what = "build prints the digest; the image greets, and --whoami is 10001",
+        .line = "cd $W/m9-project && rm -f ../m9.digest && " ++
+            "d=$($Z build | sed -n 's/^built \\(b3:[0-9a-f]*\\) .*/\\1/p') && test -n \"$d\" && " ++
+            "echo \"$d\" > ../m9.digest && $Z run $d && $Z run $d -- /usr/local/bin/hello --whoami",
+        .stdout_has = &.{ "hello from zigbox", "10001" },
+    },
+    .{
+        .id = "m9.3",
+        .what = "after an edit on the Mac to the excluded README.md, every step hits, same digest",
+        .line = "cd $W/m9-project && echo more >> README.md && o=$($Z build) && echo \"$o\" && " ++
+            "test \"$(echo \"$o\" | sed -n 's/^built \\(b3:[0-9a-f]*\\) .*/\\1/p')\" = " ++
+            "\"$(cat ../m9.digest)\" && echo same-digest",
+        .stdout_has = &.{ " 0 misses", "same-digest" },
+    },
+    .{
+        .id = "m9.4",
+        .what = "the digest is demo-m9's golden, recorded in a Linux VM (m9_expected.zon)",
+        .line = "cat $W/m9.digest",
+        .stdout_has = &.{m9_golden.digest},
+    },
 };
 
 pub fn main(init: std.process.Init) !u8 {
@@ -325,6 +380,7 @@ fn run_all(init: std.process.Init, out: *Io.Writer) !u32 {
     const zbx_path = try std.Io.Dir.cwd().realPathFileAlloc(io, zbx, arena);
     try out.print("demo-mac: zbx {s}\ndemo-mac: work directory {s}\n", .{ zbx_path, work });
     try prepare_rootfs(init, out, work, rootfs);
+    try prepare_m9_project(init, work);
     var failures: u32 = 0;
     for (steps) |step| {
         const line = try expand(arena, step.line, zbx_path, rootfs, work);
@@ -410,6 +466,22 @@ fn prepare_rootfs(
     if (unpack.term != .exited or unpack.term.exited != 0) return error.UnpackFailed;
 }
 
+/// Writes M9's project afresh under `work` (steps edit it and import writes into it) and the
+/// golden build file beside it.
+fn prepare_m9_project(init: std.process.Init, work: []const u8) !void {
+    const io = init.io;
+    const arena = init.arena.allocator();
+    var dir = try Io.Dir.cwd().openDir(io, work, .{});
+    defer dir.close(io);
+    dir.deleteTree(io, m9_project) catch {};
+    try dir.createDirPath(io, m9_project);
+    for (m9_project_files) |file| {
+        const path = try std.fmt.allocPrint(arena, "{s}/{s}", .{ m9_project, file.name });
+        try dir.writeFile(io, .{ .sub_path = path, .data = file.text });
+    }
+    try dir.writeFile(io, .{ .sub_path = "m9_expected.build.zon", .data = m9_golden_build });
+}
+
 test "a step passes only when its exit code and every piece match" {
     // Goal: the verdict function. Method: one step, each way to miss it.
     const step: Step = .{
@@ -427,4 +499,22 @@ test "a step passes only when its exit code and every piece match" {
     try std.testing.expect(check(step, 3, "yes", "") != null);
     try std.testing.expect(check(step, 3, "yes no", "E1") != null);
     for (steps) |each| try std.testing.expect(each.line.len > 0);
+}
+
+test "the M9 project is demo-m9's, file for file" {
+    // Goal: the Mac builds the same project as `demo-m9`, so its digest can be that golden.
+    // Method: the two embedded lists, name and bytes. `hello_m9` is the Linux harness, so the
+    // comparison is compiled on Linux only.
+    if (comptime builtin.os.tag != .linux) return error.SkipZigTest;
+    const hello_m9 = @import("vm/hello_m9.zig");
+    try std.testing.expectEqual(hello_m9.project_files.len, m9_project_files.len);
+    for (hello_m9.project_files, m9_project_files) |linux, mac| {
+        try std.testing.expectEqualStrings(linux.name, mac.name);
+        try std.testing.expectEqualStrings(linux.text, mac.text);
+    }
+    try std.testing.expectEqualStrings(hello_m9.golden_build, m9_golden_build);
+    for (steps) |step| {
+        if (!std.mem.startsWith(u8, step.id, "m9.")) continue;
+        try std.testing.expect(std.mem.indexOf(u8, step.line, "$W") != null);
+    }
 }
