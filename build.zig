@@ -792,6 +792,18 @@ fn add_m9_cases(b: *std.Build, module: *std.Build.Module) void {
     module.addAnonymousImport("m9_vm_cases", .{
         .root_source_file = b.path("src/build/dockerfile_fixtures/vm_cases.zig"),
     });
+    // Steps 7 and 8's file server, built for the guest (x86_64, static, no libc).
+    const target = b.resolveTargetQuery(.{ .cpu_arch = .x86_64, .os_tag = .linux, .abi = .none });
+    const server = b.addExecutable(.{
+        .name = "fixture-http",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/testing/vm/fixture_http.zig"),
+            .target = target,
+            .optimize = .ReleaseSafe,
+            .link_libc = false,
+        }),
+    });
+    module.addAnonymousImport("fixture_http", .{ .root_source_file = server.getEmittedBin() });
 }
 
 /// demo-m10's fake driver library (soname `libzbxgpu.so.1`) and the program that needs it, built

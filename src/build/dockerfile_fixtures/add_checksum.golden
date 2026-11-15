@@ -1,0 +1,37 @@
+// Imported by `zbx import` from Dockerfile: target stage0, --network detect.
+// Edit this file from here on: `zbx build` reads it, not the Dockerfile.
+.{
+    .version = 1,
+    .steps = .{
+        // Dockerfile:4  ADD --checksum=sha256:5607b439e7580027cf8f2a5b34606ba5cc1079988db4cf213e0beeaf0...
+        .{
+            .name = "stage0-1",
+            .base = "alpine:3.20",
+            .copy = .{
+                .{ .fetch = .{ .url = "http://127.0.0.1:8080/hello.txt", .sha256 = "5607b439e7580027cf8f2a5b34606ba5cc1079988db4cf213e0beeaf03269a62" }, .to = "/opt/hello.txt" },
+            },
+        },
+        // Dockerfile:5  ADD --chmod=0755 --chown=1:1 --checksum=sha256:5607b439e7580027cf8f2a5b34606ba5...
+        .{
+            .name = "stage0-2",
+            .base = "step:stage0-1",
+            .copy = .{
+                .{ .fetch = .{ .url = "https://example.org/dl/tool-1.2.tar.gz", .sha256 = "5607b439e7580027cf8f2a5b34606ba5cc1079988db4cf213e0beeaf03269a62" }, .to = "/usr/local/bin/", .chown = "1:1", .chmod = "0755" },
+            },
+        },
+        // Dockerfile:6  RUN cat /opt/hello.txt
+        .{
+            .name = "stage0-3",
+            .base = "step:stage0-2",
+            .run = .{ "/bin/sh", "-c", "cat /opt/hello.txt" },
+            .output = .root,
+            .workdir = "/opt",
+        },
+    },
+    .image = .{
+        .base = "step:stage0-3",
+        .config = .{
+            .workdir = "/opt",
+        },
+    },
+}

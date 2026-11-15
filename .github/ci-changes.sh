@@ -92,7 +92,9 @@ classify() {
     src/testing/vm/m8b/* | src/testing/vm/*_m8b.zig) want_one m8b; return ;;
     src/testing/vm/*_m10.zig | src/testing/vm/m10_fixture/*) want_one m10; return ;;
     src/testing/vm/*_s2_lazy.zig) want_one s2_lazy; return ;;
-    src/testing/vm/m9_* | src/testing/vm/*_m9.zig) want_one m9; return ;;
+    # fixture_http.zig is the HTTP server demo-m9's fetch step runs in the guest; no other uses it.
+    src/testing/vm/m9_* | src/testing/vm/*_m9.zig | src/testing/vm/fixture_http.zig) \
+      want_one m9; return ;;
     src/testing/vm/*_c4.zig | src/testing/vm/c4/* | src/testing/vm/c4_fixture/*) want_one c4; return ;;
     src/testing/vm/*_m8.zig | src/testing/vm/m8_*) want_one m8; return ;;
     src/testing/vm/m7_* | src/testing/vm/*_m7.zig) want_from m7; return ;;

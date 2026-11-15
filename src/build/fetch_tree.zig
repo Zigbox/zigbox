@@ -106,7 +106,7 @@ fn hash_blob(
     } else return changed(store, sha256, diag) != null;
     const actual = hasher.final();
     if (!actual.eql(sha256)) {
-        registry_diagnose.blob_damaged(diag, store.root_text(), sha256, actual);
+        registry_diagnose.blob_damaged(diag, store.root_text(), .fetched, sha256, actual);
         return false;
     }
     const hash = reader.finish(&ws.chunks);
