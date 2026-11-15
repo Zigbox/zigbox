@@ -776,6 +776,11 @@ pub const state_export_time_max: u64 = 0o77777777777;
 pub const sim_fs_nodes_max: u32 = 640;
 pub const sim_fs_path_bytes_max: u32 = 192;
 pub const sim_fs_pool_bytes_max: u32 = 3 * 1024 * 1024;
+// The `lazy_index` fuzzer's own pool (`SimFs.use_pool`): its incompressible file of up to three
+// chunks, the imported object and two packed layers of it.
+pub const sim_fs_pool_lazy_fuzz_bytes_max: u32 = 24 * 1024 * 1024;
+// The `chaining` fuzzer's longest input: 256 runs of its shortest run size, the BLAKE3 piece.
+pub const fuzz_chaining_bytes_max: u32 = 256 * 1024;
 pub const sim_fs_handles_max: u32 = 8;
 
 // Registry and pull (M4, docs/briefs/M4-pull.md). Every byte a registry sends is bounded: it is
@@ -1954,11 +1959,13 @@ comptime {
 
 /// The version of the layer writer: the tar form and the gzip stream a pack produces. The same
 /// tree and config give the same bytes for one version. A change to either is a new version.
-pub const layer_writer_version: u32 = 1;
+pub const layer_writer_version: u32 = 2;
 
 /// Annotation keys of a packed manifest.
 pub const pack_annotation_tree = "org.zigbox.tree";
 pub const pack_annotation_writer = "org.zigbox.layer-writer";
+/// The layer descriptor's annotation that points at the lazy index (layer writer 2).
+pub const pack_annotation_lazy_index = "org.zigbox.lazy-index";
 
 /// The OCI media types a pack writes.
 pub const oci_manifest_media_type = "application/vnd.oci.image.manifest.v1+json";
@@ -2033,4 +2040,27 @@ comptime {
     assert(pack_link_paths_bytes >= path_bytes_max + 1);
     assert(pack_config_bytes_max >= image_settings_bytes_max);
     assert(layer_writer_version >= 1);
+}
+
+// ---- Lazy start (S2, docs/briefs/S2-lazy-start.md) ----------------------------------------
+
+/// The longest lazy index taken; a longer one is refused as too large (`E1207`). A 4 GiB file's
+/// chunk list is 4,096 records of 80 bytes, about 320 KiB; 64 MiB is far beyond any real image.
+pub const lazy_index_bytes_max: u32 = 64 * 1024 * 1024;
+
+/// The most names (paths) a tree started lazily may have: the FUSE node table, fixed at start. A
+/// tree with more is refused for lazy (`E1207`) and pulled whole. It bounds the layer writer's
+/// index memory too.
+pub const lazy_nodes_max: u32 = 262144;
+
+/// The longest compressed range fetched in one request, and so the longest chunk range an index
+/// may list.
+pub const lazy_range_bytes_max: u32 = 8 * 1024 * 1024;
+
+comptime {
+    assert(lazy_index_bytes_max >= store_tree_bytes_max);
+    assert(lazy_nodes_max > 0);
+    assert(std.math.isPowerOfTwo(lazy_nodes_max));
+    assert(lazy_range_bytes_max >= 2 * store_chunk_bytes);
+    assert(layer_writer_version == 2);
 }
