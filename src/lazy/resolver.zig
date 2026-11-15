@@ -171,6 +171,9 @@ pub const Resolver = struct {
         assert(resolver.objects.len == objects.len);
         for (objects, resolver.objects) |*object, *state| {
             assert(!state.no_registry);
+            // The catalog's builder gives a chaining value per chunk, or none (`lazy.Object`).
+            if (object.chaining.len > 0) assert(object.chaining.len == object.wanted.hashes.len);
+            if (object.chaining.len > 0) assert(object.chaining.len >= 2);
             if (!locations_usable(object)) state.no_registry = true;
         }
     }
@@ -485,15 +488,16 @@ pub const Resolver = struct {
         chunk: u32,
         out: []u8,
     ) land_mod.ReadError!usize {
-        const wanted = &resolver.options.catalog.objects[object].wanted;
-        assert(chunk < wanted.hashes.len);
+        const entry = &resolver.options.catalog.objects[object];
+        assert(chunk < entry.wanted.hashes.len);
         assert(out.len > 0);
         const store_lock: land_mod.StoreLock = .{
             .context = resolver,
             .lock = lock_store_opaque,
             .unlock = unlock_store_opaque,
         };
-        return land_mod.read_local(resolver.options.store, wanted, chunk, out, &store_lock);
+        const store = resolver.options.store;
+        return land_mod.read_local(store, &entry.wanted, entry.chaining, chunk, out, &store_lock);
     }
 
     fn lock_store_opaque(context: *anyopaque) void {
@@ -766,12 +770,17 @@ pub const Resolver = struct {
         const length = schedule_mod.chunk_length(&object.wanted, chunk_bytes, work.chunks[at]);
         if (bytes.len != length) return .lied;
         if (!lazy.Digest.of(bytes).eql(object.wanted.hashes[work.chunks[at]])) return .lied;
+        // The plain hash comes from the index and is not tied to the tree; the chaining value
+        // is (`land.anchored`). `land` checks both again: the pair.
+        if (!land_mod.anchored(object.chaining, work.chunks[at], chunk_bytes, bytes)) return .lied;
         if (free < floor) return .store_full;
         resolver.lock_store();
         defer resolver.unlock_store();
         const put = resolver.memory[slot].put;
         const store = resolver.options.store;
-        return switch (land_mod.land(store, put, &object.wanted, work.chunks[at], bytes)) {
+        const chunk = work.chunks[at];
+        const landed = land_mod.land(store, put, &object.wanted, object.chaining, chunk, bytes);
+        return switch (landed) {
             .landed => .landed,
             .whole => whole: {
                 work.whole[at] = true;

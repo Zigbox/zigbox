@@ -20,6 +20,7 @@ const digest_mod = @import("../store/digest.zig");
 const fs_mod = @import("../store/fs.zig");
 const layout = @import("../store/layout.zig");
 const object = @import("../store/object.zig");
+const chaining_mod = @import("chaining.zig");
 
 const Digest = digest_mod.Digest;
 const PathBuf = fs_mod.PathBuf;
@@ -58,12 +59,16 @@ pub const StoreLock = struct {
     }
 };
 
-/// Reads chunk `index` of `wanted` into `out` and checks it against `wanted.hashes[index]`.
+/// Reads chunk `index` of `wanted` into `out` and checks it against `wanted.hashes[index]`, and
+/// a chunk file against its chaining value too (`anchored`): a chunk file may have been kept by
+/// a run whose index listed forged chunk hashes. A whole object's chunks need no chaining
+/// check: `put_chunk` assembled it only after its content hashed to `wanted.content`.
 /// Every error leaves `out` cleared, so no byte of an unverified chunk stays behind.
 /// `store_lock` is null on one thread.
 pub fn read_local(
     store: *const Store,
     wanted: *const Wanted,
+    chaining: []const Digest,
     index: u32,
     out: []u8,
     store_lock: ?*const StoreLock,
@@ -72,11 +77,13 @@ pub fn read_local(
     const length = chunks.chunk_length(store, wanted.size, index);
     assert(length > 0);
     assert(out.len >= length);
-    if (read_checked(store, wanted, index, out[0..@intCast(length)], store_lock)) |got| {
+    const chunk = out[0..@intCast(length)];
+    const checked = read_checked(store, wanted, chaining, index, chunk, store_lock);
+    if (checked) |got| {
         assert(got == length);
         return got;
     } else |err| {
-        @memset(out[0..@intCast(length)], 0);
+        @memset(chunk, 0);
         return err;
     }
 }
@@ -84,6 +91,7 @@ pub fn read_local(
 fn read_checked(
     store: *const Store,
     wanted: *const Wanted,
+    chaining: []const Digest,
     index: u32,
     out: []u8,
     store_lock: ?*const StoreLock,
@@ -106,6 +114,7 @@ fn read_checked(
             StoreLock.release(store_lock);
             if (try partial) {
                 if (!Digest.of(out).eql(wanted.hashes[index])) return error.Damaged;
+                if (!anchored(chaining, index, store.chunk_bytes, out)) return error.Damaged;
                 return out.len;
             }
         }
@@ -202,14 +211,35 @@ pub const Landed = enum {
     failed,
 };
 
+/// True if `bytes`, chunk `index` of an object, has the chaining value the index gave it at its
+/// place, or the object has none to check (`lazy.Object.chaining` is empty). A plain chunk hash
+/// can be forged in an index; the chaining values join into the content hash, which the object
+/// id and the signed tree name, so a chunk that matches its value is the tree's.
+pub fn anchored(chaining: []const Digest, index: u32, chunk_bytes: u32, bytes: []const u8) bool {
+    if (chaining.len == 0) return true;
+    assert(index < chaining.len);
+    assert(chaining.len >= 2);
+    assert(bytes.len >= 1);
+    assert(bytes.len <= chunk_bytes);
+    return chaining_mod.run_value(bytes, index, chunk_bytes).eql(chaining[index]);
+}
+
 /// Checks `bytes` against chunk `index` and keeps them with `put_chunk`. `io` is the put's copy
 /// buffer. The caller holds no lock of the resolver's but serialises calls on one `store`
 /// (its temporary names and counters are not shared safely between threads).
-pub fn land(store: *Store, io: []u8, wanted: *const Wanted, index: u32, bytes: []const u8) Landed {
+pub fn land(
+    store: *Store,
+    io: []u8,
+    wanted: *const Wanted,
+    chaining: []const Digest,
+    index: u32,
+    bytes: []const u8,
+) Landed {
     assert(index < wanted.hashes.len);
     assert(io.len >= 4096);
     if (bytes.len != chunks.chunk_length(store, wanted.size, index)) return .lied;
     if (!Digest.of(bytes).eql(wanted.hashes[index])) return .lied;
+    if (!anchored(chaining, index, store.chunk_bytes, bytes)) return .lied;
     var failure: chunks.Failure = undefined;
     const progress = chunks.put_chunk(store, io, wanted, index, bytes, &failure) catch |err| {
         return switch (err) {

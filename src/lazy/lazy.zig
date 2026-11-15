@@ -4,8 +4,8 @@
 //! looks in the local store first (the object whole, or the chunk held in
 //! `partial/<id>/<index>`), then asks the sources in order (the peers a library caller supplies,
 //! then the registry by `Range` on a layer writer 2 blob), hashes every chunk it is given against
-//! the chunk's listed hash, keeps it in the store with `chunks.put_chunk`, and only then reads
-//! it back (checked again) into the caller's buffer. It owns the deadlines, the concurrency
+//! the chunk's listed hash and its chaining value, keeps it in the store with `chunks.put_chunk`,
+//! and only then reads it back (checked again) into the caller's buffer. It owns the deadlines, the concurrency
 //! limit, readahead, range coalescing, the background fill and each source's health. It knows
 //! nothing of FUSE: the FUSE server (slice 4) calls `Resolver.read`, and a later VM front end
 //! reuses it unchanged.
@@ -125,6 +125,13 @@ pub const Object = struct {
     /// One per chunk (`wanted.hashes.len` of them), or empty when no registry holds the object
     /// (a test, or a catalog made from the store alone).
     locations: []const Location,
+    /// Each chunk's BLAKE3 chaining value at its place (`chaining.run_value`), one per chunk,
+    /// for an object of two chunks or more: what ties a chunk's bytes to the content hash, so
+    /// to the signed tree. A plain chunk hash alone is not tied to it (an index can list any),
+    /// so every chunk of such an object is checked against this too before it is kept or
+    /// served. Empty for an object of fewer than two chunks (its one chunk's hash is its
+    /// content), and in a catalog that anchors nothing (a test's, whose sources are trusted).
+    chaining: []const Digest,
 };
 
 /// Every object the tree names, each once (a file's hard links share one), in the order the

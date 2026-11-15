@@ -124,11 +124,12 @@ pub const ResolverChunks = struct {
     }
 };
 
-/// Where `catalog_of` builds the catalog: one object per index object, one hash and one
-/// location per index chunk. The caller's, sized from the verified index's header.
+/// Where `catalog_of` builds the catalog: one object per index object, one hash, one chaining
+/// value and one location per index chunk. The caller's, sized from the verified index's header.
 pub const CatalogMemory = struct {
     objects: []lazy.Object,
     hashes: []Digest,
+    chaining: []Digest,
     locations: []lazy.Location,
 };
 
@@ -144,11 +145,13 @@ pub fn catalog_of(
     const header = index.header;
     assert(memory.objects.len == header.objects);
     assert(memory.hashes.len == header.chunks);
+    assert(memory.chaining.len == header.chunks);
     assert(memory.locations.len == header.chunks);
     if (table.object_count != header.objects) return error.Malformed;
     for (0..header.chunks) |at| {
         const record = index.chunk(@intCast(at));
         memory.hashes[at] = record.hash;
+        memory.chaining[at] = record.chaining;
         memory.locations[at] = .{ .offset = record.offset, .length = record.length };
     }
     var filled: u32 = 0;
@@ -180,6 +183,12 @@ pub fn catalog_of(
                 .hashes = memory.hashes[first..][0..record.chunk_count],
             },
             .locations = memory.locations[first..][0..record.chunk_count],
+            // A one-chunk object's chunk hash is its content; a longer one's chunks are tied to
+            // its content only through these (`land.anchored`), which `content_of` joined.
+            .chaining = if (record.chunk_count < 2)
+                &.{}
+            else
+                memory.chaining[first..][0..record.chunk_count],
         };
         filled += 1;
     }

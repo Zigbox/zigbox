@@ -162,6 +162,9 @@ fn make_objects(sizes: []const u32) void {
                 .hashes = fixture.hashes[hashes_used..][0..count],
             },
             .locations = locations,
+            // This fixture's 64-byte chunks are below BLAKE3's piece; its sources are the
+            // test's, so nothing is anchored here (the sim and `fuse/resolver_tests` are).
+            .chaining = &.{},
         };
         hashes_used += count;
     }
@@ -297,7 +300,8 @@ fn events_of(kind: lazy.Event.Kind, source: []const u8) u32 {
 
 fn land_chunk(object: lazy.ObjectIndex, chunk: u32) land_mod.Landed {
     const wanted = &fixture.objects[object].wanted;
-    return land_mod.land(&fixture.store, &fixture.put_buffer, wanted, chunk, truth(object, chunk));
+    const bytes = truth(object, chunk);
+    return land_mod.land(&fixture.store, &fixture.put_buffer, wanted, &.{}, chunk, bytes);
 }
 
 // The locked file system: every call of `SimFs`'s table, one at a time.
@@ -672,6 +676,7 @@ fn schedule_setup() *Schedule {
             .hashes = &long_hashes,
         },
         .locations = &.{},
+        .chaining = &.{},
     };
     const names = [_][]const u8{"peer a"};
     schedule_state.init(.{ .objects = &long_objects }, &long_states, chunk_bytes, &names, false);
@@ -957,11 +962,11 @@ test "resolver: a damaged chunk file is fetched again and replaced" {
     defer close_resolver();
     var out: [chunk_bytes]u8 = @splat(0);
     const wanted = &fixture.objects[0].wanted;
-    const damaged = land_mod.read_local(&fixture.store, wanted, 0, &out, null);
+    const damaged = land_mod.read_local(&fixture.store, wanted, &.{}, 0, &out, null);
     try testing.expectError(error.Damaged, damaged);
     try expect_true_read(0, 0, 0);
     try testing.expectEqual(@as(u32, 1), fixture.peers[0].calls.load(.monotonic));
-    const length = try land_mod.read_local(&fixture.store, wanted, 0, &out, null);
+    const length = try land_mod.read_local(&fixture.store, wanted, &.{}, 0, &out, null);
     try testing.expectEqualSlices(u8, truth(0, 0), out[0..length]);
     try testing.expectEqual(@as(u32, 0), fixture.events_count.load(.monotonic));
 }

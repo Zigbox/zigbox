@@ -29,6 +29,7 @@ const fixture_mod = @import("fixture.zig");
 const nodes = @import("nodes.zig");
 const ops = @import("ops.zig");
 const resolver = @import("resolver.zig");
+const land = @import("../lazy/land.zig");
 
 const testing = std.testing;
 const gpa = testing.allocator;
@@ -55,7 +56,35 @@ const Lie = union(enum) {
     hash: u32,
     /// The chaining value of this ordinal's first chunk is of other bytes.
     chaining: u32,
+    /// This ordinal's second chunk is other bytes in the blob, and the index lists their plain
+    /// hash; its chaining value stays the true one, so the index still joins into the tree.
+    forged: u32,
 };
+
+/// The forged second chunk's bytes (`Lie.forged`).
+var forged_piece: [chunk_bytes]u8 = undefined;
+
+/// The bytes the blob holds for chunk `at` of `ordinal`: `piece`, or other bytes of its length
+/// whose hash `record` then lists.
+fn served_piece(
+    piece: []const u8,
+    lie: Lie,
+    ordinal: u32,
+    at: u32,
+    record: *index_mod.Chunk,
+) []const u8 {
+    const wanted = switch (lie) {
+        .forged => |wanted| wanted,
+        else => return piece,
+    };
+    if (wanted != ordinal) return piece;
+    if (at != 1) return piece;
+    const forged = forged_piece[0..piece.len];
+    @memcpy(forged, piece);
+    forged[0] ^= 0x5a;
+    record.hash = Digest.of(forged);
+    return forged;
+}
 
 /// The index of the flat root `root`, whose files (in name order, which is the table's ordinal
 /// order) hold `contents`.
@@ -85,8 +114,9 @@ fn build_index(root: Digest, ids: []const Digest, contents: []const []const u8, 
             const piece = content[start..@min(content.len, start + chunk_bytes)];
             var record = chunk_record(piece, @intCast(at), count);
             if (at == 0) lie_about(&record, lie, @intCast(ordinal));
+            const served = served_piece(piece, lie, @intCast(ordinal), @intCast(at), &record);
             record.offset = blob.items.len;
-            record.length = @intCast(try append_stored(&blob, piece));
+            record.length = @intCast(try append_stored(&blob, served));
             var encoded: [index_mod.chunk_record_bytes]u8 = undefined;
             index_mod.encode_chunk(record, &encoded);
             try records.appendSlice(gpa, &encoded);
@@ -135,6 +165,7 @@ fn lie_about(record: *index_mod.Chunk, lie: Lie, ordinal: u32) void {
         .chaining => |wanted| if (wanted == ordinal) {
             record.chaining = Digest.of("other bytes");
         },
+        .forged => {},
     }
 }
 
@@ -168,6 +199,7 @@ fn catalog_memory(index: *const index_mod.Index) !resolver.CatalogMemory {
     return .{
         .objects = try gpa.alloc(lazy.Object, index.header.objects),
         .hashes = try gpa.alloc(Digest, index.header.chunks),
+        .chaining = try gpa.alloc(Digest, index.header.chunks),
         .locations = try gpa.alloc(lazy.Location, index.header.chunks),
     };
 }
@@ -175,6 +207,7 @@ fn catalog_memory(index: *const index_mod.Index) !resolver.CatalogMemory {
 fn catalog_free(memory: resolver.CatalogMemory) void {
     gpa.free(memory.objects);
     gpa.free(memory.hashes);
+    gpa.free(memory.chaining);
     gpa.free(memory.locations);
 }
 
@@ -341,10 +374,20 @@ fn read_file(
     table: *const nodes.Table,
     name: []const u8,
 ) []const u8 {
+    return read_file_at(server, worker, table, name, 0);
+}
+
+fn read_file_at(
+    server: *const ops.Server,
+    worker: *ops.Worker,
+    table: *const nodes.Table,
+    name: []const u8,
+    offset: u64,
+) []const u8 {
     const child = table.lookup(table.node(1).?, name).?;
     const in: abi.ReadIn = .{
         .fh = 0,
-        .offset = 0,
+        .offset = offset,
         .size = 64,
         .read_flags = 0,
         .lock_owner = 0,
@@ -381,6 +424,19 @@ test "ResolverChunks: reads through ops come from the store, then the registry, 
     defer catalog_free(memory);
     const catalog = try resolver.catalog_of(&table, &index, memory);
 
+    open_store();
+    try store_whole(&catalog.objects[1].wanted, contents[1]);
+    remote.blob = built.blob;
+    remote.blob[@intCast(catalog.objects[0].locations[0].offset + 6)] ^= 1;
+    try open_resolver(catalog);
+    defer remote.resolver.deinit(gpa);
+    try remote.resolver.start(testing.io);
+    defer remote.resolver.stop();
+    try serve_three(&table, &contents);
+}
+
+/// The simulated store the resolver lands chunks in, empty.
+fn open_store() void {
     remote.host.init(1, &.{});
     remote.files.init(1);
     remote.host.store_fs = &remote.files;
@@ -388,9 +444,10 @@ test "ResolverChunks: reads through ops come from the store, then the registry, 
     support.make_store_directories(&remote.files, "/data/store");
     remote.store.at(remote.host.interface(), "/data/store");
     remote.store.chunk_bytes = chunk_bytes;
-    try store_whole(&catalog.objects[1].wanted, contents[1]);
-    remote.blob = built.blob;
-    remote.blob[@intCast(catalog.objects[0].locations[0].offset + 6)] ^= 1;
+}
+
+/// The resolver over `remote`'s store and blob, with no peers and no fill.
+fn open_resolver(catalog: lazy.Catalog) !void {
     remote.range_calls = .init(0);
     remote.events_count = .init(0);
     try remote.resolver.init(gpa, .{
@@ -402,10 +459,58 @@ test "ResolverChunks: reads through ops come from the store, then the registry, 
         .free = .{ .context = &remote, .query = free_query },
         .fill = false,
     });
+}
+
+test "ResolverChunks: a chunk whose plain hash the index forged is EIO, and nothing lands" {
+    // Goal: a registry cannot serve bytes the signed tree does not cover by listing their plain
+    // hash in the index; the chunk's chaining value refuses them. Method: `big` has two
+    // chunks; the index lists, for its second, the hash of other bytes, which the blob holds,
+    // and the true chaining value, so `catalog_of` accepts it (the chaining values still join
+    // into the content). A read of the second chunk is EIO, with W1202 naming the registry and
+    // E1203, and the store holds no chunk of `big`. Without the chaining check, the read
+    // returns the forged bytes and `partial/<id>/1` keeps them.
+    const contents = contents_three();
+    var ids: [3]Digest = undefined;
+    const root = try three_files(&contents, .{ 0o644, 0o644, 0o644 }, &ids);
+    var built = try build_index(root, &ids, &contents, .{ .forged = 0 });
+    defer built.deinit();
+    const index = try index_mod.parse(built.bytes);
+    var table: nodes.Table = undefined;
+    const region = try table_of(root, &table);
+    defer gpa.free(region);
+    const memory = try catalog_memory(&index);
+    defer catalog_free(memory);
+    const catalog = try resolver.catalog_of(&table, &index, memory);
+    try testing.expectEqual(@as(usize, 2), catalog.objects[0].chaining.len);
+
+    open_store();
+    remote.blob = built.blob;
+    try open_resolver(catalog);
     defer remote.resolver.deinit(gpa);
     try remote.resolver.start(testing.io);
     defer remote.resolver.stop();
-    try serve_three(&table, &contents);
+
+    const cache_bytes: usize = @intCast(cache_mod.memory_bytes(chunk_bytes));
+    const cache_memory = try gpa.alignedAlloc(u8, .@"8", cache_bytes);
+    defer gpa.free(cache_memory);
+    var cache: cache_mod.Cache = undefined;
+    cache.init(testing.io, cache_memory, chunk_bytes);
+    const server: ops.Server = .{ .table = &table, .cache = &cache, .chunk_bytes = chunk_bytes };
+    var chunks = resolver.ResolverChunks.init(&remote.resolver, chunk_bytes);
+    var worker = ops.Worker.init(chunks.chunks(), &remote.reply);
+    const refused = read_file_at(&server, &worker, &table, "big", chunk_bytes);
+    try testing.expectEqual(@as(usize, @sizeOf(abi.OutHeader)), refused.len);
+    try testing.expectEqual(@as(i32, -5), fixture_mod.reply_header(refused).@"error");
+    try testing.expectEqual(lazy.ReadError.Unavailable, chunks.last.?);
+    try expect_events(&.{ .lied, .unavailable });
+    const report = remote.resolver.report();
+    try testing.expectEqual(@as(u64, 0), report.fetched_on_demand_bytes);
+    var out: [chunk_bytes]u8 = undefined;
+    const wanted = &catalog.objects[0].wanted;
+    for (0..2) |chunk| {
+        const read = land.read_local(&remote.store, wanted, &.{}, @intCast(chunk), &out, null);
+        try testing.expectError(error.NotLocal, read);
+    }
 }
 
 fn serve_three(table: *const nodes.Table, contents: *const [3][]const u8) !void {

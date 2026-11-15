@@ -389,13 +389,16 @@ fn alloc_catalog(header: *const index_mod.Header) error{OutOfMemory}!resolver.Ca
     errdefer gpa.free(objects);
     const hashes = try gpa.alloc(Digest, header.chunks);
     errdefer gpa.free(hashes);
+    const chaining = try gpa.alloc(Digest, header.chunks);
+    errdefer gpa.free(chaining);
     const locations = try gpa.alloc(lazy_mod.Location, header.chunks);
-    return .{ .objects = objects, .hashes = hashes, .locations = locations };
+    return .{ .objects = objects, .hashes = hashes, .chaining = chaining, .locations = locations };
 }
 
 fn free_catalog(memory: resolver.CatalogMemory) void {
     gpa.free(memory.objects);
     gpa.free(memory.hashes);
+    gpa.free(memory.chaining);
     gpa.free(memory.locations);
 }
 
