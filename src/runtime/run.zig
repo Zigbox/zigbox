@@ -471,16 +471,9 @@ pub fn start(
     // with a limit and no way to enforce it is refused here, with nothing to clean up.
     const scope_input = try prepare_scope(handle, container.limits, options.build_step, diag);
     if (options.lazy != null) assert(container.image != null);
-    if (options.lazy_sources.len > 0) assert(options.lazy != null);
-    assert(options.lazy_sources.len < constants.lazy_sources_max);
+    if (options.lazy == null) assert(options.lazy_sources.len == 0);
     if (container.image) |image| try prepare_image(handle, container, image, options, diag);
-    if (options.lazy) |lazy| {
-        if (options.lazy_sources.len > 0) lazy.peers.?(lazy.context, options.lazy_sources);
-        if (!lazy.prepare(lazy.context, handle.image.digest, diag)) {
-            assert(diag.code != null);
-            return error.StartFailed;
-        }
-    }
+    if (options.lazy) |lazy| try prepare_lazy(handle, lazy, options.lazy_sources, diag);
     // The volumes last, so that nothing above can fail with them held; from here every way out
     // of `start` that is not a running container lets them go.
     volumes_mod.take(host, container.state, handle.name_slice(), &handle.volumes, diag) catch
@@ -515,6 +508,22 @@ pub fn start(
     handle.pid = handle.session.container_pid;
     // Again, now that the container's pid is known: this is what a later process finds it by.
     save_record(handle, .running, null, null);
+}
+
+/// Hands the library caller's peers to the lazy server, then readies it for the image's tree.
+fn prepare_lazy(
+    handle: *const Handle,
+    lazy: Lazy,
+    sources: []const lazy_mod.Source,
+    diag: *Diag,
+) Error!void {
+    assert(diag.code == null);
+    assert(sources.len < constants.lazy_sources_max);
+    if (sources.len > 0) lazy.peers.?(lazy.context, sources);
+    if (!lazy.prepare(lazy.context, handle.image.digest, diag)) {
+        assert(diag.code != null);
+        return error.StartFailed;
+    }
 }
 
 /// Holds the mounts to their rules and looks at them on the host (`mounts.resolve`): the handle
@@ -1719,7 +1728,7 @@ fn fill_diag(diag: *Diag, causes: usize, shorter: usize, length: usize) void {
     diag.reset();
     diag.raise(.E0201);
     for (0..constants.diag_whiles_count_max) |_| diag.while_("{s}", .{filler});
-    const keys = [_][]const u8{ "k0", "k1", "k2", "k3", "k4", "k5" };
+    const keys = [_][]const u8{ "ka", "kb", "kc", "kd", "ke", "kf" };
     comptime assert(keys.len == constants.diag_context_count_max);
     inline for (keys) |key| diag.context(key, "{s}", .{filler});
     for (1..causes) |at| {

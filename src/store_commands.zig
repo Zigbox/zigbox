@@ -485,7 +485,7 @@ const LsImages = struct {
             writer.undo(1); // The row's newline: the state goes at its end.
             // Cannot fail: the row is at most 8.5 KiB of the 16 KiB buffer.
             if (local) |percent| {
-                writer.print("  partial {d}%\n", .{percent}) catch unreachable;
+                writer.print("  partial {d}%\n", .{percent}) catch unreachable; // Bound above.
             } else {
                 writer.writeAll("  partial\n") catch unreachable; // Same bound.
             }

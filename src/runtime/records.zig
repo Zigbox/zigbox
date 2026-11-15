@@ -1105,7 +1105,9 @@ fn parse_binding(value: []const u8, out: *Parsed) bool {
 fn parse_lazy(value: []const u8, out: *Parsed) bool {
     assert(value.len > 0);
     const inner = strip_affixes(value, ".{ ", " }") orelse return false;
-    const keys = [_][]const u8{ "sources", "demand_bytes", "fill_bytes", "errors", "local_percent" };
+    const keys = [_][]const u8{
+        "sources", "demand_bytes", "fill_bytes", "errors", "local_percent",
+    };
     var numbers: [keys.len]u64 = undefined;
     var fields = std.mem.splitSequence(u8, inner, ", ");
     for (keys, 0..) |name, at| {

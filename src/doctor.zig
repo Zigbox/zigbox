@@ -1300,8 +1300,11 @@ fn evaluate_fuse(facts: *const Facts, check: *Check) void {
         check.warning("/dev/fuse is missing or not openable: zbx run --lazy cannot start", .{});
         check.fix("load the fuse module:", "sudo modprobe fuse");
     } else if (probe.is(.denied)) {
-        check.warning("a FUSE mount inside a user namespace was refused: zbx run --lazy " ++
-            "cannot start (Linux 4.18 or newer allows it, unless a security policy forbids it)", .{});
+        check.warning(
+            "a FUSE mount inside a user namespace was refused: zbx run --lazy " ++
+                "cannot start (Linux 4.18 or newer allows it, unless a security policy forbids it)",
+            .{},
+        );
         check.fix("look for the policy that denies it:", dmesg_policy);
     } else if (probe.is(.map_denied) or probe.is(.setup_denied)) {
         check.warning("the FUSE probe got no user namespace: zbx run --lazy cannot start " ++

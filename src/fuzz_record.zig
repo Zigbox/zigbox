@@ -331,6 +331,12 @@ fn check_round_trip(random: std.Random) void {
     assert(std.mem.eql(u8, parsed.scope_slice(), view.scope));
     assert(parsed.detached == view.detached);
     assert(parsed.timed_out == view.timed_out);
+    check_reach_back(&view, &parsed);
+    check_mounts_back(&view, &parsed);
+    check_damaged(random, text);
+}
+
+fn check_reach_back(view: *const records.View, parsed: *const records.Parsed) void {
     assert(parsed.network.? == view.network);
     assert(parsed.publish_count == view.publish.len);
     for (view.publish, parsed.publish_slice()) |wanted, found| assert(std.meta.eql(wanted, found));
@@ -338,8 +344,6 @@ fn check_round_trip(random: std.Random) void {
     for (view.env_names, 0..) |wanted, at| {
         assert(std.mem.eql(u8, wanted, parsed.env_name(@intCast(at))));
     }
-    check_mounts_back(&view, &parsed);
-    check_damaged(random, text);
 }
 
 fn check_damaged(random: std.Random, text: []const u8) void {
