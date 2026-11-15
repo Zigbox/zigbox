@@ -46,6 +46,8 @@ pub const Workspace = struct {
     index: index_mod.Index,
     /// The layer blob the index and the chunks are in.
     layer: Sha256,
+    /// The index's compressed bytes fetched from the layer: the progress line's "index 2.1 MiB".
+    index_fetched: u64,
     range: registry_range.RegistryRange,
 };
 
@@ -144,6 +146,7 @@ fn fetch_index(
         if (count == 0) return refuse(diag, tree, text, error.Malformed, .inflate);
         done += count;
     }
+    ws.index_fetched = length;
     const bytes = ws.index_bytes[0..size];
     index_mod.inflate_range(&ws.compressed, length, bytes, &ws.window) catch |err| {
         return refuse(diag, tree, text, err, .inflate);

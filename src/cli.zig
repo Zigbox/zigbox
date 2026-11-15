@@ -23,6 +23,10 @@ const render = @import("diag/render.zig");
 const diagnose = @import("runtime/diagnose.zig");
 const image_mod = @import("runtime/image.zig");
 const lazy_server_mod = @import("fuse/lazy_server.zig");
+const lazy_lines = @import("lazy_lines.zig");
+const lazy_start = @import("lazy_start.zig");
+const lazy_mod = @import("lazy/lazy.zig");
+const store_diagnose = @import("store/diagnose.zig");
 const lazy_diagnose = @import("fuse/diagnose.zig");
 const reference_mod = @import("registry/reference.zig");
 const layout = @import("store/layout.zig");
@@ -3265,6 +3269,8 @@ pub const Storage = struct {
     /// The room gc keeps its sets in (`gc.Workspace.tables`): the caller's, at least
     /// `gc.tables_bytes_min`. `zbx` gives it a static region of `store_gc_tables_bytes`.
     gc_tables: []align(8) u8,
+    /// A lazy run of an image the store lacks: its lines and where its free bytes are read.
+    lazy_remote: LazyRemote,
 };
 
 /// The memory `zbx verify` works in: the build workspace's, which no verify uses. Each `Storage`
@@ -3872,6 +3878,7 @@ fn prepare_image(
             .json = false,
         },
         .warn = .{ .context = &reporter, .call = report_warning },
+        .lazy = lazy_workspace_of(invocation),
     };
     run_image.prepare(
         &services,
@@ -3932,6 +3939,8 @@ fn run_container(
     try check_user_flag(invocation, diag);
     // A `--mount` outside the project is refused before an image is pulled for the run.
     const spec_mounts = try resolve_writable(host, &given, storage, diag);
+    // Before the image is looked for: a lazy start from a registry fetches its index.
+    if (given.lazy) try check_lazy(&given, invocation, diag);
     var prepared: run_image.Prepared = .{
         .tree = invocation.operand orelse "",
         .command = given.command,
@@ -3969,9 +3978,9 @@ fn run_container(
         .binding = binding_of(subject.binding),
     };
     const ran = ran_of(invocation, &prepared);
-    if (given.lazy) try check_lazy(&given, invocation, diag);
     if (given.detach) return run_detached(host, invocation, &container, times, storage, &ran, diag);
-    return run_foreground(host, invocation, &container, times, storage, &ran, diag);
+    const lazy: Lazy = if (!given.lazy) .none else if (prepared.remote) .remote else .local;
+    return run_foreground(host, invocation, &container, times, storage, &ran, lazy, diag);
 }
 
 /// The binding as the run record keeps it (the runtime does not know the trust module).
@@ -4093,10 +4102,12 @@ fn run_foreground(
     times: Times,
     storage: *Storage,
     ran: *const Ran,
+    lazy: Lazy,
     diag: *Diag,
 ) RunError!u8 {
     assert(diag.code == null);
     assert(!invocation.run.detach);
+    assert(invocation.run.lazy == (lazy != .none));
     assert(container.command.len > 0);
     var reporter: Reporter = .{ .host = host, .options = invocation.options };
     var refusing: RefusingLazy = .{ .host = host };
@@ -4111,8 +4122,9 @@ fn run_foreground(
     };
     const handle = &storage.handle;
     if (container.listen != null) try check_listen_send(host, invocation, diag);
+    if (lazy == .remote) try attach_remote(host, invocation, storage, diag);
     // The serving threads end with the container's mount namespace: joined after the run.
-    defer if (invocation.run.lazy) lazy_finish();
+    defer if (lazy != .none) lazy_finish(storage);
     runtime.start(host, container, options, handle, diag) catch {
         keep_bundle_of_bug(host, &storage.workspace, handle, diag);
         return error.StartFailed;
@@ -4138,10 +4150,97 @@ fn lazy_of(refusing: *RefusingLazy) runtime.Lazy {
     return server.lazy();
 }
 
-fn lazy_finish() void {
+/// After a lazy run: the summary line when the resolver served it, then the server's teardown,
+/// and the registry client's token wiped when the image came from one.
+fn lazy_finish(storage: *Storage) void {
     const server = lazy_server orelse return;
+    if (server.report()) |report| {
+        storage.lazy_remote.lines.summary(&report, server.source_names());
+    }
+    const remote = server.remote != null;
     server.finish();
+    if (remote) lazy_start.finish(&storage.pull);
     assert(server.fd == -1);
+    assert(server.remote == null);
+}
+
+/// The memory of a lazy start from a registry (`lazy_start.Workspace`, about 160 MiB): `zbx`'s
+/// `main` sets it with `lazy_server`. Null (the tests, a library) leaves `--lazy` to images the
+/// store holds, and pulls any other whole.
+pub var lazy_workspace: ?*lazy_start.Workspace = null;
+
+/// The free bytes of the file system holding a path (`host_real.free_bytes`): `main` sets it.
+/// Null, or a path it cannot read, counts the store's disk as never full.
+pub var free_bytes: ?*const fn (path: [:0]const u8) ?u64 = null;
+
+/// `Services.lazy` of a run: only `run --lazy` in the foreground with the real server fetches.
+fn lazy_workspace_of(invocation: *const Invocation) ?*lazy_start.Workspace {
+    if (invocation.command != .run) return null;
+    if (!invocation.run.lazy or invocation.run.detach) return null;
+    if (lazy_server == null) return null;
+    return lazy_workspace;
+}
+
+/// How a run serves its tree: whole from the store, lazily from the store's own objects, or
+/// lazily from a registry for an image the store lacks.
+const Lazy = enum { none, local, remote };
+
+/// A lazy run of an image the store lacks: the server's `Remote` and what it calls back.
+const LazyRemote = struct {
+    lines: lazy_lines.Lines,
+    /// The store's directory, for its free bytes.
+    root: [@sizeOf(@FieldType(layout.Store, "root"))]u8,
+    root_len: u32,
+    index_fetched: u64,
+
+    fn free(context: *anyopaque) u64 {
+        const remote: *const LazyRemote = @ptrCast(@alignCast(context));
+        assert(remote.root_len > 0);
+        assert(remote.root[remote.root_len] == 0);
+        const query = free_bytes orelse return std.math.maxInt(u64);
+        return query(remote.root[0..remote.root_len :0]) orelse std.math.maxInt(u64);
+    }
+
+    fn started(context: *anyopaque, report: *const lazy_mod.Report) void {
+        const remote: *const LazyRemote = @ptrCast(@alignCast(context));
+        remote.lines.progress(remote.index_fetched, report);
+    }
+};
+
+/// Gives the server the verified index of an image the store lacks and its registry, before
+/// the run prepares the tree (`prepare_image` started it from the registry).
+fn attach_remote(
+    host: Host,
+    invocation: *const Invocation,
+    storage: *Storage,
+    diag: *Diag,
+) RunError!void {
+    assert(diag.code == null);
+    assert(invocation.run.lazy);
+    const server = lazy_server.?; // `lazy_workspace_of` gave a workspace only with a server.
+    const ws = lazy_workspace.?;
+    const remote = &storage.lazy_remote;
+    var store: layout.Store = undefined;
+    if (!store.locate(host)) {
+        lazy_start.finish(&storage.pull);
+        store_diagnose.no_data_directory(diag);
+        return error.StartFailed;
+    }
+    assert(store.root_len < remote.root.len);
+    @memcpy(remote.root[0 .. store.root_len + 1], store.root[0 .. store.root_len + 1]);
+    remote.root_len = store.root_len;
+    remote.index_fetched = ws.index_fetched;
+    const mode = invocation.options.mode();
+    remote.lines = .init(host, mode, mode != .json and host.color_enabled(.stderr));
+    const reference = &storage.pull.library.reference;
+    ws.range.init(&ws.client, reference, ws.layer, server.threaded.io());
+    server.attach(.{
+        .index = ws.index,
+        .registry = ws.range.source(),
+        .log = remote.lines.log(),
+        .free = .{ .context = remote, .query = LazyRemote.free },
+        .started = .{ .context = remote, .call = LazyRemote.started },
+    });
 }
 
 /// The server of a lazy run without `main`'s: it builds no table and refuses the descriptor,

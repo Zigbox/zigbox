@@ -2133,6 +2133,9 @@ pub const lazy_store_free_bytes_min: u64 = 1024 * 1024 * 1024;
 pub const lazy_sources_max: u32 = 8;
 /// The readers that may wait on the resolver at once: the FUSE server's threads.
 pub const lazy_fuse_threads: u32 = 4;
+/// Coded lines a lazy run shows for its resolver's events (W1202, E1203, E1206) before one line
+/// counts the rest (approved by the owner 2026-11-14).
+pub const lazy_errors_shown_max: u32 = 16;
 /// The chunks one request may carry: a range of `lazy_range_bytes_max` holds this many chunks
 /// that compress at all. Stored incompressible, each chunk carries a header and 7 fit; the
 /// job takes what the range holds, so the bound is never passed.
@@ -2145,6 +2148,8 @@ pub const lazy_pending_max: u32 = lazy_slots * lazy_job_chunks_max +
     lazy_fuse_threads * (1 + lazy_readahead_chunks);
 
 comptime {
+    assert(lazy_errors_shown_max > 0);
+    assert(lazy_errors_shown_max <= lazy_pending_max);
     assert(lazy_attempt_timeout_ms < lazy_read_deadline_ms);
     assert(lazy_down_fail_ms < lazy_attempt_timeout_ms);
     assert(lazy_down_fail_ms < lazy_down_probe_ms);

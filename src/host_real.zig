@@ -1726,7 +1726,19 @@ const cap_version_3: u32 = 0x20080522;
 /// `struct sock_fprog`.
 const SockFprog = extern struct { len: u16, filter: [*]const bpf.Insn };
 
-/// `struct statfs` of the 64-bit architectures; only `f_flags` is read.
+/// The bytes an unprivileged writer can still use on the file system that holds `path`
+/// (`f_bavail` blocks of `f_bsize`): a lazy run's `lazy.FreeBytes` for its store. Null when
+/// `statfs` fails.
+pub fn free_bytes(path: [:0]const u8) ?u64 {
+    assert(path.len > 0);
+    var found: StatFs = undefined;
+    HostReal.check(linux.syscall2(.statfs, @intFromPtr(path.ptr), @intFromPtr(&found))) catch
+        return null;
+    if (found.f_bsize <= 0) return null;
+    return std.math.mul(u64, found.f_bavail, @intCast(found.f_bsize)) catch std.math.maxInt(u64);
+}
+
+/// `struct statfs` of the 64-bit architectures (x86_64 and aarch64 share it).
 const StatFs = extern struct {
     f_type: i64,
     f_bsize: i64,

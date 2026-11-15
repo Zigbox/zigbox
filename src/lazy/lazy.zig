@@ -159,6 +159,9 @@ pub const Event = struct {
     };
     kind: Kind,
     object: ObjectIndex,
+    /// The object's id (`Catalog.objects[object].wanted.id`): the line names it, as the catalog
+    /// has no path.
+    id: Digest,
     chunk: u32,
     /// The source the event is about (`lied`), else "".
     source: []const u8,
@@ -167,6 +170,8 @@ pub const Event = struct {
     /// "registry: timed out; peer 10.0.0.3: not found".
     outcomes: [constants.lazy_sources_max]Outcome,
     sources_count: u8,
+    /// The sources' names, indexed as `outcomes`: `sources_count` of them are set.
+    names: *const [constants.lazy_sources_max][]const u8,
 };
 
 /// What one source did for a chunk, for the `unavailable` event's reason.
@@ -220,6 +225,10 @@ pub const Report = struct {
     /// found whole by the fill). Never goes down: a gc that removes one later is not seen.
     objects_local: u32,
     objects_total: u32,
+    /// The sizes of the objects counted in `objects_local`, and of every object of the catalog
+    /// (an object with a hard link counts once): "image 38% local" and "3.0 GiB not yet local".
+    bytes_local: u64,
+    bytes_total: u64,
     /// Events the resolver had no room for (its ring holds `lazy_pending_max`): the caller
     /// shows the count, so a dropped line is never silent.
     events_dropped: u64,

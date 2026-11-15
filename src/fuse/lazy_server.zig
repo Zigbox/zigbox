@@ -62,6 +62,13 @@ pub const Remote = struct {
     registry: ?lazy_mod.Range,
     log: lazy_mod.Log,
     free: lazy_mod.FreeBytes,
+    /// Called once, when the resolver has started, with its first report: the progress line.
+    started: ?Started = null,
+};
+
+pub const Started = struct {
+    context: *anyopaque,
+    call: *const fn (context: *anyopaque, report: *const lazy_mod.Report) void,
 };
 
 /// The resolver's catalog and its fetch threads, for a `Remote` image. Allocated in `prepare`
@@ -121,6 +128,14 @@ pub const Server = struct {
         const resolving = &(server.resolving orelse return null);
         if (!resolving.started) return null;
         return resolving.resolver.report();
+    }
+
+    /// The sources' names, indexed as `Report.source_bytes`; empty when `report` is null.
+    pub fn source_names(server: *const Server) []const []const u8 {
+        const resolving = &(server.resolving orelse return &.{});
+        if (!resolving.started) return &.{};
+        const count = resolving.resolver.source_count();
+        return resolving.resolver.names[0..count];
     }
 
     pub fn lazy(server: *Server) run.Lazy {
@@ -327,6 +342,10 @@ pub const Server = struct {
                 return error.OutOfMemory;
             };
             resolving.started = true;
+            if (resolving.remote.started) |started| {
+                const first = resolving.resolver.report();
+                started.call(started.context, &first);
+            }
         }
         server.state = .serving;
         // Threads already started go on serving, and `finish` stops and joins them.
