@@ -211,3 +211,14 @@ test "the sources tried, in order" {
     given.outcomes[0] = .timed_out;
     try testing.expectEqualStrings("registry: timed out", tried_text(&buffer, &given));
 }
+
+test "lines past the bound are counted, not shown" {
+    var lines = Lines.init(undefined, .text, false);
+    var report = report_of(0, 0);
+    lines.seen.store(constants.lazy_errors_shown_max, .monotonic);
+    try testing.expectEqual(@as(u64, 0), lines.hidden(&report));
+    lines.seen.store(constants.lazy_errors_shown_max + 1, .monotonic);
+    try testing.expectEqual(@as(u64, 1), lines.hidden(&report));
+    report.events_dropped = 2;
+    try testing.expectEqual(@as(u64, 3), lines.hidden(&report));
+}
