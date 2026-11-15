@@ -26,24 +26,55 @@ The catalog's arrays (`objects`, and per chunk a hash and a location) are alloca
 allocator in proportion to the verified index: at most `lazy_nodes_max` objects and the index's
 chunk count. No bound or default changed.
 
+## Done since (second 5a implementer)
+
+- Tests: `fuse/resolver_tests.zig` covers `catalog_of` (agrees; an index object made with
+  another mode; another content) and `ResolverChunks` through `ops` over the simulated store.
+  A lie in the *tree* cannot be tested: `nodes.Table.new_node` already refuses a node whose
+  attributes do not give its object id, so the mode test lies in the index's ids.
+- Registry `Range`: `net.Request.range_last` (`Range: bytes=a-b` in `host_real_net.zig`),
+  `client.fetch_range` (a 206 whose `Content-Range` starts at the offset asked, or no bytes), and
+  `lazy/registry_range.zig`: a `lazy.Range` over one client. **Fetches are serialized** (one
+  client: one token and one wire state); a thread waits its turn at most its `timeout_ms`, and the
+  wait comes off its fetch's time. Tests in `lazy/registry_range_test.zig` (threads included).
+- `lazy_start.zig`: `start(host, pull, ws, store, text, warn, image, diag)` parses and resolves
+  the reference (`pull.resolve_with`, now `pub`), and with no anchor wipes the client, gives
+  W1201 to `warn` and returns `.whole`. Else: no `org.zigbox.tree` is E1202; fetches the config
+  (`pull.fetch_settings`, new), fetches the index range by `fetch_range`, inflates, checks the
+  hash, `verify.verify` (E1202 for each, nothing written; `TooLarge` is E1207), stores the trees
+  with `trees.put_checked`, and fills an `images.Image` in memory. The client stays resolved for
+  the run; `finish(pull)` wipes it.
+- `run_image.prepare`: `Services.lazy: ?*lazy_start.Workspace` (null by default; **nothing sets
+  it yet**), `Prepared.remote`. `lazy_remote` runs `start` only when the image is not local (a
+  digest reference with no record; a lock pin with no record; or no lock, then the operand as
+  given: no `zbx.lock` is written for a remote lazy run, a cut).
+- Codes W1201, W1202, E1203, E1206 registered with the brief's wording, goldens
+  (`fuse/diagnose.zig`: `no_index`, `index_refused`, `chunk_lied`, `chunk_unavailable`,
+  `store_full`) and errors-site pages. `can_end_run` was left at its default for them.
+
 ## Not done; what is next in 5a
 
-1. Nothing calls `Server.attach` yet: the CLI still serves only images whole in the store.
-2. The registry Range client: `net.Request` has only `range_from` (`Range: bytes=N-` in
-   `host_real_net.zig`); it needs a closed range (`bytes=a-b`) and a 206 check, then a
-   `lazy.Range` implementation over `registry/client.zig` that is safe from several resolver
-   threads (one connection and token per thread, or a lock), honouring `timeout_ms`.
-3. `zbx run --lazy <registry ref>` when the image is not local: manifest, the layer's
-   `org.zigbox.lazy-index` anchor (`manifest.zig`), fetch the index range, inflate, `verify.verify`
-   (E1202 on refusal, nothing written), `trees.put_checked`, then serve the tree digest
-   (`runtime/image.zig` `resolve_image` takes a digest prefix naming a tree) with the `Remote`
-   attached. No anchor: W1201 and a whole pull.
-4. A `lazy.Log` that renders W1202, E1203 and E1206 as one coded line each, at most
-   `lazy_errors_shown_max`, then a count; a `lazy.FreeBytes` over `statfs` of the store; the
-   progress and summary lines from `report()`. Register W1201, W1202, E1203, E1206 (and E1204
-   where it applies) only as each is raised, with the brief's wording.
-5. Tests: `catalog_of` (agrees, disagrees by mode and by content) and `ResolverChunks` through
-   `ops` over the simulated store; then the VM run (`vm/s2-slice5`, `demo-s2-lazy`).
+1. **Wire the CLI** (`cli.zig`, `main.zig`): a static `lazy_start.Workspace` in `main.zig`
+   (about 160 MiB, mostly untouched), set `Services.lazy` in `prepare_image` only for
+   `run --lazy` in the foreground with a `lazy_server`. When `prepared.remote`: init `ws.range`
+   (`RegistryRange.init(&ws.client, &pull.library.reference, ws.layer, server.threaded.io())`),
+   then `server.attach(.{ .index = &ws.index, .registry = ws.range.source(), .log, .free })`
+   before `prepare_from`, and `lazy_start.finish(&storage.pull)` after the run. On `.whole`, pull
+   as without `--lazy` (the usual path: `remote` false falls through to `via_lock`/digest).
+   Check that the composed run resolves the tree from the in-memory `image` (compose reads the
+   image record today; the record is 5b, so compose may need the `Image` passed in), and that
+   `choose_user` (reads `/etc/passwd` from the store) works for a remote image or is cut.
+2. The `lazy.Log` (new module, e.g. `lazy_lines.zig`): an atomic shown counter, at most
+   `lazy_errors_shown_max` lines rendered with `render.render` to stderr, then one count line;
+   W1202 through `chunk_lied`, E1203 through `chunk_unavailable` (each `Outcome.text()` joined),
+   E1206 through `store_full`. The lines name the object id and chunk, not the path (the catalog
+   has no path): record that cut in `docs/demos/s2.md`. `lazy.FreeBytes` over `statfs` of the
+   store's directory: `host_real.zig` has a private `StatFs` and `syscall2(.statfs)`; add a
+   `free_bytes(path)` there and pass it through a `cli` `pub var` set by `main.zig`.
+3. Progress line before the run and summary line after it, from `server.report()`.
+4. VM: `src/testing/vm/registry_server.zig` parses only `bytes=N-` (`range_start`) and the
+   fixture answers only `range_from`: it needs closed ranges before `demo-s2-lazy` can pass. Push
+   `HEAD:vm/s2lazy-slice5-a` (vm.yml maps `vm/s2lazy-*` to `demo-s2-lazy`).
 
 ## 5b (next implementer after 5a)
 
@@ -56,3 +87,6 @@ images, holders, the `zbx doctor` line, `StartOptions.lazy_sources` and its surf
   is `lazy_mod` there.
 - `catalog_of` is not reached by the compiler until something calls `attach`: build errors in it
   appear only when the CLI path or a test uses it.
+- Goldens of direct cases have no generator: write the files empty, print `direct_block` from a
+  throwaway test, and copy the blocks in (as done for the four new codes).
+- `zig build test` has no filter and takes several minutes: run it in the background.
