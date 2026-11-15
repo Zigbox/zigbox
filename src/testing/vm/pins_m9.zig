@@ -155,12 +155,17 @@ fn steady_first(session: *Session, out: *Io.Writer, timer: *H.Timer) !void {
     var buffer: [1536]u8 = undefined;
     try hello_m7.put_text(session, steady_path, steady_file(&buffer, ""));
     _ = try state.expect_long_split(session, out, steady_pin, 0, hello.build_timeout_s);
+    // The lock's text lives in the session's scratch, which the next command reuses: take
+    // the pin out of it first.
     const lock = try hello.read_file(session, out, step8, lock_path);
+    const pin = checks.pin_of(lock, "steady") orelse {
+        return fail_step(out, step8, "expected the lock to pin steady", error.PinWrong);
+    };
     const again = try state.expect_long_split(session, out, steady_locked, 0, hello.short_s);
     const report = m7.parse_json(session.scratch_allocator(), again.streams.stdout) catch |err| {
         return fail_step(out, step8, "expected the JSON build report", err);
     };
-    first_steady = checks.steady_of(&report, lock) catch |err| {
+    first_steady = checks.steady_of(&report, &pin) catch |err| {
         return fail_step(out, step8, "expected steady pinned, then hit with its pin", err);
     };
     try timer.lap(out, "steady9");

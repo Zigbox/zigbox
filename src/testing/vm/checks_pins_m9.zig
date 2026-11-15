@@ -142,10 +142,9 @@ pub const Steady = struct {
     after_key: [digest_text_bytes]u8,
 };
 
-/// The first VM's `steady`, from its pinned lock and an all-hits `--locked` JSON report.
-pub fn steady_of(report: *const m9.Report, lock: []const u8) Error!Steady {
-    const pin = pin_of(lock, "steady") orelse return error.PinWrong;
-    try check_pin_committed(report, "steady", &pin);
+/// The first VM's `steady`, from its pin in the lock and an all-hits `--locked` JSON report.
+pub fn steady_of(report: *const m9.Report, pin: *const Pin) Error!Steady {
+    try check_pin_committed(report, "steady", pin);
     const after = report.row("after") orelse return error.ReportWrong;
     if (!after.hit) return error.CacheWrong;
     if (!m7.is_digest(after.key) or after.key.len != digest_text_bytes) return error.ReportWrong;
@@ -325,10 +324,13 @@ test "steady: the first VM's pin and after's key, then the same in the second VM
     report.rows[1] = report.rows[0];
     report.rows[1].name = "after";
     report.rows[1].key = output_text;
-    const first = try steady_of(&report, steady_lock);
+    var pin = pin_of(steady_lock, "steady").?;
+    try testing.expect(pin_of(pinned_lock, "steady") == null);
+    const first = try steady_of(&report, &pin);
     try testing.expectEqualStrings(pinned_text, &first.output);
     try testing.expectEqualStrings(output_text, &first.after_key);
-    try testing.expectError(error.PinWrong, steady_of(&report, pinned_lock));
+    pin.key = pin.output;
+    try testing.expectError(error.PinWrong, steady_of(&report, &pin));
     report.rows[0].hit = false;
     report.rows[1].hit = false;
     try check_steady_same(&report, "warning[ZBX-W0801]: x\n", 0, &first);
