@@ -100,9 +100,10 @@ fn pairs(
 }
 
 fn blank_name(t: *Translator, instruction: *const Instruction, word: []const u8) Refused {
+    const keyword = instruction.keyword.upper();
     return refuse(t.refusal(), .E0810, instruction.line, "Dockerfile:{d} has `{s}` in {s}, " ++
-        "which has no name before the `=`", .{ instruction.line, word, instruction.keyword.upper() },
-        "write a name before the `=`", .{});
+        "which has no name before the `=`", .{ instruction.line, word, keyword }, "write a " ++
+        "name before the `=`", .{});
 }
 
 fn env(t: *Translator, instruction: *const Instruction) Error!void {
