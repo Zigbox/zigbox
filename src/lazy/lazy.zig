@@ -39,30 +39,55 @@ pub const FetchError = error{
     /// The source does not hold this chunk (a peer that never had it). The next source is
     /// asked at once, and this one is not counted as failing.
     NotFound,
-    /// The source did not answer within the `deadline_ms` it was given.
+    /// The source did not answer within the `timeout_ms` it was given. A source that limits
+    /// its bandwidth waits for its turn inside that time and then says this, never `NotFound`.
     TimedOut,
     /// Anything else: the connection failed, the source refused, it is shutting down.
     Failed,
+};
+
+/// What a source is asked for: one chunk, by its digest and length, which is all a source
+/// needs to serve it. The object and the chunk's index in it are hints (for a source that keeps
+/// objects whole); a source that serves by chunk digest ignores them.
+pub const Request = struct {
+    chunk: Digest,
+    /// The chunk's length: `out` is exactly this long.
+    length: u32,
+    object: Digest,
+    index: u32,
+    /// The source answers (or says `TimedOut`) within this many milliseconds.
+    timeout_ms: u32,
+};
+
+/// Which peer of a source answered, in the source's own terms: the resolver never looks inside
+/// it and passes it back to `Source.lied`.
+pub const PeerToken = u64;
+
+pub const Fetched = struct {
+    /// The bytes written to `out`. Fewer than `out.len` is a failed fetch (as `Failed`), never
+    /// a lie: only bytes that do not hash right are a lie.
+    length: u32,
+    peer: PeerToken,
 };
 
 /// A source of chunks that is not the store or the registry: Zigcube's agent passes its swarm's
 /// peer fetch as one (`StartOptions.lazy_sources`). Zigbox never imports Zigcube and never talks
 /// a peer protocol. Verification is never the source's job: the resolver checks whatever it
 /// gets.
+///
+/// A swarm is one `Source`, however many peers it has (it may have more than
+/// `lazy_sources_max`): it picks the peer, keeps its own view of which peers are down, and fails
+/// (`TimedOut` or `Failed`) only when no peer of it serves. The resolver's down state is about
+/// the whole source (docs/decisions/2026-11-14-lazy-source-interface.md).
 pub const Source = struct {
     context: *anyopaque,
-    name: []const u8, // for messages: "registry", "peer 10.0.0.3"
-    /// Fills `out` with chunk `index` of object `id` (unverified), or fails. Must return
-    /// within `deadline_ms`; may be called from several resolver threads at once.
-    fetch: *const fn (
-        context: *anyopaque,
-        id: Digest,
-        index: u32,
-        out: []u8,
-        deadline_ms: u32,
-    ) FetchError!usize,
-    /// Told when bytes from this source failed their hash (C2 reports the peer).
-    lied: *const fn (context: *anyopaque, id: Digest, index: u32) void,
+    name: []const u8, // for messages: "registry", "peer 10.0.0.3", "swarm"
+    /// Fills `out` (`request.length` bytes) with the chunk (unverified), or fails. Must return
+    /// within `request.timeout_ms`; may be called from several resolver threads at once.
+    fetch: *const fn (context: *anyopaque, request: *const Request, out: []u8) FetchError!Fetched,
+    /// Told when the bytes `peer` sent for `request` failed the chunk's hash (C2 reports the
+    /// peer). Called from a resolver thread, without the resolver's lock.
+    lied: *const fn (context: *anyopaque, request: *const Request, peer: PeerToken) void,
 };
 
 /// The registry's side of a fetch: `length` bytes of the layer blob from `offset`, by an HTTP
@@ -73,13 +98,14 @@ pub const Range = struct {
     context: *anyopaque,
     name: []const u8, // "registry"
     /// Fills `out` (`out.len` is the length asked for, at most `lazy_range_bytes_max`) or fails;
-    /// a short answer returns how much came. Must return within `deadline_ms`; called from
-    /// several resolver threads at once.
+    /// a short answer returns how much came. The chunks whose bytes did not all come count as
+    /// a failed fetch, never a lie; the ones that did are inflated and checked. Must return
+    /// within `timeout_ms`; called from several resolver threads at once.
     fetch: *const fn (
         context: *anyopaque,
         offset: u64,
         out: []u8,
-        deadline_ms: u32,
+        timeout_ms: u32,
     ) FetchError!usize,
 };
 
@@ -123,7 +149,7 @@ pub const ReadError = error{
 /// as long as the resolver.
 pub const Event = struct {
     pub const Kind = enum {
-        /// W1202: `source` sent bytes that do not match the chunk's hash (or its length);
+        /// W1202: `source` sent bytes that do not match the chunk's hash;
         /// another source is asked, and this one is not asked for this object again.
         lied,
         /// E1203: a read gave up: `reason` says what each source did.
@@ -190,9 +216,13 @@ pub const Report = struct {
     source_bytes: [constants.lazy_sources_max]u64,
     /// Reads that ended in `ReadError`.
     errors: u64,
-    /// Objects of the catalog that are whole in the store, as last counted.
+    /// Objects of the catalog seen whole in the store since `init` (at `init`, landed whole, or
+    /// found whole by the fill). Never goes down: a gc that removes one later is not seen.
     objects_local: u32,
     objects_total: u32,
+    /// Events the resolver had no room for (its ring holds `lazy_pending_max`): the caller
+    /// shows the count, so a dropped line is never silent.
+    events_dropped: u64,
 };
 
 pub const Resolver = @import("resolver.zig").Resolver;
@@ -208,4 +238,5 @@ test {
     _ = @import("schedule.zig");
     _ = @import("resolver.zig");
     _ = @import("sim.zig");
+    _ = @import("resolver_test.zig");
 }
