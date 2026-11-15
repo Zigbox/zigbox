@@ -1,0 +1,518 @@
+/ 755 0:0 directory -
+/bin 755 0:0 directory -
+/bin/arch 777 0:0 symbolic link -> /bin/busybox
+/bin/ash 777 0:0 symbolic link -> /bin/busybox
+/bin/base64 777 0:0 symbolic link -> /bin/busybox
+/bin/bbconfig 777 0:0 symbolic link -> /bin/busybox
+/bin/busybox 755 0:0 regular file b7de36c48f4c8b08
+/bin/cat 777 0:0 symbolic link -> /bin/busybox
+/bin/chattr 777 0:0 symbolic link -> /bin/busybox
+/bin/chgrp 777 0:0 symbolic link -> /bin/busybox
+/bin/chmod 777 0:0 symbolic link -> /bin/busybox
+/bin/chown 777 0:0 symbolic link -> /bin/busybox
+/bin/cp 777 0:0 symbolic link -> /bin/busybox
+/bin/date 777 0:0 symbolic link -> /bin/busybox
+/bin/dd 777 0:0 symbolic link -> /bin/busybox
+/bin/df 777 0:0 symbolic link -> /bin/busybox
+/bin/dmesg 777 0:0 symbolic link -> /bin/busybox
+/bin/dnsdomainname 777 0:0 symbolic link -> /bin/busybox
+/bin/dumpkmap 777 0:0 symbolic link -> /bin/busybox
+/bin/echo 777 0:0 symbolic link -> /bin/busybox
+/bin/egrep 777 0:0 symbolic link -> /bin/busybox
+/bin/false 777 0:0 symbolic link -> /bin/busybox
+/bin/fatattr 777 0:0 symbolic link -> /bin/busybox
+/bin/fdflush 777 0:0 symbolic link -> /bin/busybox
+/bin/fgrep 777 0:0 symbolic link -> /bin/busybox
+/bin/fsync 777 0:0 symbolic link -> /bin/busybox
+/bin/getopt 777 0:0 symbolic link -> /bin/busybox
+/bin/grep 777 0:0 symbolic link -> /bin/busybox
+/bin/gunzip 777 0:0 symbolic link -> /bin/busybox
+/bin/gzip 777 0:0 symbolic link -> /bin/busybox
+/bin/hostname 777 0:0 symbolic link -> /bin/busybox
+/bin/ionice 777 0:0 symbolic link -> /bin/busybox
+/bin/iostat 777 0:0 symbolic link -> /bin/busybox
+/bin/ipcalc 777 0:0 symbolic link -> /bin/busybox
+/bin/kbd_mode 777 0:0 symbolic link -> /bin/busybox
+/bin/kill 777 0:0 symbolic link -> /bin/busybox
+/bin/link 777 0:0 symbolic link -> /bin/busybox
+/bin/linux32 777 0:0 symbolic link -> /bin/busybox
+/bin/linux64 777 0:0 symbolic link -> /bin/busybox
+/bin/ln 777 0:0 symbolic link -> /bin/busybox
+/bin/login 777 0:0 symbolic link -> /bin/busybox
+/bin/ls 777 0:0 symbolic link -> /bin/busybox
+/bin/lsattr 777 0:0 symbolic link -> /bin/busybox
+/bin/lzop 777 0:0 symbolic link -> /bin/busybox
+/bin/makemime 777 0:0 symbolic link -> /bin/busybox
+/bin/mkdir 777 0:0 symbolic link -> /bin/busybox
+/bin/mknod 777 0:0 symbolic link -> /bin/busybox
+/bin/mktemp 777 0:0 symbolic link -> /bin/busybox
+/bin/more 777 0:0 symbolic link -> /bin/busybox
+/bin/mount 777 0:0 symbolic link -> /bin/busybox
+/bin/mountpoint 777 0:0 symbolic link -> /bin/busybox
+/bin/mpstat 777 0:0 symbolic link -> /bin/busybox
+/bin/mv 777 0:0 symbolic link -> /bin/busybox
+/bin/netstat 777 0:0 symbolic link -> /bin/busybox
+/bin/nice 777 0:0 symbolic link -> /bin/busybox
+/bin/pidof 777 0:0 symbolic link -> /bin/busybox
+/bin/ping 777 0:0 symbolic link -> /bin/busybox
+/bin/ping6 777 0:0 symbolic link -> /bin/busybox
+/bin/pipe_progress 777 0:0 symbolic link -> /bin/busybox
+/bin/printenv 777 0:0 symbolic link -> /bin/busybox
+/bin/ps 777 0:0 symbolic link -> /bin/busybox
+/bin/pwd 777 0:0 symbolic link -> /bin/busybox
+/bin/reformime 777 0:0 symbolic link -> /bin/busybox
+/bin/rev 777 0:0 symbolic link -> /bin/busybox
+/bin/rm 777 0:0 symbolic link -> /bin/busybox
+/bin/rmdir 777 0:0 symbolic link -> /bin/busybox
+/bin/run-parts 777 0:0 symbolic link -> /bin/busybox
+/bin/sed 777 0:0 symbolic link -> /bin/busybox
+/bin/setpriv 777 0:0 symbolic link -> /bin/busybox
+/bin/setserial 777 0:0 symbolic link -> /bin/busybox
+/bin/sh 777 0:0 symbolic link -> /bin/busybox
+/bin/sleep 777 0:0 symbolic link -> /bin/busybox
+/bin/stat 777 0:0 symbolic link -> /bin/busybox
+/bin/stty 777 0:0 symbolic link -> /bin/busybox
+/bin/su 777 0:0 symbolic link -> /bin/busybox
+/bin/sync 777 0:0 symbolic link -> /bin/busybox
+/bin/tar 777 0:0 symbolic link -> /bin/busybox
+/bin/touch 777 0:0 symbolic link -> /bin/busybox
+/bin/true 777 0:0 symbolic link -> /bin/busybox
+/bin/umount 777 0:0 symbolic link -> /bin/busybox
+/bin/uname 777 0:0 symbolic link -> /bin/busybox
+/bin/usleep 777 0:0 symbolic link -> /bin/busybox
+/bin/watch 777 0:0 symbolic link -> /bin/busybox
+/bin/zcat 777 0:0 symbolic link -> /bin/busybox
+/etc 755 0:0 directory -
+/etc/alpine-release 644 0:0 regular file bf4e4df148b791a0
+/etc/apk 755 0:0 directory -
+/etc/apk/arch 644 0:0 regular file aaf631698ae5160c
+/etc/apk/keys 755 0:0 directory -
+/etc/apk/keys/alpine-devel@lists.alpinelinux.org-4a6a0840.rsa.pub 644 0:0 regular file 9c102bcc376af149
+/etc/apk/keys/alpine-devel@lists.alpinelinux.org-5243ef4b.rsa.pub 644 0:0 regular file ebf31683b56410ec
+/etc/apk/keys/alpine-devel@lists.alpinelinux.org-5261cecb.rsa.pub 644 0:0 regular file 12f899e55a769122
+/etc/apk/keys/alpine-devel@lists.alpinelinux.org-6165ee59.rsa.pub 644 0:0 regular file 207e4696d3c05f7c
+/etc/apk/keys/alpine-devel@lists.alpinelinux.org-61666e3f.rsa.pub 644 0:0 regular file 128d34d4aec39b0d
+/etc/apk/protected_paths.d 755 0:0 directory -
+/etc/apk/repositories 644 0:0 regular file 6745ed39ac391bcc
+/etc/apk/world 644 0:0 regular file 713e3907167dce20
+/etc/busybox-paths.d 755 0:0 directory -
+/etc/busybox-paths.d/busybox 644 0:0 regular file e12e0822f5c6426b
+/etc/crontabs 755 0:0 directory -
+/etc/crontabs/root 600 0:0 regular file 575d810a9fae5f2f
+/etc/fstab 644 0:0 regular file a3efca2e8d62785c
+/etc/group 644 0:0 regular file 8fbc20adad3ba736
+/etc/hello 755 10001:10001 directory -
+/etc/hello/LICENSE 644 10001:10001 regular file 7a127b805a3935df
+/etc/hello/VERSION 644 10001:10001 regular file e9dd8507f4bf0c6f
+/etc/inittab 644 0:0 regular file 7326d8ad56bf5fea
+/etc/issue 644 0:0 regular file cba3b80ee6015c93
+/etc/logrotate.d 755 0:0 directory -
+/etc/logrotate.d/acpid 644 0:0 regular file d608a3b7715886b5
+/etc/modprobe.d 755 0:0 directory -
+/etc/modprobe.d/aliases.conf 644 0:0 regular file 3ebaba946f213670
+/etc/modprobe.d/blacklist.conf 644 0:0 regular file 5cd46031fc7dc718
+/etc/modprobe.d/i386.conf 644 0:0 regular file 6c46c4cbfb8b7594
+/etc/modprobe.d/kms.conf 644 0:0 regular file 50467fa732f809f3
+/etc/modules 644 0:0 regular file 2c881de75a5409c3
+/etc/modules-load.d 755 0:0 directory -
+/etc/motd 644 0:0 regular file ff044e9be5daa2ee
+/etc/mtab 777 0:0 symbolic link -> /proc/mounts
+/etc/network 755 0:0 directory -
+/etc/network/if-down.d 755 0:0 directory -
+/etc/network/if-post-down.d 755 0:0 directory -
+/etc/network/if-post-up.d 755 0:0 directory -
+/etc/network/if-pre-down.d 755 0:0 directory -
+/etc/network/if-pre-up.d 755 0:0 directory -
+/etc/network/if-up.d 755 0:0 directory -
+/etc/network/if-up.d/dad 775 0:0 regular file 2fd20d1bc67d9ee7
+/etc/nsswitch.conf 644 0:0 regular file 0afd94c183d30a34
+/etc/opt 755 0:0 directory -
+/etc/os-release 644 0:0 regular file 806c1db3963994fa
+/etc/passwd 644 0:0 regular file ebaa79e2bf48d1af
+/etc/periodic 755 0:0 directory -
+/etc/periodic/15min 755 0:0 directory -
+/etc/periodic/daily 755 0:0 directory -
+/etc/periodic/hourly 755 0:0 directory -
+/etc/periodic/monthly 755 0:0 directory -
+/etc/periodic/weekly 755 0:0 directory -
+/etc/profile 644 0:0 regular file 87e8643d3ce156de
+/etc/profile.d 755 0:0 directory -
+/etc/profile.d/20locale.sh 644 0:0 regular file 284a6ef56ab97a13
+/etc/profile.d/README 644 0:0 regular file b73284f27fe2da9a
+/etc/profile.d/color_prompt.sh.disabled 644 0:0 regular file ba24425c6864a5d1
+/etc/protocols 644 0:0 regular file 4959498abbadaa1e
+/etc/secfixes.d 755 0:0 directory -
+/etc/secfixes.d/alpine 644 0:0 regular file b168b672adbc38a9
+/etc/securetty 644 0:0 regular file 713fcea510972888
+/etc/services 644 0:0 regular file f6183055fd949f9c
+/etc/shadow 640 0:42 regular file a4528f4f7fe8b8b1
+/etc/shells 644 0:0 regular file 24be6ceb236610df
+/etc/ssl 755 0:0 directory -
+/etc/ssl/cert.pem 777 0:0 symbolic link -> certs/ca-certificates.crt
+/etc/ssl/certs 755 0:0 directory -
+/etc/ssl/certs/ca-certificates.crt 644 0:0 regular file 61efbd6d3f829f71
+/etc/ssl/ct_log_list.cnf 644 0:0 regular file f1c1803d13d1d0b7
+/etc/ssl/ct_log_list.cnf.dist 644 0:0 regular file f1c1803d13d1d0b7
+/etc/ssl/openssl.cnf 644 0:0 regular file 3a0c65ff954aff20
+/etc/ssl/openssl.cnf.dist 644 0:0 regular file 3a0c65ff954aff20
+/etc/ssl/private 755 0:0 directory -
+/etc/ssl1.1 755 0:0 directory -
+/etc/ssl1.1/cert.pem 777 0:0 symbolic link -> /etc/ssl/cert.pem
+/etc/ssl1.1/certs 777 0:0 symbolic link -> /etc/ssl/certs
+/etc/sysctl.conf 644 0:0 regular file 8bba47da45bc8715
+/etc/sysctl.d 755 0:0 directory -
+/etc/udhcpc 755 0:0 directory -
+/etc/udhcpc/udhcpc.conf 644 0:0 regular file 5b372209e01cda07
+/home 755 0:0 directory -
+/home/app 755 10001:10001 directory -
+/lib 755 0:0 directory -
+/lib/apk 755 0:0 directory -
+/lib/apk/db 755 0:0 directory -
+/lib/apk/db/installed 644 0:0 regular file 67bc4d6b3ce175c4
+/lib/apk/db/lock 600 0:0 regular empty file e3b0c44298fc1c14
+/lib/apk/db/scripts.tar 644 0:0 regular file 883e104e4661fe29
+/lib/apk/db/triggers 644 0:0 regular file e35a6ce46ca70732
+/lib/apk/exec 755 0:0 directory -
+/lib/firmware 755 0:0 directory -
+/lib/ld-musl-x86_64.so.1 755 0:0 regular file 19738ba9b967e61e
+/lib/libapk.so.2.14.0 755 0:0 regular file d44e8dd23f66a2dc
+/lib/libc.musl-x86_64.so.1 777 0:0 symbolic link -> ld-musl-x86_64.so.1
+/lib/libcrypto.so.3 755 0:0 regular file 7ad7668e7b5693cf
+/lib/libssl.so.3 755 0:0 regular file d5c07be1a046d431
+/lib/libz.so.1 777 0:0 symbolic link -> libz.so.1.3.2
+/lib/libz.so.1.3.2 755 0:0 regular file b72fcd4a2527ac76
+/lib/modules-load.d 755 0:0 directory -
+/lib/sysctl.d 755 0:0 directory -
+/lib/sysctl.d/00-alpine.conf 644 0:0 regular file ee169bea2cb68594
+/media 755 0:0 directory -
+/media/cdrom 755 0:0 directory -
+/media/floppy 755 0:0 directory -
+/media/usb 755 0:0 directory -
+/mnt 755 0:0 directory -
+/opt 755 0:0 directory -
+/root 700 0:0 directory -
+/run 755 0:0 directory -
+/sbin 755 0:0 directory -
+/sbin/acpid 777 0:0 symbolic link -> /bin/busybox
+/sbin/adjtimex 777 0:0 symbolic link -> /bin/busybox
+/sbin/apk 755 0:0 regular file 1a8141f2306ecb74
+/sbin/arp 777 0:0 symbolic link -> /bin/busybox
+/sbin/blkid 777 0:0 symbolic link -> /bin/busybox
+/sbin/blockdev 777 0:0 symbolic link -> /bin/busybox
+/sbin/depmod 777 0:0 symbolic link -> /bin/busybox
+/sbin/fbsplash 777 0:0 symbolic link -> /bin/busybox
+/sbin/fdisk 777 0:0 symbolic link -> /bin/busybox
+/sbin/findfs 777 0:0 symbolic link -> /bin/busybox
+/sbin/fsck 777 0:0 symbolic link -> /bin/busybox
+/sbin/fstrim 777 0:0 symbolic link -> /bin/busybox
+/sbin/getty 777 0:0 symbolic link -> /bin/busybox
+/sbin/halt 777 0:0 symbolic link -> /bin/busybox
+/sbin/hwclock 777 0:0 symbolic link -> /bin/busybox
+/sbin/ifconfig 777 0:0 symbolic link -> /bin/busybox
+/sbin/ifdown 777 0:0 symbolic link -> /bin/busybox
+/sbin/ifenslave 777 0:0 symbolic link -> /bin/busybox
+/sbin/ifup 777 0:0 symbolic link -> /bin/busybox
+/sbin/init 777 0:0 symbolic link -> /bin/busybox
+/sbin/inotifyd 777 0:0 symbolic link -> /bin/busybox
+/sbin/insmod 777 0:0 symbolic link -> /bin/busybox
+/sbin/ip 777 0:0 symbolic link -> /bin/busybox
+/sbin/ipaddr 777 0:0 symbolic link -> /bin/busybox
+/sbin/iplink 777 0:0 symbolic link -> /bin/busybox
+/sbin/ipneigh 777 0:0 symbolic link -> /bin/busybox
+/sbin/iproute 777 0:0 symbolic link -> /bin/busybox
+/sbin/iprule 777 0:0 symbolic link -> /bin/busybox
+/sbin/iptunnel 777 0:0 symbolic link -> /bin/busybox
+/sbin/klogd 777 0:0 symbolic link -> /bin/busybox
+/sbin/ldconfig 755 0:0 regular file b4a2c06db38742e8
+/sbin/loadkmap 777 0:0 symbolic link -> /bin/busybox
+/sbin/logread 777 0:0 symbolic link -> /bin/busybox
+/sbin/losetup 777 0:0 symbolic link -> /bin/busybox
+/sbin/lsmod 777 0:0 symbolic link -> /bin/busybox
+/sbin/mdev 777 0:0 symbolic link -> /bin/busybox
+/sbin/mkdosfs 777 0:0 symbolic link -> /bin/busybox
+/sbin/mkfs.vfat 777 0:0 symbolic link -> /bin/busybox
+/sbin/mkswap 777 0:0 symbolic link -> /bin/busybox
+/sbin/modinfo 777 0:0 symbolic link -> /bin/busybox
+/sbin/modprobe 777 0:0 symbolic link -> /bin/busybox
+/sbin/nameif 777 0:0 symbolic link -> /bin/busybox
+/sbin/nologin 777 0:0 symbolic link -> /bin/busybox
+/sbin/pivot_root 777 0:0 symbolic link -> /bin/busybox
+/sbin/poweroff 777 0:0 symbolic link -> /bin/busybox
+/sbin/raidautorun 777 0:0 symbolic link -> /bin/busybox
+/sbin/reboot 777 0:0 symbolic link -> /bin/busybox
+/sbin/rmmod 777 0:0 symbolic link -> /bin/busybox
+/sbin/route 777 0:0 symbolic link -> /bin/busybox
+/sbin/setconsole 777 0:0 symbolic link -> /bin/busybox
+/sbin/slattach 777 0:0 symbolic link -> /bin/busybox
+/sbin/swapoff 777 0:0 symbolic link -> /bin/busybox
+/sbin/swapon 777 0:0 symbolic link -> /bin/busybox
+/sbin/switch_root 777 0:0 symbolic link -> /bin/busybox
+/sbin/sysctl 777 0:0 symbolic link -> /bin/busybox
+/sbin/syslogd 777 0:0 symbolic link -> /bin/busybox
+/sbin/tunctl 777 0:0 symbolic link -> /bin/busybox
+/sbin/udhcpc 777 0:0 symbolic link -> /bin/busybox
+/sbin/vconfig 777 0:0 symbolic link -> /bin/busybox
+/sbin/watchdog 777 0:0 symbolic link -> /bin/busybox
+/sbin/zcip 777 0:0 symbolic link -> /bin/busybox
+/srv 755 0:0 directory -
+/tmp 1777 0:0 directory -
+/usr 755 0:0 directory -
+/usr/bin 755 0:0 directory -
+/usr/bin/[ 777 0:0 symbolic link -> /bin/busybox
+/usr/bin/[[ 777 0:0 symbolic link -> /bin/busybox
+/usr/bin/awk 777 0:0 symbolic link -> /bin/busybox
+/usr/bin/basename 777 0:0 symbolic link -> /bin/busybox
+/usr/bin/bc 777 0:0 symbolic link -> /bin/busybox
+/usr/bin/beep 777 0:0 symbolic link -> /bin/busybox
+/usr/bin/blkdiscard 777 0:0 symbolic link -> /bin/busybox
+/usr/bin/bunzip2 777 0:0 symbolic link -> /bin/busybox
+/usr/bin/bzcat 777 0:0 symbolic link -> /bin/busybox
+/usr/bin/bzip2 777 0:0 symbolic link -> /bin/busybox
+/usr/bin/cal 777 0:0 symbolic link -> /bin/busybox
+/usr/bin/chvt 777 0:0 symbolic link -> /bin/busybox
+/usr/bin/cksum 777 0:0 symbolic link -> /bin/busybox
+/usr/bin/clear 777 0:0 symbolic link -> /bin/busybox
+/usr/bin/cmp 777 0:0 symbolic link -> /bin/busybox
+/usr/bin/comm 777 0:0 symbolic link -> /bin/busybox
+/usr/bin/cpio 777 0:0 symbolic link -> /bin/busybox
+/usr/bin/crontab 777 0:0 symbolic link -> /bin/busybox
+/usr/bin/cryptpw 777 0:0 symbolic link -> /bin/busybox
+/usr/bin/cut 777 0:0 symbolic link -> /bin/busybox
+/usr/bin/dc 777 0:0 symbolic link -> /bin/busybox
+/usr/bin/deallocvt 777 0:0 symbolic link -> /bin/busybox
+/usr/bin/diff 777 0:0 symbolic link -> /bin/busybox
+/usr/bin/dirname 777 0:0 symbolic link -> /bin/busybox
+/usr/bin/dos2unix 777 0:0 symbolic link -> /bin/busybox
+/usr/bin/du 777 0:0 symbolic link -> /bin/busybox
+/usr/bin/eject 777 0:0 symbolic link -> /bin/busybox
+/usr/bin/env 777 0:0 symbolic link -> /bin/busybox
+/usr/bin/expand 777 0:0 symbolic link -> /bin/busybox
+/usr/bin/expr 777 0:0 symbolic link -> /bin/busybox
+/usr/bin/factor 777 0:0 symbolic link -> /bin/busybox
+/usr/bin/fallocate 777 0:0 symbolic link -> /bin/busybox
+/usr/bin/find 777 0:0 symbolic link -> /bin/busybox
+/usr/bin/flock 777 0:0 symbolic link -> /bin/busybox
+/usr/bin/fold 777 0:0 symbolic link -> /bin/busybox
+/usr/bin/free 777 0:0 symbolic link -> /bin/busybox
+/usr/bin/fuser 777 0:0 symbolic link -> /bin/busybox
+/usr/bin/getconf 755 0:0 regular file abeca5d2f2f37850
+/usr/bin/getent 755 0:0 regular file 206888f4a45cae0b
+/usr/bin/groups 777 0:0 symbolic link -> /bin/busybox
+/usr/bin/hd 777 0:0 symbolic link -> /bin/busybox
+/usr/bin/head 777 0:0 symbolic link -> /bin/busybox
+/usr/bin/hexdump 777 0:0 symbolic link -> /bin/busybox
+/usr/bin/hostid 777 0:0 symbolic link -> /bin/busybox
+/usr/bin/iconv 755 0:0 regular file d88701fa0d19ab3e
+/usr/bin/id 777 0:0 symbolic link -> /bin/busybox
+/usr/bin/install 777 0:0 symbolic link -> /bin/busybox
+/usr/bin/ipcrm 777 0:0 symbolic link -> /bin/busybox
+/usr/bin/ipcs 777 0:0 symbolic link -> /bin/busybox
+/usr/bin/killall 777 0:0 symbolic link -> /bin/busybox
+/usr/bin/last 777 0:0 symbolic link -> /bin/busybox
+/usr/bin/ldd 755 0:0 regular file 9a49c2541a439be8
+/usr/bin/less 777 0:0 symbolic link -> /bin/busybox
+/usr/bin/logger 777 0:0 symbolic link -> /bin/busybox
+/usr/bin/lsof 777 0:0 symbolic link -> /bin/busybox
+/usr/bin/lsusb 777 0:0 symbolic link -> /bin/busybox
+/usr/bin/lzcat 777 0:0 symbolic link -> /bin/busybox
+/usr/bin/lzma 777 0:0 symbolic link -> /bin/busybox
+/usr/bin/lzopcat 777 0:0 symbolic link -> /bin/busybox
+/usr/bin/md5sum 777 0:0 symbolic link -> /bin/busybox
+/usr/bin/mesg 777 0:0 symbolic link -> /bin/busybox
+/usr/bin/microcom 777 0:0 symbolic link -> /bin/busybox
+/usr/bin/mkfifo 777 0:0 symbolic link -> /bin/busybox
+/usr/bin/mkpasswd 777 0:0 symbolic link -> /bin/busybox
+/usr/bin/nc 777 0:0 symbolic link -> /bin/busybox
+/usr/bin/nl 777 0:0 symbolic link -> /bin/busybox
+/usr/bin/nmeter 777 0:0 symbolic link -> /bin/busybox
+/usr/bin/nohup 777 0:0 symbolic link -> /bin/busybox
+/usr/bin/nproc 777 0:0 symbolic link -> /bin/busybox
+/usr/bin/nsenter 777 0:0 symbolic link -> /bin/busybox
+/usr/bin/nslookup 777 0:0 symbolic link -> /bin/busybox
+/usr/bin/od 777 0:0 symbolic link -> /bin/busybox
+/usr/bin/openvt 777 0:0 symbolic link -> /bin/busybox
+/usr/bin/passwd 777 0:0 symbolic link -> /bin/busybox
+/usr/bin/paste 777 0:0 symbolic link -> /bin/busybox
+/usr/bin/pgrep 777 0:0 symbolic link -> /bin/busybox
+/usr/bin/pkill 777 0:0 symbolic link -> /bin/busybox
+/usr/bin/pmap 777 0:0 symbolic link -> /bin/busybox
+/usr/bin/printf 777 0:0 symbolic link -> /bin/busybox
+/usr/bin/pscan 777 0:0 symbolic link -> /bin/busybox
+/usr/bin/pstree 777 0:0 symbolic link -> /bin/busybox
+/usr/bin/pwdx 777 0:0 symbolic link -> /bin/busybox
+/usr/bin/readlink 777 0:0 symbolic link -> /bin/busybox
+/usr/bin/realpath 777 0:0 symbolic link -> /bin/busybox
+/usr/bin/renice 777 0:0 symbolic link -> /bin/busybox
+/usr/bin/reset 777 0:0 symbolic link -> /bin/busybox
+/usr/bin/resize 777 0:0 symbolic link -> /bin/busybox
+/usr/bin/scanelf 755 0:0 regular file 4d0a125e450889fb
+/usr/bin/seq 777 0:0 symbolic link -> /bin/busybox
+/usr/bin/setkeycodes 777 0:0 symbolic link -> /bin/busybox
+/usr/bin/setsid 777 0:0 symbolic link -> /bin/busybox
+/usr/bin/sha1sum 777 0:0 symbolic link -> /bin/busybox
+/usr/bin/sha256sum 777 0:0 symbolic link -> /bin/busybox
+/usr/bin/sha3sum 777 0:0 symbolic link -> /bin/busybox
+/usr/bin/sha512sum 777 0:0 symbolic link -> /bin/busybox
+/usr/bin/showkey 777 0:0 symbolic link -> /bin/busybox
+/usr/bin/shred 777 0:0 symbolic link -> /bin/busybox
+/usr/bin/shuf 777 0:0 symbolic link -> /bin/busybox
+/usr/bin/sort 777 0:0 symbolic link -> /bin/busybox
+/usr/bin/split 777 0:0 symbolic link -> /bin/busybox
+/usr/bin/ssl_client 755 0:0 regular file 0c977fe6f05c192f
+/usr/bin/strings 777 0:0 symbolic link -> /bin/busybox
+/usr/bin/sum 777 0:0 symbolic link -> /bin/busybox
+/usr/bin/tac 777 0:0 symbolic link -> /bin/busybox
+/usr/bin/tail 777 0:0 symbolic link -> /bin/busybox
+/usr/bin/tee 777 0:0 symbolic link -> /bin/busybox
+/usr/bin/test 777 0:0 symbolic link -> /bin/busybox
+/usr/bin/time 777 0:0 symbolic link -> /bin/busybox
+/usr/bin/timeout 777 0:0 symbolic link -> /bin/busybox
+/usr/bin/top 777 0:0 symbolic link -> /bin/busybox
+/usr/bin/tr 777 0:0 symbolic link -> /bin/busybox
+/usr/bin/traceroute 777 0:0 symbolic link -> /bin/busybox
+/usr/bin/traceroute6 777 0:0 symbolic link -> /bin/busybox
+/usr/bin/tree 777 0:0 symbolic link -> /bin/busybox
+/usr/bin/truncate 777 0:0 symbolic link -> /bin/busybox
+/usr/bin/tty 777 0:0 symbolic link -> /bin/busybox
+/usr/bin/ttysize 777 0:0 symbolic link -> /bin/busybox
+/usr/bin/udhcpc6 777 0:0 symbolic link -> /bin/busybox
+/usr/bin/unexpand 777 0:0 symbolic link -> /bin/busybox
+/usr/bin/uniq 777 0:0 symbolic link -> /bin/busybox
+/usr/bin/unix2dos 777 0:0 symbolic link -> /bin/busybox
+/usr/bin/unlink 777 0:0 symbolic link -> /bin/busybox
+/usr/bin/unlzma 777 0:0 symbolic link -> /bin/busybox
+/usr/bin/unlzop 777 0:0 symbolic link -> /bin/busybox
+/usr/bin/unshare 777 0:0 symbolic link -> /bin/busybox
+/usr/bin/unxz 777 0:0 symbolic link -> /bin/busybox
+/usr/bin/unzip 777 0:0 symbolic link -> /bin/busybox
+/usr/bin/uptime 777 0:0 symbolic link -> /bin/busybox
+/usr/bin/uudecode 777 0:0 symbolic link -> /bin/busybox
+/usr/bin/uuencode 777 0:0 symbolic link -> /bin/busybox
+/usr/bin/vi 777 0:0 symbolic link -> /bin/busybox
+/usr/bin/vlock 777 0:0 symbolic link -> /bin/busybox
+/usr/bin/volname 777 0:0 symbolic link -> /bin/busybox
+/usr/bin/wc 777 0:0 symbolic link -> /bin/busybox
+/usr/bin/wget 777 0:0 symbolic link -> /bin/busybox
+/usr/bin/which 777 0:0 symbolic link -> /bin/busybox
+/usr/bin/who 777 0:0 symbolic link -> /bin/busybox
+/usr/bin/whoami 777 0:0 symbolic link -> /bin/busybox
+/usr/bin/whois 777 0:0 symbolic link -> /bin/busybox
+/usr/bin/xargs 777 0:0 symbolic link -> /bin/busybox
+/usr/bin/xxd 777 0:0 symbolic link -> /bin/busybox
+/usr/bin/xzcat 777 0:0 symbolic link -> /bin/busybox
+/usr/bin/yes 777 0:0 symbolic link -> /bin/busybox
+/usr/lib 755 0:0 directory -
+/usr/lib/engines-3 755 0:0 directory -
+/usr/lib/engines-3/afalg.so 755 0:0 regular file 210bb35b0c64bbea
+/usr/lib/engines-3/capi.so 755 0:0 regular file 6f45fad33320a48f
+/usr/lib/engines-3/loader_attic.so 755 0:0 regular file c7170f88a5ad86ef
+/usr/lib/engines-3/padlock.so 755 0:0 regular file b10a4e141d235ab7
+/usr/lib/libcrypto.so.3 777 0:0 symbolic link -> ../../lib/libcrypto.so.3
+/usr/lib/libssl.so.3 777 0:0 symbolic link -> ../../lib/libssl.so.3
+/usr/lib/modules-load.d 755 0:0 directory -
+/usr/lib/ossl-modules 755 0:0 directory -
+/usr/lib/ossl-modules/legacy.so 755 0:0 regular file c1519b5debe127c1
+/usr/local 755 0:0 directory -
+/usr/local/bin 755 0:0 directory -
+/usr/local/bin/hello 755 0:0 regular file cc0da6d05cb1b15a
+/usr/local/lib 755 0:0 directory -
+/usr/local/share 755 0:0 directory -
+/usr/sbin 755 0:0 directory -
+/usr/sbin/add-shell 777 0:0 symbolic link -> /bin/busybox
+/usr/sbin/addgroup 777 0:0 symbolic link -> /bin/busybox
+/usr/sbin/adduser 777 0:0 symbolic link -> /bin/busybox
+/usr/sbin/arping 777 0:0 symbolic link -> /bin/busybox
+/usr/sbin/brctl 777 0:0 symbolic link -> /bin/busybox
+/usr/sbin/chpasswd 777 0:0 symbolic link -> /bin/busybox
+/usr/sbin/chroot 777 0:0 symbolic link -> /bin/busybox
+/usr/sbin/crond 777 0:0 symbolic link -> /bin/busybox
+/usr/sbin/delgroup 777 0:0 symbolic link -> /bin/busybox
+/usr/sbin/deluser 777 0:0 symbolic link -> /bin/busybox
+/usr/sbin/ether-wake 777 0:0 symbolic link -> /bin/busybox
+/usr/sbin/fbset 777 0:0 symbolic link -> /bin/busybox
+/usr/sbin/killall5 777 0:0 symbolic link -> /bin/busybox
+/usr/sbin/loadfont 777 0:0 symbolic link -> /bin/busybox
+/usr/sbin/nanddump 777 0:0 symbolic link -> /bin/busybox
+/usr/sbin/nandwrite 777 0:0 symbolic link -> /bin/busybox
+/usr/sbin/nbd-client 777 0:0 symbolic link -> /bin/busybox
+/usr/sbin/ntpd 777 0:0 symbolic link -> /bin/busybox
+/usr/sbin/partprobe 777 0:0 symbolic link -> /bin/busybox
+/usr/sbin/rdate 777 0:0 symbolic link -> /bin/busybox
+/usr/sbin/rdev 777 0:0 symbolic link -> /bin/busybox
+/usr/sbin/readahead 777 0:0 symbolic link -> /bin/busybox
+/usr/sbin/remove-shell 777 0:0 symbolic link -> /bin/busybox
+/usr/sbin/rfkill 777 0:0 symbolic link -> /bin/busybox
+/usr/sbin/sendmail 777 0:0 symbolic link -> /bin/busybox
+/usr/sbin/setfont 777 0:0 symbolic link -> /bin/busybox
+/usr/sbin/setlogcons 777 0:0 symbolic link -> /bin/busybox
+/usr/share 755 0:0 directory -
+/usr/share/apk 755 0:0 directory -
+/usr/share/apk/keys 755 0:0 directory -
+/usr/share/apk/keys/aarch64 755 0:0 directory -
+/usr/share/apk/keys/aarch64/alpine-devel@lists.alpinelinux.org-58199dcc.rsa.pub 777 0:0 symbolic link -> ../alpine-devel@lists.alpinelinux.org-58199dcc.rsa.pub
+/usr/share/apk/keys/aarch64/alpine-devel@lists.alpinelinux.org-616ae350.rsa.pub 777 0:0 symbolic link -> ../alpine-devel@lists.alpinelinux.org-616ae350.rsa.pub
+/usr/share/apk/keys/alpine-devel@lists.alpinelinux.org-4a6a0840.rsa.pub 644 0:0 regular file 9c102bcc376af149
+/usr/share/apk/keys/alpine-devel@lists.alpinelinux.org-5243ef4b.rsa.pub 644 0:0 regular file ebf31683b56410ec
+/usr/share/apk/keys/alpine-devel@lists.alpinelinux.org-524d27bb.rsa.pub 644 0:0 regular file 1bb2a846c0ea4ca9
+/usr/share/apk/keys/alpine-devel@lists.alpinelinux.org-5261cecb.rsa.pub 644 0:0 regular file 12f899e55a769122
+/usr/share/apk/keys/alpine-devel@lists.alpinelinux.org-58199dcc.rsa.pub 644 0:0 regular file 73867d92083f2f8a
+/usr/share/apk/keys/alpine-devel@lists.alpinelinux.org-58cbb476.rsa.pub 644 0:0 regular file 9a4cd858d9710963
+/usr/share/apk/keys/alpine-devel@lists.alpinelinux.org-58e4f17d.rsa.pub 644 0:0 regular file 780b3ed41786772c
+/usr/share/apk/keys/alpine-devel@lists.alpinelinux.org-5e69ca50.rsa.pub 644 0:0 regular file 59c01c57b4466332
+/usr/share/apk/keys/alpine-devel@lists.alpinelinux.org-60ac2099.rsa.pub 644 0:0 regular file db0b49163f07ffba
+/usr/share/apk/keys/alpine-devel@lists.alpinelinux.org-6165ee59.rsa.pub 644 0:0 regular file 207e4696d3c05f7c
+/usr/share/apk/keys/alpine-devel@lists.alpinelinux.org-61666e3f.rsa.pub 644 0:0 regular file 128d34d4aec39b0d
+/usr/share/apk/keys/alpine-devel@lists.alpinelinux.org-616a9724.rsa.pub 644 0:0 regular file 10877cce0a935e46
+/usr/share/apk/keys/alpine-devel@lists.alpinelinux.org-616abc23.rsa.pub 644 0:0 regular file 4a095a9daca86da4
+/usr/share/apk/keys/alpine-devel@lists.alpinelinux.org-616ac3bc.rsa.pub 644 0:0 regular file 0caf5662fde45616
+/usr/share/apk/keys/alpine-devel@lists.alpinelinux.org-616adfeb.rsa.pub 644 0:0 regular file ebe717d228555aa5
+/usr/share/apk/keys/alpine-devel@lists.alpinelinux.org-616ae350.rsa.pub 644 0:0 regular file d11f6b21c61b4274
+/usr/share/apk/keys/alpine-devel@lists.alpinelinux.org-616db30d.rsa.pub 644 0:0 regular file 40a216cbd163f22e
+/usr/share/apk/keys/armhf 755 0:0 directory -
+/usr/share/apk/keys/armhf/alpine-devel@lists.alpinelinux.org-524d27bb.rsa.pub 777 0:0 symbolic link -> ../alpine-devel@lists.alpinelinux.org-524d27bb.rsa.pub
+/usr/share/apk/keys/armhf/alpine-devel@lists.alpinelinux.org-616a9724.rsa.pub 777 0:0 symbolic link -> ../alpine-devel@lists.alpinelinux.org-616a9724.rsa.pub
+/usr/share/apk/keys/armv7 755 0:0 directory -
+/usr/share/apk/keys/armv7/alpine-devel@lists.alpinelinux.org-524d27bb.rsa.pub 777 0:0 symbolic link -> ../alpine-devel@lists.alpinelinux.org-524d27bb.rsa.pub
+/usr/share/apk/keys/armv7/alpine-devel@lists.alpinelinux.org-616adfeb.rsa.pub 777 0:0 symbolic link -> ../alpine-devel@lists.alpinelinux.org-616adfeb.rsa.pub
+/usr/share/apk/keys/mips64 755 0:0 directory -
+/usr/share/apk/keys/mips64/alpine-devel@lists.alpinelinux.org-5e69ca50.rsa.pub 777 0:0 symbolic link -> ../alpine-devel@lists.alpinelinux.org-5e69ca50.rsa.pub
+/usr/share/apk/keys/ppc64le 755 0:0 directory -
+/usr/share/apk/keys/ppc64le/alpine-devel@lists.alpinelinux.org-58cbb476.rsa.pub 777 0:0 symbolic link -> ../alpine-devel@lists.alpinelinux.org-58cbb476.rsa.pub
+/usr/share/apk/keys/ppc64le/alpine-devel@lists.alpinelinux.org-616abc23.rsa.pub 777 0:0 symbolic link -> ../alpine-devel@lists.alpinelinux.org-616abc23.rsa.pub
+/usr/share/apk/keys/riscv64 755 0:0 directory -
+/usr/share/apk/keys/riscv64/alpine-devel@lists.alpinelinux.org-60ac2099.rsa.pub 777 0:0 symbolic link -> ../alpine-devel@lists.alpinelinux.org-60ac2099.rsa.pub
+/usr/share/apk/keys/riscv64/alpine-devel@lists.alpinelinux.org-616db30d.rsa.pub 777 0:0 symbolic link -> ../alpine-devel@lists.alpinelinux.org-616db30d.rsa.pub
+/usr/share/apk/keys/s390x 755 0:0 directory -
+/usr/share/apk/keys/s390x/alpine-devel@lists.alpinelinux.org-58e4f17d.rsa.pub 777 0:0 symbolic link -> ../alpine-devel@lists.alpinelinux.org-58e4f17d.rsa.pub
+/usr/share/apk/keys/s390x/alpine-devel@lists.alpinelinux.org-616ac3bc.rsa.pub 777 0:0 symbolic link -> ../alpine-devel@lists.alpinelinux.org-616ac3bc.rsa.pub
+/usr/share/apk/keys/x86 755 0:0 directory -
+/usr/share/apk/keys/x86/alpine-devel@lists.alpinelinux.org-4a6a0840.rsa.pub 777 0:0 symbolic link -> ../alpine-devel@lists.alpinelinux.org-4a6a0840.rsa.pub
+/usr/share/apk/keys/x86/alpine-devel@lists.alpinelinux.org-5243ef4b.rsa.pub 777 0:0 symbolic link -> ../alpine-devel@lists.alpinelinux.org-5243ef4b.rsa.pub
+/usr/share/apk/keys/x86/alpine-devel@lists.alpinelinux.org-61666e3f.rsa.pub 777 0:0 symbolic link -> ../alpine-devel@lists.alpinelinux.org-61666e3f.rsa.pub
+/usr/share/apk/keys/x86_64 755 0:0 directory -
+/usr/share/apk/keys/x86_64/alpine-devel@lists.alpinelinux.org-4a6a0840.rsa.pub 777 0:0 symbolic link -> ../alpine-devel@lists.alpinelinux.org-4a6a0840.rsa.pub
+/usr/share/apk/keys/x86_64/alpine-devel@lists.alpinelinux.org-5261cecb.rsa.pub 777 0:0 symbolic link -> ../alpine-devel@lists.alpinelinux.org-5261cecb.rsa.pub
+/usr/share/apk/keys/x86_64/alpine-devel@lists.alpinelinux.org-6165ee59.rsa.pub 777 0:0 symbolic link -> ../alpine-devel@lists.alpinelinux.org-6165ee59.rsa.pub
+/usr/share/man 755 0:0 directory -
+/usr/share/misc 755 0:0 directory -
+/usr/share/udhcpc 755 0:0 directory -
+/usr/share/udhcpc/default.script 755 0:0 regular file c4e5a7c4783a7a73
+/var 755 0:0 directory -
+/var/cache 755 0:0 directory -
+/var/cache/apk 755 0:0 directory -
+/var/cache/misc 755 0:0 directory -
+/var/empty 555 0:0 directory -
+/var/lib 755 0:0 directory -
+/var/lib/misc 755 0:0 directory -
+/var/local 755 0:0 directory -
+/var/lock 755 0:0 directory -
+/var/lock/subsys 755 0:0 directory -
+/var/log 755 0:0 directory -
+/var/mail 755 0:0 directory -
+/var/opt 755 0:0 directory -
+/var/run 777 0:0 symbolic link -> /run
+/var/spool 755 0:0 directory -
+/var/spool/cron 755 0:0 directory -
+/var/spool/cron/crontabs 777 0:0 symbolic link -> /etc/crontabs
+/var/spool/mail 777 0:0 symbolic link -> /var/mail
+/var/tmp 1777 0:0 directory -

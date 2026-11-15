@@ -44,6 +44,27 @@ const m9_project = "m9-project";
 const m9_native = "m9-native";
 const m9_native_dockerfile = "FROM alpine:3.20\nRUN uname -m > /arch\n";
 const empty_lock = ".{\n    .version = 1,\n    .images = .{},\n}\n";
+/// The golden digest's image tree as `m9_tree_list` prints it inside a container of that tree
+/// (path, mode, owner, type, and a regular file's SHA-256 prefix or a link's target): tree
+/// b3:4ee34d3f7f35640ee5f63d31f04592c4fb240287db222b8bea780945536f9ae8, recorded rootless on
+/// x86_64 Linux from a `zbx build` of the demo project that printed the golden digest. The
+/// listing is a function of the tree alone. When the Mac's digest is not the golden, m9.4 prints
+/// how its tree differs from this one, so the failure names the files, not only the digest.
+const m9_golden_tree = @embedFile("vm/m9_expected.tree.txt");
+/// Lists the tree a container runs on, one line a path, sorted: fed to `sh` on stdin. What the
+/// runtime mounts (`/proc`, `/sys`, `/dev`, and the host and name files it writes) is left out,
+/// and so is a directory's size, which is the file system's.
+const m9_tree_list =
+    \\find / -xdev \( -path /proc -o -path /sys -o -path /dev -o -path /etc/hosts \
+    \\  -o -path /etc/hostname -o -path /etc/resolv.conf \) -prune -o -print | sort |
+    \\while IFS= read -r f; do
+    \\  if [ -L "$f" ]; then x="-> $(readlink "$f")"
+    \\  elif [ -f "$f" ]; then x="$(sha256sum "$f" | cut -c1-16)"
+    \\  else x=-; fi
+    \\  echo "$f $(stat -c '%a %u:%g %F' "$f") $x"
+    \\done
+    \\
+;
 /// The one-line reason the Rosetta steps fail on a Mac without it.
 const rosetta_missing = "ZBX-E1016: Rosetta is not installed, and the M9 project's lock pins " ++
     "linux/amd64; install it with softwareupdate --install-rosetta --agree-to-license, " ++
@@ -362,7 +383,14 @@ pub const steps = [_]Step{
     .{
         .id = "m9.4",
         .what = "the digest is demo-m9's golden, recorded in a Linux VM (m9_expected.zon)",
-        .line = "cat $W/m9.digest",
+        // A digest that is not the golden prints, after it, the lines of the tree listing that
+        // differ from the golden tree's (`<` the golden's, `>` the Mac's) and what `inspect` says.
+        .line = "d=$(cat $W/m9.digest) && echo \"$d\" && " ++
+            "if test \"$d\" != \"" ++ m9_golden.digest ++ "\"; then " ++
+            "t=$($Z inspect \"$d\" | awk '/^tree/ {print $2}') && " ++
+            "$Z run \"$t\" -- sh < $W/m9-tree-list.sh > $W/m9.tree.txt; " ++
+            "diff $W/m9_expected.tree.txt $W/m9.tree.txt | grep '^[<>]'; " ++
+            "$Z inspect \"$d\" | grep -v '^result'; fi",
         .stdout_has = &.{m9_golden.digest},
     },
     .{
@@ -450,8 +478,10 @@ fn run_all(init: std.process.Init, out: *Io.Writer) !u32 {
     return failures;
 }
 
+/// The end of a failing step's stream: enough for m9.4's differing lines and `inspect` after them.
 fn clip(text: []const u8) []const u8 {
-    return if (text.len > 600) text[text.len - 600 ..] else text;
+    const kept = 2400;
+    return if (text.len > kept) text[text.len - kept ..] else text;
 }
 
 /// Why a step did not pass, or null.
@@ -522,6 +552,8 @@ fn prepare_m9_project(init: std.process.Init, work: []const u8) !void {
     }
     try dir.writeFile(io, .{ .sub_path = "m9_expected.build.zon", .data = m9_golden_build });
     try dir.writeFile(io, .{ .sub_path = "m9_expected.lock", .data = m9_project_lock });
+    try dir.writeFile(io, .{ .sub_path = "m9_expected.tree.txt", .data = m9_golden_tree });
+    try dir.writeFile(io, .{ .sub_path = "m9-tree-list.sh", .data = m9_tree_list });
     // The native project holds its own lock, so that a zbx.lock higher up (the work
     // directory's, which M4's pull wrote) is not it.
     try dir.deleteTree(io, m9_native);
@@ -599,4 +631,28 @@ test "the Rosetta steps are m9.1 to m9.4, and m9.5 is native" {
     try std.testing.expect(std.mem.indexOf(u8, rosetta_missing, "ZBX-E1016") != null);
     try std.testing.expect(std.mem.indexOf(u8, rosetta_missing, "softwareupdate") != null);
     try std.testing.expect(std.mem.indexOfScalar(u8, rosetta_missing, '\n') == null);
+}
+
+test "m9.4 compares the Mac's tree with the golden tree's listing" {
+    // Goal: a failing m9.4 names the files that differ. Method: the line lists the tree with the
+    // script `prepare_m9_project` writes and diffs it with the golden listing it writes; that
+    // listing holds what the final stage made, and none of what the runtime mounts in a run.
+    for (steps) |step| {
+        if (!std.mem.eql(u8, step.id, "m9.4")) continue;
+        try std.testing.expect(std.mem.indexOf(u8, step.line, "$W/m9-tree-list.sh") != null);
+        try std.testing.expect(std.mem.indexOf(u8, step.line, "$W/m9_expected.tree.txt") != null);
+        try std.testing.expect(std.mem.indexOf(u8, step.line, m9_golden.digest) != null);
+    }
+    const made = [_][]const u8{
+        "/usr/local/bin/hello 755 0:0 regular file ",
+        "/home/app 755 10001:10001 directory -\n",
+        "/etc/hello/VERSION 644 10001:10001 regular file ",
+        "/etc/shadow 640 0:42 regular file ",
+    };
+    for (made) |line| try std.testing.expect(std.mem.indexOf(u8, m9_golden_tree, line) != null);
+    const mounted = [_][]const u8{
+        "\n/proc", "\n/sys", "\n/dev", "\n/etc/hosts ", "\n/etc/hostname ", "\n/etc/resolv.conf ",
+    };
+    for (mounted) |path| try std.testing.expect(std.mem.indexOf(u8, m9_golden_tree, path) == null);
+    try std.testing.expect(std.mem.endsWith(u8, m9_golden_tree, "\n"));
 }
