@@ -154,14 +154,8 @@ test {
     _ = @import("fuzz_layer.zig");
 }
 
+// The lazy start's FUSE server (S2 slice 4).
 test {
-    _ = @import("registry/digest.zig");
-    _ = @import("registry/blobs.zig");
-    _ = @import("store/images.zig");
-    _ = @import("pull_unpack.zig");
-    _ = @import("pull.zig");
-    _ = @import("pull_report.zig");
-    _ = @import("fuzz_pull_report.zig");
     _ = @import("fuzz_fuse.zig");
     _ = @import("fuse/abi.zig");
     _ = @import("fuse/nodes.zig");
@@ -173,6 +167,16 @@ test {
     _ = @import("fuse/kernel_tests.zig");
     _ = @import("fuse/lazy_server_tests.zig");
     _ = @import("host_real_fuse.zig");
+}
+
+test {
+    _ = @import("registry/digest.zig");
+    _ = @import("registry/blobs.zig");
+    _ = @import("store/images.zig");
+    _ = @import("pull_unpack.zig");
+    _ = @import("pull.zig");
+    _ = @import("pull_report.zig");
+    _ = @import("fuzz_pull_report.zig");
     _ = @import("layer/reader.zig");
     _ = @import("layer/tar.zig");
     _ = @import("layer/apply.zig");
