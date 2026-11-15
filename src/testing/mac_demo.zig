@@ -371,7 +371,10 @@ pub const steps = [_]Step{
     .{
         .id = "m9.3",
         .what = "a new extra.go misses and changes the digest; removed, all hits, the first digest",
+        // The Mac's store outlives a run, so extra.go is new each run (its time and the
+        // shell's pid in a comment): an extra.go a run before built would be all hits.
         .line = "cd $W/m9-project && sed 's/func main/func init/' main.go > extra.go && " ++
+            "echo \"// $(date +%s)-$$\" >> extra.go && " ++
             "o=$($Z build) && d=$(echo \"$o\" | " ++ digest_of_build ++ ") && " ++
             "test -n \"$d\" && test \"$d\" != \"$(cat ../m9.digest)\" && " ++
             "echo \"$o\" | grep -q ', [1-9][0-9]* miss' && echo new-digest && " ++
