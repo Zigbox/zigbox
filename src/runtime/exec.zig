@@ -208,7 +208,8 @@ pub fn start(
 
 const all_namespaces: u8 = 0x3f;
 
-fn init_handle(host: Host, spec: *const Spec, options: Options, handle: *Handle) void {
+/// Sets `handle` up as a start that has not begun, for a caller that may refuse before `start`.
+pub fn init_handle(host: Host, spec: *const Spec, options: Options, handle: *Handle) void {
     assert(spec.command.len > 0);
     assert(@intFromPtr(handle) != @intFromPtr(spec));
     handle.host = host;
