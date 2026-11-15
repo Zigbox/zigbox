@@ -73,6 +73,15 @@ const inputs = [_][]const u8{ "go.mod", "main.go", "src", "src/a.c", "VERSION", 
 
 const targets = [_][]const u8{ "/", "/usr/local/bin", "/out", "/etc/hello", "/a/b/c" };
 
+/// Output excludes: absolute plain paths, never `/`.
+const output_excludes = [_][]const u8{ "/var/log", "/var/cache", "/tmp", "/a b", "/ü/x" };
+
+/// `.expect` values: whole BLAKE3 digests.
+const expects = [_][]const u8{
+    "b3:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+    "b3:af1349b9f5f9a1a6a0404dea36dcc9499bcb25c9adc112b7cc9a93cae41f3262",
+};
+
 const users = [_][]const u8{
     "0:0", "1000:1000", "65534:65534", "4294967295:0", "app", "app:app", "0", "nobody:65534",
 };
@@ -179,12 +188,23 @@ fn gen_step(gen: *Gen, shape: *const Shape, index: u32) void {
     assert(shape.needs[index] <= index);
     var order: [7]StepField = std.enums.values(StepField)[0..7].*;
     gen.random.shuffle(StepField, &order);
+    const network = gen.random.boolean();
+    // A step runs a command or copies, never both: a copy step writes `.copy` where `.run` would
+    // be, and takes no output pin fields.
+    const copy_step = gen.random.uintLessThan(u8, 4) == 0;
     gen.put(".{");
-    gen_builder_fields(gen, shape, index);
+    const cached = gen_builder_fields(gen, shape, index);
+    if (!copy_step) gen_pin_fields(gen, network and !cached);
     for (order, 0..) |which, at| {
-        gen.field(switch (which) {
+        const copies = which == .run and copy_step;
+        gen.field(if (copies) ".copy" else switch (which) {
             inline else => |tag| "." ++ @tagName(tag),
         });
+        if (copies) {
+            gen_copy(gen);
+            gen.comma(@intCast(at), order.len);
+            continue;
+        }
         switch (which) {
             .name => gen.string(step_names[index]),
             .base => gen_step_base(gen, index),
@@ -198,9 +218,40 @@ fn gen_step(gen: *Gen, shape: *const Shape, index: u32) void {
                 gen.string(words[gen.random.uintLessThan(usize, words.len)]);
                 gen.put(" }");
             },
-            .network => gen.put(if (gen.random.boolean()) "true" else "false"),
+            .network => gen.put(if (network) "true" else "false"),
         }
         gen.comma(@intCast(at), order.len);
+    }
+    gen.put(" }");
+}
+
+const hash_a = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+const hash_b = "fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210";
+
+/// Copy entries a build file can hold: the whole project (`.`), plain paths and globs, and a
+/// fetch pinned by its SHA-256, to a directory or to a file.
+const copy_entries = [_][]const u8{
+    ".{ .src = .{ \".\" }, .to = \"/app/\" }",
+    ".{ .src = .{ \".\" }, .to = \"/app\" }",
+    ".{ .src = .{ \"src\", \"*.go\" }, .to = \"/app/\", .exclude = .{ \"*_test.go\" } }",
+    ".{ .src = .{ \"go.mod\" }, .to = \"/app/go.mod\", .chmod = \"0644\" }",
+    ".{ .fetch = .{ .url = \"https://example.test/a.tar.gz\", .sha256 = \"" ++
+        hash_a ++
+        "\" }, .to = \"/opt/\" }",
+    ".{ .fetch = .{ .url = \"http://127.0.0.1:8080/r/tool\", .sha256 = \"" ++
+        hash_b ++
+        "\" }, .to = \"/usr/local/bin/tool\", .chmod = \"0755\", " ++
+        ".chown = \"0:0\" }",
+};
+
+/// One to three copy entries.
+fn gen_copy(gen: *Gen) void {
+    const count = 1 + gen.random.uintLessThan(u32, 3);
+    assert(count <= constants.build_copy_entries_max);
+    gen.put(".{ ");
+    for (0..count) |at| {
+        gen.put(copy_entries[gen.random.uintLessThan(usize, copy_entries.len)]);
+        gen.comma(@intCast(at), count);
     }
     gen.put(" }");
 }
@@ -220,7 +271,8 @@ fn gen_step_base(gen: *Gen, index: u32) void {
 /// The builder's additions, each written or not at random, before a step's other fields. Each is
 /// followed by a comma. The mounts stay within the bound: needs, caches and binds together are
 /// at most `mounts_max - 2`, so a cache or a bind is written only when the needs leave room.
-fn gen_builder_fields(gen: *Gen, shape: *const Shape, index: u32) void {
+/// Returns whether a cache was written.
+fn gen_builder_fields(gen: *Gen, shape: *const Shape, index: u32) bool {
     assert(index < shape.steps);
     assert(shape.needs[index] <= constants.build_step_needs_max);
     if (gen.random.boolean()) {
@@ -250,6 +302,22 @@ fn gen_builder_fields(gen: *Gen, shape: *const Shape, index: u32) void {
         gen.put(".{ .{ .from = \"step:");
         gen.put(step_names[gen.random.uintLessThan(u32, index)]);
         gen.put("\", .source = \"/usr/bin\", .to = \"/bound\" } },");
+    }
+    return cached == 1;
+}
+
+/// The output pin fields (M9 slice 3c), each written or not at random and followed by a comma:
+/// `.expect` only on a network step without caches, the only kind that takes it.
+fn gen_pin_fields(gen: *Gen, pinnable: bool) void {
+    if (pinnable and gen.random.boolean()) {
+        gen.field(".expect");
+        gen.string(expects[gen.random.uintLessThan(usize, expects.len)]);
+        gen.put(",");
+    }
+    if (gen.random.boolean()) {
+        gen.field(".output_exclude");
+        gen.distinct_list(&output_excludes, gen.random.uintAtMost(u32, 3));
+        gen.put(",");
     }
 }
 
@@ -502,6 +570,10 @@ const pieces = [_][]const u8{
     "\"HOME=/\"",
     "\"A=1\", \"A=2\"",
     ".version = 01",
+    "\".\"",
+    "\"./\"",
+    ".src = .{ \".\" }",
+    ".fetch = .{ .url = \"https://example.test/a\", .sha256 = \"00\" }",
 };
 
 /// Damages `text` into `damaged` one of several ways, and returns the damaged length.

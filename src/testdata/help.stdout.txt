@@ -218,12 +218,11 @@ build:
   directory), or <file>, which must be inside it; checks it, its graph and its inputs, and
   prints the steps in build order, then the image, running nothing
   (--output json: nodes and edges, see zbx schema build-graph)
-  zbx build [-f <file>] [--clear-caches]
+  zbx build [-f <file>] [--clear-caches] [--pin|--locked|--hermetic]
   builds the steps, then the image: one row per step (hit or miss, time, net, cache)
-  and the result digest; --output json: one zbx.build/1
-  line per step (see zbx schema build). --clear-caches first empties the cache
-  directories. With --verbose each step's output also goes to stderr, a line at a time
-  behind "<step> | ".
+  and the result digest; --output json: one zbx.build/1 line per step (zbx schema build).
+  --clear-caches empties the cache dirs first; --verbose streams step output to stderr
+  behind "<step> | "; on pins: zbx explain E0822.
   zbx run <result digest> runs the result as its config says; zbx inspect <result digest>
   prints its tree and config (zbx schema inspect); zbx inspect --provenance <result
   digest> prints the build's provenance record (zbx schema inspect-provenance)

@@ -93,6 +93,10 @@ fn render_step(file: *const BuildFile, step: *const file_mod.Step, writer: *Writ
     if (step.caches.given) try render_caches(file, step, writer);
     if (step.binds.given) try render_binds(file, step, writer);
     if (step.exclude.given) try render_span(file, 3, "exclude", step.exclude, writer);
+    if (step.expect) |expect| try render_field(file, 3, "expect", expect, writer);
+    if (step.output_exclude.given) {
+        try render_span(file, 3, "output_exclude", step.output_exclude, writer);
+    }
     try writer.writeAll("        },\n");
 }
 
@@ -125,7 +129,14 @@ fn render_copies(file: *const BuildFile, step: *const file_mod.Step, writer: *Wr
     for (entries) |entry| {
         try writer.writeAll("                .{ ");
         if (entry.from) |from| try render_pair(file, "from", from, ", ", writer);
-        try render_inline_list(file, "src", file.texts(entry.src), writer);
+        if (entry.fetch) |fetch| {
+            assert(!entry.src.given);
+            try writer.writeAll(".fetch = .{ ");
+            try render_pair(file, "url", fetch.url, ", ", writer);
+            try render_pair(file, "sha256", fetch.sha256, " }", writer);
+        } else {
+            try render_inline_list(file, "src", file.texts(entry.src), writer);
+        }
         try render_next(file, "to", entry.to, writer);
         if (entry.chown) |chown| try render_next(file, "chown", chown, writer);
         if (entry.chmod) |chmod| try render_next(file, "chmod", chmod, writer);
@@ -327,6 +338,8 @@ fn equal_step_more(
     if (!same_optional(a, b, step_a.user, step_b.user)) return false;
     if (!same_optional(a, b, step_a.workdir, step_b.workdir)) return false;
     if (!same_span(a, b, step_a.exclude, step_b.exclude)) return false;
+    if (!same_optional(a, b, step_a.expect, step_b.expect)) return false;
+    if (!same_span(a, b, step_a.output_exclude, step_b.output_exclude)) return false;
     if (step_a.copy.given != step_b.copy.given) return false;
     if (step_a.run.given != step_b.run.given) return false;
     if (step_a.caches.given != step_b.caches.given) return false;
@@ -336,6 +349,7 @@ fn equal_step_more(
     if (copies_a.len != copies_b.len) return false;
     for (copies_a, copies_b) |entry_a, entry_b| {
         if (!same_optional(a, b, entry_a.from, entry_b.from)) return false;
+        if (!same_fetch(a, b, entry_a.fetch, entry_b.fetch)) return false;
         if (!same_text(a, b, entry_a.to, entry_b.to)) return false;
         if (!same_optional(a, b, entry_a.chown, entry_b.chown)) return false;
         if (!same_optional(a, b, entry_a.chmod, entry_b.chmod)) return false;
@@ -343,6 +357,19 @@ fn equal_step_more(
         if (!same_span(a, b, entry_a.exclude, entry_b.exclude)) return false;
     }
     return equal_mounts(a, b, step_a, step_b);
+}
+
+fn same_fetch(
+    a: *const BuildFile,
+    b: *const BuildFile,
+    fetch_a: ?file_mod.Fetch,
+    fetch_b: ?file_mod.Fetch,
+) bool {
+    const one = fetch_a orelse return fetch_b == null;
+    const other = fetch_b orelse return false;
+    assert(one.url.len > 0);
+    assert(one.sha256.len == 64);
+    return same_text(a, b, one.url, other.url) and same_text(a, b, one.sha256, other.sha256);
 }
 
 fn equal_mounts(
@@ -530,7 +557,10 @@ const m9_file =
     \\       .binds = .{ .{ .from = "step:b", .source = "/usr/bin", .to = "/tools" } } },
     \\    .{ .name = "c", .base = "alpine:3.20",
     \\       .copy = .{ .{ .from = "step:a", .src = .{ "a*" }, .to = "/d/", .chown = "app",
-    \\                     .chmod = "644", .exclude = .{ "*.o" } } } },
+    \\                     .chmod = "644", .exclude = .{ "*.o" } },
+    \\         .{ .fetch = .{ .url = "https://h.example/t.gz",
+    \\              .sha256 = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" },
+    \\            .to = "/f/" } } },
     \\  },
     \\}
 ;
@@ -539,12 +569,13 @@ test "every builder addition is printed, read back equal and printed the same" {
     // Goal: the canonical form carries the M9 fields. Method: one file with all of them, round
     // tripped, with each field's printed text looked for; then each value changed once.
     const canonical = try round_trip(m9_file);
+    const fetch_needle = ".fetch = .{ .url = \"https://h.example/t.gz\",";
     const printed = [_][]const u8{
         ".output = .root,",       ".user = \"app\",",    ".workdir = \"/w\",",
         ".exclude = .{},",        ".base = \"step:b\",", ".ro = true",
         ".mode = \"0755\"",       ".uid = 1, .gid = 2",  ".from = \"step:b\", .source",
         ".chown = \"app\"",       ".chmod = \"644\"",    ".exclude = .{ \"*.o\" }",
-        ".exclude = .{ \".git\"", ".user = \"app:app\"",
+        ".exclude = .{ \".git\"", ".user = \"app:app\"", fetch_needle,
     };
     for (printed) |needle| {
         if (std.mem.indexOf(u8, canonical, needle) == null) {
@@ -559,7 +590,8 @@ test "every builder addition is printed, read back equal and printed the same" {
         .{ "\"/tools\"", "\"/tool\"" },           .{ "\"644\"", "\"640\"" },
         .{ "\"*.o\"", "\"*.p\"" },                .{ "\"!keep.log\"", "\"keep.log\"" },
         .{ "\"app:app\"", "\"app:bpp\"" },        .{ "\"src/**/*.go\"", "\"src/*.go\"" },
-        .{ ".exclude = .{},", "" },
+        .{ ".exclude = .{},", "" },               .{ "/t.gz", "/u.gz" },
+        .{ "\"aaaa", "\"baaa" },
     };
     var buffer: [m9_file.len + 16]u8 = undefined;
     for (changed) |pair| {
@@ -581,5 +613,38 @@ test "every builder addition is printed, read back equal and printed the same" {
             std.debug.print("equal after: {s} -> {s}\n", .{ pair[0], pair[1] });
             return error.TestUnexpectedResult;
         }
+    }
+}
+
+test "a pin and output excludes are printed, read back equal and told apart" {
+    // Goal: the canonical form carries `.expect` and `.output_exclude` (M9 slice 3c). Method:
+    // one network step with both, round tripped; then each value changed once.
+    const pinned =
+        \\.{ .version = 1, .image = .{}, .steps = .{ .{ .name = "fetch", .base = "x",
+        \\  .run = .{ "true" }, .network = true,
+        \\  .expect = "b3:0000000000000000000000000000000000000000000000000000000000000000",
+        \\  .output_exclude = .{ "/var/log", "/srv/tmp" } } } }
+    ;
+    const canonical = try round_trip(pinned);
+    try testing.expect(std.mem.indexOf(u8, canonical, ".expect = \"b3:0000") != null);
+    const excludes = ".output_exclude = .{ \"/var/log\", \"/srv/tmp\" }";
+    try testing.expect(std.mem.indexOf(u8, canonical, excludes) != null);
+    const empty = try round_trip(
+        \\.{ .version = 1, .image = .{}, .steps = .{ .{ .name = "a", .base = "x",
+        \\  .run = .{ "true" }, .output_exclude = .{} } } }
+    );
+    try testing.expect(std.mem.indexOf(u8, empty, ".output_exclude = .{}") != null);
+    var problem: file_mod.Problem = undefined;
+    try testing.expectEqual(.parsed, file_mod.parse(pinned, &first, &problem));
+    const changed = [_][2][]const u8{
+        .{ "b3:0000", "b3:1000" }, .{ "/srv/tmp", "/srv/tmq" }, .{ ", \"/srv/tmp\"", "" },
+    };
+    for (changed) |pair| {
+        var buffer: [pinned.len]u8 = undefined;
+        const length = std.mem.replace(u8, pinned, pair[0], pair[1], &buffer);
+        assert(length == 1);
+        const text = buffer[0 .. pinned.len - pair[0].len + pair[1].len];
+        try testing.expectEqual(.parsed, file_mod.parse(text, &second, &problem));
+        try testing.expect(!equal(&first, &second));
     }
 }

@@ -199,3 +199,17 @@ test "an input that names the project directory, or overlaps another, is refused
     overwrite(build_path, head ++ "\"src\", \"main.go\"} } } }");
     try testing.expectEqual(@as(u8, 0), run(&.{ "zbx", "build", "--graph" }));
 }
+
+test "the demo's drift check reads E0822 as the renderer lays it out" {
+    // Goal: the VM's check of step 8 (testing/vm/checks_pins_m9.zig) reads the real layout of
+    // E0822, not one of its own. Method: the diagnostic's snapshot through the check.
+    const checks_pins = @import("testing/vm/checks_pins_m9.zig");
+    const snapshot = @embedFile("testdata/diag/E0822.txt");
+    const pinned = "b3:e4e7636c21ce34009ed2398a68e7297fc189ba08cd95198f60f295d3249ef26e";
+    const produced = "b3:b922cead1d43ac4c5de35fa6c1949849a32f507027021955be167f3023d0fe10";
+    const key = "b3:" ++ @as([64]u8, @splat('0'));
+    const pin: checks_pins.Pin = .{ .key = key.*, .output = pinned.* };
+    const drift = try checks_pins.check_drift_refused("", snapshot, 3, &pin);
+    try testing.expectEqualStrings(pinned, &drift.pinned);
+    try testing.expectEqualStrings(produced, &drift.output);
+}

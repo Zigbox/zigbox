@@ -82,7 +82,9 @@ pub const Options = struct {
     label: ?[]const u8 = null,
     /// A commit: paths in the container (`/run/secrets/key`) that are left as the parent has
     /// them, whatever the upper layer holds there, with everything below. They are the mount
-    /// points zbx made for the container's mounts, which are not the container's changes.
+    /// points zbx made for the container's mounts, which are not the container's changes, and
+    /// a pinned step's `.output_exclude` (M9 slice 3c). An import without a parent leaves
+    /// them out, with everything below (a `/out` output's `.output_exclude`).
     exclude: []const []const u8 = &.{},
     /// Keep no extended attributes at all, and say nothing about them (M7: a build step's
     /// output, so the tree does not depend on what the build host's file system adds).
@@ -545,8 +547,9 @@ const Run = struct {
         length += @intCast(name.len);
         ws.path[length] = 0;
         const path = run.path_text(length);
-        if (run.merging and run.excluded(length)) {
-            if (matched) |found| try run.write_parent_entry(frame, found);
+        if (run.options.exclude.len > 0 and run.excluded(length)) {
+            // A commit keeps the parent's entry; a plain import leaves the path out.
+            if (run.merging) if (matched) |found| try run.write_parent_entry(frame, found);
             return;
         }
         const fs = run.store.fs;
@@ -566,9 +569,9 @@ const Run = struct {
         }
     }
 
-    /// Whether the path being read (`length` bytes of `ws.path`) is one a commit leaves out.
+    /// Whether the path being read (`length` bytes of `ws.path`) is one the import leaves out.
     fn excluded(run: *const Run, length: u32) bool {
-        assert(run.merging);
+        assert(run.options.exclude.len > 0);
         const root = run.ws.frames[0].path_len;
         assert(length > root);
         const relative = run.ws.path[root..length];
