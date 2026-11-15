@@ -58,3 +58,24 @@ pub fn flag_refused(diag: *Diag, flag: []const u8) void {
     diag.context("arg", "{s}", .{flag});
     diag.fix(.{ .sentence = "leave out --lazy, or the other option" });
 }
+
+/// ZBX-E1202: the index the registry sent for `tree` does not describe it (`catalog_of` found an
+/// object whose attributes or content do not give its id).
+pub fn index_disagrees(diag: *Diag, tree: Digest) void {
+    assert(diag.code == null);
+    diag.raise(.E1202);
+    diag.while_("checking the image's lazy index against its tree", .{});
+    diag.cause("the index lists a file whose content and attributes are not the tree's", .{});
+    diag.context("tree", "{s}", .{tree.text()});
+    diag.fix(.{ .sentence = "run it without --lazy, which pulls the whole image" });
+}
+
+/// ZBX-E1201: no memory for the chunk resolver of `tree`'s lazy run.
+pub fn out_of_memory(diag: *Diag, tree: Digest) void {
+    assert(diag.code == null);
+    diag.raise(.E1201);
+    diag.while_("setting up the chunk fetcher for the lazy run", .{});
+    diag.cause("this host has too little free memory for its chunk buffers and tables", .{});
+    diag.context("tree", "{s}", .{tree.text()});
+    diag.fix(.{ .sentence = "run it without --lazy, which reads the whole image first" });
+}

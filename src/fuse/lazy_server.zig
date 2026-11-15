@@ -33,6 +33,8 @@ const ops = @import("ops.zig");
 const cache_mod = @import("cache.zig");
 const serve_mod = @import("serve.zig");
 const resolver = @import("resolver.zig");
+const lazy_mod = @import("../lazy/lazy.zig");
+const index_mod = @import("../lazy/index.zig");
 
 const Host = host_mod.Host;
 const Store = layout.Store;
@@ -52,6 +54,26 @@ const Thread = struct {
 
 const State = enum { idle, prepared, serving };
 
+/// An image that is not all local: its verified lazy index (whose trees are in the store), and
+/// where the chunks the store lacks come from. `attach` gives it to the server before the run.
+pub const Remote = struct {
+    index: index_mod.Index,
+    /// The layer blob by `Range`; null serves only what the store holds (or peers give).
+    registry: ?lazy_mod.Range,
+    log: lazy_mod.Log,
+    free: lazy_mod.FreeBytes,
+};
+
+/// The resolver's catalog and its fetch threads, for a `Remote` image. Allocated in `prepare`
+/// (sized by the index), freed in `finish`.
+const Resolving = struct {
+    remote: Remote,
+    memory: resolver.CatalogMemory,
+    resolver: lazy_mod.Resolver,
+    started: bool,
+    chunks: [threads_count]resolver.ResolverChunks,
+};
+
 pub const Server = struct {
     table_region: [table_bytes]u8 align(8),
     cache_memory: [cache_bytes]u8 align(8),
@@ -69,6 +91,9 @@ pub const Server = struct {
     serving: serve_mod.Serving,
     fd: linux.fd_t,
     state: State,
+    /// Set by `attach` for an image that is not all local; null serves the store's own objects.
+    remote: ?Remote,
+    resolving: ?Resolving,
 
     /// Readies `server` for one run on `host` (the real host).
     pub fn init(server: *Server, host: Host) void {
@@ -76,6 +101,26 @@ pub const Server = struct {
         server.threaded = .init_single_threaded;
         server.fd = -1;
         server.state = .idle;
+        server.remote = null;
+        server.resolving = null;
+    }
+
+    /// Serves the run's chunks through the chunk resolver, from the store or `remote`'s sources,
+    /// rather than from the store alone. Before `lazy`'s `prepare`.
+    pub fn attach(server: *Server, remote: Remote) void {
+        assert(server.state == .idle);
+        assert(server.remote == null);
+        assert(server.resolving == null);
+        assert(remote.index.header.complete);
+        server.remote = remote;
+    }
+
+    /// What the resolver did, for the summary line; null when the run served the store alone or
+    /// its resolver never started.
+    pub fn report(server: *Server) ?lazy_mod.Report {
+        const resolving = &(server.resolving orelse return null);
+        if (!resolving.started) return null;
+        return resolving.resolver.report();
     }
 
     pub fn lazy(server: *Server) run.Lazy {
@@ -94,6 +139,9 @@ pub const Server = struct {
             .idle, .prepared => {},
             .serving => {
                 server.serving.stop();
+                // A serving thread waiting in `Resolver.read` (up to `lazy_read_deadline_ms`)
+                // returns at once with `Stopped`.
+                if (server.resolving) |*resolving| resolving.resolver.stop();
                 server.serving.wait();
                 // Each thread closed every chunk file it opened.
                 for (&server.threads) |*thread| assert(thread.real.open_count == 0);
@@ -102,8 +150,18 @@ pub const Server = struct {
                 server.fd = -1;
             },
         }
+        server.release_resolving();
+        server.remote = null;
         server.state = .idle;
         assert(server.fd == -1);
+    }
+
+    fn release_resolving(server: *Server) void {
+        const resolving = &(server.resolving orelse return);
+        if (resolving.started and server.state != .serving) resolving.resolver.stop();
+        resolving.resolver.deinit(gpa);
+        free_catalog(resolving.memory);
+        server.resolving = null;
     }
 
     fn prepare(context: *anyopaque, tree: Digest, diag: *Diag) bool {
@@ -152,7 +210,50 @@ pub const Server = struct {
             .cache = &server.cache,
             .chunk_bytes = store.chunk_bytes,
         };
+        if (server.remote) |*remote| {
+            if (!server.prepare_resolving(remote, tree, diag)) return false;
+        }
         server.state = .prepared;
+        return true;
+    }
+
+    /// The catalog of `remote`'s index, checked against the table, and a resolver over it.
+    fn prepare_resolving(server: *Server, remote: *const Remote, tree: Digest, diag: *Diag) bool {
+        assert(server.resolving == null);
+        assert(remote.index.header.tree.eql(tree));
+        const memory = alloc_catalog(&remote.index.header) catch {
+            diagnose.out_of_memory(diag, tree);
+            return false;
+        };
+        const catalog = resolver.catalog_of(&server.table, &remote.index, memory) catch {
+            free_catalog(memory);
+            diagnose.index_disagrees(diag, tree);
+            return false;
+        };
+        server.resolving = .{
+            .remote = remote.*,
+            .memory = memory,
+            .resolver = undefined,
+            .started = false,
+            .chunks = undefined,
+        };
+        const resolving = &server.resolving.?;
+        resolving.resolver.init(gpa, .{
+            .store = &server.store,
+            .catalog = catalog,
+            .peers = &.{},
+            .registry = remote.registry,
+            .log = remote.log,
+            .free = remote.free,
+            .fill = false,
+        }) catch |err| {
+            // No peers in `zbx`: one source at most, far under `lazy_sources_max`.
+            assert(err == error.OutOfMemory);
+            free_catalog(memory);
+            server.resolving = null;
+            diagnose.out_of_memory(diag, tree);
+            return false;
+        };
         return true;
     }
 
@@ -213,12 +314,44 @@ pub const Server = struct {
                 error.TimedOut => error.TimedOut,
             };
         };
+        if (server.resolving) |*resolving| {
+            for (&resolving.chunks, &server.sources) |*chunks, *source| {
+                chunks.* = resolver.ResolverChunks.init(&resolving.resolver, server.store.chunk_bytes);
+                source.* = chunks.chunks();
+            }
+            resolving.resolver.start(server.threaded.io()) catch {
+                server.host.close(@intCast(server.fd));
+                server.fd = -1;
+                server.state = .idle;
+                return error.OutOfMemory;
+            };
+            resolving.started = true;
+        }
         server.state = .serving;
         // Threads already started go on serving, and `finish` stops and joins them.
         server.serving.start() catch return error.OutOfMemory;
         assert(server.serving.started == threads_count);
     }
 };
+
+/// The resolver's and the catalog's allocator: a lazy run's only heap, sized by the index at
+/// start and freed after the run.
+const gpa = std.heap.page_allocator;
+
+fn alloc_catalog(header: *const index_mod.Header) error{OutOfMemory}!resolver.CatalogMemory {
+    const objects = try gpa.alloc(lazy_mod.Object, header.objects);
+    errdefer gpa.free(objects);
+    const hashes = try gpa.alloc(Digest, header.chunks);
+    errdefer gpa.free(hashes);
+    const locations = try gpa.alloc(lazy_mod.Location, header.chunks);
+    return .{ .objects = objects, .hashes = hashes, .locations = locations };
+}
+
+fn free_catalog(memory: resolver.CatalogMemory) void {
+    gpa.free(memory.objects);
+    gpa.free(memory.hashes);
+    gpa.free(memory.locations);
+}
 
 comptime {
     assert(table_bytes <= std.math.maxInt(usize));

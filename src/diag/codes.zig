@@ -24,7 +24,7 @@ pub const Blame = enum { user, environment, external, internal };
 
 /// Every code, in registry order: `registry[i].code` is the i-th tag. The tag is the part of the
 /// code after "ZBX-": a kind letter (E error, W warning, B bug) and four digits.
-pub const Code = enum(u8) {
+pub const Code = enum(u16) {
     E0001,
     E0002,
     E0003,
@@ -278,6 +278,8 @@ pub const Code = enum(u8) {
     E1016,
     E1017,
     W1003,
+    E1201,
+    E1202,
     E1207,
     E1208,
     B0001,
@@ -4622,6 +4624,39 @@ pub const registry = [_]Entry{
         ,
     },
     .{
+        .code = .E1201,
+        .severity = .@"error",
+        .blame = .environment,
+        .summary = "lazy start is not possible on this host",
+        .explanation =
+        \\zbx run --lazy serves the image's files through FUSE from the zbx
+        \\process while the container runs, and fetches the chunks it has not got
+        \\yet as they are read. That needs /dev/fuse, a kernel that lets a user
+        \\namespace mount FUSE, and memory for the server's tables and chunk
+        \\buffers. The cause says which of these this host lacks.
+        \\
+        \\The container was not started. Run it without --lazy: the whole image is
+        \\then read before the container starts.
+        ,
+    },
+    .{
+        .code = .E1202,
+        .severity = .@"error",
+        .blame = .external,
+        .summary = "the image's lazy index was refused",
+        .explanation =
+        \\An image pushed by zbx carries a lazy index: the list of the image's
+        \\files and the chunks they are made of, hashed in the image's manifest.
+        \\zbx run --lazy checks the index before it uses any of it: its bytes must
+        \\hash to the manifest's value, stay within zbx's bounds, and describe
+        \\exactly the image's tree. This one did not: the registry, or whoever
+        \\pushed the image, sent an index that does not belong to it.
+        \\
+        \\Nothing was started and nothing was written. Run it without --lazy: a
+        \\whole pull checks every layer against the manifest instead.
+        ,
+    },
+    .{
         .code = .E1207,
         .severity = .@"error",
         .blame = .user,
@@ -4678,7 +4713,7 @@ comptime {
     // One entry per tag, in tag order: this is what makes a duplicate or a missing entry a
     // build error, and lets `entry` index the table directly.
     assert(registry.len == fields.len);
-    assert(fields.len <= std.math.maxInt(u8));
+    assert(fields.len <= std.math.maxInt(u16));
     @setEvalBranchQuota(600_000);
     for (registry, fields, 0..) |item, name, index| {
         assert(@backingInt(item.code) == index);
