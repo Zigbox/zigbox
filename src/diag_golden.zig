@@ -837,10 +837,12 @@ const build_cases = [_]Case{
     .{ .code = .W0803, .args = &.{}, .direct = build_pin_warned, .warning = true, .exit = 0 },
 };
 
-/// The lazy start's codes that slice 4 raises (fuse/diagnose.zig). E1207 needs a tree too large
-/// for the real server's table, which the simulated run does not build: its golden is the
-/// diagnostic as `fuse/diagnose.zig` builds it.
+/// The lazy start's codes (fuse/diagnose.zig). E1201's memory cause, E1202's catalog check and
+/// E1207 need a real server, which the simulated run does not build: their goldens are the
+/// diagnostics as `fuse/diagnose.zig` builds them.
 const lazy_cases = [_]Case{
+    .{ .code = .E1201, .args = &.{}, .direct = lazy_out_of_memory, .exit = 1 },
+    .{ .code = .E1202, .args = &.{}, .direct = lazy_index_disagrees, .exit = 1 },
     .{ .code = .E1207, .args = &.{}, .direct = lazy_too_large, .exit = 1 },
     .{
         .code = .E1208,
@@ -848,6 +850,16 @@ const lazy_cases = [_]Case{
         .exit = 125,
     },
 };
+
+fn lazy_out_of_memory(diag: *Diag) void {
+    const tree_digest = Digest.parse("b3:" ++ test_util.repeat('7', 64)).?;
+    lazy_diagnose.out_of_memory(diag, tree_digest);
+}
+
+fn lazy_index_disagrees(diag: *Diag) void {
+    const tree_digest = Digest.parse("b3:" ++ test_util.repeat('7', 64)).?;
+    lazy_diagnose.index_disagrees(diag, tree_digest);
+}
 
 fn lazy_too_large(diag: *Diag) void {
     const tree_digest = Digest.parse("b3:" ++ test_util.repeat('7', 64)).?;

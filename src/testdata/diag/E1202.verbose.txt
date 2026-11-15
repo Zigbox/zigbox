@@ -1,0 +1,7 @@
+error[ZBX-E1202]: the image's lazy index was refused
+  while  checking the image's lazy index against its tree
+  cause  the index lists a file whose content and attributes are not the tree's
+  tree   b3:7777777777777777777777777777777777777777777777777777777777777777
+  fix    run it without --lazy, which pulls the whole image
+  more   zbx explain E1202
+  docs   https://zigbox.github.io/zigbox/errors/E1202.html
