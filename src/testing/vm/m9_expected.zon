@@ -1,6 +1,7 @@
 .{
     // The result digest of the demo project (src/testing/vm/m9_project, imported from its
     // Dockerfile), as a recorded run of `zig build demo-m9` prints it in the clean VM: VM run
-    // 43544344033 on 4685d6c, the first to reach the golden check.
-    .digest = "b3:54d2df5e5a52d41c61ff59a7b92f18324abd68faab0119bb6e90e6ffa068c3fa",
+    // 43658112204 on e685559, the first after the final stage stopped running `adduser`, whose
+    // /etc/shadow line held the day it ran.
+    .digest = "b3:2021670fd368b076b06bab2f3e2beebab5b79bdcfe6896399ffcd6e3c2558e91",
 }
