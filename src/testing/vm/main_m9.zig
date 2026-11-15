@@ -8,11 +8,13 @@
 //! ACCEPT (accept_m9.zig): the fixtures through the binary, the graph, comments, the refusals,
 //!   a clean store.
 //! AGENT (agent_m9.zig): `zbx import`, `build` and `explain` by JSON only.
-//! PIN (pins_m9.zig): step 8's `--pin`, then `--locked` all hits.
+//! PIN (pins_m9.zig): step 8's `--pin`, then `--locked` all hits with the pin's key and output,
+//!   `--pin --locked` E0005, and `steady` pinned.
 //!
 //! The second VM is clean: HELLO's step 5 (hello_m9.zig): the same import bytes and the digest of
-//! step 2, equal to the golden in `m9_expected.zon`; then step 8's drift (pins_m9.zig): E0822
-//! under `--locked`, W0803 without it.
+//! step 2, equal to the golden in `m9_expected.zon`; `--locked` in ~/hello all hits with its lock
+//! unchanged; then step 8's drift (pins_m9.zig): E0822 under `--locked`, W0803 without it, and
+//! `steady` with `.expect` giving the first VM's output.
 //!
 //! No upgrade test: M9 changes no store or record format (docs/demos/m9.md).
 //!
@@ -136,6 +138,7 @@ fn second_vm(context: Context) !void {
     try H.install_binary(&session, context.out, &timer);
     try common.write_wrappers(&session, context.out, context.ca_file.len > 0);
     try hello.step_second(&session, context.out, &timer);
+    try pins.step_hello_locked(&session, context.out, &timer);
     try pins.step_drift(&session, context.out, &timer);
     try session.shutdown();
 }

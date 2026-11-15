@@ -706,6 +706,31 @@ test "key: an M7 step keeps its key; each M9 field changes it; an excluded file 
     try testing.expectEqual(variants.len, count);
 }
 
+test "key: the preimage reader takes the most output excludes, and refuses one more" {
+    // Goal: gc's reader of a preimage agrees with `compute` at the bound of `.output_exclude`.
+    // Method: a spec with the most excludes reads back; the same preimage with its count raised
+    // by one and one more path appended is refused, not read past.
+    const most = constants.build_output_excludes_max;
+    const paths: [most][]const u8 = @splat("/x");
+    const spec = with_more(sample(&.{}), .{ .output_exclude = &paths });
+    try compute(&spec, &key_storage[0]);
+    var out: [constants.build_copy_entries_max][32]u8 = undefined;
+    const preimage = key_storage[0].preimage();
+    try testing.expectEqual(@as(?u32, 0), fetched(preimage, &out));
+    // `.output_exclude` is the last field: its tag, its count, then each path as length, bytes.
+    const path_bytes = 4 + "/x".len;
+    const at = preimage.len - (1 + 4 + most * path_bytes);
+    try testing.expectEqual(@backingInt(Tag.output_exclude), preimage[at]);
+    var longer: [constants.build_key_preimage_bytes_max]u8 = undefined;
+    try testing.expect(preimage.len + path_bytes <= longer.len);
+    @memcpy(longer[0..preimage.len], preimage);
+    std.mem.writeInt(u32, longer[at + 1 ..][0..4], most + 1, .little);
+    @memcpy(longer[preimage.len..][0..path_bytes], &[_]u8{ 2, 0, 0, 0, '/', 'x' });
+    try testing.expectEqual(@as(?u32, null), fetched(longer[0 .. preimage.len + path_bytes], &out));
+    std.mem.writeInt(u32, longer[at + 1 ..][0..4], most, .little);
+    try testing.expectEqual(@as(?u32, 0), fetched(longer[0..preimage.len], &out));
+}
+
 fn with_more(spec: Spec, more: struct {
     root_output: bool = false,
     user: ?[]const u8 = null,

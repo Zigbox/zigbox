@@ -727,6 +727,14 @@ pub const Context = struct {
             .output => |digest| digest,
         };
         ws.key = slot.key;
+        // An output refused for drift is not cached: a later `--locked` build runs the step
+        // again rather than hitting the refused output for ever.
+        if (context.pins.enforces()) {
+            _ = context.check_pin(slot.index, output) catch {
+                context.unroot(output);
+                return .{ .index = slot.index, .ok = false };
+            };
+        }
         const kept = context.record(output) catch return .{ .index = slot.index, .ok = false };
         ws.outputs[slot.index] = context.check_pin(slot.index, kept) catch {
             return .{ .index = slot.index, .ok = false };

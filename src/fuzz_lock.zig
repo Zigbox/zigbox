@@ -144,8 +144,8 @@ fn fuzz_lock_text(random: std.Random) void {
     _ = lock_file.parse(noise[0..random.uintAtMost(usize, noise.len)], &second);
 }
 
-/// Copies `source` into `out` with a few random edits: flipped bytes, a cut, a duplicated or
-/// removed line.
+/// Copies `source` into `out` with a few random edits: flipped bytes, a cut, a removed line, a
+/// line copied elsewhere, or a lock line inserted.
 fn damage(source: []const u8, out: []u8, random: std.Random) usize {
     assert(source.len <= out.len);
     @memcpy(out[0..source.len], source);
@@ -153,14 +153,66 @@ fn damage(source: []const u8, out: []u8, random: std.Random) usize {
     const edits = random.uintAtMost(u32, 4);
     for (0..edits) |_| {
         if (length == 0) break;
-        switch (random.uintLessThan(u8, 4)) {
+        switch (random.uintLessThan(u8, 6)) {
             0 => out[random.uintLessThan(usize, length)] ^= @as(u8, 1) << random.int(u3),
             1 => length = random.uintLessThan(usize, length),
             2 => length = remove_line(out, length, random),
+            3 => length = copy_line(out, length, random),
+            4 => length = insert_line(out, length, random),
             else => out[random.uintLessThan(usize, length)] = random.int(u8),
         }
     }
     return length;
+}
+
+/// Lines a hand edit could add: each field of a lock or record, given again.
+const inserted_lines = [_][]const u8{
+    "    .version = 1,\n",
+    "    .version = 2,\n",
+    "    .pins = .{\n",
+    "    .images = .{\n",
+    "        .{\n",
+    "        },\n",
+    "            .file = \"zbx.build.zon\",\n",
+    "            .step = \"fetch\",\n",
+    "            .reference = \"alpine:3.20\",\n",
+    "            .platform = \"linux/amd64\",\n",
+};
+
+/// The start of the line holding `at`.
+fn line_start(buffer: []const u8, at: usize) usize {
+    assert(at <= buffer.len);
+    return if (std.mem.lastIndexOfScalar(u8, buffer[0..at], '\n')) |found| found + 1 else 0;
+}
+
+/// Puts `line` at the start of a random line of `buffer[0..length]`, if it fits.
+fn put_line(buffer: []u8, length: usize, line: []const u8, random: std.Random) usize {
+    assert(length <= buffer.len);
+    assert(line.len > 0);
+    if (length + line.len > buffer.len) return length;
+    const at = line_start(buffer[0..length], random.uintAtMost(usize, length));
+    std.mem.copyBackwards(u8, buffer[at + line.len ..], buffer[at..length]);
+    @memcpy(buffer[at..][0..line.len], line);
+    return length + line.len;
+}
+
+/// Copies a random line of `buffer[0..length]` to the start of another random line.
+fn copy_line(buffer: []u8, length: usize, random: std.Random) usize {
+    assert(length > 0);
+    assert(length <= buffer.len);
+    const at = random.uintLessThan(usize, length);
+    const start = line_start(buffer[0..length], at);
+    const end = (std.mem.indexOfScalarPos(u8, buffer[0..length], at, '\n') orelse length - 1) + 1;
+    var line: [512]u8 = undefined;
+    if (end - start > line.len) return length;
+    @memcpy(line[0 .. end - start], buffer[start..end]);
+    return put_line(buffer, length, line[0 .. end - start], random);
+}
+
+fn insert_line(buffer: []u8, length: usize, random: std.Random) usize {
+    assert(length <= buffer.len);
+    const line = inserted_lines[random.uintLessThan(usize, inserted_lines.len)];
+    return put_line(buffer, length, line, random);
 }
 
 fn remove_line(buffer: []u8, length: usize, random: std.Random) usize {

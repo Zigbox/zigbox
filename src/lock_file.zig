@@ -369,7 +369,7 @@ pub const ProblemKind = enum {
     no_version,
     /// A newer version than this zbx reads.
     newer,
-    /// Two entries for one image, or two pins for one step.
+    /// Two entries for one image, two pins for one step, or a second `.version`.
     duplicate,
     /// More entries, pins or bytes than a lock holds, or a lock whose rendering would be.
     too_big,
@@ -458,9 +458,12 @@ fn parse_line(
     assert(number > 0);
     assert(lock.count <= constants.lock_entries_max);
     if (std.mem.eql(u8, key, "version")) {
+        // One `.version`, so a later line cannot unsay the version the pins were read under.
+        if (reading.version_seen != 0) return .{ .kind = .duplicate, .line = number };
         reading.version_seen = std.fmt.parseInt(u32, value, 10) catch {
             return .{ .kind = .bad_value, .line = number };
         };
+        if (reading.version_seen == 0) return .{ .kind = .bad_value, .line = number };
         if (reading.version_seen > version_pins) return .{ .kind = .newer, .line = number };
     } else if (std.mem.eql(u8, key, "images")) {
         if (reading.in_pins) return .{ .kind = .unknown_line, .line = number };
@@ -1026,6 +1029,28 @@ test "pins are refused in a version 1 lock, twice, or incomplete" {
     const long_step = v2 ++ "    .pins = .{\n        .{\n            .file = \"f\",\n" ++
         "            .step = \"" ++ step_too_long ++ "\",\n";
     try testing.expectEqual(ProblemKind.bad_value, problem_of(long_step).?.kind);
+}
+
+test "a second .version, or a .step twice in a pin, is refused at its line" {
+    // Goal: a version 2 lock cannot be unsaid by a later `.version = 1` (which used to reach the
+    // pin-version assert), and a pin cannot name its step twice.
+    const pin = "    .pins = .{\n        .{\n            .file = \"f\",\n" ++
+        "            .step = \"s\",\n            .key = \"" ++ Digest.of("k").text() ++
+        "\",\n            .output = \"" ++ Digest.of("o").text() ++ "\",\n        },\n";
+    const v2 = ".{\n    .version = 2,\n    .images = .{\n    },\n";
+    const after = problem_of(v2 ++ pin ++ "    },\n    .version = 1,\n}\n").?;
+    try testing.expectEqual(ProblemKind.duplicate, after.kind);
+    try testing.expectEqual(@as(u32, 13), after.line);
+    const twice = problem_of(".{\n    .version = 1,\n    .version = 1,\n}\n").?;
+    try testing.expectEqual(ProblemKind.duplicate, twice.kind);
+    try testing.expectEqual(@as(u32, 3), twice.line);
+    const zero = problem_of(".{\n    .version = 0,\n}\n").?;
+    try testing.expectEqual(ProblemKind.bad_value, zero.kind);
+    const step_twice = v2 ++ "    .pins = .{\n        .{\n            .file = \"f\",\n" ++
+        "            .step = \"s\",\n            .step = \"t\",\n";
+    const repeated = problem_of(step_twice).?;
+    try testing.expectEqual(ProblemKind.bad_value, repeated.kind);
+    try testing.expectEqual(@as(u32, 9), repeated.line);
 }
 
 test "the pins are full at lock_pins_max" {

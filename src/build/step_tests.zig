@@ -203,7 +203,7 @@ pub fn join(buffer: []u8, base: []const u8, tail: []const u8) []const u8 {
 }
 
 /// The step's `out` directory in the store, while it exists.
-fn find_out() ?[]const u8 {
+pub fn find_out() ?[]const u8 {
     var index: u32 = 0;
     while (files.alive_path(index)) |path| : (index += 1) {
         const in_work = std.mem.startsWith(u8, path, work_root ++ "/");

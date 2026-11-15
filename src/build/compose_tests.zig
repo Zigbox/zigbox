@@ -2104,6 +2104,179 @@ test "--pin with nothing to pin leaves the lock unwritten" {
     try testing.expectError(error.NotFound, sim.interface().filesystem().lstat("/p/zbx.lock"));
 }
 
+test "--pin records each pinned step's own key and output" {
+    // Goal: save_pins takes every step's key from that step, not step 0's. Method: two steps
+    // pinned with different keys and outputs; the lock holds each step's pair.
+    try pinning_started(.pinning);
+    composed.wants[1] = .pinning;
+    composed.timings[1].key = Digest.of("key1");
+    composed.outputs[1] = Digest.of("output1");
+    try context.save_pins();
+    var failure: lock_file.Failure = undefined;
+    const host = sim.interface();
+    try lock_file.open_project(host, host.filesystem(), &lock_read, &failure);
+    for (0..2) |index| {
+        const name = loaded.file.text(loaded.file.steps[index].name);
+        const found = lock_read.lock.find_pin("zbx.build.zon", name).?;
+        try testing.expect(found.key.eql(composed.timings[index].key));
+        try testing.expect(found.output.eql(composed.outputs[index]));
+    }
+    try testing.expectEqual(@as(u32, 2), lock_read.lock.pin_count);
+}
+
+/// `registry_started`, with a build file of one network step `compile` whose `.expect` is
+/// `expect`, in the project `/p` (the working directory), and the base pulled.
+fn expecting_started(expect: Digest) !void {
+    registry_started(&registry.fixture.oci.amd64.digest);
+    var buffer: [512]u8 = undefined;
+    const text = try std.fmt.bufPrint(&buffer, "{s}{s}{s}{s}{s}", .{
+        ".{ .version = 1, .image = .{}, .steps = .{ .{ .name = \"compile\", .base = \"",
+        locked_reference,
+        "\", .inputs = .{\"a.txt\"}, .run = .{\"true\"}, .network = true, .expect = \"",
+        &expect.text(),
+        "\" } } }\n",
+    });
+    var problem: file_mod.Problem = undefined;
+    const parsed = file_mod.parse(text, &loaded.file, &problem);
+    try testing.expectEqual(file_mod.ParseResult.parsed, parsed);
+    var graph_problem: graph_mod.Problem = undefined;
+    try testing.expectEqual(graph_mod.Result.ordered, graph_mod.order(
+        &loaded.file,
+        &loaded.graph,
+        &graph_problem,
+    ));
+    files.put_dir("/p", 0o755);
+    files.put_file("/p/a.txt", 0o644, "a\n");
+    set_path(&loaded.project, "/p");
+    set_path(&loaded.path, "/p/zbx.build.zon");
+}
+
+/// Begins step 0, which misses and starts a worker, and ends that worker with `output` as its
+/// answer: the step's key is in `composed.key` after.
+fn missed_then_answered(output: Digest) schedule.Ended {
+    const began = context.begin(0) catch unreachable; // The step starts.
+    assert(began == .running);
+    compose.Context.abort_step(&context);
+    const answer = answer_of(output);
+    return settle(worker_ended(0, 7, &answer), .{ .exited = 0 });
+}
+
+test "a hit whose output is not its pin is E0822 under --locked, W0803 otherwise, in order" {
+    // Goal: the pin is checked on a cache hit as on a run, and the diagnostic says which digest
+    // the step produced and which is its pin. Method: a plain build caches an output that is
+    // not the step's .expect (W0803 then); a --locked build hits it and is E0822; a plain
+    // build hits it and is W0803, using the output.
+    const pinned = Digest.of("pinned");
+    try expecting_started(pinned);
+    const output = made_output();
+    context.pins = .plain;
+    try testing.expect(missed_then_answered(output).ok);
+    try testing.expect(composed.outputs[0].eql(output));
+    var expected: [256]u8 = undefined;
+    const cause = try std.fmt.bufPrint(&expected, "step compile produced {s}, and its pin " ++
+        "is {s}", .{ &output.text(), &pinned.text() });
+    sim.stderr_len = 0;
+    context.pins = .locked;
+    try testing.expectError(error.Failed, context.begin(0));
+    try testing.expect(diag.code.? == .E0822);
+    try testing.expectEqualStrings(cause, diag.last_cause().?);
+    diag.reset();
+    context.pins = .plain;
+    sim.stdout_len = 0;
+    try testing.expect(try context.begin(0) == .hit);
+    try testing.expect(diag.code == null);
+    try testing.expect(composed.outputs[0].eql(output));
+    try testing.expect(std.mem.indexOf(u8, sim.stderr(), "W0803") != null);
+    try testing.expect(std.mem.indexOf(u8, sim.stderr(), cause) != null);
+}
+
+test "an output refused under --locked is not cached: the next build runs the step again" {
+    // Goal: a drift refused under --locked does not stick. Method: a --locked run's output
+    // drifts and is E0822; the same step begun again misses (starts a worker) rather than
+    // hitting the refused output, and no root of it is left.
+    try expecting_started(Digest.of("pinned"));
+    const output = made_output();
+    context.pins = .locked;
+    try testing.expect(!missed_then_answered(output).ok);
+    try testing.expect(diag.code.? == .E0822);
+    try testing.expect(root_source(output, &root_text) == null);
+    diag.reset();
+    try testing.expect(try context.begin(0) == .running);
+    compose.Context.abort_step(&context);
+}
+
+var root_text: [constants.store_source_bytes_max]u8 = undefined;
+var lock_read: lock_file.Workspace = undefined;
+
+test "zbx build --pin writes the lock after the build, with the step's key and output" {
+    // Goal: run_steps saves the pins of a --pin build. Method: the step's output is cached;
+    // run_steps in --pin mode hits it, builds the image, and the lock on disk then holds the
+    // step's pin with its key and output.
+    try expecting_started(Digest.of("unused"));
+    loaded.file.steps[0].expect = null;
+    const output = made_output();
+    context.pins = .pin;
+    try testing.expect(missed_then_answered(output).ok);
+    const key = composed.key.digest;
+    var text: [constants.lock_file_bytes_max]u8 = undefined;
+    files.put_file("/p/zbx.lock", 0o644, lock_file.render(&composed.locking.lock, &text));
+    _ = sim.world.processes[sim.world.current].cwd.set("/p");
+    diag.reset();
+    const options: compose.Options = .{ .json = false, .verbose = false, .pins = .pin };
+    try compose.run_steps(sim.interface(), &facts, &loaded, &composed, options, &diag);
+    var failure: lock_file.Failure = undefined;
+    const host = sim.interface();
+    try lock_file.open_project(host, host.filesystem(), &lock_read, &failure);
+    const found = lock_read.lock.find_pin("zbx.build.zon", "compile").?;
+    try testing.expect(found.key.eql(key));
+    try testing.expect(found.output.eql(output));
+}
+
+/// Saves the lock with the fault at write point `point`; true if the save ran to its end
+/// without the fault firing, so there are no more points to try.
+fn faulty_save(point: u32, crash: bool) bool {
+    files.mutations = 0;
+    if (crash) files.faults.crash_mutation = point else files.faults.fail_mutation = point;
+    defer files.faults = .{};
+    var failure: lock_file.Failure = undefined;
+    const fs = sim.interface().filesystem();
+    lock_file.save(sim.interface(), fs, &composed.locking, &failure) catch return false;
+    return true;
+}
+
+var old_lock: [constants.lock_file_bytes_max]u8 = undefined;
+var new_lock: [constants.lock_file_bytes_max]u8 = undefined;
+var back: lock_file.Lock = undefined;
+
+test "a crash or failure at any write of the lock leaves the old lock or the new, never torn" {
+    // Goal: the brief's "simulated crash during lock write": a reader finds the old lock or the
+    // new one, whole. Method: a version 1 lock is on disk; the lock with a pin added is saved
+    // with the fault at each write point in turn, as a crash (unsynced bytes torn, then a
+    // restart) and as a failed call; the file is then byte for byte the old or the new lock,
+    // and it parses.
+    for ([_]bool{ true, false }) |crash| {
+        var point: u32 = 0;
+        while (true) : (point += 1) {
+            try pinning_started(.pinning);
+            const manifest = oci_digest.Sha256{ .bytes = @splat(3) };
+            try composed.locking.lock.put("alpine:3.20", manifest, "linux/amd64", Digest.of("t"));
+            const old = lock_file.render(&composed.locking.lock, &old_lock);
+            try testing.expect(faulty_save(std.math.maxInt(u32), false));
+            const lock = &composed.locking.lock;
+            try lock.put_pin("zbx.build.zon", "compile", Digest.of("k"), Digest.of("o"));
+            const new = lock_file.render(&composed.locking.lock, &new_lock);
+            const finished = faulty_save(point, crash);
+            if (crash and !finished) files.restart();
+            const on_disk = files.content_of("/p/zbx.lock").?;
+            try testing.expect(std.mem.eql(u8, on_disk, old) or std.mem.eql(u8, on_disk, new));
+            if (finished) try testing.expectEqualStrings(new, on_disk);
+            try testing.expectEqual(@as(?lock_file.Problem, null), lock_file.parse(on_disk, &back));
+            if (finished) break;
+        }
+        try testing.expect(point >= 2);
+    }
+}
+
 fn whole_project_parsed(source: []const u8) !void {
     var buffer: [512]u8 = undefined;
     const text = try std.fmt.bufPrint(&buffer, "{s}{s}{s}{s}{s}", .{
