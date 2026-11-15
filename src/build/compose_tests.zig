@@ -2187,19 +2187,23 @@ test "a hit whose output is not its pin is E0822 under --locked, W0803 otherwise
     try testing.expect(diag.code == null);
     try testing.expect(composed.outputs[0].eql(output));
     try testing.expect(std.mem.indexOf(u8, sim.stderr(), "W0803") != null);
-    try testing.expect(std.mem.indexOf(u8, sim.stderr(), cause) != null);
+    // The renderer wraps the cause, so its two digests are found apart, produced first.
+    const produced_at = std.mem.indexOf(u8, sim.stderr(), &output.text()).?;
+    const pin_at = std.mem.indexOf(u8, sim.stderr(), &pinned.text()).?;
+    try testing.expect(produced_at < pin_at);
 }
 
 test "an output refused under --locked is not cached: the next build runs the step again" {
     // Goal: a drift refused under --locked does not stick. Method: a --locked run's output
     // drifts and is E0822; the same step begun again misses (starts a worker) rather than
-    // hitting the refused output, and no root of it is left.
+    // hitting the refused output. The output's only root is the one its import made (`/src`):
+    // the refused step left none of its own.
     try expecting_started(Digest.of("pinned"));
     const output = made_output();
     context.pins = .locked;
     try testing.expect(!missed_then_answered(output).ok);
     try testing.expect(diag.code.? == .E0822);
-    try testing.expect(root_source(output, &root_text) == null);
+    try testing.expectEqualStrings("/src", root_source(output, &root_text).?);
     diag.reset();
     try testing.expect(try context.begin(0) == .running);
     compose.Context.abort_step(&context);

@@ -51,7 +51,7 @@ var first_steady: ?checks.Steady = null;
 /// `steady` writes a constant, and the date under /var/log, which a pinned step's output
 /// leaves out; `after` needs it. With `expect`, `steady` is held to that digest.
 fn steady_file(buffer: []u8, expect: []const u8) []const u8 {
-    assert(expect.len == 0 or expect.len == "b3:".len + 64);
+    if (expect.len > 0) assert(expect.len == "b3:".len + 64);
     const expect_line_head = "            .expect = \"";
     var line_buffer: [expect_line_head.len + 72]u8 = undefined;
     const line = if (expect.len == 0) "" else std.fmt.bufPrint(
@@ -92,7 +92,9 @@ fn steady_file(buffer: []u8, expect: []const u8) []const u8 {
         \\}
         \\
     ;
-    return std.fmt.bufPrint(buffer, "{s}{s}{s}", .{ head, line, tail }) catch unreachable;
+    return std.fmt.bufPrint(buffer, "{s}{s}{s}", .{ head, line, tail }) catch {
+        unreachable; // The caller's buffer holds the file with the longest expect line.
+    };
 }
 
 fn install(session: *Session, out: *Io.Writer, lock: []const u8) !void {
