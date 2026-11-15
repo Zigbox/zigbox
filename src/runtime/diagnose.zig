@@ -443,7 +443,16 @@ fn setup_failed(
     assert(diag.code == null);
     assert(operation.len > 0);
     diag.raise(.E0205);
-    errors.cause_host_error(diag, operation, failure.err, failure.errno);
+    // A FUSE server's refusal has no errno of its own: its error says why.
+    const refused = if (step.kind == .serve_fuse and failure.errno == 0)
+        serve_fuse_reason(failure.err)
+    else
+        null;
+    if (refused) |reason| {
+        diag.cause("{s} failed: {s}", .{ operation, reason });
+    } else {
+        errors.cause_host_error(diag, operation, failure.err, failure.errno);
+    }
     if (setup_reason(step.kind, failure.err)) |reason| diag.cause("{s}", .{reason});
     switch (step.kind) {
         // The directories zbx makes in the user's own rootfs: a problem with that directory,
@@ -521,6 +530,23 @@ fn read_only_failed(
     }
     assert(diag.code.? == .E0209);
     assert(diag.fixes.count > 0);
+}
+
+/// Why the lazy run's FUSE server refused its connection (`lazy_server.serve`), by its error.
+fn serve_fuse_reason(err: host_mod.Error) ?[]const u8 {
+    const reason: ?[]const u8 = switch (err) {
+        error.TimedOut => std.fmt.comptimePrint(
+            "the kernel sent no FUSE INIT within {d} s",
+            .{constants.fuse_init_timeout_ms / 1000},
+        ),
+        error.Unsupported => "the kernel's FUSE is older than protocol 7.31, or its first " ++
+            "request was not INIT",
+        error.IoFailed => "the FUSE connection ended before its INIT was answered",
+        error.OutOfMemory => "the FUSE serving threads could not be started",
+        else => null,
+    };
+    if (reason) |text| assert(text.len > 0);
+    return reason;
 }
 
 /// Why a step is refused, when the step and the error say so. Null leaves the symptom as the

@@ -47,6 +47,8 @@ const build_file_fuzz = @import("fuzz_build_file.zig");
 const dockerignore_fuzz = @import("fuzz_dockerignore.zig");
 const dockerfile_fuzz = @import("fuzz_dockerfile.zig");
 const pull_report_fuzz = @import("fuzz_pull_report.zig");
+const fuse_request_fuzz = @import("fuzz_fuse.zig");
+const fuse_serve_fuzz = @import("fuzz_fuse_serve.zig");
 const key_fuzz = @import("fuzz_key.zig");
 const openpgp_fuzz = @import("fuzz_openpgp.zig");
 const dnf_fuzz = @import("fuzz_dnf.zig");
@@ -107,6 +109,8 @@ const fuzzers = [_]Fuzzer{
     .{ .name = "dockerignore", .run_iteration = dockerignore_fuzz.fuzz_dockerignore },
     .{ .name = "dockerfile", .run_iteration = dockerfile_fuzz.fuzz_dockerfile },
     .{ .name = "pull_report", .run_iteration = pull_report_fuzz.fuzz_pull_report },
+    .{ .name = "fuse_request", .run_iteration = fuse_request_fuzz.fuzz_fuse_request },
+    .{ .name = "fuse_serve", .run_iteration = fuse_serve_fuzz.fuzz_fuse_serve },
     .{ .name = "key", .run_iteration = key_fuzz.fuzz_key },
     .{ .name = "openpgp", .run_iteration = openpgp_fuzz.fuzz_openpgp },
     .{ .name = "dnf", .run_iteration = dnf_fuzz.fuzz_dnf },

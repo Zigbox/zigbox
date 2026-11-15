@@ -278,6 +278,8 @@ pub const Code = enum(u8) {
     E1016,
     E1017,
     W1003,
+    E1207,
+    E1208,
     B0001,
 };
 
@@ -4617,6 +4619,38 @@ pub const registry = [_]Entry{
         \\To keep the lookups on your own network, join one that has an IPv4 DNS
         \\server, then zbx vm stop; the next command starts a machine that asks it.
         \\The warning is printed once, by the command that starts the machine.
+        ,
+    },
+    .{
+        .code = .E1207,
+        .severity = .@"error",
+        .blame = .user,
+        .summary = "the image is too large for lazy start",
+        .explanation =
+        \\zbx run --lazy serves the image's files from memory it sets aside when
+        \\the run starts: a table with room for a fixed number of entries (files,
+        \\directories and links) and a fixed number of bytes of directory
+        \\listings. This image has more of one than that room; the cause says
+        \\which, and the limit.
+        \\
+        \\The container was not started. Run it without --lazy: the whole image is
+        \\then read before the container starts, with no such limit.
+        ,
+    },
+    .{
+        .code = .E1208,
+        .severity = .@"error",
+        .blame = .user,
+        .summary = "--lazy does not work with another option given",
+        .explanation =
+        \\zbx run --lazy starts a container before its image is all on disk,
+        \\serving the files from the store as the container reads them. The server
+        \\runs in the zbx process that runs the container, so for now the run must
+        \\stay in the foreground: -d with --lazy is not yet supported. It also needs
+        \\an image (not --rootfs, which runs a directory as it is).
+        \\
+        \\The cause names the option. Nothing was started. Leave out --lazy, or
+        \\the other option.
         ,
     },
     .{

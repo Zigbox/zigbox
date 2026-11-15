@@ -387,6 +387,7 @@ pub const wait_interrupts_max: u32 = 1024;
 pub const child_exit_setup_failed: u8 = 125;
 /// EIO: the errno that stands for a failure with none (an error made inside host.zig).
 pub const errno_io: u16 = 5;
+pub const errno_pipe: u16 = 32;
 /// SIGKILL, the same number on x86_64 and aarch64.
 pub const signal_kill: u8 = 9;
 /// SIGINT (Ctrl-C), the same number on x86_64 and aarch64.
@@ -2063,6 +2064,49 @@ comptime {
     assert(std.math.isPowerOfTwo(lazy_nodes_max));
     assert(lazy_range_bytes_max >= 2 * store_chunk_bytes);
     assert(layer_writer_version == 2);
+}
+
+// Lazy start (S2): the FUSE server (slice 4). `lazy_nodes_max`, `lazy_fuse_threads` and
+// `lazy_index_bytes_max` are the S2 brief's bounds, approved by the owner on 2026-11-14, and are
+// defined with the index and the resolver; the rest follow from them and the store's chunk size.
+
+/// The most bytes one FUSE `READ` asks for (`max_read` and `max_pages`): one whole chunk.
+pub const fuse_read_bytes_max: u32 = store_chunk_bytes;
+pub const fuse_max_pages: u16 = @intCast(fuse_read_bytes_max / 4096);
+/// A request read from `/dev/fuse`: the kernel's minimum read buffer. The server is read-only and
+/// asks for `max_write` of one page, so every request it answers fits; the kernel refuses a longer
+/// one (a large `setxattr`) to its caller without sending it.
+pub const fuse_request_bytes: u32 = 8192;
+pub const fuse_max_write: u32 = 4096;
+/// A reply: the out-header and the longest data, a read of `fuse_read_bytes_max`.
+pub const fuse_reply_bytes: u32 = 16 + fuse_read_bytes_max;
+/// How long the kernel may cache names and attributes: the tree never changes while it is served.
+pub const fuse_valid_seconds: u64 = 365 * 24 * 60 * 60;
+/// FUSE requests the kernel keeps in flight to the server, and when it starts to throttle.
+pub const fuse_max_background: u16 = 64;
+pub const fuse_congestion_threshold: u16 = 48;
+/// How long a serving thread waits on `/dev/fuse` before it looks at the stop flag again: the
+/// most `finish` waits for an idle thread after the container is gone.
+pub const fuse_poll_ms: u32 = 100;
+/// How long `serve` waits for the kernel's `INIT` on a new connection before refusing the run.
+pub const fuse_init_timeout_ms: u32 = 10_000;
+
+comptime {
+    assert(lazy_nodes_max < std.math.maxInt(u32) / 4);
+    assert(lazy_fuse_threads >= 1);
+    assert(lazy_fuse_threads <= 64);
+    assert(fuse_read_bytes_max == store_chunk_bytes);
+    assert(fuse_read_bytes_max % 4096 == 0);
+    assert(fuse_max_pages <= 256); // The kernel's `FUSE_MAX_MAX_PAGES`.
+    assert(fuse_request_bytes >= 8192); // The kernel's `FUSE_MIN_READ_BUFFER`.
+    assert(fuse_request_bytes >= 40 + 40 + fuse_max_write);
+    assert(fuse_request_bytes >= 40 + 1024 + 1); // A lookup of the longest name the kernel sends.
+    assert(fuse_reply_bytes > fuse_read_bytes_max);
+    assert(fuse_congestion_threshold < fuse_max_background);
+    assert(fuse_poll_ms > 0);
+    assert(fuse_poll_ms <= 1000);
+    assert(fuse_init_timeout_ms % fuse_poll_ms == 0);
+    assert(fuse_init_timeout_ms >= 10 * fuse_poll_ms);
 }
 
 // Lazy start (S2): the chunk resolver (`src/lazy/`). The values are the brief's, approved by the

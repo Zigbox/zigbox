@@ -92,7 +92,8 @@ pub const Path = struct {
 pub const Prepared = struct {
     digest: Digest,
     digest_text: [constants.store_digest_text_bytes]u8,
-    /// The farm of the tree (the lower layer).
+    /// The farm of the tree (the lower layer); in a lazy run, the container's empty `lower`
+    /// directory, where the setup child mounts the FUSE server's tree instead.
     lower: Path,
     /// The mount point of the overlay, which becomes the container's root.
     merged: Path,
@@ -104,6 +105,8 @@ pub const Prepared = struct {
     /// The layer on top of the tree: the mount points of the generated /etc files.
     net: Path,
     read_only: bool,
+    /// The tree is served lazily (`zbx run --lazy`), not materialized.
+    lazy: bool,
 
     pub fn tree_text(prepared: *const Prepared) []const u8 {
         return &prepared.digest_text;
@@ -159,6 +162,7 @@ pub fn prepare(
     image: []const u8,
     name: []const u8,
     read_only: bool,
+    lazy: bool,
     warn: ?namespace.Warn,
     check: ?Check,
     prepared: *Prepared,
@@ -182,7 +186,12 @@ pub fn prepare(
     prepared.digest = digest;
     prepared.digest_text = digest.text();
     prepared.read_only = read_only;
-    const ok = prepared.lower.set(&.{farm}) and
+    prepared.lazy = lazy;
+    const lower_ok = if (lazy)
+        prepared.lower.set(&.{ base.text(), "/lower" })
+    else
+        prepared.lower.set(&.{farm});
+    const ok = lower_ok and
         prepared.merged.set(&.{ base.text(), "/merged" }) and
         prepared.upper.set(&.{ base.text(), "/upper" }) and
         prepared.work.set(&.{ base.text(), "/work" }) and
@@ -403,7 +412,10 @@ fn execute(job: *Job, diag: *Diag) Error!void {
         }
     }
     const ws = &job.workspace.materialize;
-    _ = materialize.ensure(&store, ws, prepared.digest, diag) catch return error.Failed;
+    // A lazy run serves the tree from the store's objects as they are: nothing to materialize.
+    if (!prepared.lazy) {
+        _ = materialize.ensure(&store, ws, prepared.digest, diag) catch return error.Failed;
+    }
     // The container's directory, new: whatever an earlier run of the name left is removed.
     try make_container(&store, job, diag);
 }
@@ -423,9 +435,11 @@ fn make_container(store: *Store, job: *Job, diag: *Diag) Error!void {
         &prepared.merged,
         &prepared.net,
         if (prepared.read_only) &prepared.empty else &prepared.upper,
-        &prepared.work,
+        // A read-only run has no work directory: a lazy one's lower directory comes here.
+        if (prepared.read_only) &prepared.lower else &prepared.work,
+        &prepared.lower,
     };
-    const count: usize = if (prepared.read_only) 3 else 4;
+    const count = @as(usize, if (prepared.read_only) 3 else 4) + @intFromBool(prepared.lazy);
     for (directories[0..count]) |directory| {
         fs.make_directory(directory.text(), false) catch |err| {
             diagnose.write_failed(

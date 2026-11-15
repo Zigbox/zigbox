@@ -295,6 +295,7 @@ const roots = [_][]const u8{
     "src/testing/vm/main_m8b.zig",
     "src/testing/vm/main_m9.zig",
     "src/testing/vm/main_m10.zig",
+    "src/testing/vm/main_s2_lazy.zig",
     "src/testing/vm/main_s2_probe.zig",
     "src/testing/vm/main_c4.zig",
     "src/testing/vm/main_z7.zig",
@@ -332,6 +333,7 @@ const linux_only = [_][]const u8{
     "src/testing/vm/main_m8b.zig",
     "src/testing/vm/main_m9.zig",
     "src/testing/vm/main_m10.zig",
+    "src/testing/vm/main_s2_lazy.zig",
     "src/testing/vm/main_s2_probe.zig",
     "src/testing/vm/main_c4.zig",
     "src/testing/vm/main_z7.zig",
@@ -583,6 +585,11 @@ const demos = [_]struct { step: []const u8, root: []const u8, help: []const u8 }
         .help = "Run the M10 demo: --device and --gpu with a fake vendor, doctor, refusals",
     },
     .{
+        .step = "demo-s2-lazy",
+        .root = "src/testing/vm/main_s2_lazy.zig",
+        .help = "Run the S2 slice 4 check: zbx run --lazy serves an image from the store",
+    },
+    .{
         .step = "demo-s2-probe",
         .root = "src/testing/vm/main_s2_probe.zig",
         .help = "Run the S2 probe: a no-libc FUSE server under a userxattr overlay, as a user",
@@ -652,7 +659,7 @@ fn add_demo_step(
             }),
         });
         harness.dependOn(&vm.step);
-        add_harness_imports(b, demo.step, vm.root_module);
+        add_harness_imports(b, options, demo.step, vm.root_module);
         const run = b.addRunArtifact(vm);
         run.setCwd(b.path("."));
         run.addArgs(&.{ "--accel", @tagName(accel) });
@@ -680,7 +687,12 @@ fn add_demo_step(
 }
 
 /// What one demo's harness embeds beyond the VM module.
-fn add_harness_imports(b: *std.Build, step: []const u8, module: *std.Build.Module) void {
+fn add_harness_imports(
+    b: *std.Build,
+    options: *std.Build.Step.Options,
+    step: []const u8,
+    module: *std.Build.Module,
+) void {
     // The top-20 run tells a seccomp refusal from another EPERM by the allowlist itself.
     if (std.mem.eql(u8, step, "top20")) {
         module.addAnonymousImport("seccomp_policy", .{
@@ -691,6 +703,36 @@ fn add_harness_imports(b: *std.Build, step: []const u8, module: *std.Build.Modul
     if (std.mem.eql(u8, step, "demo-m9")) add_m9_cases(b, module);
     if (std.mem.eql(u8, step, "demo-s2-probe")) add_s2_probe_fixture(b, module);
     if (std.mem.eql(u8, step, "demo-c4")) add_c4_supervisor(b, module);
+    if (std.mem.eql(u8, step, "demo-s2-lazy")) add_fuse_kernel_test(b, options, module);
+}
+
+/// demo-s2-lazy's FUSE kernel test (`src/fuse/kernel_tests.zig`) as a test binary for the guest
+/// (x86_64, static, no libc, ReleaseSafe), embedded in the harness, which serves it: the guest
+/// runs it as `demo` against its own kernel, where it must pass, not skip.
+fn add_fuse_kernel_test(
+    b: *std.Build,
+    options: *std.Build.Step.Options,
+    harness_module: *std.Build.Module,
+) void {
+    const target = b.resolveTargetQuery(.{ .cpu_arch = .x86_64, .os_tag = .linux });
+    const module = b.createModule(.{
+        .root_source_file = b.path("src/fuse_kernel_test_root.zig"),
+        .target = target,
+        .optimize = .ReleaseSafe,
+        .link_libc = false,
+        // Stripped, to fit the harness's 8 MiB body (`http_body_bytes_max`); asserts stay on.
+        .strip = true,
+        .imports = &.{.{ .name = "build_options", .module = options.createModule() }},
+    });
+    // The test's imports bring their own files' tests along; the guest runs this one alone.
+    const binary = b.addTest(.{
+        .root_module = module,
+        .use_llvm = true,
+        .filters = &.{"a real kernel mount serves a tree"},
+    });
+    harness_module.addAnonymousImport("fuse_kernel_test", .{
+        .root_source_file = binary.getEmittedBin(),
+    });
 }
 
 /// demo-s2-probe's throwaway FUSE server (S2 slice 1), static x86_64 with no libc, embedded in

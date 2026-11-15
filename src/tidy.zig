@@ -164,6 +164,15 @@ const shipped_files = [_][]const u8{
     "src/store/verify.zig",
     "src/store/walk.zig",
     "src/store/xattrs.zig",
+    "src/fuse/abi.zig",
+    "src/fuse/cache.zig",
+    "src/fuse/diagnose.zig",
+    "src/fuse/lazy_server.zig",
+    "src/fuse/nodes.zig",
+    "src/fuse/ops.zig",
+    "src/fuse/resolver.zig",
+    "src/fuse/serve.zig",
+    "src/host_real_fuse.zig",
 };
 const asserts_per_function_min: u32 = 2;
 
