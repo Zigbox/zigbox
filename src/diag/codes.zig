@@ -4533,15 +4533,18 @@ pub const registry = [_]Entry{
         .code = .E1013,
         .severity = .@"error",
         .blame = .user,
-        .summary = "the working directory is not shared with the virtual machine",
+        .summary = "a directory or path is not shared with the virtual machine",
         .explanation =
         \\The machine sees one directory of the Mac: your home directory, at the
         \\same path. A command runs in the directory you ran zbx in, and the
         \\machine can only enter that directory when it is inside the home. A
         \\command started anywhere else would run in a different place than you
-        \\asked for, so zbx refuses.
+        \\asked for, so zbx refuses. The paths zbx build and zbx import are
+        \\given (-f, -o, --context) are read and written in the machine, so each
+        \\must be inside the home as well.
         \\
-        \\Change into a directory below your home and run the command there.
+        \\Change into a directory below your home and run the command there, with
+        \\paths below your home.
         ,
     },
     .{

@@ -1185,8 +1185,8 @@ fn link_macos(module: *std.Build.Module, image: VmImage) void {
 
 /// Builds the macOS zbx, signs it ad hoc with the virtualization entitlement (good for this Mac;
 /// a Developer ID signature and notarization are the release's job) and installs it.
-/// `zig build demo-mac`: the M1 to M4 demo steps and M4b's, driven from this Mac through the macOS
-/// `zbx` it installs (src/testing/mac_demo.zig). Only where the build runs on macOS.
+/// `zig build demo-mac`: the M1 to M4, M4b, M6b and M9 demo steps, driven from this Mac through
+/// the macOS `zbx` it installs (src/testing/mac_demo.zig). Only where the build runs on macOS.
 fn add_demo_mac(b: *std.Build, vm_module: *std.Build.Module) void {
     const exe = b.addExecutable(.{
         .name = "demo_mac",
@@ -1202,7 +1202,7 @@ fn add_demo_mac(b: *std.Build, vm_module: *std.Build.Module) void {
     run.setCwd(b.path("."));
     run.addArgs(&.{ "--zbx", "zig-out/bin/zbx" });
     run.step.dependOn(b.getInstallStep());
-    const step = b.step("demo-mac", "Run the M1 to M4 and M4b demo steps from macOS");
+    const step = b.step("demo-mac", "Run the M1 to M4, M4b, M6b and M9 demo steps from macOS");
     step.dependOn(&run.step);
 }
 

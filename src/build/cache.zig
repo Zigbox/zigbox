@@ -280,6 +280,31 @@ pub fn record(
     return output;
 }
 
+/// Removes the entry for `key` if it still names `refused`: a hit its caller found to be an
+/// output the step cannot make now (`step.cached_output_holds`), written by an older zbx. The
+/// step then runs and `record` writes the entry again. An entry another build has replaced in
+/// the meantime is kept. The caller holds the store lock, as every write does.
+pub fn forget(
+    store: *Store,
+    ws: *Workspace,
+    key: *const key_mod.Key,
+    refused: Digest,
+    failure: *Failure,
+) Error!void {
+    assert(store.lock_depth > 0);
+    assert(key.len >= key_mod.magic.len + 4);
+    switch (try lookup(store, ws, key, failure)) {
+        .hit => |existing| if (!existing.eql(refused)) return,
+        .miss => return,
+    }
+    var path: PathBuf = undefined;
+    const where = store.build_cache_path(&path, key.digest);
+    store.fs.unlink(where) catch |err| {
+        if (err == error.NotFound) return;
+        return io_failure(store, failure, "removing a stale build cache entry", err);
+    };
+}
+
 fn write_entry(
     store: *Store,
     ws: *Workspace,

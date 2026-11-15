@@ -17,6 +17,8 @@ const control = @import("control.zig");
 const constants = @import("../constants.zig");
 const diagnose = @import("diagnose.zig");
 const files = @import("files.zig");
+const forward_commands = @import("../forward_commands.zig");
+const lock_file = @import("../lock_file.zig");
 const manifest = @import("../registry/manifest.zig");
 const ports = @import("../vm_ports.zig");
 const protocol = @import("../forward_protocol.zig");
@@ -282,6 +284,7 @@ pub fn run(ctx: *const commands.Context, given: *const Command, diag: *Diag) Err
     assert(given.words.len > 0);
     assert(diag.code == null);
     try check_directory(diag);
+    try check_project(given, diag);
     var platform: ?[]const u8 = null;
     var command = try take_platform(given, &platform, diag);
     var reserved: ports.PortSet = .{};
@@ -473,12 +476,68 @@ fn check_directory(diag: *Diag) Error!void {
     return error.Failed;
 }
 
+/// The text of the project's lock, read on the Mac for `project_pins_amd64`.
+var lock_text: [constants.lock_file_bytes_max + 1]u8 = undefined;
+
+/// A `build` or an `import` reads the project on the Mac first. A path it names outside the home
+/// is not in the machine (E1013), and a lock that pins linux/amd64 needs Rosetta (E1016), as
+/// `run --platform linux/amd64` does. Both are refused before the machine is asked.
+fn check_project(command: *const Command, diag: *Diag) Error!void {
+    assert(diag.code == null);
+    if (!forward_commands.reads_project(command.words)) return;
+    var home_storage: [constants.vm_path_bytes_max:0]u8 = undefined;
+    const home = files.shared_home(&home_storage) orelse return; // `forward_command` said so.
+    if (c.getcwd(&frames.directory, frames.directory.len) == null) return;
+    const directory = std.mem.sliceTo(&frames.directory, 0);
+    var paths = forward_commands.project_paths(command.words);
+    while (paths.next()) |path| {
+        var resolved: [constants.path_bytes_max + 1]u8 = undefined;
+        // Too long to read: the Linux zbx refuses it in its own words.
+        const full = forward_commands.resolve(directory, path, &resolved) orelse continue;
+        if (files.is_inside(full, home)) continue;
+        var shown: [constants.path_bytes_max + 1]u8 = undefined;
+        diagnose.path_not_shared(diag, text_util.sanitise(&shown, full), home);
+        return error.Failed;
+    }
+    if (rosetta_refused("linux/amd64", vz.rosetta_state()) and project_pins_amd64(directory)) {
+        diagnose.rosetta_missing(diag);
+        return error.Failed;
+    }
+}
+
+/// True if the project's lock pins linux/amd64. The lock is the nearest `zbx.lock` from
+/// `directory` up, as the Linux zbx finds it (`lock_file.locate`); a lock that cannot be read
+/// counts as none here, and the Linux zbx says why.
+fn project_pins_amd64(directory: []const u8) bool {
+    assert(directory.len > 0);
+    assert(directory[0] == '/'); // From `getcwd`.
+    var path: [constants.vm_path_bytes_max]u8 = undefined;
+    var current = directory;
+    while (true) {
+        const parent = std.mem.trimEnd(u8, current, "/");
+        const lock_path = std.fmt.bufPrint(&path, "{s}/{s}\x00", .{
+            parent, lock_file.file_name,
+        }) catch return false;
+        if (files.exists(lock_path[0 .. lock_path.len - 1 :0])) {
+            const text = files.read_file(lock_path[0 .. lock_path.len - 1], &lock_text) catch {
+                return false;
+            };
+            return forward_commands.pins_amd64(text);
+        }
+        if (current.len <= 1) return false;
+        const slash = std.mem.lastIndexOfScalar(u8, current, '/') orelse return false;
+        current = if (slash == 0) "/" else current[0..slash];
+    }
+}
+
 /// Takes `--platform <linux/amd64|linux/arm64>` (before the `--` of a `run`) out of the command
 /// line: the Linux zbx in the machine does not know the option, and gets `ZBX_PLATFORM` instead.
-/// Refuses a platform Rosetta would be needed for when this Mac has none.
+/// Refuses a platform Rosetta would be needed for when this Mac has none. A `build`, an `import`
+/// and an `inspect` keep the option, so that the Linux zbx refuses it as it does on Linux.
 fn take_platform(given: *const Command, platform: *?[]const u8, diag: *Diag) Error!Command {
     assert(given.words.len <= constants.args_count_max);
     assert(platform.* == null);
+    if (!forward_commands.takes_platform(given.words)) return given.*;
     var kept: usize = 0;
     var index: usize = 0;
     var past_separator = false;

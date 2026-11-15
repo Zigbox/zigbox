@@ -18,13 +18,14 @@ const key_mod = @import("key.zig");
 const step = @import("step.zig");
 const tests = @import("step_tests.zig");
 const pin = @import("pin.zig");
+const import_mod = @import("../store/import.zig");
 
 const testing = std.testing;
 const Digest = digest_mod.Digest;
 
 /// What the command leaves in its upper layer, written when the hook fires.
 const Layer = struct {
-    kind: enum { added, deleted, fifo, nothing, excluded },
+    kind: enum { added, deleted, fifo, nothing, excluded, rosetta, rosetta_and_own },
 
     fn write(context: *anyopaque) void {
         const layer: *const Layer = @ptrCast(@alignCast(context));
@@ -47,6 +48,15 @@ const Layer = struct {
                 tests.files.put(tests.join(&path, upper, "/pipe"), .fifo, 0o644, .{ 0, 0 }, "");
             },
             .excluded => write_excluded(upper),
+            .rosetta, .rosetta_and_own => {
+                tests.files.put_dir(tests.join(&path, upper, "/root"), 0o700);
+                tests.files.put_dir(tests.join(&path, upper, "/root/.cache"), 0o755);
+                tests.files.put_dir(tests.join(&path, upper, "/root/.cache/rosetta"), 0o755);
+                if (layer.kind == .rosetta_and_own) {
+                    const own = tests.join(&path, upper, "/root/.cache/own");
+                    tests.files.put_file(own, 0o644, "the step's\n");
+                }
+            },
         }
     }
 };
@@ -241,4 +251,82 @@ test "a pinned step's /out leaves out /var/log and its written excludes" {
         try testing.expectEqual(kept, try has(tests.result.output, "skip/stamp"));
         try tests.expect_clean(&fixture, &before);
     }
+}
+
+/// The platform that is not the simulated machine's (`x86_64`): a step on it is foreign, as a
+/// linux/amd64 step under Rosetta is on a Mac.
+const foreign_platform = "linux/arm64";
+
+/// A base with /root, as an image's is, and /root/.cache/kept when `with_cache`.
+fn import_home_base(with_cache: bool) !Digest {
+    const top = if (with_cache) "/cached" else "/homed";
+    var path: [64]u8 = undefined;
+    tests.files.put_dir(top, 0o755);
+    tests.files.put_dir(tests.join(&path, top, "/root"), 0o700);
+    if (with_cache) {
+        tests.files.put_dir(tests.join(&path, top, "/root/.cache"), 0o755);
+        tests.files.put_file(tests.join(&path, top, "/root/.cache/kept"), 0o644, "the base's\n");
+    }
+    var imported: import_mod.Result = undefined;
+    tests.diag.reset();
+    const options: import_mod.Options = .{ .squash_owner = false, .warn = null };
+    try import_mod.import(&tests.store, &tests.import_ws, top, options, &imported, &tests.diag);
+    return imported.digest;
+}
+
+/// Runs the root step with `kind` in its layer on `platform`, on a base with /root (and
+/// /root/.cache when `with_cache`); returns that base.
+fn run_on(
+    seed: u64,
+    kind: @TypeOf(@as(Layer, undefined).kind),
+    platform: []const u8,
+    with_cache: bool,
+) !Digest {
+    const fixture = try tests.setup(seed, "fetch");
+    const base = try import_home_base(with_cache);
+    tests.sim.world.command_exit = .{ .exited = 0 };
+    var layer: Layer = .{ .kind = kind };
+    tests.files.hook = .{
+        .rename_to_contains = "fetch.log",
+        .context = &layer,
+        .call = Layer.write,
+    };
+    var spec = root_spec(&fixture);
+    spec.platform = platform;
+    spec.base_tree = base;
+    try tests.run_it(&spec);
+    return base;
+}
+
+test "a foreign root step's output leaves out Rosetta's cache and the .cache it made" {
+    // Goal: Rosetta's `/root/.cache/rosetta` is the machine's, not the step's (Mac run
+    // 43747691774: the two directories changed demo-m9's digest). Method: a foreign step whose
+    // layer holds only them has its base as its output; the same layer on the machine's own
+    // platform keeps both, so the check can fail.
+    const base = try run_on(18, .rosetta, foreign_platform, false);
+    try testing.expectEqual(@as(?codes.Code, null), tests.diag.code);
+    try testing.expect(tests.result.output.eql(base));
+    const native = try run_on(18, .rosetta, "linux/amd64", false);
+    try testing.expectEqual(@as(?codes.Code, null), tests.diag.code);
+    try testing.expect(!tests.result.output.eql(native));
+    try testing.expect(try has(tests.result.output, "root/.cache/rosetta"));
+}
+
+test "a foreign root step keeps its own files in .cache, without Rosetta's" {
+    // Goal: only Rosetta's directory goes. Method: the layer adds /root/.cache/own next to the
+    // cache; the output has it and its .cache, and not the cache.
+    _ = try run_on(19, .rosetta_and_own, foreign_platform, false);
+    try testing.expectEqual(@as(?codes.Code, null), tests.diag.code);
+    try testing.expect(try has(tests.result.output, "root/.cache/own"));
+    try testing.expect(!(try has(tests.result.output, "root/.cache/rosetta")));
+}
+
+test "a foreign root step whose base has .cache keeps it as the base has it" {
+    // Goal: a `.cache` the base has is not the step's to drop, nor Rosetta's. Method: a base
+    // with /root/.cache/kept; the layer holds the copied-up .cache and Rosetta's cache; the
+    // output is that base, so .cache and its file are there unchanged.
+    const base = try run_on(20, .rosetta, foreign_platform, true);
+    try testing.expectEqual(@as(?codes.Code, null), tests.diag.code);
+    try testing.expect(tests.result.output.eql(base));
+    try testing.expect(try has(tests.result.output, "root/.cache/kept"));
 }
