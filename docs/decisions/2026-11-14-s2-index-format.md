@@ -60,7 +60,7 @@ Header, 72 bytes:
 | 56 | 4 | trees count |
 | 60 | 4 | objects count |
 | 64 | 4 | chunks count |
-| 68 | 4 | order count (the reserved prefetch section; 0 in S2) |
+| 68 | 4 | order count (the reserved prefetch section; must be 0 in version 1) |
 
 Then four sections, in this order:
 
@@ -70,12 +70,15 @@ Then four sections, in this order:
    `id[32] size:u64 first_chunk:u32 chunk_count:u32` (48 bytes). `chunk_count` is
    `ceil(size / chunk bytes)` (0 for an empty file); `first_chunk` is the sum of the counts before
    it. Every file object of the tree is here, empty ones included.
-3. **Chunks**: per chunk, object by object, `hash[32] offset:u64 length:u32 zero:u32` (48 bytes):
-   the chunk's BLAKE3, its compressed range in the blob, and four zero bytes.
+3. **Chunks**: per chunk, object by object,
+   `hash[32] chaining[32] offset:u64 length:u32 zero:u32` (80 bytes): the chunk's BLAKE3, its
+   BLAKE3 chaining value in its file (all zero for a file of one chunk;
+   `2026-11-14-s2-chunk-anchor.md`), its compressed range in the blob, and four zero bytes.
    `1 <= length <= lazy_range_bytes_max`; ranges are in increasing order and never overlap, the
    first starts at or after byte 10, and the last ends at or before the index's own offset.
 4. **Order**: `order count` chunk ordinals (`u32`, each below the chunks count). Reserved for a
-   start profile (brief, decision 7); S2 writes none and readers ignore it after checking it.
+   start profile (brief, decision 7). Version 1 has none: the parser refuses a non-zero order
+   count, so a later version that fills it changes the version number.
 
 **Order of trees and objects.** Both are in the order of the pack's walk (names in the tree's
 order, each directory before what it holds), first appearance only. So a checker that walks the
@@ -96,5 +99,7 @@ header alone, complete 0, every count but names 0) as too large; zigbox writes n
 The bytes' BLAKE3 and length against the annotation; the header tree against `org.zigbox.tree`;
 the structure above; the walk order; that every file entry's object is listed with the entry's
 size; that a one-chunk file's chunk hash is its content hash and an empty file's content is the
-hash of nothing (`chunks.Wanted`'s rules); the names count; and that no chunk range reaches the
-index. It writes nothing; a caller stores the trees with `trees.put_checked`.
+hash of nothing (`chunks.Wanted`'s rules); that a one-chunk file's chaining field is zero and a
+longer file's chaining values join into its content hash (`2026-11-14-s2-chunk-anchor.md`); the
+names count; that no tree or object record is left after the walk; and that no chunk range
+reaches the index. It writes nothing; a caller stores the trees with `trees.put_checked`.

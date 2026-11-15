@@ -17,6 +17,7 @@ const constants = @import("../constants.zig");
 const digest_mod = @import("digest.zig");
 const store_digest = @import("../store/digest.zig");
 const text_util = @import("../text.zig");
+const index_mod = @import("../lazy/index.zig");
 
 const Sha256 = digest_mod.Sha256;
 
@@ -116,6 +117,10 @@ pub const Resolved = struct {
     /// The tree digest the manifest's `org.zigbox.tree` annotation claims, when it has one that
     /// reads; a claim only, which a pull checks against the tree it unpacks.
     tree_note: ?[32]u8,
+    /// Where the first layer's lazy index is, from its `org.zigbox.lazy-index` annotation, when
+    /// it has one that reads; null runs the image eagerly (`W1201`). A claim only, which lazy
+    /// start checks against the blob.
+    lazy_index: ?index_mod.Anchor,
 };
 
 /// Why a body was not accepted. The code that reports it is chosen by the client.
@@ -153,65 +158,98 @@ const DescriptorJson = struct {
     platform: ?PlatformJson = null,
 };
 
-/// The manifest's `annotations` member. The tree claim is only a claim, so nothing in this member
-/// can refuse a manifest: it is read without allocating, and a member that is not an object, a
-/// value that is not a string, a name or value that is escaped or too long, a repeated name or
-/// text that is not a digest leave `tree` null.
-const AnnotationsJson = struct {
-    tree: ?[32]u8 = null,
-
+/// An `annotations` member read for one annotation, `name`, whose text `parse` reads into a `T`.
+/// The annotation is only a claim, so nothing in this member can refuse a document: it is read
+/// without allocating, and a member that is not an object, a value that is not a string, a name
+/// or value that is escaped or too long, a repeated name or text that `parse` rejects leave
+/// `value` null.
+fn AnnotationJson(
+    comptime name: []const u8,
+    comptime text_bytes_max: u32,
+    comptime T: type,
+    comptime parse: fn ([]const u8) ?T,
+) type {
     comptime {
-        assert(std.mem.eql(u8, constants.pack_annotation_tree, "org.zigbox.tree"));
-        assert(constants.pack_annotation_tree.len < 32);
+        assert(name.len < 32);
+        assert(text_bytes_max > 0);
+        assert(text_bytes_max <= read_text_bytes_max);
     }
+    return struct {
+        value: ?T = null,
 
-    pub fn jsonParse(
-        allocator: std.mem.Allocator,
-        source: anytype,
-        options: std.json.ParseOptions,
-    ) !AnnotationsJson {
-        _ = allocator;
-        _ = options;
-        assert(constants.pack_annotation_tree.len < 32);
-        var found: AnnotationsJson = .{};
-        if ((try source.peekNextTokenType()) != .object_begin) {
-            try source.skipValue();
+        const Self = @This();
+
+        pub fn jsonParse(
+            allocator: std.mem.Allocator,
+            source: anytype,
+            options: std.json.ParseOptions,
+        ) !Self {
+            _ = allocator;
+            _ = options;
+            var found: Self = .{};
+            if ((try source.peekNextTokenType()) != .object_begin) {
+                try source.skipValue();
+                return found;
+            }
+            _ = try source.next();
+            var seen = false;
+            var repeated = false;
+            while ((try source.peekNextTokenType()) != .object_end) {
+                var name_buffer: [32]u8 = undefined;
+                const member = try read_text(source, &name_buffer);
+                const ours = if (member) |text| std.mem.eql(u8, text, name) else false;
+                if (!ours or (try source.peekNextTokenType()) != .string) {
+                    try source.skipValue();
+                    continue;
+                }
+                if (seen) repeated = true;
+                seen = true;
+                var text_buffer: [text_bytes_max]u8 = undefined;
+                const text = try read_text(source, &text_buffer);
+                if (text) |claim| found.value = parse(claim);
+            }
+            _ = try source.next();
+            if (repeated) found.value = null;
+            if (found.value != null) assert(seen);
+            if (repeated) assert(found.value == null);
             return found;
         }
-        _ = try source.next();
-        var seen = false;
-        var repeated = false;
-        while ((try source.peekNextTokenType()) != .object_end) {
-            var name_buffer: [32]u8 = undefined;
-            const name = try read_text(source, &name_buffer);
-            const ours = if (name) |text|
-                std.mem.eql(u8, text, constants.pack_annotation_tree)
-            else
-                false;
-            if (!ours or (try source.peekNextTokenType()) != .string) {
-                try source.skipValue();
-                continue;
-            }
-            if (seen) repeated = true;
-            seen = true;
-            var text_buffer: [128]u8 = undefined;
-            const text = try read_text(source, &text_buffer);
-            if (text) |claim| if (store_digest.Digest.parse(claim)) |claimed| {
-                found.tree = claimed.bytes;
-            };
-        }
-        _ = try source.next();
-        if (repeated) found.tree = null;
-        if (found.tree != null) assert(seen);
-        if (repeated) assert(found.tree == null);
-        return found;
-    }
-};
+    };
+}
+
+fn parse_tree_claim(text: []const u8) ?[32]u8 {
+    const claimed = store_digest.Digest.parse(text) orelse return null;
+    return claimed.bytes;
+}
+
+/// The manifest's `annotations` member: the `org.zigbox.tree` claim.
+const AnnotationsJson = AnnotationJson(
+    constants.pack_annotation_tree,
+    128,
+    [32]u8,
+    parse_tree_claim,
+);
+
+/// A layer descriptor's `annotations` member: the `org.zigbox.lazy-index` anchor. A wrong
+/// spelling is no index (the image runs eagerly, `W1201`), never a refusal.
+const LayerAnnotationsJson = AnnotationJson(
+    constants.pack_annotation_lazy_index,
+    index_mod.anchor_text_bytes_max,
+    index_mod.Anchor,
+    index_mod.Anchor.parse,
+);
+
+comptime {
+    assert(std.mem.eql(u8, constants.pack_annotation_tree, "org.zigbox.tree"));
+    assert(std.mem.eql(u8, constants.pack_annotation_lazy_index, "org.zigbox.lazy-index"));
+}
+
+const read_text_bytes_max = 256;
 
 /// The next JSON string, if it is plain and fits `buffer`; the whole string is consumed either way.
 fn read_text(source: anytype, buffer: []u8) !?[]const u8 {
     assert(buffer.len > 0);
-    assert(buffer.len <= 128);
+    assert(buffer.len <= read_text_bytes_max);
     var used: usize = 0;
     var fits = true;
     while (true) {
@@ -240,7 +278,6 @@ fn read_text(source: anytype, buffer: []u8) !?[]const u8 {
 }
 
 const DocumentJson = struct {
-    annotations: ?AnnotationsJson = null,
     schemaVersion: ?i64 = null,
     mediaType: ?[]const u8 = null,
     manifests: ?[]const DescriptorJson = null,
@@ -253,7 +290,36 @@ const DocumentJson = struct {
 pub const Document = struct {
     media: MediaType,
     json: DocumentJson,
+    notes: NotesJson,
 };
+
+/// The annotations zbx reads, in a pass of their own over the same body. They are only claims,
+/// so a repeated `annotations` member on the manifest, a layer or the config never refuses the
+/// document: the first is read (std's `use_first`). Every other member stays strict, a repeat
+/// of it `Malformed`, so two readers cannot take two different digests from one manifest.
+const NotesJson = struct {
+    annotations: ?AnnotationsJson = null,
+    layers: ?[]const LayerNotesJson = null,
+};
+
+const LayerNotesJson = struct {
+    annotations: ?LayerAnnotationsJson = null,
+};
+
+fn parse_notes(arena: std.mem.Allocator, body: []const u8) ParseError!NotesJson {
+    assert(body.len <= constants.registry_manifest_bytes_max);
+    assert(@intFromPtr(arena.vtable) != 0);
+    const options: std.json.ParseOptions = .{
+        .ignore_unknown_fields = true,
+        .duplicate_field_behavior = .use_first,
+    };
+    return std.json.parseFromSliceLeaky(NotesJson, arena, body, options) catch |err| {
+        return switch (err) {
+            error.OutOfMemory => error.TooComplex,
+            else => error.Malformed,
+        };
+    };
+}
 
 fn parse_json(arena: std.mem.Allocator, body: []const u8) ParseError!DocumentJson {
     assert(body.len <= constants.registry_manifest_bytes_max);
@@ -291,8 +357,9 @@ pub fn parse_document(
     } else {
         if (json.config == null) return error.Malformed;
     }
+    const notes = try parse_notes(arena, body);
     assert(problem.text.len == 0);
-    return .{ .media = media, .json = json };
+    return .{ .media = media, .json = json, .notes = notes };
 }
 
 fn name_media(problem: *Problem, text: ?[]const u8) void {
@@ -497,7 +564,7 @@ pub fn read_manifest(
         return error.UnknownMediaType;
     }
     resolved.tree_note = null;
-    if (document.json.annotations) |notes| resolved.tree_note = notes.tree;
+    if (document.notes.annotations) |notes| resolved.tree_note = notes.value;
     resolved.config_digest = try descriptor_digest(config, problem);
     resolved.config_size = config.size orelse return error.BadDescriptor;
     if (resolved.config_size == 0) return error.BadDescriptor;
@@ -523,6 +590,12 @@ pub fn read_manifest(
     }
     resolved.layer_count = @intCast(layers.len);
     assert(resolved.layer_count <= constants.registry_layers_max);
+    resolved.lazy_index = null;
+    const noted = document.notes.layers orelse &.{};
+    assert(noted.len == layers.len); // The same body, read twice.
+    if (noted.len > 0) {
+        if (noted[0].annotations) |notes| resolved.lazy_index = notes.value;
+    }
 }
 
 // ---- Tests ---------------------------------------------------------------------------------
@@ -806,6 +879,70 @@ test "a malformed tree annotation never refuses the manifest" {
     }
     try read_in(head ++ "{\"o\\u0072g\":1," ++ good ++ "}}", &resolved, &problem);
     try testing.expect(resolved.tree_note != null);
+}
+
+test "the first layer's lazy-index annotation is read when exact, and ignored otherwise" {
+    // Goal: slice 2's writer puts the anchor on layers[0]; lazy start reads only an exact one,
+    // and any other spelling, or an anchor on another layer, runs the image eagerly (W1201).
+    const anchor = comptime "offset=10 length=20 size=72 digest=b3:" ++ repeat('c', 64);
+    const head = "{\"schemaVersion\":2," ++ config_member ++ ",\"layers\":[";
+    const plain = comptime describe(media_oci_layer_gzip, one, 11) ++ "}";
+    const noted = comptime describe(media_oci_layer_gzip, one, 11) ++
+        ",\"annotations\":{\"org.zigbox.lazy-index\":\"" ++ anchor ++ "\"}}";
+    var resolved: Resolved = undefined;
+    var problem: Problem = .{};
+    try read_in(head ++ noted ++ "]}", &resolved, &problem);
+    const found = resolved.lazy_index orelse return error.TestUnexpectedResult;
+    try testing.expectEqual(@as(u64, 10), found.offset);
+    try testing.expectEqual(@as(u64, 20), found.length);
+    try testing.expectEqual(@as(u64, 72), found.size);
+    try testing.expectEqual(@as(u8, 0xcc), found.digest.bytes[0]);
+    try read_in(head ++ plain ++ "," ++ noted ++ "]}", &resolved, &problem);
+    try testing.expect(resolved.lazy_index == null);
+    try read_in(head ++ "]}", &resolved, &problem);
+    try testing.expect(resolved.lazy_index == null);
+    const wrong = comptime [_][]const u8{
+        "offset=010 length=20 size=72 digest=b3:" ++ repeat('c', 64),
+        "offset=10  length=20 size=72 digest=b3:" ++ repeat('c', 64),
+        "offset=10 length=20 size=72 digest=b3:" ++ repeat('C', 64),
+        "offset=10 length=20 size=72 digest=b3:" ++ repeat('c', 64) ++ " ",
+        "length=20 offset=10 size=72 digest=b3:" ++ repeat('c', 64),
+        "offset=99999999999999999999 length=20 size=72 digest=b3:" ++ repeat('c', 64),
+        "",
+    };
+    for (wrong) |text| {
+        var body_buffer: [1024]u8 = undefined;
+        const format = "{s}{s},\"annotations\":{{\"org.zigbox.lazy-index\":\"{s}\"}}}}]}}";
+        const open = plain[0 .. plain.len - 1];
+        const body = try std.fmt.bufPrint(&body_buffer, format, .{ head, open, text });
+        try read_in(body, &resolved, &problem);
+        try testing.expect(resolved.lazy_index == null);
+    }
+}
+
+test "a repeated annotations member never refuses a manifest, and other repeats still do" {
+    // Goal: annotations are claims, so a repeat of the member on a layer, on the config or on
+    // the manifest reads the first and keeps the image; a repeated digest is still `Malformed`.
+    const anchor = comptime "offset=10 length=20 size=72 digest=b3:" ++ repeat('c', 64);
+    const notes = ",\"annotations\":{\"org.zigbox.lazy-index\":\"" ++ anchor ++ "\"}";
+    const layer = comptime describe(media_oci_layer_gzip, one, 11) ++ notes ++ notes ++ "}";
+    const config = comptime "\"config\":" ++ describe(media_oci_config, zero, 7) ++
+        ",\"annotations\":{},\"annotations\":{\"a\":\"b\"}}";
+    var resolved: Resolved = undefined;
+    var problem: Problem = .{};
+    const noted = "{\"schemaVersion\":2," ++ config_member ++ ",\"layers\":[" ++ layer ++ "]}";
+    try read_in(noted, &resolved, &problem);
+    const found = resolved.lazy_index orelse return error.TestUnexpectedResult;
+    try testing.expectEqual(@as(u64, 10), found.offset);
+    try read_in("{\"schemaVersion\":2," ++ config ++ ",\"layers\":[]}", &resolved, &problem);
+    try testing.expect(resolved.lazy_index == null);
+    const twice = "{\"annotations\":{},\"schemaVersion\":2," ++ config_member ++
+        ",\"layers\":[],\"annotations\":{}}";
+    try read_in(twice, &resolved, &problem);
+    try testing.expect(resolved.tree_note == null);
+    const digest_twice = comptime "{" ++ config_member ++ ",\"layers\":[" ++
+        describe(media_oci_layer_gzip, one, 11) ++ ",\"digest\":\"" ++ one ++ "\"}]}";
+    try testing.expectError(error.Malformed, read_in(digest_twice, &resolved, &problem));
 }
 
 test "a manifest with a type, digest or size it cannot use is refused" {

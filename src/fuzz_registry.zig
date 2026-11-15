@@ -253,7 +253,12 @@ fn pushing_ready() *Pushing {
     import_mod.import(&rig.store, &rig.imports, "/src", options, &result, &diag) catch {
         @panic("the fuzzer's source does not import");
     };
-    const input: pack.Input = .{ .tree = result.digest, .settings = &rig.settings, .labels = null };
+    const input: pack.Input = .{
+        .tree = result.digest,
+        .settings = &rig.settings,
+        .labels = null,
+        .writer_version = constants.layer_writer_version,
+    };
     var failure: pack.Failure = undefined;
     rig.packing.piece = 4096;
     pack.pack(&rig.store, &rig.packing, input, &rig.made, &failure) catch {

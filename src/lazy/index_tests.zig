@@ -6,6 +6,7 @@ const std = @import("std");
 const assert = std.debug.assert;
 const flate = std.compress.flate;
 const constants = @import("../constants.zig");
+const chaining = @import("chaining.zig");
 const index_mod = @import("index.zig");
 const verify_mod = @import("verify.zig");
 const tree_mod = @import("../store/tree.zig");
@@ -19,9 +20,14 @@ const Anchor = index_mod.Anchor;
 /// Trees by digest, as a test's store.
 const Trees = std.AutoHashMap([32]u8, []u8);
 
+/// The fill byte of each file of two chunks or more, by content hash: such a file's content and
+/// chunks are real, so its chaining values join into its content.
+const Fills = std.AutoHashMap([32]u8, u8);
+
 /// Writes an index for the tree at `root`: trees and objects at first appearance, in the pack
 /// walk's order, each chunk given a 100-byte range after the one before.
 pub const Builder = struct {
+    fills: *const Fills,
     trees: std.ArrayList(u8) = .empty,
     objects: std.ArrayList(u8) = .empty,
     chunks: std.ArrayList(u8) = .empty,
@@ -79,26 +85,39 @@ pub const Builder = struct {
         }, &record);
         try builder.objects.appendSlice(gpa, &record);
         builder.object_count += 1;
+        if (count == 1) try builder.chunk(.{ .hash = entry.content, .chaining = zero });
+        if (count < 2) return;
+        const fill = builder.fills.get(entry.content.bytes).?;
+        const bytes = try gpa.alloc(u8, constants.store_chunk_bytes);
+        defer gpa.free(bytes);
+        @memset(bytes, fill);
         for (0..count) |ordinal| {
-            var name: [8]u8 = undefined;
-            std.mem.writeInt(u64, &name, ordinal, .little);
-            const hash = if (count == 1) entry.content else Digest.of(&name);
-            var chunk: [index_mod.chunk_record_bytes]u8 = undefined;
-            const chunk_record: index_mod.Chunk = .{
-                .hash = hash,
-                .offset = builder.offset,
-                .length = 100,
-            };
-            index_mod.encode_chunk(chunk_record, &chunk);
-            try builder.chunks.appendSlice(gpa, &chunk);
-            builder.offset += 100;
-            builder.chunk_count += 1;
+            const start = ordinal * constants.store_chunk_bytes;
+            const length = @min(entry.size - start, constants.store_chunk_bytes);
+            const run = bytes[0..@intCast(length)];
+            try builder.chunk(.{
+                .hash = Digest.of(run),
+                .chaining = chaining.run_value(run, ordinal, constants.store_chunk_bytes),
+            });
         }
     }
 
+    fn chunk(builder: *Builder, hashes: struct { hash: Digest, chaining: Digest }) !void {
+        var record: [index_mod.chunk_record_bytes]u8 = undefined;
+        index_mod.encode_chunk(.{
+            .hash = hashes.hash,
+            .chaining = hashes.chaining,
+            .offset = builder.offset,
+            .length = 100,
+        }, &record);
+        try builder.chunks.appendSlice(gpa, &record);
+        builder.offset += 100;
+        builder.chunk_count += 1;
+    }
+
     /// The index bytes; the caller frees them.
-    pub fn build(store: *const Trees, root: Digest) ![]u8 {
-        var builder: Builder = .{ .seen = .init(gpa), .store = store };
+    pub fn build(store: *const Trees, fills: *const Fills, root: Digest) ![]u8 {
+        var builder: Builder = .{ .seen = .init(gpa), .store = store, .fills = fills };
         defer builder.deinit();
         try builder.visit(root, true);
         const header: index_mod.Header = .{
@@ -122,12 +141,21 @@ pub const Builder = struct {
     }
 };
 
-/// A file entry: the content hash is the hash of `fill` repeated `size` times, and the object id
-/// is made from it (the walk checks only that ids repeat as objects do).
+const zero: Digest = .{ .bytes = @splat(0) };
+
+/// A file entry: the content hash stands for `fill` repeated `size` times, and the object id
+/// is made from it (the walk checks only that ids repeat as objects do). It is the real hash for
+/// an empty file and a file of two chunks or more, whose chunks are anchored to it.
 const FileSpec = struct { name: []const u8, size: u64, fill: u8 };
 
-fn content_of(size: u64, fill: u8) Digest {
+fn content_of(size: u64, fill: u8) !Digest {
     if (size == 0) return Digest.of("");
+    if (size > constants.store_chunk_bytes) {
+        const bytes = try gpa.alloc(u8, @intCast(size));
+        defer gpa.free(bytes);
+        @memset(bytes, fill);
+        return Digest.of(bytes);
+    }
     var name: [9]u8 = undefined;
     std.mem.writeInt(u64, name[0..8], size, .little);
     name[8] = fill;
@@ -136,6 +164,7 @@ fn content_of(size: u64, fill: u8) Digest {
 
 const Fixture = struct {
     store: Trees,
+    fills: Fills,
     root: Digest,
     bytes: []u8,
     anchor: Anchor,
@@ -144,6 +173,7 @@ const Fixture = struct {
         var values = fixture.store.valueIterator();
         while (values.next()) |value| gpa.free(value.*);
         fixture.store.deinit();
+        fixture.fills.deinit();
         gpa.free(fixture.bytes);
     }
 
@@ -163,19 +193,23 @@ const Fixture = struct {
             .digest = Digest.of(fixture.bytes),
         };
     }
-};
 
-fn add_file(writer: *tree_mod.Writer, spec: FileSpec) !void {
-    try writer.begin(spec.name, .file, 0o644, 0, 0, &xattrs.empty);
-    const content = content_of(spec.size, spec.fill);
-    try writer.end_file(spec.size, content, Digest.of(&content.bytes));
-}
+    fn add_file(fixture: *Fixture, writer: *tree_mod.Writer, spec: FileSpec) !void {
+        try writer.begin(spec.name, .file, 0o644, 0, 0, &xattrs.empty);
+        const content = try content_of(spec.size, spec.fill);
+        if (spec.size > constants.store_chunk_bytes) {
+            try fixture.fills.put(content.bytes, spec.fill);
+        }
+        try writer.end_file(spec.size, content, Digest.of(&content.bytes));
+    }
+};
 
 /// A root with a shared subtree (`a/` and `b/` are the same tree), a file whose object repeats,
 /// an empty file, a three-chunk file and a symlink.
 fn fixture_make() !Fixture {
     var fixture: Fixture = .{
         .store = .init(gpa),
+        .fills = .init(gpa),
         .root = undefined,
         .bytes = &.{},
         .anchor = undefined,
@@ -183,8 +217,8 @@ fn fixture_make() !Fixture {
     errdefer fixture.deinit();
     var buffer: [4096]u8 = undefined;
     var writer = tree_mod.Writer.init(&buffer);
-    try add_file(&writer, .{ .name = "one", .size = 5, .fill = 'x' });
-    try add_file(&writer, .{ .name = "two", .size = 5, .fill = 'x' });
+    try fixture.add_file(&writer, .{ .name = "one", .size = 5, .fill = 'x' });
+    try fixture.add_file(&writer, .{ .name = "two", .size = 5, .fill = 'x' });
     const leaf = try fixture.put(writer.finish());
     writer = tree_mod.Writer.init(&buffer);
     try writer.begin("a", .dir, 0o755, 0, 0, &xattrs.empty);
@@ -192,19 +226,20 @@ fn fixture_make() !Fixture {
     try writer.begin("b", .dir, 0o755, 0, 0, &xattrs.empty);
     try writer.end_dir(leaf);
     const big_size = 3 * constants.store_chunk_bytes - 1;
-    try add_file(&writer, .{ .name = "big", .size = big_size, .fill = 'y' });
-    try add_file(&writer, .{ .name = "empty", .size = 0, .fill = 0 });
-    try add_file(&writer, .{ .name = "same", .size = 5, .fill = 'x' });
+    try fixture.add_file(&writer, .{ .name = "big", .size = big_size, .fill = 'y' });
+    try fixture.add_file(&writer, .{ .name = "empty", .size = 0, .fill = 0 });
+    try fixture.add_file(&writer, .{ .name = "same", .size = 5, .fill = 'x' });
     try writer.begin("z", .symlink, 0o777, 0, 0, &xattrs.empty);
     try writer.end_symlink("one");
     fixture.root = try fixture.put(writer.finish());
-    fixture.bytes = try Builder.build(&fixture.store, fixture.root);
+    fixture.bytes = try Builder.build(&fixture.store, &fixture.fills, fixture.root);
     fixture.anchor_for();
     return fixture;
 }
 
 fn verify_bytes(fixture: *Fixture) index_mod.Refusal!index_mod.Index {
     const ws = gpa.create(verify_mod.Workspace) catch @panic("out of memory");
+    ws.key = @splat(5);
     defer gpa.destroy(ws);
     return verify_mod.verify(ws, fixture.bytes, &fixture.anchor, fixture.root);
 }
@@ -278,6 +313,143 @@ test "verify refuses objects out of the walk's order and a tree listed twice" {
     try expect_refused(&fixture, error.Malformed);
 }
 
+test "verify anchors a longer file's chunks to its content" {
+    var fixture = try fixture_make();
+    defer fixture.deinit();
+    const chunks_at = fixture.bytes.len - 4 * index_mod.chunk_record_bytes;
+    const record = index_mod.chunk_record_bytes;
+    // A forged chaining value of the three-chunk file, in its first, middle and last chunk.
+    for (1..4) |chunk| {
+        const at = chunks_at + chunk * record + 32;
+        fixture.bytes[at + 5] ^= 1;
+        try expect_refused(&fixture, error.Malformed);
+        fixture.bytes[at + 5] ^= 1;
+    }
+    // Two chunks swapped: each value is right for some place, but not for this one.
+    const first = chunks_at + 1 * record + 32;
+    const second = chunks_at + 2 * record + 32;
+    var held: [32]u8 = fixture.bytes[first..][0..32].*;
+    @memcpy(fixture.bytes[first..][0..32], fixture.bytes[second..][0..32]);
+    @memcpy(fixture.bytes[second..][0..32], &held);
+    try expect_refused(&fixture, error.Malformed);
+    @memcpy(fixture.bytes[second..][0..32], fixture.bytes[first..][0..32]);
+    @memcpy(fixture.bytes[first..][0..32], &held);
+    // A one-chunk file's chaining field is zero.
+    fixture.bytes[chunks_at + 32] = 1;
+    try expect_refused(&fixture, error.Malformed);
+    fixture.bytes[chunks_at + 32] = 0;
+    fixture.anchor_for();
+    _ = try verify_bytes(&fixture);
+}
+
+/// The fixture's bytes with `extra` inserted at `at`, and the header's count at `count_at` one
+/// more; the caller frees them.
+fn with_record(bytes: []const u8, at: usize, extra: []const u8, count_at: usize) ![]u8 {
+    const out = try gpa.alloc(u8, bytes.len + extra.len);
+    @memcpy(out[0..at], bytes[0..at]);
+    @memcpy(out[at..][0..extra.len], extra);
+    @memcpy(out[at + extra.len ..], bytes[at..]);
+    const count = std.mem.readInt(u32, out[count_at..][0..4], .little);
+    put_u32(out, count_at, count + 1);
+    return out;
+}
+
+test "verify refuses a trailing tree record and a trailing object record" {
+    var fixture = try fixture_make();
+    defer fixture.deinit();
+    const objects_at = fixture.bytes.len - 4 * index_mod.chunk_record_bytes -
+        3 * index_mod.object_record_bytes;
+    var buffer: [64]u8 = undefined;
+    var writer = tree_mod.Writer.init(&buffer);
+    const tree = writer.finish();
+    var tree_record: [index_mod.tree_head_bytes + 64]u8 = undefined;
+    const head = tree_record[0..index_mod.tree_head_bytes];
+    index_mod.encode_tree_head(Digest.of(tree), @intCast(tree.len), head);
+    @memcpy(tree_record[index_mod.tree_head_bytes..][0..tree.len], tree);
+    const tree_bytes = tree_record[0 .. index_mod.tree_head_bytes + tree.len];
+    const original = fixture.bytes;
+    defer fixture.bytes = original;
+    fixture.bytes = try with_record(original, objects_at, tree_bytes, 56);
+    _ = try index_mod.parse(fixture.bytes);
+    try expect_refused(&fixture, error.Malformed);
+    gpa.free(fixture.bytes);
+    // An empty object after the last, its first chunk the running count.
+    var object: [index_mod.object_record_bytes]u8 = undefined;
+    index_mod.encode_object(.{
+        .id = Digest.of("never named"),
+        .size = 0,
+        .first_chunk = 4,
+        .chunk_count = 0,
+    }, &object);
+    const chunks_at = original.len - 4 * index_mod.chunk_record_bytes;
+    fixture.bytes = try with_record(original, chunks_at, &object, 60);
+    defer gpa.free(fixture.bytes);
+    _ = try index_mod.parse(fixture.bytes);
+    try expect_refused(&fixture, error.Malformed);
+}
+
+test "verify refuses an empty file whose content is not the empty hash" {
+    var fixture = try fixture_make();
+    defer fixture.deinit();
+    var buffer: [256]u8 = undefined;
+    var writer = tree_mod.Writer.init(&buffer);
+    try writer.begin("empty", .file, 0o644, 0, 0, &xattrs.empty);
+    const content = Digest.of("not empty");
+    try writer.end_file(0, content, Digest.of(&content.bytes));
+    fixture.root = try fixture.put(writer.finish());
+    gpa.free(fixture.bytes);
+    fixture.bytes = try Builder.build(&fixture.store, &fixture.fills, fixture.root);
+    try expect_refused(&fixture, error.Malformed);
+}
+
+/// A header and `trees` copies of the empty tree's record, with `names` names.
+fn trees_only(names: u32, trees: u32) ![]u8 {
+    var buffer: [64]u8 = undefined;
+    var writer = tree_mod.Writer.init(&buffer);
+    const tree = writer.finish();
+    var out: std.ArrayList(u8) = .empty;
+    errdefer out.deinit(gpa);
+    var head: [index_mod.header_bytes]u8 = undefined;
+    const header: index_mod.Header = .{
+        .complete = true,
+        .tree = Digest.of(tree),
+        .names = names,
+        .trees = trees,
+        .objects = 0,
+        .chunks = 0,
+        .order = 0,
+    };
+    header.encode(&head);
+    try out.appendSlice(gpa, &head);
+    for (0..trees) |_| {
+        var tree_head: [index_mod.tree_head_bytes]u8 = undefined;
+        index_mod.encode_tree_head(Digest.of(tree), @intCast(tree.len), &tree_head);
+        try out.appendSlice(gpa, &tree_head);
+        try out.appendSlice(gpa, tree);
+    }
+    return out.toOwnedSlice(gpa);
+}
+
+test "parse: trees at most one more than names, and the order section empty in version 1" {
+    for ([_][3]u32{ .{ 0, 1, 1 }, .{ 0, 2, 0 }, .{ 1, 2, 1 }, .{ 1, 3, 0 } }) |case| {
+        const bytes = try trees_only(case[0], case[1]);
+        defer gpa.free(bytes);
+        if (case[2] == 1) {
+            _ = try index_mod.parse(bytes);
+        } else {
+            try testing.expectError(error.Malformed, index_mod.parse(bytes));
+        }
+    }
+    const bytes = try trees_only(0, 1);
+    defer gpa.free(bytes);
+    put_u32(bytes, 68, 1);
+    const longer = try gpa.alloc(u8, bytes.len + index_mod.order_record_bytes);
+    defer gpa.free(longer);
+    @memcpy(longer[0..bytes.len], bytes);
+    @memset(longer[bytes.len..], 0);
+    try testing.expectError(error.Malformed, index_mod.parse(longer));
+}
+
 test "parse: a stub is too large, a malformed stub is malformed" {
     var bytes: [index_mod.header_bytes]u8 = undefined;
     const stub: index_mod.Header = .{
@@ -343,8 +515,8 @@ fn small_index(names: u32, ranges: []const [2]u64) ![]u8 {
     try out.appendSlice(gpa, &record);
     for (ranges) |range| {
         var chunk: [index_mod.chunk_record_bytes]u8 = @splat(0);
-        std.mem.writeInt(u64, chunk[32..40], range[0], .little);
-        std.mem.writeInt(u32, chunk[40..44], @intCast(range[1]), .little);
+        std.mem.writeInt(u64, chunk[64..72], range[0], .little);
+        std.mem.writeInt(u32, chunk[72..76], @intCast(range[1]), .little);
         try out.appendSlice(gpa, &chunk);
     }
     return out.toOwnedSlice(gpa);
