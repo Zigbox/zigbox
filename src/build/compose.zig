@@ -580,9 +580,27 @@ pub const Context = struct {
             return context.cache_failed(&failure);
         };
         return switch (found) {
-            .hit => |output| try context.check_pin(index, output),
+            .hit => |output| if (try context.stale(spec, output))
+                null
+            else
+                try context.check_pin(index, output),
             .miss => null,
         };
+    }
+
+    /// Whether the hit `output` is an output the step cannot make on this machine
+    /// (`step.cached_output_holds`): an older zbx's, with Rosetta's cache in it. Its entry is
+    /// removed, and the step runs as on a miss.
+    fn stale(context: *Context, spec: *const key_mod.Spec, output: Digest) Error!bool {
+        const ws = context.ws;
+        const store = context.store;
+        if (step_mod.cached_output_holds(context.host, store, &ws.step, spec, output)) return false;
+        try store_diagnose.hold(context.diag, store, .shared, "build", "dropping a stale entry");
+        defer lock.release(store);
+        var failure: cache.Failure = undefined;
+        cache.forget(store, &ws.cache, &ws.key, output, &failure) catch
+            return context.cache_failed(&failure);
+        return true;
     }
 
     /// The policy gate on a step that is about to run (a hit runs nothing and is not checked):

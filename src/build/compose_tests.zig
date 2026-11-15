@@ -765,6 +765,74 @@ test "begin computes the key of an M7 step: the M9 fields are defaults, not garb
     try testing.expect(diag.code == null);
 }
 
+/// A root step on the locked linux/amd64 base, begun once on a machine of `machine`: a miss that
+/// leaves the step's key in `composed.key`. The worker slot is freed for the next `begin`.
+fn root_step_begun(machine: []const u8) !void {
+    registry_started(&registry.fixture.oci.amd64.digest);
+    sim.uname_value.machine = host_mod.Text.from_slice(machine);
+    const text = ".{ .version = 1, .image = .{}, .steps = .{ .{ .name = \"compile\", .base = \"" ++
+        locked_reference ++ "\", .run = .{\"true\"}, .output = .root } } }\n";
+    var problem: file_mod.Problem = undefined;
+    const parsed = file_mod.parse(text, &loaded.file, &problem);
+    try testing.expectEqual(file_mod.ParseResult.parsed, parsed);
+    files.put_dir("/p", 0o755);
+    set_path(&loaded.project, "/p");
+    set_path(&loaded.path, "/p/zbx.build.zon");
+    try testing.expect(try context.begin(0) == .running);
+    for (&composed.slots) |*slot| slot.active = false;
+}
+
+/// Writes the cache entry for `composed.key`, naming the tree imported from `top`, as a build
+/// before this one did.
+fn entry_written(top: []const u8) !Digest {
+    var result: import.Result = undefined;
+    const options: import.Options = .{ .squash_owner = false, .warn = null };
+    try import.import(&store, &import_workspace, top, options, &result, &diag);
+    try store_lock.hold(&store, .shared, "test");
+    defer store_lock.release(&store);
+    var failure: cache.Failure = undefined;
+    return cache.record(&store, &composed.cache, &composed.key, result.digest, &failure);
+}
+
+test "a foreign root step's entry with Rosetta's cache, from an older zbx, is dropped and run" {
+    // Goal: the Mac's sequence (PR #168, job 132951593134). A zbx before the Rosetta rule
+    // recorded demo-m9's final step with /root/.cache/rosetta in its output; the key did not
+    // change, so the next build hit that entry and printed the old digest. Method: the machine
+    // is aarch64 and the step linux/amd64, as on the Mac; such an entry is planted under the
+    // step's key; `begin` must run the step and remove the entry. On an x86_64 machine the same
+    // entry is the step's own output and is a hit, and an entry that keeps a file of the step's
+    // in .cache is a hit on aarch64, so the check can fail both ways.
+    const Case = struct { machine: []const u8, top: []const u8, hit: bool };
+    const cases = [_]Case{
+        .{ .machine = "aarch64", .top = "/stale", .hit = false },
+        .{ .machine = "x86_64", .top = "/stale", .hit = true },
+        .{ .machine = "aarch64", .top = "/own", .hit = true },
+    };
+    for (cases) |case| {
+        try root_step_begun(case.machine);
+        // `start` emptied the machine: the trees an older build made are written again.
+        files.put_dir("/stale", 0o755);
+        files.put_dir("/stale/root", 0o700);
+        files.put_dir("/stale/root/.cache", 0o755);
+        files.put_dir("/stale/root/.cache/rosetta", 0o755);
+        files.put_dir("/own", 0o755);
+        files.put_dir("/own/root", 0o700);
+        files.put_dir("/own/root/.cache", 0o755);
+        files.put_file("/own/root/.cache/own", 0o644, "the step's\n");
+        const planted = try entry_written(case.top);
+        const began = try context.begin(0);
+        try testing.expect(diag.code == null);
+        try testing.expectEqual(case.hit, began == .hit);
+        var failure: cache.Failure = undefined;
+        const found = try cache.lookup(&store, &composed.cache, &composed.key, &failure);
+        if (case.hit) {
+            try testing.expect(found.hit.eql(planted));
+        } else {
+            try testing.expect(found == .miss);
+        }
+    }
+}
+
 test "a lock holding an index digest is E0804 naming both manifests, never an assertion" {
     // Goal: external input (zbx.lock) cannot panic a ReleaseSafe build. Method: the lock names
     // the fixture's index; the registry answers the pull with the platform's manifest, which

@@ -197,7 +197,7 @@ pub fn run_step(request: *const Request, ws: *Workspace, result: *Result, diag: 
     // keeps its own directory.
     try store_diagnose.hold(diag, &store, .shared, "build", "running a build step");
     defer lock.release(&store);
-    try resolve_identity(request, &store, ws, diag);
+    try resolve_identity(request.spec, &store, ws, diag);
     look_for_rosetta(request, &store, ws);
     try in_store(request, ws, .prepare, diag);
     defer cleanup(request, ws);
@@ -233,12 +233,11 @@ pub fn run_step(request: *const Request, ws: *Workspace, result: *Result, diag: 
 /// the base's files lack is E0817, mid-build, because a `step:` base exists only after the
 /// steps before it ran.
 fn resolve_identity(
-    request: *const Request,
+    spec: *const key_mod.Spec,
     store: *const Store,
     ws: *Workspace,
     diag: *Diag,
 ) Error!void {
-    const spec = request.spec;
     assert(diag.code == null);
     ws.user = null;
     ws.home_len = 0;
@@ -273,19 +272,60 @@ const rosetta_path_bytes_max = image_user.home_bytes_max + rosetta_cache.len;
 
 /// Sets `ws.foreign` and `ws.base_has_cache`, in the parent, before the step runs.
 fn look_for_rosetta(request: *const Request, store: *const Store, ws: *Workspace) void {
-    ws.foreign = false;
+    ws.foreign = runs_foreign(request.host, request.spec);
     ws.base_has_cache = false;
-    if (!request.spec.root_output) return;
-    const wanted = manifest.architecture_of_platform(request.spec.platform) orelse return;
-    const names = request.host.uname() catch return;
-    const machine = manifest.architecture_of_machine(names.machine.slice()) orelse return;
-    if (wanted == machine) return;
-    ws.foreign = true;
+    if (!ws.foreign) return;
     var path: [rosetta_path_bytes_max]u8 = undefined;
     const cache = joined(&path, step_home(ws), home_cache);
-    ws.base_has_cache = base_has_directory(store, &ws.user_ws.tree, request.spec.base_tree, cache);
+    const found = entry_at(store, &ws.user_ws.tree, request.spec.base_tree, cache) catch null;
+    ws.base_has_cache = if (found) |entry| entry.kind == .dir else false;
 }
 
+/// Whether `spec` is a root step on another architecture than the machine's (`uname`): on a
+/// Mac, one that runs through Rosetta.
+fn runs_foreign(host: Host, spec: *const key_mod.Spec) bool {
+    if (!spec.root_output) return false;
+    const wanted = manifest.architecture_of_platform(spec.platform) orelse return false;
+    const names = host.uname() catch return false;
+    const machine = manifest.architecture_of_machine(names.machine.slice()) orelse return false;
+    return wanted != machine;
+}
+
+/// Whether `output`, a cache entry's tree for the run step `spec`, is one this machine's commit
+/// could make: on a foreign root step, Rosetta's cache as the base has it, and no empty
+/// `<home>/.cache` the base lacks (`rosetta_excludes`). An entry from a zbx before that rule is
+/// not (Mac run of PR #168, job 132951593134: m9.2 was all hits on the store an earlier run
+/// filled, and the output kept both directories); the caller drops it and runs the step. Runs in
+/// the parent, before a worker starts, with `ws` as scratch. False when a tree cannot be read
+/// or the user is not found: the step then runs, and says why if it fails.
+pub fn cached_output_holds(
+    host: Host,
+    store: *const Store,
+    ws: *Workspace,
+    spec: *const key_mod.Spec,
+    output: Digest,
+) bool {
+    if (!runs_foreign(host, spec)) return true;
+    var diag: Diag = undefined;
+    diag.reset();
+    resolve_identity(spec, store, ws, &diag) catch return false;
+    const home = step_home(ws);
+    var path: [rosetta_path_bytes_max]u8 = undefined;
+    const buffer = &ws.user_ws.tree;
+    const rosetta = joined(&path, home, rosetta_cache);
+    const base_rosetta = entry_at(store, buffer, spec.base_tree, rosetta) catch return false;
+    const output_rosetta = entry_at(store, buffer, output, rosetta) catch return false;
+    if (!Found.same(base_rosetta, output_rosetta)) return false;
+    const cache = joined(&path, home, home_cache);
+    const base_cache = entry_at(store, buffer, spec.base_tree, cache) catch return false;
+    if (base_cache) |entry| if (entry.kind == .dir) return true;
+    const output_cache = (entry_at(store, buffer, output, cache) catch return false) orelse
+        return true;
+    if (output_cache.kind != .dir) return true;
+    // The commit leaves out a `.cache` the step made that holds nothing but Rosetta's cache, and
+    // that cache is not in the output (checked above): an empty one is not the commit's.
+    return !(tree_empty(store, buffer, output_cache.subtree) catch return false);
+}
 /// The step's `HOME`: its user's home, or the fixed environment's `/root`.
 fn step_home(ws: *const Workspace) []const u8 {
     if (ws.home_len > 0) return ws.home[0..ws.home_len];
@@ -306,25 +346,75 @@ fn joined(out: *[rosetta_path_bytes_max]u8, home: []const u8, suffix: []const u8
     return out[0 .. head.len + suffix.len];
 }
 
-/// Whether the tree `root` has a directory at `path` (absolute); false when it cannot be read.
-fn base_has_directory(store: *const Store, buffer: []u8, root: Digest, path: []const u8) bool {
+/// What `entry_at` finds: an entry's fields, copied out of the buffer the next load reuses.
+const Found = struct {
+    kind: tree.Kind,
+    mode: u16,
+    uid: u32,
+    gid: u32,
+    size: u64,
+    content: Digest,
+    subtree: Digest,
+    target: Digest,
+    xattrs: Digest,
+
+    /// Both absent, or the same entry.
+    fn same(a: ?Found, b: ?Found) bool {
+        const left = a orelse return b == null;
+        const right = b orelse return false;
+        return left.kind == right.kind and left.mode == right.mode and left.uid == right.uid and
+            left.gid == right.gid and left.size == right.size and
+            left.content.eql(right.content) and left.subtree.eql(right.subtree) and
+            left.target.eql(right.target) and left.xattrs.eql(right.xattrs);
+    }
+};
+
+const ReadError = error{Unreadable};
+
+/// The entry of the tree `root` at `path` (absolute), or null when there is none. A part of the
+/// path that is not a directory is none.
+fn entry_at(store: *const Store, buffer: []u8, root: Digest, path: []const u8) ReadError!?Found {
     assert(path.len > 1);
     assert(path[0] == '/');
     var at = root;
+    var found: ?Found = null;
     var parts = std.mem.tokenizeScalar(u8, path, '/');
     while (parts.next()) |name| {
+        if (found) |parent| {
+            if (parent.kind != .dir) return null;
+            at = parent.subtree;
+        }
         var errno: u16 = 0;
-        const bytes = trees.load(store, at, buffer, &errno) catch return false;
+        const bytes = trees.load(store, at, buffer, &errno) catch return error.Unreadable;
         var decoder: tree.Decoder = undefined;
-        decoder.init(bytes) catch return false;
+        decoder.init(bytes) catch return error.Unreadable;
         var entry: tree.Entry = undefined;
-        const found = while (decoder.next(&entry) catch return false) {
+        const match = while (decoder.next(&entry) catch return error.Unreadable) {
             if (std.mem.eql(u8, entry.name, name)) break entry;
-        } else return false;
-        if (found.kind != .dir) return false;
-        at = found.subtree;
+        } else return null;
+        found = .{
+            .kind = match.kind,
+            .mode = match.mode,
+            .uid = match.uid,
+            .gid = match.gid,
+            .size = match.size,
+            .content = match.content,
+            .subtree = match.subtree,
+            .target = Digest.of(match.target),
+            .xattrs = Digest.of(match.xattrs),
+        };
     }
-    return true;
+    return found;
+}
+
+/// Whether the tree `root` has no entries.
+fn tree_empty(store: *const Store, buffer: []u8, root: Digest) ReadError!bool {
+    var errno: u16 = 0;
+    const bytes = trees.load(store, root, buffer, &errno) catch return error.Unreadable;
+    var decoder: tree.Decoder = undefined;
+    decoder.init(bytes) catch return error.Unreadable;
+    var entry: tree.Entry = undefined;
+    return !(decoder.next(&entry) catch return error.Unreadable);
 }
 
 /// Counts the entries of a directory other than `rosetta`.
