@@ -316,7 +316,8 @@ pub const Server = struct {
         };
         if (server.resolving) |*resolving| {
             for (&resolving.chunks, &server.sources) |*chunks, *source| {
-                chunks.* = resolver.ResolverChunks.init(&resolving.resolver, server.store.chunk_bytes);
+                const chunk_bytes = server.store.chunk_bytes;
+                chunks.* = resolver.ResolverChunks.init(&resolving.resolver, chunk_bytes);
                 source.* = chunks.chunks();
             }
             resolving.resolver.start(server.threaded.io()) catch {
