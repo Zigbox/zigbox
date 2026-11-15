@@ -61,6 +61,8 @@ pub const Remote = struct {
     index: index_mod.Index,
     /// The layer blob by `Range`; null serves only what the store holds (or peers give).
     registry: ?lazy_mod.Range,
+    /// A library caller's peer sources (`StartOptions.lazy_sources`), asked before the registry.
+    peers: []const lazy_mod.Source = &.{},
     log: lazy_mod.Log,
     free: lazy_mod.FreeBytes,
     /// Called once, when the resolver has started, with its first report: the progress line.
@@ -142,7 +144,23 @@ pub const Server = struct {
     pub fn lazy(server: *Server) run.Lazy {
         assert(server.state == .idle);
         assert(server.fd == -1);
-        return .{ .context = server, .prepare = prepare, .serve = serve, .record = record };
+        return .{
+            .context = server,
+            .prepare = prepare,
+            .serve = serve,
+            .record = record,
+            .peers = peers,
+        };
+    }
+
+    /// The run's peer sources, kept for the resolver. A run with nothing to fetch (no `attach`)
+    /// asks no source, so it keeps none.
+    fn peers(context: *anyopaque, sources: []const lazy_mod.Source) void {
+        const server: *Server = @ptrCast(@alignCast(context));
+        assert(server.state == .idle);
+        assert(sources.len < constants.lazy_sources_max); // `run.start` checked it.
+        const remote = &(server.remote orelse return);
+        remote.peers = sources;
     }
 
     /// The run record's `.lazy`, from the resolver's report; null before it started.
@@ -264,13 +282,13 @@ pub const Server = struct {
         resolving.resolver.init(gpa, .{
             .store = &server.store,
             .catalog = catalog,
-            .peers = &.{},
+            .peers = remote.peers,
             .registry = remote.registry,
             .log = remote.log,
             .free = remote.free,
             .fill = false,
         }) catch |err| {
-            // No peers in `zbx`: one source at most, far under `lazy_sources_max`.
+            // `run.start` left room for the registry under `lazy_sources_max`.
             assert(err == error.OutOfMemory);
             free_catalog(memory);
             server.resolving = null;

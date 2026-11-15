@@ -444,6 +444,8 @@ const store_verify_schema =
     \\"trees":{"type":"integer"},"roots":{"type":"integer"},
     \\"damaged":{"type":"integer","description":"all damaged things, listed or not"},
     \\"paths_truncated":{"type":"boolean","description":"the walk for paths ran out of room"},
+    \\"partial_images":{"type":"integer",
+    \\"description":"S2: images started with --lazy, not every file fetched: not damage"},
     \\"things":{"type":"array","items":{"type":"object",
     \\"required":["id","class","kind","reason","errno","reached","paths"],
     \\"properties":{"id":{"type":"string","pattern":"^b3:[0-9a-f]{64}$"},

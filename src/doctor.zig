@@ -47,7 +47,7 @@ const Host = host_mod.Host;
 
 pub const Status = enum { ok, fail, warn };
 
-pub const CheckId = enum { kernel, userns, cgroup, overlay, subid, seccomp, net };
+pub const CheckId = enum { kernel, userns, cgroup, overlay, subid, seccomp, net, fuse };
 
 pub const Detail = text_util.Bounded(constants.detail_bytes_max);
 /// The diagnostic code of each check: one per check, so a FAIL line and its block name the same
@@ -60,6 +60,8 @@ pub fn code_of(id: CheckId) diag_codes.Code {
         .overlay => .E0104,
         .subid => .E0105,
         .seccomp => .E0106,
+        // S2: FUSE, which only `zbx run --lazy` needs, is the same check the run makes (E1201).
+        .fuse => .E1201,
         // The net check only ever warns (a missing pasta fails nothing): its code is W0102.
         .net => unreachable, // `Check.problem` is never called for it.
     };
@@ -75,7 +77,7 @@ pub fn warning_code_of(id: CheckId) ?diag_codes.Code {
     const code: ?diag_codes.Code = switch (id) {
         .userns => .W0101,
         .net => .W0102,
-        .kernel, .cgroup, .overlay, .subid, .seccomp => null,
+        .kernel, .cgroup, .overlay, .subid, .seccomp, .fuse => null,
     };
     if (code) |found| {
         assert(diag_codes.entry(found).severity == .warning);
@@ -421,6 +423,8 @@ pub const Facts = struct {
     bus: BusFact,
 
     probe_overlay: ProbeFact,
+    /// S2: `/dev/fuse` opened and FUSE mounted from a scratch user namespace.
+    probe_fuse: ProbeFact,
     /// M6b: the project directory the id-mapped mount probe was asked about (empty: it could not
     /// be found, so nothing was asked), and what the probe said. Reported, never used.
     idmap_path: text_util.Bounded(constants.mount_path_bytes_max),
@@ -455,6 +459,7 @@ pub const Facts = struct {
         facts.cgroup_controllers.reset();
         facts.bus = .{};
         facts.probe_overlay = .{};
+        facts.probe_fuse = .{};
         facts.idmap_path = .{};
         facts.probe_idmap = .{};
         facts.uid = 0;
@@ -490,6 +495,7 @@ pub fn gather_one(host: Host, facts: *Facts, id: CheckId) void {
         .subid => gather_subid(host, facts),
         .seccomp => gather_seccomp(host, facts),
         .net => gather_net(host, facts),
+        .fuse => facts.probe_fuse.run(host, .fuse),
     }
     // Each id ran its own gather step, not a neighbour's.
     switch (id) {
@@ -500,6 +506,7 @@ pub fn gather_one(host: Host, facts: *Facts, id: CheckId) void {
         .subid => assert(facts.subgid.attempted),
         .seccomp => assert(facts.status.attempted),
         .net => assert(facts.pasta.attempted),
+        .fuse => {}, // As for overlay: an outcome or an error, both valid.
     }
 }
 
@@ -689,6 +696,7 @@ pub fn evaluate(facts: *const Facts, report: *Report) void {
             .subid => evaluate_subid(facts, check),
             .seccomp => evaluate_seccomp(facts, check),
             .net => evaluate_net(facts, check),
+            .fuse => evaluate_fuse(facts, check),
         }
         if (check.status == .fail) add_context(facts, check);
     }
@@ -706,7 +714,7 @@ fn add_context(facts: *const Facts, check: *Check) void {
     }
     switch (check.id) {
         .cgroup, .subid => check.diag.context("uid", "{d}", .{facts.uid}),
-        .kernel, .userns, .overlay, .seccomp, .net => {},
+        .kernel, .userns, .overlay, .seccomp, .net, .fuse => {},
     }
 }
 
@@ -1268,6 +1276,46 @@ fn evaluate_overlay(facts: *const Facts, check: *Check) void {
     assert(!probe.is(.ok)); // Every success and named refusal returned above.
     if (probe.err == null) assert(probe.outcome != .denied);
     probe_problem(check, "overlay", probe);
+}
+
+/// S2: whether `zbx run --lazy` can serve an image here. Only that flag needs FUSE.
+fn evaluate_fuse(facts: *const Facts, check: *Check) void {
+    assert(check.detail.len == 0);
+    assert(check.status == .ok);
+    const probe = facts.probe_fuse;
+    if (probe.is(.ok)) {
+        check.pass("FUSE mounts inside a user namespace (zbx run --lazy)", .{});
+        return;
+    }
+    if (probe.is(.no_device)) {
+        check.problem("/dev/fuse is missing or not openable: zbx run --lazy cannot start", .{});
+        check.cause_symptom();
+        check.cause("zbx run --lazy serves the image over FUSE, which needs /dev/fuse " ++
+            "readable and writable by this user", .{});
+        check.context_path("/dev/fuse");
+        check.fix("load the fuse module:", "sudo modprobe fuse");
+        check.fix("or run without --lazy, which needs no FUSE", "");
+        return;
+    }
+    if (probe.is(.denied)) {
+        check.problem("a FUSE mount inside a user namespace was refused", .{});
+        check.cause_symptom();
+        check.cause("/dev/fuse opened, but the kernel refused mount(fuse) from a user " ++
+            "namespace: it may be older than Linux 4.18, or a security policy forbids it", .{});
+        check.fix("use Linux 4.18 or newer, or run without --lazy, which needs no FUSE", "");
+        return;
+    }
+    if (probe.is(.map_denied)) return map_denied(check);
+    if (probe.is(.setup_denied)) {
+        check.problem("could not enter the user and mount namespaces the probe needs", .{});
+        check.cause_symptom();
+        check.cause("the FUSE probe needs a user namespace first and the kernel refused " ++
+            "to create one, so FUSE itself was never tried (see the userns check)", .{});
+        check.fix("fix the userns check first (ZBX-E0101); FUSE needs the same permission", "");
+        return;
+    }
+    assert(!probe.is(.ok));
+    probe_problem(check, "fuse", probe);
 }
 
 /// M6b: the line of the overlay check says, after the overlay, whether this user could make an

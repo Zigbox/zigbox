@@ -1491,18 +1491,45 @@ fn do_verify(job: *Job, diag: *Diag) Error!void {
         };
     }
     for (0..ws.damage_count) |index| report_damage(job, &store, @intCast(index));
+    const partial = if (exists) try count_partial(job, &store, diag) else 0;
     if (job.output.json) try verify_json(
         job,
         &totals,
+        partial,
         diag,
-    ) else try verify_text(job, &totals, diag);
+    ) else try verify_text(job, &totals, partial, diag);
     if (totals.damaged == 0) return;
     const checked = totals.objects + totals.trees + totals.roots;
     diagnose.verify_failed(diag, totals.damaged, ws.damage_count, checked);
     return error.Failed;
 }
 
-fn verify_text(job: *const Job, totals: *const verify.Totals, diag: *Diag) Error!void {
+/// Counts the image records of lazily started images (S2): partial, not damaged. Their trees are
+/// rooted by their records alone, never under `roots/`, so `verify` does not walk them.
+const PartialCount = struct {
+    count: u32 = 0,
+
+    pub fn visit(self: *PartialCount, image: *const images.Image) void {
+        assert(self.count < constants.images_max);
+        if (image.partial) self.count += 1;
+    }
+};
+
+fn count_partial(job: *Job, store: *const Store, diag: *Diag) Error!u32 {
+    assert(diag.code == null);
+    var visitor: PartialCount = .{};
+    image_find.scan(store, &job.workspace.image_memory, &job.workspace.image, &visitor) catch {
+        return images_unreadable(diag, store);
+    };
+    return visitor.count;
+}
+
+fn verify_text(
+    job: *const Job,
+    totals: *const verify.Totals,
+    partial: u32,
+    diag: *Diag,
+) Error!void {
     assert(totals.orphan_lists <= totals.chunk_lists);
     assert(diag.code == null);
     var buffer: [constants.output_bytes_max]u8 = undefined;
@@ -1524,10 +1551,19 @@ fn verify_text(job: *const Job, totals: *const verify.Totals, diag: *Diag) Error
         writer.print("{d} chunk lists have no object (an interrupted import or gc left them; " ++
             "the next gc moves them away)\n", .{totals.orphan_lists}) catch unreachable; // Same.
     }
+    if (partial > 0) {
+        writer.print("{d} images are partial (started with --lazy, not every file fetched; " ++
+            "zbx pull completes one)\n", .{partial}) catch unreachable; // Same bound.
+    }
     try put(job, writer.buffered(), diag);
 }
 
-fn verify_json(job: *const Job, totals: *const verify.Totals, diag: *Diag) Error!void {
+fn verify_json(
+    job: *const Job,
+    totals: *const verify.Totals,
+    partial: u32,
+    diag: *Diag,
+) Error!void {
     assert(job.output.json);
     assert(diag.code == null);
     const ws = &job.workspace.verify;
@@ -1537,7 +1573,7 @@ fn verify_json(job: *const Job, totals: *const verify.Totals, diag: *Diag) Error
     writer.print("{{\"schema\":\"zbx.store.verify/1\",\"ok\":{},\"objects\":{d}," ++
         "\"object_bytes\":{d}," ++
         "\"chunk_lists\":{d},\"orphan_lists\":{d},\"trees\":{d},\"roots\":{d},\"damaged\":{d}," ++
-        "\"paths_truncated\":{},\"things\":[", .{
+        "\"paths_truncated\":{},\"partial_images\":{d},\"things\":[", .{
         totals.damaged == 0,
         totals.objects,
         totals.object_bytes,
@@ -1547,6 +1583,7 @@ fn verify_json(job: *const Job, totals: *const verify.Totals, diag: *Diag) Error
         totals.roots,
         totals.damaged,
         totals.paths_truncated,
+        partial,
     }) catch unreachable; // Same bound.
     try put_big(job, writer.buffered(), diag);
     for (0..ws.damage_count) |index| try damage_json(job, @intCast(index), diag);

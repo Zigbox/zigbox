@@ -2335,6 +2335,8 @@ const child_exit_refused_mount: u8 = 11;
 /// The namespace exists, but writing setgroups/uid_map/gid_map was refused.
 const child_exit_refused_map: u8 = 13;
 const child_exit_failed: u8 = 12;
+/// FUSE only: `/dev/fuse` is missing or could not be opened.
+const child_exit_no_device: u8 = 14;
 
 const scratch_names = [_][:0]const u8{ "work/work", "work", "upper", "lower", "merged" };
 
@@ -2407,18 +2409,23 @@ fn probe_run(
     // Registered before create(): a failure after the directory exists (chown) must still
     // remove it.
     defer scratch.remove();
-    if (kind == .overlay) try scratch.create(self.scratch_parent, give_to);
+    if (needs_scratch(kind)) try scratch.create(self.scratch_parent, give_to);
 
     var options: [3 * constants.probe_scratch_bytes_max + 64]u8 = undefined;
-    const options_text = overlay_options(&options, &scratch);
+    const options_text = if (kind == .overlay) overlay_options(&options, &scratch) else "";
 
     const forked = linux.fork();
     try HostReal.check(forked);
     if (forked == 0) child_main(self, kind, &scratch, options_text, caller == 0, path);
     const child: i32 = @intCast(forked);
     assert(child > 0);
-    assert(scratch.created == (kind == .overlay));
+    assert(scratch.created == needs_scratch(kind));
     return wait_for_child(child, kind, self.probe_timeout_ms);
+}
+
+/// The overlay probe mounts on directories under the scratch root, the FUSE probe on the root.
+fn needs_scratch(kind: host.ProbeKind) bool {
+    return kind == .overlay or kind == .fuse;
 }
 
 /// The overlay mount data, built in the parent so the child allocates and formats nothing.
@@ -2449,7 +2456,7 @@ fn child_main(
         if (!drop_to_nobody()) linux.exit_group(child_exit_failed);
     }
     if (self.child_hook) |hook| hook();
-    assert(scratch.created == (kind == .overlay));
+    assert(scratch.created == needs_scratch(kind));
     if (kind == .overlay) assert(options.len > 0);
 
     // The ids to map are read here, before the namespace exists: inside an unmapped user
@@ -2463,7 +2470,7 @@ fn child_main(
 
     const flags: usize = switch (kind) {
         .userns => linux.CLONE.NEWUSER,
-        .overlay, .idmap => linux.CLONE.NEWUSER | linux.CLONE.NEWNS,
+        .overlay, .idmap, .fuse => linux.CLONE.NEWUSER | linux.CLONE.NEWNS,
     };
     const unshared = linux.errno(linux.unshare(flags));
     if (unshared != .SUCCESS) {
@@ -2478,6 +2485,7 @@ fn child_main(
     const private = linux.mount(null, "/", null, linux.MS.REC | linux.MS.PRIVATE, 0);
     if (linux.errno(private) != .SUCCESS) linux.exit_group(child_exit_refused_mount);
     if (kind == .idmap) linux.exit_group(idmap_attempt(path));
+    if (kind == .fuse) linux.exit_group(fuse_attempt(scratch));
     linux.exit_group(overlay_mount(scratch, options));
 }
 
@@ -2523,6 +2531,23 @@ fn idmap_attempt(path: [:0]const u8) u8 {
     );
     if (linux.errno(done) == .SUCCESS) return child_exit_ok;
     return refusal_exit(linux.errno(done), child_exit_refused_mount);
+}
+
+/// Opens `/dev/fuse` and mounts it on the scratch root as `run --lazy` mounts it
+/// (`host_real_fuse.mount`). Nothing answers the kernel's `INIT`; the mount and the descriptor go
+/// with the namespace when the child exits. A missing or unopenable device is its own outcome
+/// (`no_device`), so the doctor can say which of the two the host lacks.
+fn fuse_attempt(scratch: *const Scratch) u8 {
+    assert(scratch.created);
+    const opened = linux.open("/dev/fuse", .{ .ACCMODE = .RDWR, .CLOEXEC = true }, 0);
+    switch (linux.errno(opened)) {
+        .SUCCESS => {},
+        .NOENT, .NXIO, .NODEV, .ACCES, .PERM => return child_exit_no_device,
+        else => return child_exit_failed,
+    }
+    const mounted = host_real_fuse.mount(@intCast(opened), scratch.root[0..scratch.root_len :0]);
+    if (mounted == .SUCCESS) return child_exit_ok;
+    return refusal_exit(mounted, child_exit_refused_mount);
 }
 
 /// Writes `/proc/self/{setgroups,gid_map,uid_map}` so that `uid` and `gid` (the ids the process
@@ -2634,6 +2659,7 @@ fn classify_status(status: u32, kind: host.ProbeKind) host.ProbeOutcome {
         child_exit_refused_namespace => if (kind == .userns) .denied else .setup_denied,
         child_exit_refused_map => .map_denied,
         child_exit_refused_mount => .denied,
+        child_exit_no_device => if (kind == .fuse) .no_device else .failed,
         else => .failed,
     };
 }

@@ -801,7 +801,7 @@ fn put_blob(text: []const u8) Sha256 {
 }
 
 /// An image record for `tree` that names `config` and `layer`.
-fn record_image(tree: Digest, config: Sha256, layer: Sha256) void {
+fn record_image(tree: Digest, config: Sha256, layer: Sha256, partial: bool) void {
     var image: images.Image = undefined;
     image.tag_count = 0;
     image.add_tag("docker.io/library/fixture:1");
@@ -815,7 +815,7 @@ fn record_image(tree: Digest, config: Sha256, layer: Sha256) void {
     image.layers[0] = layer;
     image.settings.clear();
     image.labels.clear();
-    image.partial = false;
+    image.partial = partial;
     var failure: @import("fs.zig").Failure = undefined;
     images.save(&store, &image, &failure) catch unreachable; // The simulated store writes.
 }
@@ -828,7 +828,7 @@ test "blobs no image names are planned, trashed and restored; the others and cut
     const layer = put_blob("layer bytes");
     const orphan = put_blob("an abandoned layer");
     files.put_file(root_path ++ "/blobs/partial/cut", 0o644, "half");
-    record_image(trees_[0], config, layer);
+    record_image(trees_[0], config, layer, false);
     const planned = try make_plan(&.{});
     try testing.expectEqual(@as(u64, 1), planned.counts.blobs);
     try testing.expectEqual(@as(u64, 1), planned.counts.total());
@@ -859,9 +859,26 @@ test "an image record keeps its tree and blobs when its root is gone" {
     const without = try make_plan(&.{});
     try testing.expect(without.counts.objects + without.counts.trees > 0);
     try testing.expectEqual(@as(u64, 2), without.counts.blobs);
-    record_image(trees_[1], config, layer);
+    record_image(trees_[1], config, layer, false);
     const with = try make_plan(&.{});
     try testing.expectEqual(@as(u64, 0), with.counts.total());
+}
+
+test "a partial image's record keeps its tree and the objects fetched so far" {
+    // Goal: gc keeps what a lazy run fetched (S2 slice 5). Method: the tree's root is gone, as
+    // after `run --lazy`, and one of its files was never fetched; the partial record still
+    // keeps every object present, and gc plans nothing.
+    const trees_ = two_trees();
+    const config = put_blob("config bytes");
+    const layer = put_blob("layer bytes");
+    drop_root(trees_[1]);
+    var buffer: [constants.sim_fs_path_bytes_max]u8 = undefined;
+    files.remove_path(object_path("/src/bin/tool", &buffer));
+    record_image(trees_[1], config, layer, true);
+    const planned = try make_plan(&.{});
+    try testing.expectEqual(@as(u64, 0), planned.counts.total());
+    var kept: [constants.sim_fs_path_bytes_max]u8 = undefined;
+    try testing.expect(files.kind_of(object_path("/src/etc/extra", &kept)) != null);
 }
 
 test "the sets are sized to the store, and a store beyond the room is refused with the limit" {

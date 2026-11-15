@@ -621,7 +621,7 @@ test "verify of a whole store says so, in text and in JSON" {
     try testing.expect(object.get("ok").?.bool);
     const keys = [_][]const u8{
         "schema", "ok",    "objects",         "object_bytes", "chunk_lists",
-        "trees",  "roots", "paths_truncated", "things",
+        "trees",  "roots", "paths_truncated", "things", "partial_images",
     };
     try json_object_has(object, schemas.of("store-verify").?, &keys);
     try testing.expectEqual(@as(usize, 0), object.get("things").?.array.items.len);

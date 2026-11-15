@@ -57,6 +57,7 @@ const netfiles = @import("netfiles.zig");
 const pasta_mod = @import("pasta.zig");
 const plan_mod = @import("plan.zig");
 const records = @import("records.zig");
+const lazy_mod = @import("../lazy/lazy.zig");
 const scope_mod = @import("scope.zig");
 const scope_text = @import("scope_text.zig");
 const session_mod = @import("session.zig");
@@ -210,6 +211,10 @@ pub const StartOptions = struct {
     stream_prefix: []const u8 = "",
     /// Serve the tree lazily (`Lazy`); only a run of a tree from the store (`Spec.image`).
     lazy: ?Lazy = null,
+    /// A lazy run's peer sources (Zigcube's swarm fetch, `zigbox.lazy.Source`), asked for a
+    /// chunk after the local store and before the registry, in this order. Only with `lazy`; at
+    /// most `lazy_sources_max - 1`, leaving room for the registry. `zbx` passes none.
+    lazy_sources: []const lazy_mod.Source = &.{},
 };
 
 /// A run whose tree is served lazily (`zbx run --lazy`, S2): the caller's FUSE server. The tree
@@ -226,6 +231,8 @@ pub const Lazy = struct {
     /// the record is written. Null, or a null answer (the server never started), writes a lazy
     /// run's record with zero counts.
     record: ?*const fn (context: *anyopaque) ?records.Lazy = null,
+    /// Given `StartOptions.lazy_sources` before `prepare`, when there are any.
+    peers: ?*const fn (context: *anyopaque, sources: []const lazy_mod.Source) void = null,
 
     fn record_now(lazy: *const Lazy) records.Lazy {
         const none: records.Lazy = .{
@@ -464,8 +471,11 @@ pub fn start(
     // with a limit and no way to enforce it is refused here, with nothing to clean up.
     const scope_input = try prepare_scope(handle, container.limits, options.build_step, diag);
     if (options.lazy != null) assert(container.image != null);
+    if (options.lazy_sources.len > 0) assert(options.lazy != null);
+    assert(options.lazy_sources.len < constants.lazy_sources_max);
     if (container.image) |image| try prepare_image(handle, container, image, options, diag);
     if (options.lazy) |lazy| {
+        if (options.lazy_sources.len > 0) lazy.peers.?(lazy.context, options.lazy_sources);
         if (!lazy.prepare(lazy.context, handle.image.digest, diag)) {
             assert(diag.code != null);
             return error.StartFailed;
