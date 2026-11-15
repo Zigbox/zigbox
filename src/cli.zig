@@ -40,6 +40,7 @@ const verify_commands = @import("trust/verify_commands.zig");
 const trust_exec = @import("trust/exec_gate.zig");
 const trust_gate = @import("trust/gate.zig");
 const trust_tamper = @import("trust/tamper.zig");
+const trust_start = @import("trust/start_gate.zig");
 const layout_mod = @import("store/layout.zig");
 const trust_statement = @import("trust/statement.zig");
 const volume = @import("state/volume.zig");
@@ -119,11 +120,11 @@ const help_text =
     \\  --read-only     mount the root read-only, with a tmpfs at /tmp and /run
     \\  --net <mode>    none (the default: a network of its own, only lo), host (share the host's)
     \\                  or user (through pasta: apt install passt)
-    \\  --publish <h:c> forward TCP port h of this machine to port c of the container (repeatable;
-    \\                  implies --net user)
-    \\  --listen <addr:port>  make a TCP listener on the container's loopback (only 127.0.0.1;
-    \\                  --net none only) and hand it to the caller with --listen-send
+    \\  --publish <h:c> forward TCP port h here to port c inside (repeatable; --net user)
+    \\  --listen <addr:port>  a TCP listener on the container's loopback (127.0.0.1, --net none),
+    \\                  handed to the caller over --listen-send
     \\  --listen-send <fd>  the inherited Unix socket the listener goes over (SCM_RIGHTS)
+    \\  --hosts-file <path>  this file, read-only, as /etc/hosts (--net none only)
     \\  -e <name>[=<value>]  set a variable in the container, over the image's (repeatable): with
     \\                  =<value> that value, without it zbx's own (an error if unset there).
     \\                  A value is never stored or printed; only the name is shown
@@ -411,6 +412,8 @@ pub const RunArgs = struct {
     /// as typed (the descriptor number is read when the listener is sent, E0609).
     listen: ?runtime_spec.Listen = null,
     listen_send: ?[]const u8 = null,
+    /// `--hosts-file`: the path as typed; looked at when the container starts (E0612).
+    hosts_file: ?[]const u8 = null,
     /// The `-e` options, each read as it came (a bad one is refused there, E0010). A value stays
     /// in the argument it came in and is never copied; `run_env.resolve` merges them at the start.
     env: [constants.run_env_count_max]run_env.Setting = undefined,
@@ -474,6 +477,7 @@ const RunOption = enum {
     publish,
     listen,
     listen_send,
+    hosts_file,
     state,
     tmpfs,
     bind,
@@ -487,7 +491,7 @@ const RunOption = enum {
     workdir,
 
     fn flag(option: RunOption) []const u8 {
-        assert(@backingInt(option) <= 21);
+        assert(@backingInt(option) <= 22);
         assert(@tagName(option).len > 0);
         return switch (option) {
             .rootfs => "--rootfs",
@@ -501,6 +505,7 @@ const RunOption = enum {
             .publish => "--publish",
             .listen => "--listen",
             .listen_send => "--listen-send",
+            .hosts_file => "--hosts-file",
             .state => "--state",
             .tmpfs => "--tmpfs",
             .bind => "--bind",
@@ -760,7 +765,7 @@ fn import_option_of(argument: []const u8) ?Token {
 /// `--rootfs`, `--rootfs=x` and the other value options of `run`, or null.
 fn run_option_of(argument: []const u8) ?Token {
     assert(argument.len <= constants.arg_bytes_max);
-    assert(std.enums.values(RunOption).len == 22);
+    assert(std.enums.values(RunOption).len == 23);
     inline for (comptime std.enums.values(RunOption)) |option| {
         const flag = comptime option.flag();
         if (std.mem.eql(u8, argument, flag)) return .{ .run_option_next = option };
@@ -1938,6 +1943,7 @@ fn take_run_option(
         .publish => unreachable, // Repeatable: `take_publish` above.
         .listen => unreachable, // `take_listen` above.
         .listen_send => &run_args.listen_send,
+        .hosts_file => &run_args.hosts_file,
         .state => unreachable, // Repeatable: `take_state` above.
         .tmpfs, .bind, .secret, .mount => unreachable, // Repeatable: `take_mount` above.
         .device => unreachable, // Repeatable: `take_device` above.
@@ -3234,8 +3240,9 @@ pub const Storage = struct {
     gate: trust_gate.Memory,
     /// The tamper check of a run under a policy file (`trust/tamper.zig`).
     tamper: trust_tamper.Workspace,
-    tamper_on: bool,
-    tamper_always: bool,
+    /// The gate's state for this run (`trust/start_gate.zig`, shared with the library's start):
+    /// set by `check_policy`, read by `tree_check_of`.
+    run_gate: trust_start.Gate,
     /// `zbx exec`: the library's handle and the `-e` values.
     exec: exec_commands.Workspace,
     /// `zbx build`: the build file, its graph and the checks' findings. `verify` and `trust` work
@@ -3947,6 +3954,7 @@ fn run_container(
         .network = network_of(&given),
         .publish = given.publish_slice(),
         .listen = given.listen,
+        .hosts_file = given.hosts_file orelse "",
         .state = given.state_slice(),
         .mounts = spec_mounts,
         .devices = given.devices_slice(),
@@ -4034,7 +4042,9 @@ fn gate_subject_of(
 }
 
 /// The gate in front of a run: every policy file that exists must be met before anything
-/// starts. A refusal has set `diag` and started nothing.
+/// starts. A refusal has set `diag` and started nothing. The library's start runs the same gate
+/// (`trust/start_gate.zig`); `zbx run` runs it here, ahead of the environment and the start,
+/// with the subject worded as `zbx sign` would take it.
 fn check_policy(
     host: Host,
     storage: *Storage,
@@ -4042,49 +4052,29 @@ fn check_policy(
     diag: *Diag,
 ) RunError!void {
     assert(diag.code == null);
-    trust_gate.load(host, &storage.gate, diag) catch return error.StartFailed;
-    const record = &storage.sign.record;
-    const work = &storage.sign.record_work;
-    trust_gate.judge_all(host, &storage.gate, record, work, subject, diag) catch {
-        return error.StartFailed;
+    const sign = &storage.sign;
+    storage.run_gate = .{
+        .memory = &storage.gate,
+        .record = &sign.record,
+        .work = &sign.record_work,
+        .tamper = &storage.tamper,
+        .lent = .{
+            .scratch = &sign.tree.verify.scratch,
+            .tree_buffer = &sign.tree.tree_buffer,
+            .stack = &sign.tree.stack,
+        },
     };
-    // Any policy file at all asks for the tamper check, whatever it requires (the strictest
-    // `verify` of them wins); with none there is no check.
-    storage.tamper_on = storage.gate.count > 0;
-    storage.tamper_always = false;
-    for (storage.gate.files[0..storage.gate.count]) |*loaded| {
-        if (loaded.policy.verify == .always) storage.tamper_always = true;
-    }
+    storage.run_gate.load(host, diag) catch return error.StartFailed;
+    storage.run_gate.judge(host, subject, diag) catch return error.StartFailed;
+    assert(storage.run_gate.then == null);
 }
 
-/// The check the store's child makes of the tree before it starts, or none.
+/// The check the store's child makes of the tree before it starts, or none. `check_policy` has
+/// run.
 fn tree_check_of(storage: *Storage) ?image_mod.Check {
     assert(@intFromPtr(storage) != 0);
-    assert(storage.gate.count <= constants.policy_files_max);
-    if (!storage.tamper_on) return null;
-    return .{ .context = storage, .call = tamper_call };
-}
-
-fn tamper_call(
-    context: *anyopaque,
-    store: *layout_mod.Store,
-    tree: digest_prefix.Digest,
-    diag: *Diag,
-) bool {
-    const storage: *Storage = @ptrCast(@alignCast(context));
-    assert(storage.tamper_on);
-    assert(tree.bytes.len == constants.store_digest_bytes);
-    assert(storage.gate.count > 0);
-    const sign = &storage.sign;
-    const lent: trust_tamper.Lent = .{
-        .scratch = &sign.tree.verify.scratch,
-        .tree_buffer = &sign.tree.tree_buffer,
-        .stack = &sign.tree.stack,
-    };
-    trust_tamper.check(store, &storage.tamper, lent, tree, storage.tamper_always, diag) catch {
-        return false;
-    };
-    return true;
+    assert(storage.run_gate.memory == &storage.gate);
+    return storage.run_gate.tree_check();
 }
 
 /// A run in the foreground: starts the container, waits for it, and reports how it ended.
@@ -5918,12 +5908,12 @@ test "run: any policy file with verify always makes the tamper check hash every 
     var diag: Diag = undefined;
     diag.reset();
     try check_policy(sim.interface(), &shared_storage, directory, &diag);
-    try testing.expect(shared_storage.tamper_on);
-    try testing.expect(!shared_storage.tamper_always);
+    try testing.expect(shared_storage.run_gate.tamper_on);
+    try testing.expect(!shared_storage.run_gate.tamper_always);
     policy_files.put_file("/home/alice/.config/zbx/policy.zon", 0o644, always);
     try check_policy(sim.interface(), &shared_storage, directory, &diag);
-    try testing.expect(shared_storage.tamper_on);
-    try testing.expect(shared_storage.tamper_always);
+    try testing.expect(shared_storage.run_gate.tamper_on);
+    try testing.expect(shared_storage.run_gate.tamper_always);
 }
 
 const Frame = struct { tag: u8, head: ?u8, body: []const u8 };
