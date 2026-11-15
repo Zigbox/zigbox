@@ -164,7 +164,7 @@ fn expect_row(report: *const Report, name: []const u8, hit: bool) Error!void {
 }
 
 /// Step 4, with `extra.go`: the `build` stage's copy of `*.go` and its compile miss, the copy
-/// of `go.mod` and the final stage's `adduser` hit; what follows the compile misses.
+/// of `go.mod` and the final stage's user step hit; what follows the compile misses.
 pub fn check_extra(report: *const Report) Error!void {
     assert(report.count <= m7.rows_max);
     if (report.count != rows_count) return error.ReportWrong;
