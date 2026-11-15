@@ -35,8 +35,8 @@ pub fn sanitise(storage: []u8, text: []const u8) []const u8 {
 /// One part of a plain format, filled at the call site and written by `write_parts`.
 pub const Part = union(enum) {
     text: []const u8,
-    unsigned: u64,
-    signed: i64,
+    /// Wide enough for every `u64` and `i64`; `printInt` writes the same digits for either.
+    integer: i65,
 };
 
 /// One piece of a plain format, known at compile time: literal text, or the index of a `{s}` or
@@ -64,7 +64,10 @@ pub fn plain_template(comptime format: []const u8, comptime Args: type) ?[]const
         while (index < format.len) : (index += 1) {
             if (format[index] == '}') return null;
             if (format[index] != '{') continue;
+            assert(format[index] == '{');
+            assert(start <= index);
             if (index + 2 >= format.len) return null;
+            assert(index + 2 < format.len);
             if (format[index + 2] != '}') return null;
             if (arg >= types.len) return null;
             if (index > start) pieces = pieces ++ .{Piece{ .literal = format[start..index] }};
@@ -75,11 +78,15 @@ pub fn plain_template(comptime format: []const u8, comptime Args: type) ?[]const
             };
             pieces = pieces ++ .{piece};
             arg += 1;
+            assert(arg <= types.len);
             index += 2;
             start = index + 1;
         }
         if (arg != types.len) return null;
+        assert(arg == types.len);
+        assert(start <= format.len);
         if (format.len > start) pieces = pieces ++ .{Piece{ .literal = format[start..] }};
+        assert(pieces.len <= 2 * types.len + 1);
         const result = pieces[0..pieces.len].*;
         return &result;
     }
@@ -116,28 +123,23 @@ pub inline fn plain_parts(
         part.* = switch (piece) {
             .literal => |literal| .{ .text = literal },
             .string => |arg| .{ .text = @field(args, names[arg]) },
-            .integer => |arg| integer_part(@field(args, names[arg])),
+            .integer => |arg| .{ .integer = @field(args, names[arg]) },
         };
     }
-}
-
-inline fn integer_part(value: anytype) Part {
-    comptime assert(@typeInfo(@TypeOf(value)).int.bits <= 64);
-    if (@typeInfo(@TypeOf(value)).int.signedness == .signed) return .{ .signed = value };
-    return .{ .unsigned = value };
 }
 
 /// Writes the parts of a plain format, as `std.Io.Writer.print` would write the format.
 pub noinline fn write_parts(writer: *std.Io.Writer, parts: []const Part) std.Io.Writer.Error!void {
     // A format has at most 32 arguments (std's bound), so at most 33 literals around them.
     assert(parts.len <= 65);
+    assert(writer.end <= writer.buffer.len);
     for (parts) |part| {
         switch (part) {
             .text => |text| try writer.writeAll(text),
-            .unsigned => |value| try writer.printInt(value, 10, .lower, .{}),
-            .signed => |value| try writer.printInt(value, 10, .lower, .{}),
+            .integer => |value| try writer.printInt(value, 10, .lower, .{}),
         }
     }
+    assert(writer.end <= writer.buffer.len);
 }
 
 /// A fixed-capacity string. Appending past the capacity truncates and ends the text in "...",
@@ -175,13 +177,16 @@ pub fn Bounded(comptime capacity: u32) type {
         noinline fn print_parts(self: *Self, parts: []const Part) void {
             assert(self.len <= capacity);
             if (self.truncated) return;
+            const start = self.len;
             var writer = std.Io.Writer.fixed(self.bytes[self.len..]);
             write_parts(&writer, parts) catch return self.end_print(&writer, true);
             self.end_print(&writer, false);
+            assert(self.len >= start);
         }
 
         noinline fn end_print(self: *Self, writer: *std.Io.Writer, full: bool) void {
             assert(!self.truncated);
+            assert(writer.buffered().len <= capacity - self.len);
             self.len += @intCast(writer.buffered().len);
             if (full) self.truncate();
             assert(self.len <= capacity);

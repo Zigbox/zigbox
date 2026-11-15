@@ -221,16 +221,20 @@ pub const Diag = struct {
         assert(key.len > 0);
         assert(key.len <= constants.diag_key_bytes_max);
         const slot = diag.pairs.next() orelse return null;
+        assert(diag.pairs.count > 0);
         slot.key = @splat(0);
         @memcpy(slot.key[0..key.len], key);
         slot.key_len = @intCast(key.len);
         slot.value = .{};
+        assert(slot.value.len == 0);
         return slot;
     }
 
     noinline fn pair_slot_end(slot: *const Pair, key_len: usize, diag: *const Diag) void {
         assert(slot.value.len > 0);
+        assert(slot.value.len <= constants.diag_field_bytes_max);
         assert(slot.key_len == key_len);
+        assert(slot.key_len > 0);
         assert(diag.pairs.count > 0);
     }
 
@@ -267,6 +271,7 @@ pub const Diag = struct {
     noinline fn fix_slot(diag: *Diag, sentence: []const u8) ?*Fix {
         assert(sentence.len > 0);
         const slot = diag.fixes.next() orelse return null;
+        assert(diag.fixes.count > 0);
         slot.sentence = .{};
         slot.command = .{};
         put(&slot.sentence, "{s}", .{sentence});
@@ -279,6 +284,7 @@ pub const Diag = struct {
         slot.needs_root = command_uses_sudo(slot.command.slice());
         slot.template = false;
         assert(slot.command.len > 0);
+        assert(slot.command.len <= constants.diag_command_bytes_max);
         assert(slot.sentence.len > 0);
     }
 
@@ -430,6 +436,7 @@ fn put(field: anytype, comptime format: []const u8, args: anytype) void {
 /// The part of `put` after the formatting, shared by every format: one copy per field type.
 noinline fn put_end(field: anytype, start: u32) void {
     assert(field.len >= start);
+    assert(field.len <= field.bytes.len);
     for (field.bytes[start..field.len]) |*byte| {
         if (!text_util.is_printable(byte.*)) byte.* = '?';
     }
@@ -443,7 +450,9 @@ noinline fn text_slot(list: anytype) *Text {
     const slot = list.next().?; // `.newest` lists always have a slot.
     slot.* = .{};
     assert(slot.len == 0);
+    assert(!slot.truncated);
     assert(list.count > 0);
+    assert(list.count <= list.items.len);
     return slot;
 }
 
