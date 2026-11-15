@@ -1,9 +1,11 @@
 //! `zbx run --lazy` of an image the store does not have (S2 slice 5): resolves the reference,
 //! reads the layer's `org.zigbox.lazy-index` anchor, fetches the index by `Range`, inflates and
 //! verifies it against the manifest's `org.zigbox.tree` (`E1202` when it fails, before anything
-//! is written), stores the tree's directories with `trees.put_checked`, and fills an image
-//! record in memory (never written: records of partial images are slice 5b) for the run to
-//! compose. The registry client stays resolved for the run's chunk fetches (`RegistryRange`).
+//! is written), stores the tree's directories with `trees.put_checked`, and writes the image's
+//! record with `partial = true` (version 4, `store/images.zig`), as a pull writes its record: it
+//! roots the tree and keeps the config blob for gc, and `zbx images` shows the image. The run
+//! composes from the same record in memory. The registry client stays resolved for the run's
+//! chunk fetches (`RegistryRange`).
 //!
 //! An image without an anchor is `W1201`: the caller pulls it whole, as without `--lazy`.
 
@@ -20,6 +22,7 @@ const namespace = @import("store/namespace.zig");
 const object = @import("store/object.zig");
 const pull_commands = @import("pull_commands.zig");
 const pull_lib = @import("pull.zig");
+const pull_unpack = @import("pull_unpack.zig");
 const registry_range = @import("lazy/registry_range.zig");
 const store_diagnose = @import("store/diagnose.zig");
 const trees = @import("store/trees.zig");
@@ -101,7 +104,8 @@ pub fn start(
     ws.layer = resolved.layers[0].digest;
     try fetch_index(host, ws, &library.reference, &anchor, tree, text, diag);
     try put_trees(store, &ws.index, diag);
-    fill_image(image, library, tree);
+    fill_image(host, store, image, library, tree, text);
+    try save_image(store, image, diag);
     return .lazy;
 }
 
@@ -109,6 +113,14 @@ pub fn start(
 pub fn finish(pull: *pull_commands.Workspace) void {
     assert(pull.library.reference.registry_len > 0);
     client_mod.Workspace.wipe(&pull.library.client);
+}
+
+/// Wipes the client's secrets whether or not a lazy start resolved anything: the `defer` of a
+/// lazy run, so an exit between the start and the run's own `finish` (a refusal by the gate, a
+/// bad flag, a failed compose) leaves no token behind. Wiping twice is harmless.
+pub fn wipe(pull: *pull_commands.Workspace) void {
+    client_mod.Workspace.wipe(&pull.library.client);
+    assert(pull.library.client.token[0] == 0);
 }
 
 fn warn_no_index(warn: ?namespace.Warn, text: []const u8) void {
@@ -206,19 +218,46 @@ fn put_trees(store: *Store, index: *const index_mod.Index, diag: *Diag) Error!vo
     }
 }
 
-/// The image as its record would be, in memory: what `compose` reads.
-fn fill_image(image: *images.Image, library: *const pull_lib.Workspace, tree: Digest) void {
+/// The image's record, partial, as a pull would write it: what `compose` reads. A record already
+/// kept for the manifest keeps its tags, and a start by tag adds the tag, as a pull does.
+fn fill_image(
+    host: Host,
+    store: *const Store,
+    image: *images.Image,
+    library: *const pull_lib.Workspace,
+    tree: Digest,
+    text: []const u8,
+) void {
     const resolved = &library.resolved;
     assert(resolved.layer_count >= 1);
     assert(resolved.layer_count <= constants.registry_layers_max);
-    image.tag_count = 0;
+    images.carry_tags(store, resolved.manifest_digest, image);
+    const written = text[0..@min(text.len, constants.reference_bytes_max)];
+    if (library.reference.digest == null) image.add_tag(written);
     image.manifest = resolved.manifest_digest;
-    image.platform_len = 0;
+    var platform_buffer: [16]u8 = undefined;
+    const platform = pull_unpack.platform_text(&platform_buffer, resolved.architecture);
+    @memcpy(image.platform[0..platform.len], platform);
+    image.platform_len = @intCast(platform.len);
     image.config = resolved.config_digest;
     image.tree = tree;
-    image.time = 0;
+    image.time = host.time_now();
     image.layer_count = resolved.layer_count;
     for (resolved.layers[0..resolved.layer_count], 0..) |layer, at| image.layers[at] = layer.digest;
     image.settings = library.settings;
     image.labels = library.labels;
+    image.partial = true;
+}
+
+/// Writes the partial image's record, before the run: it keeps the tree's directories (stored
+/// just now) for gc while the run fetches the files.
+fn save_image(store: *Store, image: *const images.Image, diag: *Diag) Error!void {
+    assert(diag.code == null);
+    assert(image.partial);
+    var failure: @import("store/fs.zig").Failure = undefined;
+    images.save(store, image, &failure) catch {
+        const step = "writing the image record";
+        store_diagnose.write_failed(diag, store, step, failure.err, failure.errno);
+        return error.Failed;
+    };
 }

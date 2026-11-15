@@ -815,6 +815,7 @@ fn record_image(tree: Digest, config: Sha256, layer: Sha256) void {
     image.layers[0] = layer;
     image.settings.clear();
     image.labels.clear();
+    image.partial = false;
     var failure: @import("fs.zig").Failure = undefined;
     images.save(&store, &image, &failure) catch unreachable; // The simulated store writes.
 }

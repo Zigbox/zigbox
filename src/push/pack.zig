@@ -999,6 +999,7 @@ pub fn record_image(
     image.layers[0] = made.layer;
     image.settings = input.settings.*;
     set_labels(&image.labels, input.labels);
+    image.partial = false; // The tree was just packed from the store.
     try images.save(store, &image, failure);
 }
 

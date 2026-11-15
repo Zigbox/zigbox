@@ -3941,6 +3941,8 @@ fn run_container(
     const spec_mounts = try resolve_writable(host, &given, storage, diag);
     // Before the image is looked for: a lazy start from a registry fetches its index.
     if (given.lazy) try check_lazy(&given, invocation, diag);
+    // A lazy start from a registry holds its token for the run: wiped on every way out of it.
+    defer if (given.lazy) lazy_start.wipe(&storage.pull);
     var prepared: run_image.Prepared = .{
         .tree = invocation.operand orelse "",
         .command = given.command,
