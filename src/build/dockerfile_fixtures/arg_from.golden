@@ -1,0 +1,25 @@
+// Imported by `zbx import` from Dockerfile: target stage0, --network detect.
+// Edit this file from here on: `zbx build` reads it, not the Dockerfile.
+.{
+    .version = 1,
+    .steps = .{
+        // Dockerfile:6  COPY .build/${OS}-${ARCH}/prometheus /bin/prometheus
+        .{
+            .name = "stage0-1",
+            .base = "quay.io/prometheus/busybox-linux-amd64:latest",
+            .copy = .{
+                .{ .src = .{ ".build/-amd64/prometheus" }, .to = "/bin/prometheus" },
+            },
+        },
+    },
+    .image = .{
+        .base = "step:stage0-1",
+        .config = .{
+            .entrypoint = .{ "/bin/prometheus" },
+            .cmd = .{ "--config.file=/etc/prometheus/prometheus.yml" },
+            .labels = .{
+                .{ "org.zigbox.import.expose", "9090" },
+            },
+        },
+    },
+}

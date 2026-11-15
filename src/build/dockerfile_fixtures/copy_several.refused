@@ -1,0 +1,3 @@
+E0810 Dockerfile:3
+Dockerfile:3 has COPY of several sources to `/dest`, which does not end in /
+end the destination with /, as Docker requires

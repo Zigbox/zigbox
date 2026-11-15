@@ -636,6 +636,29 @@ const pull_schema =
     \\"created":{"type":"boolean","description":"this pull made the file"}}}}}
 ;
 
+const import_schema =
+    \\{"$schema":"https://json-schema.org/draft/2020-12/schema",
+    \\"$id":"https://zigbox.github.io/zigbox/schema/import/1","version":1,
+    \\"title":"zbx import --output json",
+    \\"description":"stdout: what the import made of a Dockerfile; a refusal is on stderr.",
+    \\"type":"object","required":["schema","dockerfile","output","target","stages","steps",
+    \\"dropped","flagged"],
+    \\"properties":{"schema":{"const":"zbx.import/1"},
+    \\"dockerfile":{"type":"string"},
+    \\"output":{"type":"string","description":"the build file written"},
+    \\"target":{"type":"string"},"stages":{"type":"integer"},
+    \\"steps":{"type":"array","items":{"type":"object",
+    \\"required":["name","line","kind","network","matched","cache","bind"],
+    \\"properties":{"name":{"type":"string"},"line":{"type":"integer"},
+    \\"kind":{"type":"string"},
+    \\"network":{"type":["string","null"],"description":"the word that looked like network use"},
+    \\"matched":{"type":"boolean"},"cache":{"type":"boolean"},"bind":{"type":"boolean"}}}},
+    \\"dropped":{"type":"array","items":{"type":"object","required":["line","what","became"],
+    \\"properties":{"line":{"type":"integer"},"what":{"type":"string"},
+    \\"became":{"type":"string"}}}},
+    \\"flagged":{"type":"integer","description":"steps not hermetic (network or cache)"}}}
+;
+
 const push_schema =
     \\{"$schema":"https://json-schema.org/draft/2020-12/schema",
     \\"$id":"https://zigbox.github.io/zigbox/schema/push/1","version":1,
@@ -1015,6 +1038,7 @@ const table = [_]Entry{
     .{ .command = "store-restore", .text = store_restore_schema },
     .{ .command = "pull-resolve", .text = pull_resolve_schema },
     .{ .command = "pull", .text = pull_schema },
+    .{ .command = "import", .text = import_schema },
     .{ .command = "push", .text = push_schema },
     .{ .command = "explain", .text = explain_schema },
     .{ .command = "lock-show", .text = lock_show_schema },
@@ -1040,7 +1064,7 @@ const table = [_]Entry{
 /// The schema of a command's output, or null if it has none.
 pub fn of(command: []const u8) ?[]const u8 {
     assert(command.len <= 4096);
-    assert(table.len == 39);
+    assert(table.len == 40);
     for (table) |entry| {
         if (std.mem.eql(u8, entry.command, command)) return entry.text;
     }
@@ -1069,7 +1093,7 @@ test "every schema is valid JSON, names its command and its version" {
     }
     try testing.expect(of("lock") == null);
     try testing.expect(of("") == null);
-    try testing.expectEqual(@as(usize, 39), table.len);
+    try testing.expectEqual(@as(usize, 40), table.len);
 }
 
 test "run and doctor are one object schema without a $ref, as an agent can follow it" {

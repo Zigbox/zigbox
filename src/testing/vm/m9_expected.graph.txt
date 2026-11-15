@@ -1,0 +1,7 @@
+build-1    base golang:1.23-alpine   copies 1
+build-2    base step:build-1         copies 1
+build-3    base step:build-2         output root
+stage2-1   base alpine:3.20          output root
+stage2-2   base step:stage2-1        copies 1
+stage2-3   base step:stage2-2        copies 1
+image      base step:stage2-3

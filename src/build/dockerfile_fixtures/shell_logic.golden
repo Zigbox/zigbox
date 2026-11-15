@@ -1,0 +1,26 @@
+// Imported by `zbx import` from Dockerfile: target stage0, --network detect.
+// Edit this file from here on: `zbx build` reads it, not the Dockerfile.
+.{
+    .version = 1,
+    .steps = .{
+        // Dockerfile:4  RUN if [ "$GO_SRC" = "go-builder" ]; then       echo "built" > /built;     else...
+        .{
+            .name = "stage0-1",
+            .base = "alpine:3.20",
+            .env = .{ "GO_SRC=go-builder" },
+            .run = .{ "/bin/sh", "-c", "if [ \"$GO_SRC\" = \"go-builder\" ]; then       echo \"built\" > /built;     else       echo \"tarball\" > /built;     fi" },
+            .output = .root,
+        },
+        // Dockerfile:9  RUN for f in a b c; do echo "$f" >> /list; done && test -s /list || exit 1
+        .{
+            .name = "stage0-2",
+            .base = "step:stage0-1",
+            .env = .{ "GO_SRC=go-builder" },
+            .run = .{ "/bin/sh", "-c", "for f in a b c; do echo \"$f\" >> /list; done && test -s /list || exit 1" },
+            .output = .root,
+        },
+    },
+    .image = .{
+        .base = "step:stage0-2",
+    },
+}

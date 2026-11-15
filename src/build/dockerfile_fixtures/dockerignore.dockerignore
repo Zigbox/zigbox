@@ -1,0 +1,6 @@
+# Build output and editor files.
+**/*.log
+node_modules
+!node_modules/keep
+
+.git

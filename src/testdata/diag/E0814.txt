@@ -1,0 +1,5 @@
+error[ZBX-E0814]: --hermetic refused a step
+  cause  Dockerfile:7 makes step fetch, which has the network
+  fix    drop --hermetic, or change Dockerfile:7 so it needs neither the network nor a cache
+  more   zbx explain E0814 · rerun with --verbose for the full cause chain
+  docs   https://zigbox.github.io/zigbox/errors/E0814.html

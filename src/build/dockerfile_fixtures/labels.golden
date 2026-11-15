@@ -1,0 +1,19 @@
+// Imported by `zbx import` from Dockerfile: target stage0, --network detect.
+// Edit this file from here on: `zbx build` reads it, not the Dockerfile.
+.{
+    .version = 1,
+    .image = .{
+        .base = "nginx:1.27",
+        .config = .{
+            .labels = .{
+                .{ "maintainer", "Someone <someone@example.com>" },
+                .{ "org.opencontainers.image.title", "web" },
+                .{ "version", "1" },
+                .{ "org.zigbox.import.expose", "80 443/tcp" },
+                .{ "org.zigbox.import.volume", "/var/cache/nginx /data" },
+                .{ "org.zigbox.import.healthcheck", "--interval=30s CMD curl -f http://localhost/ || exit 1" },
+                .{ "org.zigbox.import.stopsignal", "SIGQUIT" },
+            },
+        },
+    },
+}

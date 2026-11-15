@@ -98,8 +98,11 @@ pub const log_group_bytes = 16;
 pub fn log_group(out: *[log_group_bytes]u8, absolute_file: []const u8) []const u8 {
     assert(absolute_file.len > 0);
     assert(absolute_file[0] == '/');
-    const digest = Digest.of(absolute_file).text();
-    @memcpy(out, digest[0..log_group_bytes]);
+    // The hex alone: the group names directories that are mounted (`build/caches/<group>`),
+    // and a mount's host path may not hold the `:` of `b3:` (volume.path_problem).
+    const hex = Digest.of(absolute_file).hex();
+    @memcpy(out, hex[0..log_group_bytes]);
+    assert(std.mem.indexOfScalar(u8, out, ':') == null);
     return out;
 }
 
@@ -239,7 +242,7 @@ fn resolve_identity(
         var where: [constants.build_step_name_bytes_max + 8]u8 = undefined;
         // The buffer holds the name at its bound plus `step ""`.
         const named = std.fmt.bufPrint(&where, "step \"{s}\"", .{spec.name}) catch unreachable;
-        diagnose.user_not_found(diag, named, text);
+        diagnose.user_not_found(diag, named, text, ws.user_ws.too_large);
         return error.Failed;
     };
     ws.user = found.user;
