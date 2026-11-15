@@ -555,11 +555,7 @@ pub fn copy(t: *Translator, instruction: *const Instruction) Error!void {
             return refuse(t.refusal(), .E0810, line, what, args, fix, .{});
         }
     }
-    const written = try translate.absolute(t, line, t.state().directory(), written_to, true);
-    const to = if (given.from == null and whole_context(sources))
-        try into_directory(t, line, written)
-    else
-        written;
+    const to = try translate.absolute(t, line, t.state().directory(), written_to, true);
     var from_text: ?[]const u8 = null;
     if (given.from) |name| {
         from_text = try stage_head(t, line, name) orelse image: {
@@ -569,7 +565,7 @@ pub fn copy(t: *Translator, instruction: *const Instruction) Error!void {
     }
     note_unbuilt(t, line, &given, from_text);
     const name = try begin(t, instruction, .copy);
-    try put_copy(t, &given, from_text, sources, to);
+    try put_copy(t, line, &given, from_text, sources, to);
     try end(t, name);
 }
 
@@ -590,6 +586,7 @@ fn note_unbuilt(t: *Translator, line: u32, given: *const CopyFlags, from_text: ?
 
 fn put_copy(
     t: *Translator,
+    line: u32,
     given: *const CopyFlags,
     from_text: ?[]const u8,
     sources: []const []const u8,
@@ -604,7 +601,7 @@ fn put_copy(
     try t.put(".src = .{");
     for (sources, 0..) |source, index| {
         try t.put(if (index == 0) " " else ", ");
-        try t.put_string(if (from_text == null) project_path(source) else source);
+        try t.put_string(if (from_text == null) try project_path(t, line, source) else source);
     }
     try t.put(" }, .to = ");
     try t.put_string(to);
@@ -627,37 +624,24 @@ fn put_copy(
     try t.put(" },\n" ++ indent ++ "},\n");
 }
 
-/// A context source as the builder reads it: relative to the project (Docker reads `/x` there
-/// as `x`). The whole context (`.` or `/`) is `*`, every entry at the top of the project, since
-/// a build file refuses a project source of `.`
-/// (docs/decisions/2026-11-13-copy-source-refusals.md).
-fn project_path(source: []const u8) []const u8 {
-    if (is_whole_context(source)) return "*";
-    return std.mem.trimStart(u8, source, "/");
-}
-
-fn is_whole_context(source: []const u8) bool {
-    const trimmed = std.mem.trimStart(u8, source, "/");
-    return trimmed.len == 0 or std.mem.eql(u8, trimmed, ".");
-}
-
-fn whole_context(sources: []const []const u8) bool {
-    for (sources) |source| {
-        if (is_whole_context(source)) return true;
-    }
-    return false;
-}
-
-/// `to` ending in `/`: the entries of the whole context go inside it, as Docker's `COPY . to`
-/// puts the context's contents there (a `*` copied to a `.to` without `/` is refused, E0803).
-fn into_directory(t: *Translator, line: u32, to: []const u8) Refused![]const u8 {
-    assert(to.len > 0);
-    assert(to[0] == '/');
-    if (to[to.len - 1] == '/') return to;
+/// A context source as the builder reads it: relative to the project, in plain parts. Docker
+/// cleans a source (`filepath.Clean`) and reads `/x` as `x`, so `./x`, `a//b`, `a/./b` and a
+/// trailing `/` are written plainly, and the whole context (`.`, `./`, `/`) as `.`, the one
+/// dot spelling the parser takes (docs/decisions/2026-11-14-m9-copy-dot-whole-project.md). A
+/// `..` part is kept, for the parser to refuse.
+fn project_path(t: *Translator, line: u32, source: []const u8) Refused![]const u8 {
     const start = t.out.mark();
-    try t.out.push(t.refusal(), line, to);
-    try t.out.push(t.refusal(), line, "/");
-    return t.out.since(start);
+    var parts = std.mem.tokenizeScalar(u8, source, '/');
+    while (parts.next()) |part| {
+        if (std.mem.eql(u8, part, ".")) continue;
+        if (t.out.since(start).len > 0) try t.out.push(t.refusal(), line, "/");
+        try t.out.push(t.refusal(), line, part);
+    }
+    const result = t.out.since(start);
+    assert(result.len <= source.len);
+    if (result.len == 0) return ".";
+    assert(result[0] != '/');
+    return result;
 }
 
 const archives = [_][]const u8{

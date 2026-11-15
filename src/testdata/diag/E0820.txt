@@ -1,0 +1,5 @@
+error[ZBX-E0820]: a fetch could not be downloaded
+  cause  https://example.org/tool-1.2.tar.gz answered HTTP 404, not 200
+  fix    check the URL, or put the bytes in the store with an earlier build on a host that can reach it
+  more   zbx explain E0820 · rerun with --verbose for the full cause chain
+  docs   https://zigbox.github.io/zigbox/errors/E0820.html

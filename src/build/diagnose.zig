@@ -18,6 +18,8 @@ const fs_mod = @import("../store/fs.zig");
 const assemble_mod = @import("assemble.zig");
 const result_mod = @import("result.zig");
 const tree_mod = @import("../store/tree.zig");
+const fetch_mod = @import("fetch.zig");
+const net_mod = @import("../registry/net.zig");
 const Diag = @import("../diag/diag.zig").Diag;
 const Digest = @import("../store/digest.zig").Digest;
 
@@ -163,7 +165,7 @@ fn parse_fix(diag: *Diag, problem: *const file_mod.Problem) void {
         .unknown_field => {
             var fields: [sentence_bytes_max]u8 = undefined;
             var writer = std.Io.Writer.fixed(&fields);
-            // The longest list, a step's, is fourteen short names: it fits.
+            // The longest list, a step's, is sixteen short names: it fits.
             write_fields(&writer, problem.level.allowed()) catch unreachable;
             fix_sentence(diag, "use a field that {s} takes: {s}", .{ level, writer.buffered() });
         },
@@ -198,10 +200,44 @@ fn parse_fix(diag: *Diag, problem: *const file_mod.Problem) void {
     }
 }
 
+/// The fixes of the problems of `.expect` and `.output_exclude` (M9 slice 3c).
+fn pin_fix(diag: *Diag, kind: file_mod.ProblemKind) void {
+    assert(diag.code != null);
+    const sentence: []const u8 = switch (kind) {
+        .bad_expect => "write .expect as the output digest a build printed, b3: and 64 " ++
+            "lowercase hex digits, or remove it and run zbx build --pin",
+        .expect_without_network => "remove .expect: a step without .network = true is " ++
+            "keyed by what it reads, so its output needs no pin",
+        .expect_with_caches => "remove .expect, or remove the step's .caches: what a cache " ++
+            "holds is not in the key, so the output cannot be pinned",
+        .bad_output_exclude => "write each .output_exclude entry as an absolute path other " ++
+            "than /, with no empty, . or .. part, for example \"/var/log\"",
+        .output_exclude_on_copy => "remove .output_exclude from the copy step: leave a path " ++
+            "out by not copying it",
+        else => unreachable, // `value_fix` sends only these kinds.
+    };
+    assert(sentence.len > 0);
+    diag.fix(.{ .sentence = sentence });
+}
+
+/// The fixes of a `.fetch` that does not load (`value_fix`'s).
+fn fetch_fix(diag: *Diag, kind: file_mod.ProblemKind) void {
+    assert(diag.code != null);
+    assert(kind != .bad_step_name);
+    diag.fix(.{ .sentence = switch (kind) {
+        .bad_fetch_url => "write .url as an https:// URL (http:// only to localhost or 127.x), " ++
+            "ending in a file name when .to ends in /",
+        .bad_sha256 => "write .sha256 as the file's 64 lowercase hex digits, as sha256sum " ++
+            "prints them",
+        else => "give a copy entry .fetch or .from and .src, not both; a fetch takes no .exclude",
+    } });
+}
+
 /// The fixes of the problems of one value (`describe_value`'s).
 fn value_fix(diag: *Diag, problem: *const file_mod.Problem) void {
     assert(diag.code != null);
     assert(problem.word_len <= problem.word.len);
+    if (pin_problem(problem.kind)) return pin_fix(diag, problem.kind);
     var word_echo: Echo = undefined;
     const word = text_util.sanitise(&word_echo, problem.word_text());
     switch (problem.kind) {
@@ -242,12 +278,13 @@ fn value_fix(diag: *Diag, problem: *const file_mod.Problem) void {
             "empty, . or .. part, for example \"/cache\"" }),
         .bad_copy_to => diag.fix(.{ .sentence = "write .to as an absolute path written " ++
             "plainly, ending in / for a directory, for example \"/app/\"" }),
+        .bad_fetch_url, .bad_sha256, .fetch_and_source => fetch_fix(diag, problem.kind),
         .bad_mode => diag.fix(.{ .sentence = "write the mode as 3 or 4 octal digits, for " ++
             "example \"0755\"" }),
         .bad_pattern => diag.fix(.{ .sentence = "write a glob: * ? [a-z] and ** work, a \\ " ++
             "quotes a byte, and no part is .." }),
         .bad_project_source => diag.fix(.{ .sentence = "name project paths plainly, with no " ++
-            "trailing /: for the whole project write .src = .{\"*\"} and a .to ending in /" }),
+            "./ or trailing /; .src = .{\".\"} copies the whole project" }),
         .bad_from => diag.fix(.{ .sentence = "write .from as step:<name> of a step, or as " ++
             "an image reference like alpine:3.20" }),
         .bad_source => diag.fix(.{ .sentence = "write .source as a path in the project, or " ++
@@ -310,7 +347,41 @@ fn describe(writer: *std.Io.Writer, problem: *const file_mod.Problem) std.Io.Wri
         .text_too_long => try writer.print("the strings of the file come to more than {d} bytes", .{
             constants.build_pool_bytes,
         }),
+        .fetch_and_source => try writer.print("a copy entry has .fetch and .{s}; a fetch " ++
+            "is the entry's only source", .{field}),
         else => try describe_value(writer, problem.kind, word),
+    }
+}
+
+/// Whether the problem is one of `.expect` or `.output_exclude` (M9 slice 3c).
+fn pin_problem(kind: ProblemKind) bool {
+    return switch (kind) {
+        .bad_expect,
+        .expect_without_network,
+        .expect_with_caches,
+        .bad_output_exclude,
+        .output_exclude_on_copy,
+        => true,
+        else => false,
+    };
+}
+
+/// The problems of `.expect` and `.output_exclude`: `word` is the value, echoed.
+fn describe_pin(writer: *std.Io.Writer, kind: ProblemKind, word: []const u8) !void {
+    assert(pin_problem(kind));
+    assert(word.len <= constants.arg_echo_bytes_max);
+    switch (kind) {
+        .bad_expect => try writer.print(".expect \"{s}\" is not an output digest " ++
+            "(b3: and 64 lowercase hex digits)", .{word}),
+        .expect_without_network => try writer.writeAll(".expect is given on a step " ++
+            "without .network = true"),
+        .expect_with_caches => try writer.writeAll(".expect is given on a step with " ++
+            ".caches, whose output depends on what the caches hold"),
+        .bad_output_exclude => try writer.print("the .output_exclude path \"{s}\" is not " ++
+            "an absolute path written plainly, or is /", .{word}),
+        .output_exclude_on_copy => try writer.writeAll(".output_exclude is given on a " ++
+            "copy step, whose output is only what it copies"),
+        else => unreachable, // `describe_value` sends only `pin_problem` kinds.
     }
 }
 
@@ -318,6 +389,7 @@ fn describe(writer: *std.Io.Writer, problem: *const file_mod.Problem) std.Io.Wri
 fn describe_value(writer: *std.Io.Writer, kind: ProblemKind, word: []const u8) !void {
     assert(@tagName(kind).len > 0);
     assert(word.len <= constants.arg_echo_bytes_max);
+    if (pin_problem(kind)) return describe_pin(writer, kind, word);
     switch (kind) {
         .bad_version => try writer.writeAll(".version is not a whole number from 1"),
         .newer_version => try writer.print(".version is {s}, and this zbx reads version {d}", .{
@@ -353,10 +425,16 @@ fn describe_value(writer: *std.Io.Writer, kind: ProblemKind, word: []const u8) !
             "plainly (no empty, . or .. part)", .{word}),
         .bad_copy_to => try writer.print(".to \"{s}\" is not an absolute path written " ++
             "plainly, which may end in /", .{word}),
+        .bad_fetch_url => try writer.print(".url \"{s}\" is not an https:// URL (or http:// " ++
+            "to loopback) of at most {d} bytes naming a file", .{
+            word,
+            constants.registry_url_bytes_max,
+        }),
+        .bad_sha256 => try writer.print(".sha256 \"{s}\" is not 64 lowercase hex digits", .{word}),
         .bad_mode => try writer.print("the mode \"{s}\" is not 3 or 4 octal digits", .{word}),
         .bad_pattern => try writer.print("the pattern \"{s}\" is not a valid glob", .{word}),
         .bad_project_source => try writer.print("the project source \"{s}\" has an empty " ++
-            "or . part; a project source is a relative path written plainly", .{word}),
+            "or . part; a project source is . or a relative path written plainly", .{word}),
         .bad_from => try writer.print(".from \"{s}\" is not step:<name> or an image " ++
             "reference", .{word}),
         .bad_source => try writer.print(".source \"{s}\" is not a path inside what it " ++
@@ -632,6 +710,7 @@ fn list_max(level: Level, field: ?Field) u32 {
         .binds => constants.build_step_binds_max,
         .exclude => constants.build_exclude_lines_max,
         .src => constants.build_copy_sources_max,
+        .output_exclude => constants.build_output_excludes_max,
         else => 0,
     };
     assert(result <= constants.build_strings_max);
@@ -650,6 +729,7 @@ fn level_name(level: Level) []const u8 {
         .copy => "a copy entry",
         .cache => "a cache entry",
         .bind => "a bind entry",
+        .fetch => "a copy entry's .fetch",
     };
     assert(name.len > 0);
     return name;
@@ -1462,6 +1542,93 @@ pub fn result_operand(diag: *Diag, operand: []const u8, absent: bool) void {
     diag.context("arg", "{s}", .{echo});
 }
 
+/// The URL of a fetch as a message shows it: control bytes replaced, a long one cut.
+const UrlEcho = [256]u8;
+
+/// ZBX-E0820: a fetch could not be downloaded. A failure to write the blob cache is not this
+/// code: it is E0416 or E0417, as a pull's is (`registry/diagnose.zig` `cache_failed`).
+pub fn fetch_failed(diag: *Diag, step: []const u8, url: []const u8, reason: fetch_mod.Reason) void {
+    assert(diag.code == null);
+    assert(reason != .mismatch);
+    assert(reason != .io);
+    var url_echo: UrlEcho = undefined;
+    const shown = text_util.sanitise(&url_echo, url);
+    diag.raise(.E0820);
+    diag.while_("downloading the .fetch of build step \"{s}\"", .{step});
+    switch (reason) {
+        .status => |status| diag.cause("{s} answered HTTP {d}, not 200", .{ shown, status }),
+        .network => |err| diag.cause("{s} could not be read: {s}", .{ shown, network_words(err) }),
+        .too_large => diag.cause("{s} sent more than {d} MiB, the most a fetch may hold", .{
+            shown, constants.build_fetch_bytes_max / (1024 * 1024),
+        }),
+        .redirects => diag.cause("{s} redirected more than {d} times", .{
+            shown, constants.build_fetch_redirects_max,
+        }),
+        .refused => |refusal| diag.cause("{s} redirected {s}", .{ shown, refusal_words(refusal) }),
+        .io, .mismatch => unreachable, // Asserted above.
+    }
+    diag.context("step", "{s}", .{step});
+    diag.context("url", "{s}", .{shown});
+    diag.fix(.{ .sentence = "check the URL, or put the bytes in the store with an earlier " ++
+        "build on a host that can reach it" });
+    assert(diag.code.? == .E0820);
+}
+
+fn network_words(err: net_mod.Error) []const u8 {
+    assert(@errorName(err).len > 0);
+    return switch (err) {
+        error.UnknownHost => "no address was found for its host",
+        error.ConnectFailed, error.TimedOut => "the connection could not be made",
+        error.ProxyFailed => "the proxy refused the connection",
+        error.TlsUntrusted => "its certificate is not signed by a trusted authority",
+        error.TlsExpired => "its certificate has expired",
+        error.TlsHostMismatch => "its certificate names another host",
+        error.TlsFailed => "the TLS handshake failed",
+        error.NoCertificates => "no CA certificates could be loaded to check it",
+        error.Stalled => "the server stopped sending",
+        error.Truncated => "the connection closed before the whole file arrived",
+        error.TooLarge, error.BadResponse => "the answer is not usable HTTP",
+        error.Unsupported => "the request is not one this build can make",
+        error.SinkFailed, error.SourceFailed, error.IoFailed => "the connection failed",
+    };
+}
+
+fn refusal_words(refusal: fetch_mod.Refusal) []const u8 {
+    assert(@backingInt(refusal) <= @backingInt(fetch_mod.Refusal.malformed));
+    return switch (refusal) {
+        .http => "to plain http, which only a loopback host may use",
+        .loopback => "from a host that is not loopback to one that is",
+        .malformed => "to a place that cannot be followed (no Location, or not an http URL)",
+    };
+}
+
+/// ZBX-E0821: the fetched bytes are not the ones `.sha256` pins. Either side can be wrong, so
+/// there are two fixes.
+pub fn fetch_mismatch(
+    diag: *Diag,
+    step: []const u8,
+    url: []const u8,
+    expected: *const [64]u8,
+    received: *const [64]u8,
+) void {
+    assert(diag.code == null);
+    assert(!std.mem.eql(u8, expected, received));
+    var url_echo: UrlEcho = undefined;
+    const shown = text_util.sanitise(&url_echo, url);
+    diag.raise(.E0821);
+    diag.while_("downloading the .fetch of build step \"{s}\"", .{step});
+    diag.cause("the bytes downloaded are not those .sha256 pins", .{});
+    diag.cause("{s} sent sha256:{s}", .{ shown, received });
+    diag.context("step", "{s}", .{step});
+    diag.context("url", "{s}", .{shown});
+    diag.context("expect", "sha256:{s}", .{expected});
+    diag.context("actual", "sha256:{s}", .{received});
+    fix_sentence(diag, "if .sha256 (or ADD --checksum) was copied wrongly, correct it; it " ++
+        "pins sha256:{s}", .{expected});
+    diag.fix(.{ .sentence = "otherwise find out why the file changed before trusting it" });
+    assert(diag.code.? == .E0821);
+}
+
 test "network_names joins the names and cuts what does not fit with an ellipsis" {
     // Goal: the W0801 cause always fits its field, names the steps in order, and says when it
     // left some out. Method: names that fit exactly, one past, and a single name too long.
@@ -1522,4 +1689,62 @@ test "the step-name hint's example is a .base line the build file parser takes" 
     const parsed = file_mod.parse(text, file, &problem);
     try std.testing.expectEqual(file_mod.ParseResult.parsed, parsed);
     try std.testing.expectEqualStrings("step:build", file.text(file.steps[1].base));
+}
+
+// ---- Output pins (M9 slice 3c) --------------------------------------------------------------
+
+/// `E0822` under `--locked` or `--hermetic`, else `W0803`: the pinned step `name` produced
+/// `got`, not its pin `pinned`. The JSON view has the step and both digests as fields.
+pub fn pin_drifted(diag: *Diag, locked: bool, name: []const u8, pinned: Digest, got: Digest) void {
+    assert(diag.code == null);
+    assert(!pinned.eql(got));
+    diag.raise(if (locked) .E0822 else .W0803);
+    diag.while_("checking step {s} against its pin", .{name});
+    diag.cause("step {s} produced {s}, and its pin is {s}", .{ name, got.text(), pinned.text() });
+    diag.context("step", "{s}", .{name});
+    diag.context("pinned", "{s}", .{pinned.text()});
+    diag.context("output", "{s}", .{got.text()});
+    if (locked) {
+        diag.fix(.{ .sentence = "build without --locked to see the new output; to accept " ++
+            "it, delete the pin from zbx.lock and run zbx build --pin, or edit .expect" });
+    } else {
+        diag.fix(.{ .sentence = "to accept the new output, delete the pin from zbx.lock " ++
+            "and run zbx build --pin, or edit .expect" });
+    }
+    assert(diag.code != null);
+}
+
+/// `E0822` under `--locked` or `--hermetic`: the lock's pin for step `name` was recorded for
+/// `pinned_key`, and the step's key is now `key`, so the pin says nothing about this step.
+pub fn pin_stale(diag: *Diag, name: []const u8, pinned_key: Digest, key: Digest) void {
+    assert(diag.code == null);
+    assert(!pinned_key.eql(key));
+    diag.raise(.E0822);
+    diag.while_("checking step {s} against its pin", .{name});
+    diag.cause("the pin of step {s} is stale: it was recorded for key {s}, and the step's " ++
+        "key is now {s}", .{ name, pinned_key.text(), key.text() });
+    diag.context("step", "{s}", .{name});
+    diag.context("pinned", "{s}", .{pinned_key.text()});
+    diag.context("key", "{s}", .{key.text()});
+    diag.fix(.{ .sentence = "run zbx build --pin: it replaces the stale pin with the " ++
+        "changed step's" });
+    assert(diag.code.? == .E0822);
+}
+
+/// `E0814` from `zbx build --hermetic`: step `name` has a cache mount (`cache`), or the network
+/// and no pin.
+pub fn hermetic_step(diag: *Diag, name: []const u8, cache: bool) void {
+    assert(diag.code == null);
+    assert(name.len > 0);
+    diag.raise(.E0814);
+    diag.while_("planning the build", .{});
+    if (cache) {
+        diag.cause("step {s} has a cache mount, which --hermetic refuses", .{name});
+        diag.fix(.{ .sentence = "drop the step's .caches, or build without --hermetic" });
+    } else {
+        diag.cause("step {s} uses the network and has no pin, which --hermetic refuses", .{name});
+        diag.fix(.{ .sentence = "pin it with zbx build --pin, or give it .expect" });
+    }
+    diag.context("step", "{s}", .{name});
+    assert(diag.code.? == .E0814);
 }
