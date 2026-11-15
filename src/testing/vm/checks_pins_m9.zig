@@ -153,7 +153,9 @@ pub fn steady_of(report: *const m9.Report, pin: *const Pin) Error!Steady {
     return steady;
 }
 
-/// Without `--locked`: exit 0, W0803 naming the same two digests, and `use` missed.
+/// Without `--locked`: exit 0, W0803 naming the same pin and an output that is not it, and `use`
+/// missed. The refused output was not cached, so this build ran the step again: in the VM a
+/// fresh uuid, so its output need not be the refused one.
 pub fn check_drift_warned(
     report: *const m9.Report,
     stderr: []const u8,
@@ -164,7 +166,7 @@ pub fn check_drift_warned(
     try m9.check_warnings(stderr, &.{"ZBX-W0803"});
     const drift = drift_of(stderr) orelse return error.PinWrong;
     if (!std.mem.eql(u8, &drift.pinned, &refused.pinned)) return error.PinWrong;
-    if (!std.mem.eql(u8, &drift.output, &refused.output)) return error.PinWrong;
+    if (std.mem.eql(u8, &drift.output, &drift.pinned)) return error.PinWrong;
     const use = report.row("use") orelse return error.ReportWrong;
     if (use.hit) return error.PinWrong;
 }
@@ -310,6 +312,8 @@ test "the drift warning names the refusal's digests, and use misses" {
     try testing.expectError(error.ReportWrong, check_drift_warned(&report, refusal, 0, &drift));
     var other = drift;
     other.output[3] = '3';
+    try check_drift_warned(&report, warned, 0, &other);
+    other.pinned[3] = '3';
     try testing.expectError(error.PinWrong, check_drift_warned(&report, warned, 0, &other));
     report.rows[0].hit = true;
     try testing.expectError(error.PinWrong, check_drift_warned(&report, warned, 0, &drift));

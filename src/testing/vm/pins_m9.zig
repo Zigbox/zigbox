@@ -3,8 +3,8 @@
 //! needs it. In the first VM (`step_pin`): `--pin` writes one pin and a version 2 lock, and
 //! `--locked` is all hits with the lock unchanged. In the second VM, a fresh store
 //! (`step_drift`): `--locked` is E0822 naming both digests, `use` never runs and the lock is
-//! unchanged; without `--locked` the build passes with W0803 naming the same digests, and `use`
-//! misses. The uuid stands in for a changed download (recorded in docs/demos/m9.md).
+//! unchanged; without `--locked` the build passes with W0803 naming the same pin, and `use`
+//! misses. The refused output is not cached, so that build runs `fetch` again: a new uuid.
 //!
 //! Every assertion is a function of checks_pins_m9.zig with a unit test.
 
@@ -237,7 +237,7 @@ pub fn step_drift(session: *Session, out: *Io.Writer, timer: *H.Timer) !void {
         return fail_step(out, step8, "expected the text build report", err);
     };
     checks.check_drift_warned(&report, warned.streams.stderr, warned.status, &drift) catch |err| {
-        return fail_step(out, step8, "expected W0803 naming the same digests, use a miss", err);
+        return fail_step(out, step8, "expected W0803 naming the same pin, use a miss", err);
     };
     try expect_lock(session, out, pinned);
     try steady_second(session, out, pinned);
