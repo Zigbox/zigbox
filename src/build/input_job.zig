@@ -22,6 +22,8 @@ const roots = @import("../store/roots.zig");
 const step_mod = @import("step.zig");
 const inputs_mod = @import("inputs.zig");
 const diagnose = @import("diagnose.zig");
+const fetch_tree = @import("fetch_tree.zig");
+const oci_digest = @import("../registry/digest.zig");
 
 const Host = host_mod.Host;
 const Digest = digest_mod.Digest;
@@ -39,8 +41,16 @@ pub const Request = struct {
     step: u8,
     /// A copy entry of the step (an index into its entries): import its `.src`, not `.inputs`.
     entry: ?u32 = null,
+    /// A fetch: read the blob into a one-file tree (`fetch_tree`), not the project.
+    fetch: ?Fetch = null,
     ws: *input_tree.Workspace,
     problem: *inputs_mod.Problem,
+};
+
+/// The blob a fetch entry downloaded, and the name of its file in the tree.
+pub const Fetch = struct {
+    sha256: oci_digest.Sha256,
+    name: []const u8,
 };
 
 const Job = struct {
@@ -118,6 +128,14 @@ fn job_call(context: *anyopaque, squash_owner: bool) u8 {
 }
 
 fn imported(request: *const Request, diag: *Diag) ?Digest {
+    if (request.fetch) |fetch| {
+        assert(request.entry != null);
+        const tree = fetch_tree.import(request.store, request.ws, fetch.sha256, fetch.name, diag);
+        const digest = tree orelse return null;
+        const name = request.loaded.file.text(request.loaded.file.steps[request.step].name);
+        if (!root_tree(request.store, digest, name, diag)) return null;
+        return digest;
+    }
     const loaded = request.loaded;
     const fs = request.host.filesystem();
     const project = fs.open_directory(loaded.project.text()) catch |err| {

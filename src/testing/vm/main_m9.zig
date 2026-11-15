@@ -8,6 +8,7 @@
 //! ACCEPT (accept_m9.zig): the fixtures through the binary, the graph, comments, the refusals,
 //!   a clean store.
 //! AGENT (agent_m9.zig): `zbx import`, `build` and `explain` by JSON only.
+//! FETCH (fetch_m9.zig): step 7, a pinned `ADD` served in the guest (fixture_http.zig).
 //! PIN (pins_m9.zig): step 8's `--pin`, then `--locked` all hits with the pin's key and output,
 //!   `--pin --locked` E0005, and `steady` pinned.
 //!
@@ -26,6 +27,7 @@ const accept = @import("accept_m9.zig");
 const agent = @import("agent_m9.zig");
 const pins = @import("pins_m9.zig");
 const common = @import("common_m4.zig");
+const fetch = @import("fetch_m9.zig");
 const harness = @import("harness.zig");
 const hello = @import("hello_m9.zig");
 const image = @import("image.zig");
@@ -112,6 +114,7 @@ fn start_vm(context: Context, session: *Session, name: []const u8) !void {
         .binary = context.binary,
         .old_binary = &.{},
         .ca_file = context.ca_file,
+        .extra = &fetch.routes,
     });
 }
 
@@ -149,6 +152,7 @@ const parts = [_]*const fn (*Session, *Io.Writer, *H.Timer) anyerror!void{
     hello.step_first,
     accept.step_accept,
     agent.run_agent,
+    fetch.step_fetch,
     pins.step_pin,
 };
 
@@ -158,6 +162,7 @@ test {
     _ = @import("hello_m9.zig");
     _ = @import("accept_m9.zig");
     _ = @import("agent_m9.zig");
+    _ = @import("checks_fetch_m9.zig");
     _ = @import("checks_pins_m9.zig");
     _ = @import("pins_m9.zig");
 }

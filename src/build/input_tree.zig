@@ -7,8 +7,10 @@
 //! (`RESOLVE_BENEATH | RESOLVE_NO_MAGICLINKS`): no path can leave the project, whatever the disk
 //! does while the build reads it. A declared input's links are followed (beneath; `inputs.zig`
 //! has already refused one that leads out). Inside a directory input nothing is followed: a link
-//! is imported as a link, its text in the tree and so in the key. A device, a FIFO or a socket is
-//! refused (E0803). The key is computed from what was read, never from a second look.
+//! is imported as a link, its text in the tree and so in the key. So is a link at the top of the
+//! project that the whole project (`.`) matched, as Docker's `COPY .` keeps it. A device, a FIFO
+//! or a socket is refused (E0803). The key is computed from what was read, never from a second
+//! look.
 //!
 //! What the tree records is normalised, so that two checkouts of one commit give one key: every
 //! owner is 0, no extended attribute is kept, a directory is 0755, a file is 0755 if its owner
@@ -160,6 +162,7 @@ pub fn import(request: Request, ws: *Workspace, problem: *Problem, diag: *Diag) 
         .lines = &.{},
         .negation = false,
         .scan_depth = 0,
+        .follow = true,
     };
     run.read_lines(request.exclude orelse .{ request.file.exclude, step.exclude, .none });
     return run.go();
@@ -179,6 +182,9 @@ const Run = struct {
     /// Some exclude line starts with `!`: an excluded directory is still entered.
     negation: bool,
     scan_depth: u32,
+    /// The declared input being imported names its path: a link there is followed. A path the
+    /// whole project (`.`) matched is kept as it is, a link as a link, as Docker copies it.
+    follow: bool,
 
     fn read_lines(run: *Run, spans: [3]file_mod.Span) void {
         var count: u32 = 0;
@@ -208,6 +214,7 @@ const Run = struct {
         try run.push_made_up(0);
         for (order[0..kept]) |index| {
             run.input = run.inputs[run.ws.matches.entries[index].input];
+            run.follow = !file_mod.is_whole_project(run.request.file.text(run.input));
             const text = run.ws.matches.get(index);
             assert(inputs_mod.is_plain_relative(text));
             try run.close_to(text);
@@ -497,13 +504,15 @@ const Run = struct {
     // ---- One entry --------------------------------------------------------------------------
 
     /// Imports the entry at `ws.path[0..path_len]` into the top frame. `declared`: it is a
-    /// declared input, whose links are followed; inside a directory input none is.
+    /// declared input, whose links are followed unless `.` matched it; inside a directory input
+    /// none is.
     fn entry(run: *Run, path_len: u32, declared: bool) Error!void {
         assert(path_len > 0);
         assert(run.ws.path[path_len] == 0);
         const fs = run.request.store.fs;
         const path = run.ws.path[0..path_len :0];
-        const how: fs_mod.Beneath = if (declared) .path_follow else .path_entry;
+        const follow = if (declared) run.follow else false;
+        const how: fs_mod.Beneath = if (follow) .path_follow else .path_entry;
         const handle = fs.open_beneath(run.request.project, path, how) catch |err|
             return run.source_failed(err, path_len);
         defer fs.close(handle);
@@ -520,7 +529,8 @@ const Run = struct {
                 try run.push_walked(path_len, stat.inode);
             },
             .symlink => {
-                assert(!declared); // `path_follow` resolved every link.
+                // `path_follow` resolved every link.
+                if (declared) assert(!run.follow);
                 const target = fs.read_link_fd(handle, &run.ws.link_target) catch |err| {
                     if (err == error.FileTooLarge) return run.limit(.target, path_len);
                     return run.source_failed(err, path_len);

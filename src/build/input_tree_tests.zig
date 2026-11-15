@@ -311,6 +311,24 @@ test "a glob input brings in the paths it matches and a matched directory whole"
     try testing.expect(!try has(dirs, "README"));
 }
 
+test "the whole project keeps a top-level link as a link; a declared link is followed" {
+    // Goal: `.` imports a link at the top of the project as Docker copies it, a link with its
+    // text, while a link the file names is followed. Method: import `.`, then `link`.
+    start(13);
+    files.put_symlink(proj ++ "/link", "src");
+    parse("\".\"");
+    const whole = try import_inputs();
+    var entry: tree.Entry = undefined;
+    try testing.expect(try entry_of(whole, "link", &entry));
+    try testing.expectEqual(tree.Kind.symlink, entry.kind);
+    try testing.expect(try entry_of(whole, "src", &entry));
+    try testing.expectEqual(tree.Kind.dir, entry.kind);
+    parse("\"link\"");
+    const named = try import_inputs();
+    try testing.expect(try entry_of(named, "link", &entry));
+    try testing.expectEqual(tree.Kind.dir, entry.kind);
+}
+
 test "a glob that matches nothing is refused, and an input a glob and a path both name is once" {
     // Goal: an empty glob is an error naming the input; overlap between globs and plain inputs
     // is merged, not refused. Method: `*.zig` matches nothing; `src` plus `src/*.c` equals `src`.

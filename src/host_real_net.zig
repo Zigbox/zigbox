@@ -1059,7 +1059,7 @@ fn probe_request(port: u16, idle_ms: u32, total_ms: u32) net.Request {
     };
 }
 
-const Probed = struct { status: u16, content_length: ?u64 };
+const Probed = struct { status: u16, content_length: ?u64, body_len: u64 };
 
 /// One GET straight through the real network; only the error set, so a failed `expectError`
 /// does not print a whole head.
@@ -1069,7 +1069,11 @@ fn probe(loopback: *Loopback, request: *const net.Request, storage: []u8) net.Er
     var head: net.Head = .{};
     try interface(&real).get(request, &head, sink.sink());
     _ = loopback;
-    return .{ .status = head.status, .content_length = head.content_length };
+    return .{
+        .status = head.status,
+        .content_length = head.content_length,
+        .body_len = head.body_len,
+    };
 }
 
 fn buffers_are_zero(buffers: *const Buffers) bool {
@@ -1247,7 +1251,8 @@ test "a closed port is a refused connection, with the errno" {
 }
 
 test "answers that are not usable: garbage, a fat head, a body over the bound" {
-    // Goal: BadResponse, TooLarge for the head and for the body, SinkFailed for a full sink.
+    // Goal: BadResponse, TooLarge for the head and for the body, SinkFailed for a full sink;
+    // a chunked body of exactly body_bytes_max is whole, and one byte more is TooLarge.
     var loopback: Loopback = undefined;
     var storage: [4096]u8 = undefined;
     try loopback.start(.garbage);
@@ -1269,6 +1274,12 @@ test "answers that are not usable: garbage, a fat head, a body over the bound" {
     const answered = try probe(&loopback, &request, &storage);
     try testing.expectEqual(@as(u16, 200), answered.status);
     try testing.expectEqual(@as(?u64, null), answered.content_length);
+    try testing.expect(answered.body_len > 1);
+    request.body_bytes_max = answered.body_len;
+    const exact = try probe(&loopback, &request, &storage);
+    try testing.expectEqual(answered.body_len, exact.body_len);
+    request.body_bytes_max = answered.body_len - 1;
+    try testing.expectError(error.TooLarge, probe(&loopback, &request, &storage));
 }
 
 test "a tunnel: CONNECT with the proxy's credentials, a refusal, and no TLS behind it" {
