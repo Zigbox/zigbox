@@ -12,7 +12,7 @@
 //! for this command only. A value of `env` is never kept or printed: the history the exec leaves
 //! beside the container's log (`exec_history.zig`) has the command and how it ended.
 //!
-//! Storage belongs to the caller: a `Handle` (about 800 KiB; `constants.exec_handle_bytes_max`)
+//! Storage belongs to the caller: a `Handle` (under `constants.exec_handle_bytes_max`, 640 KiB)
 //! holds the plan, the container's environment and files, and the state of the exec. The
 //! thread that calls `start` must call `wait`, and must be the process's only thread when it
 //! calls `start` (namespaces are joined in a forked child, as for a run).
@@ -162,6 +162,13 @@ pub const Handle = struct {
     }
 };
 
+comptime {
+    // A caller (zbx, or Zigcube's worker) sizes static or heap storage for a `Handle` from this
+    // bound; it is about 400 KiB today, too big for a thread's stack.
+    assert(@sizeOf(Handle) <= constants.exec_handle_bytes_max);
+    assert(constants.exec_handle_bytes_max > 64 * 1024);
+}
+
 /// Starts the command. On return it runs and `handle` is `running`; on `StartFailed` it did not,
 /// nothing it made is left, and `diag` says why. `handle` must not move until `wait` returns.
 pub fn start(
@@ -208,7 +215,8 @@ pub fn start(
 
 const all_namespaces: u8 = 0x3f;
 
-fn init_handle(host: Host, spec: *const Spec, options: Options, handle: *Handle) void {
+/// Sets `handle` up as a start that has not begun, for a caller that may refuse before `start`.
+pub fn init_handle(host: Host, spec: *const Spec, options: Options, handle: *Handle) void {
     assert(spec.command.len > 0);
     assert(@intFromPtr(handle) != @intFromPtr(spec));
     handle.host = host;
@@ -297,7 +305,19 @@ fn find_container(
     record: *records.Parsed,
     diag: *Diag,
 ) Error!void {
+    try find_running(host, name, record, diag);
+    handle.name.print("{s}", .{record.name_slice()});
+    handle.container_pid = record.pid;
+    handle.scope.print("{s}", .{record.scope_slice()});
+    assert(handle.name.len > 0);
+}
+
+/// The lookup alone, for callers that have no exec handle (`container_socket.zig`): the record
+/// of the running container `name`, or the diagnostic of why there is none (E0701, E0402,
+/// E0220).
+pub fn find_running(host: Host, name: []const u8, record: *records.Parsed, diag: *Diag) Error!void {
     assert(diag.code == null);
+    assert(name.len > 0);
     var dir: records.Dir = undefined;
     if (!records.locate(host, &dir)) {
         diagnose.no_such_container(diag, name, .no_state);
@@ -315,10 +335,7 @@ fn find_container(
         exec_diagnose.not_running(diag, name, state == .lost, record);
         return error.StartFailed;
     }
-    handle.name.print("{s}", .{record.name_slice()});
-    handle.container_pid = record.pid;
-    handle.scope.print("{s}", .{record.scope_slice()});
-    assert(handle.name.len > 0);
+    assert(record.pid > 1);
 }
 
 /// The container's environment, as its PID 1 was started with it.

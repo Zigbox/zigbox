@@ -231,6 +231,7 @@ test {
     _ = @import("runtime/pasta.zig");
     _ = @import("runtime/net_tests.zig");
     _ = @import("runtime/listen_tests.zig");
+    _ = @import("runtime/hosts_file_tests.zig");
     // CI path selection (`.github/ci-changes.sh`).
     _ = @import("ci_changes_tests.zig");
 }
@@ -270,6 +271,7 @@ test {
     _ = @import("runtime/exec_history.zig");
     _ = @import("runtime/exec_tests.zig");
     _ = @import("runtime/exec_worker_tests.zig");
+    _ = @import("runtime/container_socket_tests.zig");
 }
 
 test {
@@ -294,6 +296,15 @@ test {
 
 test {
     _ = @import("build/copy_tests.zig");
+}
+
+test {
+    _ = @import("fuzz_dnf.zig");
+}
+
+test {
+    // The library's start behind the trust gate (docs/briefs/library-trust-gate.md).
+    _ = @import("trust/start_gate_tests.zig");
 }
 
 test {
