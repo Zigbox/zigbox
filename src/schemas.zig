@@ -273,7 +273,8 @@ const doctor_schema =
     \\"ok":{"type":"boolean"},"subject":{"type":"string"},"detail":{"type":"string"}}}},
     \\"checks":{"type":"array","description":"every check, in the order of the text report",
     \\"items":{"type":"object","required":["id","status","detail"],
-    \\"properties":{"id":{"enum":["kernel","userns","cgroup","overlay","subid","seccomp","net"]},
+    \\"properties":{"id":{"enum":["kernel","userns","cgroup","overlay","subid","seccomp","fuse",
+    \\"net"]},
     \\"status":{"enum":["ok","warn","fail"]},"detail":{"type":"string",
     \\"description":"the line of the text report"},
     \\"code":{"type":"string","pattern":"^ZBX-[EW][0-9]{4}$",
@@ -1146,5 +1147,22 @@ test "run and doctor are one object schema without a $ref, as an agent can follo
     const ps_text = of("ps").?;
     for ([_][]const u8{ "\"network\"", "\"published\"", "\"env\"" }) |part| {
         try testing.expect(std.mem.indexOf(u8, ps_text, part) != null);
+    }
+}
+
+test "the doctor schema's id enum is every check the doctor runs, in its order" {
+    // Goal: a new doctor check cannot ship with a schema that refuses its id (S2's fuse check
+    // did, and the M5 agent demo caught it in the VM). Method: the enum read from the parsed
+    // schema against `doctor.CheckId`, member by member.
+    const doctor = @import("doctor.zig");
+    var parsed = try std.json.parseFromSlice(std.json.Value, testing.allocator, doctor_schema, .{});
+    defer parsed.deinit();
+    const checks = parsed.value.object.get("properties").?.object.get("checks").?.object;
+    const item = checks.get("items").?.object.get("properties").?.object;
+    const ids = item.get("id").?.object.get("enum").?.array.items;
+    const names = @typeInfo(doctor.CheckId).@"enum".field_names;
+    try testing.expectEqual(names.len, ids.len);
+    inline for (names, 0..) |name, index| {
+        try testing.expectEqualStrings(name, ids[index].string);
     }
 }
