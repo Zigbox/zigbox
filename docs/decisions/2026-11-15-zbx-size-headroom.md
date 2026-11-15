@@ -52,8 +52,11 @@ and the assertions around it.
 
 | Target | Before | After | Saved |
 |---|---:|---:|---:|
-| x86_64 | 4,188,936 | 3,737,112 | 451,824 (441 KiB) |
-| aarch64 | 3,622,720 | 3,218,904 | 403,816 (394 KiB) |
+| x86_64 | 4,188,936 | 3,749,352 | 439,584 (429 KiB) |
+| aarch64 | 3,622,720 | 3,219,816 | 402,904 (393 KiB) |
+
+The per-cut figures above were measured before the shared helpers gained the assertions that keep
+tidy's two per function (12,240 bytes on x86_64, 912 on aarch64); the table is the final commit.
 
 ## Not done
 
