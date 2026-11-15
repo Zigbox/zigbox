@@ -295,6 +295,10 @@ test {
 }
 
 test {
+    _ = @import("fuzz_dnf.zig");
+}
+
+test {
     // The library's start behind the trust gate (docs/briefs/library-trust-gate.md).
     _ = @import("trust/start_gate_tests.zig");
 }

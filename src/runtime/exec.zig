@@ -12,7 +12,7 @@
 //! for this command only. A value of `env` is never kept or printed: the history the exec leaves
 //! beside the container's log (`exec_history.zig`) has the command and how it ended.
 //!
-//! Storage belongs to the caller: a `Handle` (about 800 KiB; `constants.exec_handle_bytes_max`)
+//! Storage belongs to the caller: a `Handle` (under `constants.exec_handle_bytes_max`, 640 KiB)
 //! holds the plan, the container's environment and files, and the state of the exec. The
 //! thread that calls `start` must call `wait`, and must be the process's only thread when it
 //! calls `start` (namespaces are joined in a forked child, as for a run).
@@ -161,6 +161,13 @@ pub const Handle = struct {
         if (handle.warn) |warn| warn.call(warn.context, diag);
     }
 };
+
+comptime {
+    // A caller (zbx, or Zigcube's worker) sizes static or heap storage for a `Handle` from this
+    // bound; it is about 400 KiB today, too big for a thread's stack.
+    assert(@sizeOf(Handle) <= constants.exec_handle_bytes_max);
+    assert(constants.exec_handle_bytes_max > 64 * 1024);
+}
 
 /// Starts the command. On return it runs and `handle` is `running`; on `StartFailed` it did not,
 /// nothing it made is left, and `diag` says why. `handle` must not move until `wait` returns.
