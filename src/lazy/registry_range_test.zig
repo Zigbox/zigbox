@@ -47,7 +47,7 @@ const World = struct {
     diag: Diag,
     range: registry_range.RegistryRange,
     /// The 401's body length (`expired`).
-    challenge_bytes: usize,
+    challenge_bytes: u32,
     /// Answers of each kind served.
     requests: u32,
     unauthorized: u32,
@@ -97,7 +97,7 @@ fn answer(
     }
     if (self.mode == .expired and self.unauthorized == 0) {
         self.unauthorized += 1;
-        const body = challenge_body[0..self.challenge_bytes];
+        const body = challenge_body[0..@as(usize, self.challenge_bytes)];
         served.* = .{ .status = 401, .www_authenticate = realm, .body = body };
         return;
     }

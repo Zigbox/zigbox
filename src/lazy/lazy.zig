@@ -5,10 +5,10 @@
 //! `partial/<id>/<index>`), then asks the sources in order (the peers a library caller supplies,
 //! then the registry by `Range` on a layer writer 2 blob), hashes every chunk it is given against
 //! the chunk's listed hash and its chaining value, keeps it in the store with `chunks.put_chunk`,
-//! and only then reads it back (checked again) into the caller's buffer. It owns the deadlines, the concurrency
-//! limit, readahead, range coalescing, the background fill and each source's health. It knows
-//! nothing of FUSE: the FUSE server (slice 4) calls `Resolver.read`, and a later VM front end
-//! reuses it unchanged.
+//! and only then reads it back (checked again) into the caller's buffer. It owns the deadlines,
+//! the concurrency limit, readahead, range coalescing, the background fill and each source's
+//! health. It knows nothing of FUSE: the FUSE server (slice 4) calls `Resolver.read`, and a
+//! later VM front end reuses it unchanged.
 //!
 //! What this file fixes, for the FUSE server, the run integration and Zigcube's agent:
 //!

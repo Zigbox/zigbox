@@ -982,7 +982,7 @@ test "resolver: chunks a gc removed are fetched again, never taken as damage" {
     var path: PathBuf = undefined;
     const id = fixture.objects[0].wanted.id;
     const chunk = chunks_mod.partial_chunk(&fixture.store, &path, id, 0);
-    const directory = chunk[0 .. std.mem.lastIndexOfScalar(u8, chunk, '/').?];
+    const directory = chunk[0..std.mem.lastIndexOfScalar(u8, chunk, '/').?];
     fixture.files.remove_path(chunk);
     fixture.files.remove_path(directory);
     try testing.expect(fixture.files.kind_of(directory) == null);

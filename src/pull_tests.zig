@@ -1139,7 +1139,7 @@ const Warned = struct {
     codes: [4]?codes.Code = @splat(null),
     count: u32 = 0,
     text: [512]u8 = undefined,
-    text_len: usize = 0,
+    text_len: u32 = 0,
 
     fn call(context: *anyopaque, diag: *const Diag) void {
         const warned: *Warned = @ptrCast(@alignCast(context));
@@ -1149,7 +1149,7 @@ const Warned = struct {
         const cause = diag.last_cause() orelse "";
         const size = @min(cause.len, warned.text.len);
         @memcpy(warned.text[0..size], cause[0..size]);
-        warned.text_len = size;
+        warned.text_len = @intCast(size);
     }
 };
 

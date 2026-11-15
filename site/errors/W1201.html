@@ -76,7 +76,7 @@ footer{border-top:1px solid var(--line);padding-block:24px;color:var(--muted);
 <p class="summary">the image has no lazy index: pulling it whole</p>
 <dl class="facts"><div><dt>Kind</dt><dd>warning</dd></div><div><dt>Blame</dt><dd>external</dd></div><div><dt>Exit code</dt><dd>3</dd></div></dl>
 <h2>What it means</h2>
-<p>zbx run --lazy starts a container from an image's lazy index: the list of its files and the chunks they are made of, which a zbx with layer writer 2 puts in the image when it pushes it. This image has none: it was pushed by another tool, or by an older zbx.</p>
+<p>zbx run --lazy starts a container from an image's lazy index: the list of its files and the chunks they are made of, which a zbx with layer writer 2 puts in the image when it pushes it. This image has none: it was pushed by another tool, or by an older zbx. Or it has more than one layer: an index covers one layer, so for now such an image is not started lazily.</p>
 <p>The run goes on as without --lazy: the whole image is pulled, then run.</p>
 <h2>Offline</h2>
 <p>The same text, without a network:</p>
