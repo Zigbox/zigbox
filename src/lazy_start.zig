@@ -57,8 +57,11 @@ pub const Workspace = struct {
 pub const Outcome = enum {
     /// The index is verified and the trees are in the store: run lazily.
     lazy,
-    /// No anchor (`W1201` was given to `warn`): pull the image whole.
+    /// No anchor, or more than one layer (`W1201` was given to `warn`): pull the image whole.
     whole,
+    /// The store holds the image whole already: run it from there, as without `--lazy`. Its
+    /// record is left as it is (never rewritten as partial), and nothing was said.
+    local,
 };
 
 /// Resolves `text` (a tag or a digest reference) and readies its lazy start, or says it has no
@@ -90,6 +93,15 @@ pub fn start(
         };
     }
     const resolved = &library.resolved;
+    if (held_whole(store, resolved.manifest_digest, image)) {
+        client_mod.Workspace.wipe(&library.client);
+        return .local;
+    }
+    if (resolved.layer_count != 1) {
+        client_mod.Workspace.wipe(&library.client);
+        warn_layers(warn, text, resolved.layer_count);
+        return .whole;
+    }
     const anchor = resolved.lazy_index orelse {
         client_mod.Workspace.wipe(&library.client);
         warn_no_index(warn, text);
@@ -110,17 +122,44 @@ pub fn start(
 }
 
 /// Wipes the client's token and state; the run that used `ws.range` has ended.
-pub fn finish(pull: *pull_commands.Workspace) void {
+pub fn finish(pull: *pull_commands.Workspace, lazy: ?*Workspace) void {
     assert(pull.library.reference.registry_len > 0);
-    client_mod.Workspace.wipe(&pull.library.client);
+    wipe(pull, lazy);
 }
 
 /// Wipes the client's secrets whether or not a lazy start resolved anything: the `defer` of a
 /// lazy run, so an exit between the start and the run's own `finish` (a refusal by the gate, a
 /// bad flag, a failed compose) leaves no token behind. Wiping twice is harmless.
-pub fn wipe(pull: *pull_commands.Workspace) void {
+/// `lazy` is the start's workspace, whose client holds the token's length: zeroed with the
+/// bytes, so no client reads a wiped token as a live one.
+pub fn wipe(pull: *pull_commands.Workspace, lazy: ?*Workspace) void {
     client_mod.Workspace.wipe(&pull.library.client);
     assert(pull.library.client.token[0] == 0);
+    const ws = lazy orelse return;
+    ws.client.token_len = 0;
+    ws.client.basic_len = 0;
+    assert(ws.client.basic_len == 0);
+}
+
+/// Whether the store has a whole record of `manifest`: a pulled image, which a lazy start must
+/// not turn into a partial one. `image` is only scratch here; the caller loads it again.
+fn held_whole(store: *Store, manifest: Sha256, image: *images.Image) bool {
+    assert(manifest.bytes.len == constants.oci_digest_bytes);
+    assert(@intFromPtr(image) != 0);
+    var errno: u16 = 0;
+    images.load(store, manifest, image, &errno) catch return false;
+    return !image.partial;
+}
+
+/// A lazy index covers one layer: an image of more than one is pulled whole (`W1201`).
+fn warn_layers(warn: ?namespace.Warn, text: []const u8, count: u32) void {
+    assert(text.len > 0);
+    assert(count != 1);
+    const to = warn orelse return;
+    var warning: Diag = undefined;
+    warning.reset();
+    lazy_diagnose.many_layers(&warning, text, count);
+    to.call(to.context, &warning);
 }
 
 fn warn_no_index(warn: ?namespace.Warn, text: []const u8) void {
@@ -148,16 +187,21 @@ fn fetch_index(
     const size: usize = @intCast(anchor.size);
     assert(length <= index_mod.compressed_bytes_max);
     assert(size <= ws.index_bytes.len);
-    var done: usize = 0;
-    while (done < length) {
-        const out = ws.compressed[done..length];
-        const at = anchor.offset + done;
-        const timeout = constants.lazy_read_deadline_ms;
-        const got = client_mod.fetch_range(&ws.client, reference, ws.layer, at, out, timeout, diag);
-        const count = got catch return error.Failed;
-        if (count == 0) return refuse(diag, tree, text, error.Malformed, .inflate);
-        done += count;
-    }
+    const clock: client_mod.Clock = .{ .context = &host, .now_ms = host_now_ms };
+    const out = ws.compressed[0..length];
+    const fetched = registry_range.fetch_whole(
+        &ws.client,
+        reference,
+        ws.layer,
+        anchor.offset,
+        out,
+        clock,
+        diag,
+    );
+    fetched catch |err| switch (err) {
+        error.Short => return refuse(diag, tree, text, error.Malformed, .inflate),
+        error.Failed => return error.Failed,
+    };
     ws.index_fetched = length;
     const bytes = ws.index_bytes[0..size];
     index_mod.inflate_range(&ws.compressed, length, bytes, &ws.window) catch |err| {
@@ -173,6 +217,12 @@ fn fetch_index(
         return refuse(diag, tree, text, err, .tree);
     };
     assert(ws.index.header.complete);
+}
+
+/// The host's monotonic clock, for `client_mod.Deadline`.
+fn host_now_ms(context: *const anyopaque) u64 {
+    const host: *const Host = @ptrCast(@alignCast(context));
+    return host.monotonic_ms();
 }
 
 /// `TooLarge` is the image past a bound of lazy start (E1207); anything else is E1202.

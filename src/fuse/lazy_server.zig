@@ -163,9 +163,21 @@ pub const Server = struct {
         remote.peers = sources;
     }
 
-    /// The run record's `.lazy`, from the resolver's report; null before it started.
+    /// The run record's `.lazy`, from the resolver's report; null before it started. A run that
+    /// serves the store alone (no `attach`: the image is whole in the store) is 100% local,
+    /// with nothing fetched and no resolver.
     fn record(context: *anyopaque) ?records.Lazy {
         const server: *Server = @ptrCast(@alignCast(context));
+        if (server.remote == null) {
+            assert(server.resolving == null);
+            return .{
+                .sources = 0,
+                .demand_bytes = 0,
+                .fill_bytes = 0,
+                .errors = 0,
+                .local_percent = 100,
+            };
+        }
         const found = server.report() orelse return null;
         return record_of(&found, server.source_names().len);
     }

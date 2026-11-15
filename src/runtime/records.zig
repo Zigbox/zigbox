@@ -1099,7 +1099,6 @@ fn parse_binding(value: []const u8, out: *Parsed) bool {
     return true;
 }
 
-/// `"UID:GID"`: two numbers in one spelling each (no sign, no leading zero), as `render` writes.
 /// `.{ .sources = 2, .demand_bytes = 1, .fill_bytes = 0, .errors = 0, .local_percent = 38 }`,
 /// exactly as `write_lazy` writes it: every field, in order.
 fn parse_lazy(value: []const u8, out: *Parsed) bool {
@@ -1140,6 +1139,7 @@ fn strip_affixes(text: []const u8, prefix: []const u8, suffix: []const u8) ?[]co
     return text[prefix.len .. text.len - suffix.len];
 }
 
+/// `"UID:GID"`: two numbers in one spelling each (no sign, no leading zero), as `render` writes.
 fn parse_user(value: []const u8, out: *Parsed) bool {
     assert(value.len > 0);
     assert(value.len <= constants.record_bytes_max);

@@ -3942,7 +3942,7 @@ fn run_container(
     // Before the image is looked for: a lazy start from a registry fetches its index.
     if (given.lazy) try check_lazy(&given, invocation, diag);
     // A lazy start from a registry holds its token for the run: wiped on every way out of it.
-    defer if (given.lazy) lazy_start.wipe(&storage.pull);
+    defer if (given.lazy) lazy_start.wipe(&storage.pull, lazy_workspace);
     var prepared: run_image.Prepared = .{
         .tree = invocation.operand orelse "",
         .command = given.command,
@@ -4161,7 +4161,7 @@ fn lazy_finish(storage: *Storage) void {
     }
     const remote = server.remote != null;
     server.finish();
-    if (remote) lazy_start.finish(&storage.pull);
+    if (remote) lazy_start.finish(&storage.pull, lazy_workspace);
     assert(server.fd == -1);
     assert(server.remote == null);
 }
@@ -4224,7 +4224,7 @@ fn attach_remote(
     const remote = &storage.lazy_remote;
     var store: layout.Store = undefined;
     if (!store.locate(host)) {
-        lazy_start.finish(&storage.pull);
+        lazy_start.finish(&storage.pull, lazy_workspace);
         store_diagnose.no_data_directory(diag);
         return error.StartFailed;
     }

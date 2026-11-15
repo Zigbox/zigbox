@@ -58,6 +58,7 @@ const pasta_mod = @import("pasta.zig");
 const plan_mod = @import("plan.zig");
 const records = @import("records.zig");
 const lazy_mod = @import("../lazy/lazy.zig");
+const lazy_diagnose = @import("../fuse/diagnose.zig");
 const scope_mod = @import("scope.zig");
 const scope_text = @import("scope_text.zig");
 const session_mod = @import("session.zig");
@@ -463,6 +464,7 @@ pub fn start(
     try check_listen(container, diag);
     try check_hosts_file(host, container, diag);
     try check_network(host, container, handle, diag);
+    try check_lazy_sources(options, diag);
     try resolve_mounts(host, container, handle, diag);
     try resolve_devices(host, container, handle, &cdi_storage, diag);
 
@@ -508,6 +510,25 @@ pub fn start(
     handle.pid = handle.session.container_pid;
     // Again, now that the container's pid is known: this is what a later process finds it by.
     save_record(handle, .running, null, null);
+}
+
+/// A library caller's peer sources need a lazy run whose server takes them, and room for the
+/// registry: refused (E1208) before anything is created, never asserted.
+fn check_lazy_sources(options: StartOptions, diag: *Diag) Error!void {
+    assert(diag.code == null);
+    const count = options.lazy_sources.len;
+    if (count == 0) return;
+    const problem: lazy_diagnose.SourcesProblem = if (options.lazy == null)
+        .no_lazy
+    else if (options.lazy.?.peers == null)
+        .no_peers_hook
+    else if (count >= constants.lazy_sources_max)
+        .too_many
+    else
+        return;
+    lazy_diagnose.sources_refused(diag, problem, count);
+    assert(diag.code.? == .E1208);
+    return error.StartFailed;
 }
 
 /// Hands the library caller's peers to the lazy server, then readies it for the image's tree.

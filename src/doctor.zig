@@ -12,7 +12,8 @@
 //!   FAIL  the requirement is not met, or could not be checked. A failed read, a probe that
 //!         could not run and a malformed file are all FAIL with the reason: a fault is never
 //!         reported as ok, and never as warn. A FAIL carries a diagnostic (DIAGNOSTICS.md):
-//!         its check's own code (ZBX-E0101 to E0106, or E1201 for fuse; blame environment),
+//!         its check's own code (ZBX-E0101 to E0106; blame environment; the fuse line never
+//!         fails, it warns with W1203),
 //!         its causes, and at least one fix, with a runnable command where the fix is one. A
 //!         check that could not run uses its own code too, and its cause says that it could not
 //!         run, and why.

@@ -403,6 +403,29 @@ test "serve over a socket pair: INIT answered, requests served, finish stops and
     try testing.expectEqual(null, try peer_reply(paired.peer));
 }
 
+test "a lazy run served from the store alone records its image 100% local" {
+    // Goal: the review's SHOULD 5 for S2 slice 5: a lazy run of an image whole in the store (no
+    // `attach`, so no resolver) shows `local_percent` 100 in its run record and in `ps`, not 0.
+    // Method: a prepared server with nothing attached; its record hook, the run's source of
+    // both, answers 100% local with nothing fetched, before and while it serves.
+    var real: host_real.HostReal = .{};
+    const paired = try paired_create(&real);
+    defer testing.allocator.destroy(paired.server);
+    defer _ = linux.close(paired.peer);
+    const lazy = paired.lazy;
+    const before = lazy.record.?(lazy.context).?;
+    try testing.expectEqual(100, before.local_percent);
+    try testing.expectEqual(0, before.sources);
+    try peer_send(paired.peer, .init, 0, 1, std.mem.asBytes(&init_in));
+    try lazy.serve(lazy.context, paired.device);
+    try testing.expectEqual(0, (try peer_reply(paired.peer)).?.@"error");
+    const serving = lazy.record.?(lazy.context).?;
+    try testing.expectEqual(100, serving.local_percent);
+    try testing.expectEqual(0, serving.demand_bytes + serving.fill_bytes + serving.errors);
+    paired.server.finish();
+    try testing.expectEqual(0, real.open_count);
+}
+
 test "serve over a socket pair: a first request that is not INIT is refused, its end closed" {
     // Goal: a refused handshake closes the descriptor (so the kernel ends the connection) and
     // leaves the server idle, with the refusal the run reports. Method: the peer sends GETATTR

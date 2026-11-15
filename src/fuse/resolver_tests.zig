@@ -546,6 +546,12 @@ fn serve_three(table: *const nodes.Table, contents: *const [3][]const u8) !void 
 }
 
 fn expect_events(kinds: []const lazy.Event.Kind) !void {
+    // A worker that drained the queue logs its batch outside the lock, so the read can return
+    // before the events reach the log: wait for them, in a bound.
+    var waited: u32 = 0;
+    while (remote.events_count.load(.acquire) < kinds.len and waited < 5_000) : (waited += 1) {
+        std.Io.sleep(testing.io, .fromMilliseconds(1), .awake) catch {};
+    }
     const count = remote.events_count.load(.monotonic);
     try testing.expectEqual(kinds.len, count);
     for (kinds, remote.events[0..count]) |kind, event| {

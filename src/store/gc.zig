@@ -57,6 +57,7 @@ const remove = @import("remove.zig");
 const roots = @import("roots.zig");
 const sets = @import("sets.zig");
 const shards = @import("shards.zig");
+const names_mod = @import("names.zig");
 const tree = @import("tree.zig");
 const walk = @import("walk.zig");
 const Sha256 = @import("../registry/digest.zig").Sha256;
@@ -77,8 +78,12 @@ pub const Counts = struct {
     farms: u64 = 0,
     /// Downloaded blobs no image names.
     blobs: u64 = 0,
-    /// Cut downloads nobody has written to for `store_partial_seconds`.
+    /// Cut downloads nobody has written to for `store_partial_seconds`, and partly fetched
+    /// objects no root holds (S2's `partial/<id>/` chunks), as old.
     partials: u64 = 0,
+    /// Of `partials`, the partly fetched objects: removed, not trashed (their chunks can be
+    /// fetched again), so not in the trash's count for a restore.
+    chunk_dirs: u64 = 0,
     /// Leftovers of dead processes in `tmp/`; deleted, not trashed, and not in the hash.
     tmp: u64 = 0,
     /// Pack records (`pack/`) whose tree is not kept; deleted with the tree, not trashed (a
@@ -715,6 +720,18 @@ const Pass = struct {
             .partial => pass.counts.partials += 1,
         }
     }
+
+    /// A partly fetched object's chunks (`enumerate_chunk_dirs`): counted with the cut
+    /// downloads, under a tag of their own in the plan's hash.
+    fn note_chunks(pass: *Pass, id: Digest) void {
+        assert(pass.counts.total() < 1 << 40);
+        assert(id.bytes.len == constants.store_digest_bytes);
+        pass.hasher.update("c");
+        pass.hasher.update(&id.bytes);
+        pass.counts.partials += 1;
+        pass.counts.chunk_dirs += 1;
+        assert(pass.counts.chunk_dirs <= pass.counts.partials);
+    }
 };
 
 fn file_size(run: *Run, path: [:0]const u8) Error!u64 {
@@ -891,6 +908,74 @@ fn enumerate_partials(run: *Run, pass: *Pass) Error!void {
     }
 }
 
+/// The chunks of objects fetched in part (`partial/<id>/`, S2's lazy runs) whose object no root
+/// holds: counted with the cut downloads, and removed by an apply, not trashed (the object is
+/// unreachable, and its chunks can be fetched again). A live object's chunks are a lazy run's,
+/// or a partial image's, and stay; the age keeps a plan from naming what a lazy start is writing
+/// before its record is saved.
+fn enumerate_chunk_dirs(run: *Run, pass: *Pass) Error!void {
+    assert(run.names.len > 0);
+    assert(run.objects.slots.len > 0);
+    const listed = shards.read(run.store, run.names, run.offsets, "partial", null);
+    const found = listed catch |err| return run.io("listing the partly fetched objects", err);
+    const now = run.store.host.time_now();
+    var index: u32 = 0;
+    while (index < found.count()) : (index += 1) {
+        const id = Digest.from_hex(found.name(index)) orelse continue;
+        if (run.objects.get(id) != null) continue; // Live: a root holds the object.
+        var path: PathBuf = undefined;
+        const where = run.store.path(&path, &.{ "/partial/", found.name(index) });
+        const stat = run.store.fs.lstat(where) catch |err| {
+            return run.io("sizing a partly fetched object", err);
+        };
+        if (stat.kind != .dir) continue;
+        if (stat.mtime + constants.store_partial_seconds > now) continue; // Recent: a start's.
+        pass.counts.bytes += try chunk_dir_bytes(run, found.name(index), where);
+        pass.note_chunks(id);
+        if (pass.mode == .apply) try remove_chunk_dir(run, where);
+    }
+}
+
+/// The bytes of the chunk files in `directory`: one listing, and each name's size.
+fn chunk_dir_bytes(run: *Run, hex: []const u8, directory: [:0]const u8) Error!u64 {
+    assert(hex.len == constants.store_digest_bytes * 2);
+    assert(directory.len > hex.len);
+    assert(constants.store_chunks_max <= 9999); // Four digits and the separator each.
+    var listing: [constants.store_chunks_max * 5 + 64]u8 = undefined;
+    var names = names_mod.NameList.init(&listing, constants.store_chunks_max + 8);
+    run.store.fs.read_dir(directory, names.visitor()) catch |err| {
+        return run.io("listing a partly fetched object", err);
+    };
+    var bytes: u64 = 0;
+    var at: u32 = 0;
+    while (at < names.used) {
+        const name = names.at(at);
+        at += @intCast(1 + name.len);
+        var path: PathBuf = undefined;
+        const file = run.store.path(&path, &.{ "/partial/", hex, "/", name });
+        const stat = run.store.fs.lstat(file) catch |err| {
+            return run.io("sizing a chunk", err);
+        };
+        bytes += stat.size;
+    }
+    assert(at == names.used);
+    return bytes;
+}
+
+fn remove_chunk_dir(run: *Run, directory: [:0]const u8) Error!void {
+    assert(directory.len > run.store.root_len);
+    var failure: remove.Failure = undefined;
+    const memory = run.removal_memory();
+    remove.tree(run.store.fs, &run.ws.removal, memory, directory, &failure) catch {
+        run.failure.* = .{ .io = .{
+            .err = failure.err,
+            .errno = failure.errno,
+            .step = "removing a partly fetched object",
+        } };
+        return error.Failed;
+    };
+}
+
 fn ensure_trash_partial(run: *Run, gc: Id) Error!void {
     assert(gc.len == constants.store_gc_id_hex_bytes);
     assert(run.store.root_len > 1);
@@ -1029,6 +1114,7 @@ fn make_plan(run: *Run, pass: *Pass, generation_now: u64) Error!Plan {
     try enumerate_farms(run, pass);
     try enumerate_blobs(run, pass);
     try enumerate_partials(run, pass);
+    try enumerate_chunk_dirs(run, pass);
     return .{ .counts = pass.counts, .hash = pass.hasher.final(), .generation = generation_now };
 }
 
@@ -1150,7 +1236,7 @@ fn move_all(run: *Run, result: *Applied, time: u64) Error!void {
         .trees = result.counts.trees,
         .farms = result.counts.farms,
         .blobs = result.counts.blobs,
-        .partials = result.counts.partials,
+        .partials = result.counts.partials - result.counts.chunk_dirs,
         .bytes = result.counts.bytes,
         .complete = false,
     };
@@ -1168,7 +1254,7 @@ fn move_all(run: *Run, result: *Applied, time: u64) Error!void {
     meta.trees = again.counts.trees;
     meta.farms = again.counts.farms;
     meta.blobs = again.counts.blobs;
-    meta.partials = again.counts.partials;
+    meta.partials = again.counts.partials - again.counts.chunk_dirs;
     meta.bytes = again.counts.bytes;
     meta.complete = true;
     try write_meta(run, result.gc, &meta);

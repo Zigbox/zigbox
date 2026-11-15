@@ -1552,8 +1552,9 @@ fn verify_text(
             "the next gc moves them away)\n", .{totals.orphan_lists}) catch unreachable; // Same.
     }
     if (partial > 0) {
-        writer.print("{d} images are partial (started with --lazy, not every file fetched; " ++
-            "zbx pull completes one)\n", .{partial}) catch unreachable; // Same bound.
+        const noun = if (partial == 1) "image is" else "images are";
+        writer.print("{d} {s} partial (started with --lazy, not every file fetched; " ++
+            "zbx pull completes one)\n", .{ partial, noun }) catch unreachable; // Same bound.
     }
     try put(job, writer.buffered(), diag);
 }

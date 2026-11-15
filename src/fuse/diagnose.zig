@@ -9,6 +9,25 @@ const constants = @import("../constants.zig");
 const Diag = @import("../diag/diag.zig").Diag;
 const Digest = @import("../store/digest.zig").Digest;
 
+/// What is wrong with a library caller's lazy sources (`StartOptions.lazy_sources`).
+pub const SourcesProblem = enum { no_lazy, no_peers_hook, too_many };
+
+/// ZBX-E1208 for a library caller: peer sources a lazy run cannot take. `zbx` passes none.
+pub fn sources_refused(diag: *Diag, problem: SourcesProblem, count: usize) void {
+    assert(count > 0);
+    assert(diag.code == null);
+    diag.raise(.E1208);
+    diag.while_("checking the run's lazy sources", .{});
+    switch (problem) {
+        .no_lazy => diag.cause("{d} peer sources were given to a run that is not lazy", .{count}),
+        .no_peers_hook => diag.cause("{d} peer sources were given, and the run's lazy " ++
+            "server takes none (its peers hook is null)", .{count}),
+        .too_many => diag.cause("{d} peer sources were given, and a lazy run takes at most " ++
+            "{d} beside the registry", .{ count, constants.lazy_sources_max - 1 }),
+    }
+    diag.fix(.{ .sentence = "give peer sources only to a lazy run whose server takes them" });
+}
+
 /// Which bound of the node table a tree too large for it passed.
 pub const Bound = enum { entries, index };
 
@@ -88,6 +107,17 @@ pub fn no_index(diag: *Diag, reference: []const u8) void {
     diag.raise(.W1201);
     diag.while_("starting {s} lazily", .{reference});
     diag.cause("its manifest has no lazy index: no zbx with layer writer 2 pushed it", .{});
+    diag.context("image", "{s}", .{reference});
+    diag.fix(.{ .sentence = "nothing to do: the image is pulled whole, then run" });
+}
+
+/// W1201 for an image of more than one layer: a lazy index covers one layer only.
+pub fn many_layers(diag: *Diag, reference: []const u8, count: u32) void {
+    assert(reference.len > 0);
+    assert(diag.code == null);
+    diag.raise(.W1201);
+    diag.while_("starting {s} lazily", .{reference});
+    diag.cause("it has {d} layers, and a lazy start serves an image of one layer only", .{count});
     diag.context("image", "{s}", .{reference});
     diag.fix(.{ .sentence = "nothing to do: the image is pulled whole, then run" });
 }

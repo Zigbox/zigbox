@@ -14,6 +14,7 @@ const client_mod = @import("../registry/client.zig");
 const digest_mod = @import("../registry/digest.zig");
 const lazy = @import("lazy.zig");
 const reference_mod = @import("../registry/reference.zig");
+const constants = @import("../constants.zig");
 const Diag = @import("../diag/diag.zig").Diag;
 
 pub const RegistryRange = struct {
@@ -88,16 +89,17 @@ fn fetch(context: *anyopaque, offset: u64, out: []u8, timeout_ms: u32) lazy.Fetc
         .raw = .fromMilliseconds(timeout_ms),
         .clock = .awake,
     };
-    const deadline = started.addDuration(allowed);
-    range.take_turn(deadline) catch {
+    const clock: client_mod.Clock = .{ .context = &range.io, .now_ms = io_now_ms };
+    const deadline = client_mod.Deadline.after(clock, timeout_ms);
+    range.take_turn(started.addDuration(allowed)) catch {
         _ = range.failures.fetchAdd(1, .monotonic);
         return error.TimedOut;
     };
     defer range.give_turn();
-    const left = remaining_ms(range.io, deadline) orelse {
+    if (deadline.remaining_ms(timeout_ms) == null) {
         _ = range.failures.fetchAdd(1, .monotonic);
         return error.TimedOut;
-    };
+    }
     range.diag.reset();
     const got = client_mod.fetch_range(
         range.client,
@@ -105,25 +107,70 @@ fn fetch(context: *anyopaque, offset: u64, out: []u8, timeout_ms: u32) lazy.Fetc
         range.blob,
         offset,
         out,
-        left,
+        deadline,
+        timeout_ms,
         &range.diag,
     );
     return got catch |err| {
         _ = range.failures.fetchAdd(1, .monotonic);
         if (err == error.NotFound) return error.NotFound;
         // The wire says why it failed in the `Diag`; a call that used up its time timed out.
-        if (remaining_ms(range.io, deadline) == null) return error.TimedOut;
+        if (deadline.remaining_ms(timeout_ms) == null) return error.TimedOut;
         return error.Failed;
     };
 }
 
-/// The whole milliseconds left before `deadline`; null when none are.
-fn remaining_ms(io: Io, deadline: Io.Clock.Timestamp) ?u32 {
-    assert(deadline.clock == .awake);
-    const now = Io.Clock.Timestamp.now(io, .awake);
-    const left = now.durationTo(deadline).raw.toMilliseconds();
-    if (left <= 0) return null;
-    const bounded: u32 = @intCast(@min(left, std.math.maxInt(u32)));
-    assert(bounded > 0);
-    return bounded;
+/// The awake clock of the `Io` at `context`, in milliseconds.
+fn io_now_ms(context: *const anyopaque) u64 {
+    const io: *const Io = @ptrCast(@alignCast(context));
+    const now = Io.Clock.Timestamp.now(io.*, .awake);
+    assert(now.clock == .awake);
+    const ms = now.raw.toMilliseconds();
+    assert(ms >= 0);
+    return @intCast(ms);
+}
+
+pub const WholeError = error{
+    /// The registry, or the time, failed; the `Diag` says which.
+    Failed,
+    /// The blob ended before `out` was full: the caller's offsets are not this blob's.
+    Short,
+};
+
+/// All of `out`, from `offset` of blob `digest`, before lazy start uses any of it (the index):
+/// as many range requests as the registry's answers take, all of them within
+/// `net_request_timeout_ms` (a registry that drips a byte per answer is cut off), no one longer
+/// than `lazy_read_deadline_ms`.
+pub fn fetch_whole(
+    client: *client_mod.Client,
+    reference: *const reference_mod.Reference,
+    digest: digest_mod.Sha256,
+    offset: u64,
+    out: []u8,
+    clock: client_mod.Clock,
+    diag: *Diag,
+) WholeError!void {
+    assert(out.len > 0);
+    assert(diag.code == null);
+    const deadline = client_mod.Deadline.after(clock, constants.net_request_timeout_ms);
+    const each_ms = constants.lazy_read_deadline_ms;
+    var done: usize = 0;
+    while (done < out.len) {
+        const at = offset + done;
+        const rest = out[done..];
+        const count = client_mod.fetch_range(
+            client,
+            reference,
+            digest,
+            at,
+            rest,
+            deadline,
+            each_ms,
+            diag,
+        ) catch return error.Failed;
+        assert(count <= rest.len);
+        if (count == 0) return error.Short;
+        done += count;
+    }
+    assert(done == out.len);
 }

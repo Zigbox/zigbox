@@ -4639,7 +4639,8 @@ pub const registry = [_]Entry{
         \\zbx run --lazy starts a container from an image's lazy index: the list of
         \\its files and the chunks they are made of, which a zbx with layer writer 2
         \\puts in the image when it pushes it. This image has none: it was pushed
-        \\by another tool, or by an older zbx.
+        \\by another tool, or by an older zbx. Or it has more than one layer: an
+        \\index covers one layer, so for now such an image is not started lazily.
         \\
         \\The run goes on as without --lazy: the whole image is pulled, then run.
         ,
@@ -4748,7 +4749,8 @@ pub const registry = [_]Entry{
         \\an image (not --rootfs, which runs a directory as it is).
         \\
         \\The cause names the option. Nothing was started. Leave out --lazy, or
-        \\the other option.
+        \\the other option. A program that uses zigbox as a library sees this code
+        \\too when it gives peer sources to a run that cannot take them.
         ,
     },
     .{

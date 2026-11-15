@@ -368,11 +368,11 @@ fn fetch_manifest(
     ) catch unreachable; // The storage holds the longest repository and name.
     var sink: net.BufferSink = .{ .buffer = &client.workspace.body };
     const had_token = client.token_len > 0 or client.basic_len > 0;
-    const receiver = Receiver.of_buffer(&sink);
+    const receiver = Receiver.of_buffer(&sink, constants.net_request_timeout_ms);
     try request_following(client, origin, target, manifest.accept, true, receiver, head, diag);
     if (head.status == 401 and !had_token) {
         // The one repeat: with the token that was just given. A second 401 is a refusal.
-        try authenticate(client, reference, origin, head, diag);
+        try authenticate(client, reference, origin, head, constants.net_request_timeout_ms, diag);
         try request_following(client, origin, target, manifest.accept, true, receiver, head, diag);
     }
     const seen: Seen = .{ .basic = client.basic_len > 0, .body = sink.bytes() };
@@ -476,10 +476,12 @@ fn authenticate(
     reference: *const Reference,
     origin: Origin,
     head: *const net.Head,
+    timeout_ms: u32,
     diag: *Diag,
 ) Error!void {
     assert(head.status == 401);
     assert(client.token_len == 0);
+    assert(timeout_ms > 0);
     const registry = reference.registry();
     const repository = reference.repository();
     const header = head.www_authenticate.slice() orelse {
@@ -510,19 +512,25 @@ fn authenticate(
         diagnose.auth_refused(diag, .bad_realm, registry, repository);
         return error.Failed;
     }
-    try fetch_token(client, reference, parsed, diag);
+    try fetch_token(client, reference, parsed, timeout_ms, diag);
     assert(client.token_len > 0);
     assert(diag.code == null);
 }
 
-fn fetch_token(client: *Client, reference: *const Reference, url: net.Url, diag: *Diag) Error!void {
+fn fetch_token(
+    client: *Client,
+    reference: *const Reference,
+    url: net.Url,
+    timeout_ms: u32,
+    diag: *Diag,
+) Error!void {
     assert(url.target[0] == '/');
     assert(client.token_len == 0);
     const origin: Origin = .{ .scheme = url.scheme, .host = url.host, .port = url.port };
     var head: net.Head = .{};
     var sink: net.BufferSink = .{ .buffer = &client.workspace.token_body };
     const target = url.target;
-    const receiver = Receiver.of_buffer(&sink);
+    const receiver = Receiver.of_buffer(&sink, timeout_ms);
     try request_following(client, origin, target, "application/json", false, receiver, &head, diag);
     var url_storage: [constants.registry_url_bytes_max]u8 = undefined;
     const shown = url_of(&url_storage, origin, url.target);
@@ -589,13 +597,14 @@ const Receiver = struct {
     buffer: ?*net.BufferSink = null,
     total_timeout_ms: u32,
 
-    fn of_buffer(buffer: *net.BufferSink) Receiver {
+    fn of_buffer(buffer: *net.BufferSink, timeout_ms: u32) Receiver {
         assert(buffer.buffer.len > 0);
+        assert(timeout_ms > 0);
         return .{
             .sink = buffer.sink(),
             .body_bytes_max = buffer.buffer.len,
             .buffer = buffer,
-            .total_timeout_ms = constants.net_request_timeout_ms,
+            .total_timeout_ms = timeout_ms,
         };
     }
 };
@@ -904,7 +913,8 @@ fn request_blob(
         if (head.status == 401 and attempt == 0 and client.basic_len == 0) {
             // A token lasts minutes and a layer can take longer: ask for a fresh one, once.
             client.token_len = 0;
-            try authenticate(client, reference, origin, head, diag);
+            const timeout = constants.net_request_timeout_ms;
+            try authenticate(client, reference, origin, head, timeout, diag);
             continue;
         }
         break;
@@ -942,16 +952,82 @@ pub const RangeError = error{
     Failed,
 };
 
+/// A monotonic clock in milliseconds, from whatever the caller has (an `Io`, a `Host`).
+pub const Clock = struct {
+    context: *const anyopaque,
+    now_ms: *const fn (context: *const anyopaque) u64,
+};
+
+/// When a call must be done: what `fetch_range` is given, so a token it has to fetch again comes
+/// out of the same time as the range.
+pub const Deadline = struct {
+    clock: Clock,
+    at_ms: u64,
+
+    /// `timeout_ms` from now.
+    pub fn after(clock: Clock, timeout_ms: u32) Deadline {
+        assert(timeout_ms > 0);
+        const now = clock.now_ms(clock.context);
+        assert(now < std.math.maxInt(u64) - @as(u64, timeout_ms));
+        return .{ .clock = clock, .at_ms = now + timeout_ms };
+    }
+
+    /// The whole milliseconds left, at most `limit_ms`; null when none are.
+    pub fn remaining_ms(deadline: Deadline, limit_ms: u32) ?u32 {
+        assert(deadline.at_ms > 0);
+        assert(limit_ms > 0);
+        const now = deadline.clock.now_ms(deadline.clock.context);
+        if (now >= deadline.at_ms) return null;
+        const left: u32 = @intCast(@min(deadline.at_ms - now, limit_ms));
+        assert(left > 0);
+        return left;
+    }
+};
+
+/// Where a range answer's body goes: a `206`'s into the caller's buffer (at most its length),
+/// any other status's (a 401's challenge page, a 404's JSON) nowhere, and at most
+/// `push_error_body_bytes` of it (of every hop's together), however small the range: the bound is
+/// the status's, never `out.len`'s. The head is filled before the first byte of the body comes.
+const RangeSink = struct {
+    buffer: *net.BufferSink,
+    head: *const net.Head,
+    other: u32 = 0,
+
+    fn sink(range: *RangeSink) net.Sink {
+        return .{ .context = range, .write = write };
+    }
+
+    fn write(context: *anyopaque, data: []const u8) error{SinkFull}!void {
+        const range: *RangeSink = @ptrCast(@alignCast(context));
+        assert(range.head.status >= 100);
+        assert(range.other <= constants.push_error_body_bytes);
+        if (range.head.status == 206) {
+            const into = range.buffer.sink();
+            return into.write(into.context, data);
+        }
+        if (data.len > constants.push_error_body_bytes - range.other) return error.SinkFull;
+        range.other += @intCast(data.len);
+    }
+};
+
+/// The most body bytes a range request takes: the range, or an error answer's bound.
+fn range_body_bytes_max(out_len: usize) u64 {
+    assert(out_len > 0);
+    return @max(out_len, constants.push_error_body_bytes);
+}
+
 /// Bytes `offset` to `offset + out.len - 1` of blob `digest` by one closed `Range` request to the
-/// place that answered the resolve, within `timeout_ms` for the whole call. Only a `206` whose
-/// Content-Range starts at `offset` is an answer; its bytes are unverified, for the caller to
-/// check. Returns how many came: fewer than asked when the blob ends sooner.
+/// place that answered the resolve, all of it (a fresh token after a 401 included) before
+/// `deadline`, and no one request longer than `timeout_ms`. Only a `206` whose Content-Range
+/// starts at `offset` is an answer; its bytes are unverified, for the caller to check. Returns
+/// how many came: fewer than asked when the blob ends sooner.
 pub fn fetch_range(
     client: *Client,
     reference: *const Reference,
     digest: Sha256,
     offset: u64,
     out: []u8,
+    deadline: Deadline,
     timeout_ms: u32,
     diag: *Diag,
 ) RangeError!usize {
@@ -969,24 +1045,43 @@ pub fn fetch_range(
     ) catch unreachable; // The storage holds the longest repository and a digest.
     var buffer: net.BufferSink = .{ .buffer = out };
     var head: net.Head = .{};
+    var range: RangeSink = .{ .buffer = &buffer, .head = &head };
     for (0..2) |attempt| {
+        range.other = 0;
+        const left = deadline.remaining_ms(timeout_ms) orelse return out_of_time(origin, diag);
         const receiver: Receiver = .{
-            .sink = buffer.sink(),
-            .body_bytes_max = out.len,
+            .sink = range.sink(),
+            .body_bytes_max = range_body_bytes_max(out.len),
             .range_from = offset,
             .range_last = offset + out.len - 1,
             .buffer = &buffer,
-            .total_timeout_ms = timeout_ms,
+            .total_timeout_ms = left,
         };
         try request_following(client, origin, target, "", true, receiver, &head, diag);
         if (head.status == 401 and attempt == 0 and client.basic_len == 0) {
             client.token_len = 0; // The token ran out mid-run: a fresh one, once.
-            try authenticate(client, reference, origin, &head, diag);
+            const auth_left = deadline.remaining_ms(timeout_ms) orelse {
+                return out_of_time(origin, diag);
+            };
+            try authenticate(client, reference, origin, &head, auth_left, diag);
             continue;
         }
         break;
     }
     return range_answer(reference, origin, target, &head, buffer.len, offset, client, diag);
+}
+
+/// The deadline passed before a request of `fetch_range` could start.
+fn out_of_time(origin: Origin, diag: *Diag) RangeError {
+    assert(origin.port != 0);
+    assert(diag.code == null);
+    const target_info: diagnose.Target = .{
+        .host = origin.host,
+        .port = origin.port,
+        .scheme = origin.scheme,
+    };
+    diagnose.network_failed(diag, error.TimedOut, target_info, 0);
+    return error.Failed;
 }
 
 /// The bytes a range request got, or why it got none.
