@@ -1,17 +1,18 @@
 //! `zig build demo-mac`: the milestone demos M1 to M4, steps 2 to 4 of M4b, the five steps of
 //! M6b (with `exec` and `logs` on a terminal, with signals and exit codes) and M9's import and
 //! build of its demo project, driven from macOS through the macOS `zbx`, which runs them in its
-//! virtual machine. Each step is one shell
-//! command line with what it must print and how it must end; the steps are the ones the Linux
-//! demos check (docs/demos/m1.md to m4.md), taken by number, so a step that passes on Linux and
-//! fails here is a difference between the two `zbx`es. The Linux demos drive a QEMU console
-//! (`src/testing/vm/session.zig`), which has no counterpart on a Mac, so their code is not
-//! shared; this table is the macOS side of the same steps.
+//! virtual machine. Each step is one shell command line with what it must print and how it must
+//! end; the steps are the ones the Linux demos check (docs/demos/m1.md to m9.md), taken by
+//! number, so a step that passes on Linux and fails here is a difference between the two
+//! `zbx`es. The Linux demos drive a QEMU console (`src/testing/vm/session.zig`), which has no
+//! counterpart on a Mac, so their code is not shared; this table is the macOS side of the same
+//! steps.
 //!
 //! Run from a directory below the home (the machine shares the home and nothing else). It uses
-//! `$HOME/zbx-demo-mac` as its working directory and leaves it for the next run. The M9 steps
-//! need Rosetta: the demo project's lock pins `linux/amd64`, as `demo-m9`'s does, so that its
-//! digest is `demo-m9`'s golden.
+//! `$HOME/zbx-demo-mac` as its working directory and leaves it for the next run. Steps m9.1 to
+//! m9.4 need Rosetta: the demo project's lock pins `linux/amd64`, as `demo-m9`'s does, so that
+//! its digest is `demo-m9`'s golden. Without it they fail with one line naming ZBX-E1016; m9.5
+//! builds a project of its own natively, for linux/arm64.
 
 const std = @import("std");
 const builtin = @import("builtin");
@@ -35,7 +36,20 @@ pub const m9_project_files = [_]struct { name: []const u8, text: []const u8 }{
 /// The build file `zbx import` must write for the project, `demo-m9`'s golden. Written beside the
 /// project (not in it) for `cmp`.
 const m9_golden_build = @embedFile("vm/m9_expected.build.zon");
+/// The project's lock, which neither import nor build may change. Written beside the project.
+const m9_project_lock = @embedFile("vm/m9_project/zbx.lock");
 const m9_project = "m9-project";
+/// m9.5's project: a base of this machine's platform (linux/arm64), locked by `zbx pull` into an
+/// empty lock of its own, and a step that records the architecture it ran on.
+const m9_native = "m9-native";
+const m9_native_dockerfile = "FROM alpine:3.20\nRUN uname -m > /arch\n";
+const empty_lock = ".{\n    .version = 1,\n    .images = .{},\n}\n";
+/// The one-line reason the Rosetta steps fail on a Mac without it.
+const rosetta_missing = "ZBX-E1016: Rosetta is not installed, and the M9 project's lock pins " ++
+    "linux/amd64; install it with softwareupdate --install-rosetta --agree-to-license, " ++
+    "then zbx vm stop";
+/// What `zbx doctor` says on its `rosetta` line when Rosetta is installed (`check_rosetta`).
+const rosetta_installed = "rosetta  installed: linux/amd64 images can run";
 
 /// One step: the shell line (`$Z` is the zbx, `$R` the unpacked rootfs, `$W` the work
 /// directory), how it must end and what each stream must hold.
@@ -49,6 +63,9 @@ pub const Step = struct {
     stdout_lacks: []const []const u8 = &.{},
     stderr_empty: bool = false,
 };
+
+/// A `sed` that prints the digest of `zbx build`'s `built b3:... (...)` line.
+const digest_of_build = "sed -n 's/^built \\(b3:[0-9a-f]*\\) .*/\\1/p'";
 
 pub const steps = [_]Step{
     // ---- M1: the shell ---------------------------------------------------------------------
@@ -309,36 +326,53 @@ pub const steps = [_]Step{
     },
     // ---- M9: the demo project imported from its Dockerfile and built (docs/demos/m9.md) ---------
     // `$W/m9-project` is written afresh by `prepare_m9_project`; `$W/m9.digest` carries step 2's
-    // digest to the steps after it.
+    // digest to the steps after it. Steps m9.1 to m9.4 need Rosetta (`needs_rosetta`).
     .{
         .id = "m9.1",
         .what = "import writes demo-m9's golden build file, owned by the Mac user, with W0811",
-        .line = "cd $W/m9-project && $Z import && cmp zbx.build.zon ../m9_expected.build.zon && " ++
+        .line = "cd $W/m9-project && $Z import && cmp zbx.lock ../m9_expected.lock && " ++
+            "cmp zbx.build.zon ../m9_expected.build.zon && " ++
             "test \"$(stat -f %u zbx.build.zon)\" = \"$(id -u)\" && echo imported",
         .stdout_has = &.{"imported"},
         .stderr_has = &.{"ZBX-W0811"},
     },
     .{
         .id = "m9.2",
-        .what = "build prints the digest; the image greets, and --whoami is 10001",
-        .line = "cd $W/m9-project && rm -f ../m9.digest && " ++
-            "d=$($Z build | sed -n 's/^built \\(b3:[0-9a-f]*\\) .*/\\1/p') && test -n \"$d\" && " ++
-            "echo \"$d\" > ../m9.digest && $Z run $d && $Z run $d -- /usr/local/bin/hello --whoami",
-        .stdout_has = &.{ "hello from zigbox", "10001" },
+        .what = "build prints the digest, keeps the lock; the image greets, --whoami is 10001",
+        .line = "cd $W/m9-project && rm -f ../m9.digest && o=$($Z build) && " ++
+            "cmp zbx.lock ../m9_expected.lock && " ++
+            "d=$(echo \"$o\" | " ++ digest_of_build ++ ") && test -n \"$d\" && " ++
+            "echo \"$d\" > ../m9.digest && $Z run $d && " ++
+            "w=$($Z run $d -- /usr/local/bin/hello --whoami) && test \"$w\" = 10001 && " ++
+            "echo whoami-10001",
+        .stdout_has = &.{ "hello from zigbox", "whoami-10001" },
     },
     .{
         .id = "m9.3",
-        .what = "after an edit on the Mac to the excluded README.md, every step hits, same digest",
-        .line = "cd $W/m9-project && echo more >> README.md && o=$($Z build) && echo \"$o\" && " ++
-            "test \"$(echo \"$o\" | sed -n 's/^built \\(b3:[0-9a-f]*\\) .*/\\1/p')\" = " ++
-            "\"$(cat ../m9.digest)\" && echo same-digest",
-        .stdout_has = &.{ " 0 misses", "same-digest" },
+        .what = "a new extra.go misses and changes the digest; removed, all hits, the first digest",
+        .line = "cd $W/m9-project && sed 's/func main/func init/' main.go > extra.go && " ++
+            "o=$($Z build) && d=$(echo \"$o\" | " ++ digest_of_build ++ ") && " ++
+            "test -n \"$d\" && test \"$d\" != \"$(cat ../m9.digest)\" && " ++
+            "echo \"$o\" | grep -q ', [1-9][0-9]* miss' && echo new-digest && " ++
+            "rm extra.go && o=$($Z build) && echo \"$o\" && " ++
+            "test \"$(echo \"$o\" | " ++ digest_of_build ++ ")\" = \"$(cat ../m9.digest)\" && " ++
+            "echo same-digest",
+        .stdout_has = &.{ "new-digest", " 0 misses", "same-digest" },
     },
     .{
         .id = "m9.4",
         .what = "the digest is demo-m9's golden, recorded in a Linux VM (m9_expected.zon)",
         .line = "cat $W/m9.digest",
         .stdout_has = &.{m9_golden.digest},
+    },
+    .{
+        .id = "m9.5",
+        .what = "a project locked to linux/arm64 builds natively, and its step ran on aarch64",
+        .line = "cd $W/m9-native && $Z pull alpine:3.20 >/dev/null && " ++
+            "grep -q '\"linux/arm64\"' zbx.lock && ! grep -q 'linux/amd64' zbx.lock && " ++
+            "$Z import && o=$($Z build) && d=$(echo \"$o\" | " ++ digest_of_build ++ ") && " ++
+            "test -n \"$d\" && $Z run $d -- cat /arch",
+        .stdout_has = &.{"aarch64"},
     },
 };
 
@@ -381,8 +415,15 @@ fn run_all(init: std.process.Init, out: *Io.Writer) !u32 {
     try out.print("demo-mac: zbx {s}\ndemo-mac: work directory {s}\n", .{ zbx_path, work });
     try prepare_rootfs(init, out, work, rootfs);
     try prepare_m9_project(init, work);
+    const rosetta = try rosetta_ready(init, zbx_path);
     var failures: u32 = 0;
     for (steps) |step| {
+        if (needs_rosetta(step) and !rosetta) {
+            failures += 1;
+            try out.print("FAIL {s}  {s}\n     {s}\n", .{ step.id, step.what, rosetta_missing });
+            try out.flush();
+            continue;
+        }
         const line = try expand(arena, step.line, zbx_path, rootfs, work);
         const result = try std.process.run(arena, io, .{
             .argv = &.{ "/bin/sh", "-c", line },
@@ -458,7 +499,7 @@ fn prepare_rootfs(
         .file_name = alpine.file_name,
     });
     // A fresh unpack each run: steps change the rootfs.
-    dir.deleteTree(io, rootfs) catch {};
+    try dir.deleteTree(io, rootfs); // A rootfs that is not there is no error.
     try dir.createDirPath(io, rootfs);
     const unpack = try std.process.run(arena, io, .{
         .argv = &.{ "/usr/bin/tar", "-xzf", archive, "-C", rootfs },
@@ -466,20 +507,41 @@ fn prepare_rootfs(
     if (unpack.term != .exited or unpack.term.exited != 0) return error.UnpackFailed;
 }
 
-/// Writes M9's project afresh under `work` (steps edit it and import writes into it) and the
-/// golden build file beside it.
+/// Writes M9's projects afresh under `work` (steps edit them, and import writes into them), and
+/// the golden build file and lock beside the first, for `cmp`.
 fn prepare_m9_project(init: std.process.Init, work: []const u8) !void {
     const io = init.io;
     const arena = init.arena.allocator();
     var dir = try Io.Dir.cwd().openDir(io, work, .{});
     defer dir.close(io);
-    dir.deleteTree(io, m9_project) catch {};
+    try dir.deleteTree(io, m9_project); // A project that is not there is no error.
     try dir.createDirPath(io, m9_project);
     for (m9_project_files) |file| {
         const path = try std.fmt.allocPrint(arena, "{s}/{s}", .{ m9_project, file.name });
         try dir.writeFile(io, .{ .sub_path = path, .data = file.text });
     }
     try dir.writeFile(io, .{ .sub_path = "m9_expected.build.zon", .data = m9_golden_build });
+    try dir.writeFile(io, .{ .sub_path = "m9_expected.lock", .data = m9_project_lock });
+    // The native project holds its own lock, so that a zbx.lock higher up (the work
+    // directory's, which M4's pull wrote) is not it.
+    try dir.deleteTree(io, m9_native);
+    try dir.createDirPath(io, m9_native);
+    const dockerfile = m9_native ++ "/Dockerfile";
+    try dir.writeFile(io, .{ .sub_path = dockerfile, .data = m9_native_dockerfile });
+    try dir.writeFile(io, .{ .sub_path = m9_native ++ "/zbx.lock", .data = empty_lock });
+}
+
+/// True if `zbx doctor` says Rosetta is installed. Steps m9.1 to m9.4 need it.
+fn rosetta_ready(init: std.process.Init, zbx: []const u8) !bool {
+    const result = try std.process.run(init.arena.allocator(), init.io, .{
+        .argv = &.{ zbx, "doctor" },
+    });
+    return std.mem.indexOf(u8, result.stdout, rosetta_installed) != null;
+}
+
+/// True for the steps that build the M9 project, whose lock pins linux/amd64.
+fn needs_rosetta(step: Step) bool {
+    return std.mem.startsWith(u8, step.id, "m9.") and !std.mem.eql(u8, step.id, "m9.5");
 }
 
 test "a step passes only when its exit code and every piece match" {
@@ -503,8 +565,10 @@ test "a step passes only when its exit code and every piece match" {
 
 test "the M9 project is demo-m9's, file for file" {
     // Goal: the Mac builds the same project as `demo-m9`, so its digest can be that golden.
-    // Method: the two embedded lists, name and bytes. `hello_m9` is the Linux harness, so the
-    // comparison is compiled on Linux only.
+    // Method: both lists embed the same files, so their bytes agree by construction; what this
+    // checks is that the two lists name the same files in the same order, so a file added to
+    // `demo-m9`'s project and not here (or the other way) fails. `hello_m9` is the Linux
+    // harness, so the comparison is compiled on Linux only.
     if (comptime builtin.os.tag != .linux) return error.SkipZigTest;
     const hello_m9 = @import("vm/hello_m9.zig");
     try std.testing.expectEqual(hello_m9.project_files.len, m9_project_files.len);
@@ -517,4 +581,22 @@ test "the M9 project is demo-m9's, file for file" {
         if (!std.mem.startsWith(u8, step.id, "m9.")) continue;
         try std.testing.expect(std.mem.indexOf(u8, step.line, "$W") != null);
     }
+}
+
+test "the Rosetta steps are m9.1 to m9.4, and m9.5 is native" {
+    // Goal: a Mac without Rosetta fails the amd64 steps with one line naming E1016 and still
+    // runs the native one. Method: the steps' ids against `needs_rosetta`.
+    var count: u32 = 0;
+    for (steps) |step| {
+        if (needs_rosetta(step)) count += 1;
+    }
+    try std.testing.expectEqual(@as(u32, 4), count);
+    for (steps) |step| {
+        if (!std.mem.eql(u8, step.id, "m9.5")) continue;
+        try std.testing.expect(!needs_rosetta(step));
+        try std.testing.expect(std.mem.indexOf(u8, step.line, "$W/" ++ m9_native) != null);
+    }
+    try std.testing.expect(std.mem.indexOf(u8, rosetta_missing, "ZBX-E1016") != null);
+    try std.testing.expect(std.mem.indexOf(u8, rosetta_missing, "softwareupdate") != null);
+    try std.testing.expect(std.mem.indexOfScalar(u8, rosetta_missing, '\n') == null);
 }

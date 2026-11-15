@@ -1,4 +1,4 @@
-error[ZBX-E1013]: the working directory is not shared with the virtual machine
+error[ZBX-E1013]: a directory or path is not shared with the virtual machine
   while  choosing the directory to run the command in
   cause  /private/tmp/build is not shared with the virtual machine; only
          /Users/ada is

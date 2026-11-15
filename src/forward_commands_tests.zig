@@ -33,6 +33,7 @@ const command_sources = [_]struct { command: []const u8, source: []const u8 }{
     .{ .command = "pull", .source = @embedFile("trust/gate.zig") },
     .{ .command = "build", .source = @embedFile("build_commands.zig") },
     .{ .command = "import", .source = @embedFile("import_commands.zig") },
+    .{ .command = "inspect", .source = @embedFile("inspect_commands.zig") },
 };
 
 test "every forwarded command that can ask for a passphrase runs with no terminal" {
@@ -46,4 +47,41 @@ test "every forwarded command that can ask for a passphrase runs with no termina
         const lacks_terminal = !forward_commands.has_terminal(&.{entry.command});
         try std.testing.expectEqual(asks, lacks_terminal);
     }
+}
+
+test "every command the Mac leaves --platform in refuses it on Linux" {
+    // Goal: `build`, `import` and `inspect` refuse `--platform` on a Mac exactly as on Linux,
+    // because the Mac passes it through (`takes_platform`). Method: the Linux parser on each,
+    // with the option and without it, so the refusal is the option's.
+    const Diag = @import("diag/diag.zig").Diag;
+    const lines = [_][]const []const u8{
+        &.{"build"}, &.{"import"}, &.{ "inspect", "b3:0" },
+    };
+    for (forward_commands.platform_kept_commands, lines) |name, line| {
+        try std.testing.expect(forward_commands.forwarded(&.{name}));
+        try std.testing.expectEqualStrings(name, line[0]);
+        var invocation: cli.Invocation = undefined;
+        var diag: Diag = undefined;
+        diag.reset();
+        try cli.parse(line, &invocation, &diag);
+        var words: [4][]const u8 = undefined;
+        @memcpy(words[0..line.len], line);
+        words[line.len] = "--platform";
+        words[line.len + 1] = "linux/amd64";
+        diag.reset();
+        const refused = cli.parse(words[0 .. line.len + 2], &invocation, &diag);
+        try std.testing.expectError(error.UnknownOption, refused);
+        try std.testing.expectEqual(@import("diag/codes.zig").Code.E0004, diag.code.?);
+    }
+}
+
+test "demo-mac's Rosetta check reads the line the Mac's doctor prints" {
+    // Goal: `demo-mac` skips its amd64 steps by the doctor's words, which live in a Mac-only
+    // file. Method: both sources hold the line (`render_text` puts two spaces after the name).
+    const demo = @embedFile("testing/mac_demo.zig");
+    const doctor = @embedFile("mac/doctor.zig");
+    const said = "installed: linux/amd64 images can run";
+    try std.testing.expect(std.mem.indexOf(u8, demo, "\"rosetta  " ++ said ++ "\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, doctor, "\"" ++ said ++ "\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, doctor, "\"{s} {s}  {s}\"") != null);
 }
