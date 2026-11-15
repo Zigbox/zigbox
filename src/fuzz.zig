@@ -1167,6 +1167,14 @@ const Parsed = struct {
     iterations: u32,
 };
 
+fn find_fuzzer(name: []const u8) ?*const Fuzzer {
+    assert(fuzzers.len > 0);
+    for (&fuzzers) |*candidate| {
+        if (std.mem.eql(u8, candidate.name, name)) return candidate;
+    }
+    return null;
+}
+
 const UsageError = error{ NoFuzzer, UnknownFuzzer, BadSeed, BadIterations, TooManyArguments };
 
 fn parse_arguments(arguments: []const []const u8) UsageError!Parsed {
@@ -1174,9 +1182,7 @@ fn parse_arguments(arguments: []const []const u8) UsageError!Parsed {
     if (arguments.len > 3) return error.TooManyArguments;
     assert(arguments.len >= 1);
     assert(arguments.len <= 3);
-    const fuzzer = for (&fuzzers) |*candidate| {
-        if (std.mem.eql(u8, candidate.name, arguments[0])) break candidate;
-    } else return error.UnknownFuzzer;
+    const fuzzer = find_fuzzer(arguments[0]) orelse return error.UnknownFuzzer;
 
     var seed: ?u64 = null;
     if (arguments.len >= 2) {
@@ -1211,7 +1217,14 @@ pub fn main(init: std.process.Init) u8 {
         count += 1;
     }
     if (count >= 1 and std.mem.eql(u8, arguments_storage[0], "all")) {
-        return run_all(init.io, seeds, arguments_storage[1..count]);
+        return run_all(init.io, seeds, null, arguments_storage[1..count]);
+    }
+    if (count >= 2 and std.mem.eql(u8, arguments_storage[0], "all-but")) {
+        const skip = find_fuzzer(arguments_storage[1]) orelse {
+            print_usage(out, error.UnknownFuzzer) catch {};
+            return constants.tool_exit_usage;
+        };
+        return run_all(init.io, seeds, skip, arguments_storage[2..count]);
     }
     const parsed = parse_arguments(arguments_storage[0..count]) catch |err| {
         print_usage(out, err) catch {};
@@ -1256,9 +1269,11 @@ const Seeds = struct {
 
 /// `fuzz all [iterations]`, which `zig build check` runs: every fuzzer once, each with a fresh
 /// seed, which is printed and flushed before its first iteration, so a crash names the line that
-/// replays it (`zig build fuzz -- <fuzzer> <seed> <iterations>`).
-fn run_all(io: std.Io, seeds: Seeds, arguments: []const []const u8) u8 {
+/// replays it (`zig build fuzz -- <fuzzer> <seed> <iterations>`). `fuzz all-but <fuzzer>
+/// [iterations]` runs every fuzzer but `skip`, so CI can run a slow one in a job of its own.
+fn run_all(io: std.Io, seeds: Seeds, skip: ?*const Fuzzer, arguments: []const []const u8) u8 {
     assert(fuzzers.len > 0);
+    if (skip != null) assert(fuzzers.len > 1);
     const out = seeds.out;
     var iterations = constants.fuzz_check_iterations;
     if (arguments.len > 1) {
@@ -1273,7 +1288,10 @@ fn run_all(io: std.Io, seeds: Seeds, arguments: []const []const u8) u8 {
         }
     }
     assert(iterations > 0);
+    var ran: u32 = 0;
     for (&fuzzers) |*fuzzer| {
+        if (fuzzer == skip) continue;
+        ran += 1;
         var entropy: [8]u8 = undefined;
         io.random(&entropy);
         const seed = std.mem.readInt(u64, &entropy, .little);
@@ -1281,7 +1299,8 @@ fn run_all(io: std.Io, seeds: Seeds, arguments: []const []const u8) u8 {
         var splitmix = std.Random.SplitMix64.init(seed);
         for (0..iterations) |_| fuzzer.run_iteration(splitmix.next());
     }
-    out.print("fuzz: all {d} ok\n", .{fuzzers.len}) catch return constants.tool_exit_failed;
+    assert(ran == if (skip == null) fuzzers.len else fuzzers.len - 1);
+    out.print("fuzz: all {d} ok\n", .{ran}) catch return constants.tool_exit_failed;
     out.flush() catch return constants.tool_exit_failed;
     return constants.tool_exit_ok;
 }
@@ -1289,7 +1308,8 @@ fn run_all(io: std.Io, seeds: Seeds, arguments: []const []const u8) u8 {
 fn print_usage(out: *std.Io.Writer, err: UsageError) !void {
     assert(@errorName(err).len > 0);
     assert(fuzzers.len > 0);
-    const usage = "usage: zig build fuzz -- <fuzzer> [seed] [iterations] | all [iterations]";
+    const usage = "usage: zig build fuzz -- <fuzzer> [seed] [iterations] | all [iterations]" ++
+        " | all-but <fuzzer> [iterations]";
     try out.print("fuzz: {s}\n{s}\n", .{ @errorName(err), usage });
     try out.writeAll("fuzzers:");
     for (fuzzers) |fuzzer| try out.print(" {s}", .{fuzzer.name});

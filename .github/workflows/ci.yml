@@ -139,7 +139,7 @@ jobs:
         run: zig build errors-site-check
 
   fuzz:
-    name: fuzz (every fuzzer, fresh seeds)
+    name: fuzz (every fuzzer but provenance, fresh seeds)
     needs: changes
     if: ${{ needs.changes.outputs.code == 'true' }}
     runs-on: ubuntu-24.04
@@ -150,12 +150,29 @@ jobs:
       - uses: ./.github/actions/zig-cache
         with:
           name: fuzz
-      # One job runs every fuzzer in turn (`all`), 10,000 iterations each, as the per-fuzzer jobs
-      # did. Each fuzzer draws a fresh random seed and prints `fuzz: <name> seed=<n> ...` before it
+      # One job runs every fuzzer but provenance in turn (`all-but`), 10,000 iterations each.
+      # Each fuzzer draws a fresh random seed and prints `fuzz: <name> seed=<n> ...` before it
       # starts, flushed, so the last `fuzz:` line before a failure names the fuzzer and its seed;
-      # replay it with `zig build fuzz -- <name> <seed> 10000`.
-      - name: Fuzz every fuzzer
-        run: zig build fuzz -- all 10000
+      # replay it with `zig build fuzz -- <name> <seed> 10000`. Provenance, the slowest by far,
+      # runs in `fuzz-provenance` beside it. `zig build tidy` checks that every fuzzer has a step.
+      - name: Fuzz every fuzzer but provenance
+        run: zig build fuzz -- all-but provenance 10000
+
+  fuzz-provenance:
+    name: fuzz (provenance, fresh seed)
+    needs: changes
+    if: ${{ needs.changes.outputs.code == 'true' }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: ./.github/actions/setup-zig
+      - uses: ./.github/actions/zig-cache
+        with:
+          name: fuzz-provenance
+      # The seed comes from the runner and is printed before the first iteration, as above.
+      - name: Fuzz provenance
+        run: zig build fuzz -- provenance "$(od -An -N8 -tu8 /dev/urandom | tr -d ' ')" 10000
 
   # The D-Bus client against a real dbus-daemon (a private session bus), which is what shows that
   # the simulator's bus and the real one agree: Hello, calls, AddMatch, signals, and bytes the

@@ -168,14 +168,18 @@ fn inflate_at(blob: []const u8, offset: u64, length: u64, size: u64) error{Malfo
 }
 
 /// Adds one file the plain generator never makes: empty, one byte short of a chunk, a chunk or
-/// one byte over, whose bytes repeat a random 4 KiB block; or two to three chunks of random
-/// bytes, which no compressor shrinks.
+/// one byte over, whose bytes repeat a random 4 KiB block; or a chunk and one byte to 64 KiB
+/// of random bytes, which no compressor shrinks. That last file still spans two chunks, so its
+/// chaining values, stored blocks and compressed length above plain are exercised; it is kept
+/// near one chunk because its cost is linear in size and it dominated the fuzzer's run time.
 fn add_sized_file(random: std.Random, target: *fs_sim.SimFs) void {
     const chunk = constants.store_chunk_bytes;
     const sizes = [_]u32{ 0, 1, chunk - 1, chunk, chunk + 1 };
     const choice = random.uintLessThan(usize, sizes.len + 1);
     if (choice == sizes.len) {
-        const size = random.intRangeAtMost(u32, 2 * chunk, 3 * chunk);
+        const size = random.intRangeAtMost(u32, chunk + 1, chunk + 64 * 1024);
+        assert(size > chunk);
+        assert(size <= reader.blob.len);
         const content = reader.blob[0..size];
         random.bytes(content);
         target.put_file("/src/sized", 0o644, content);

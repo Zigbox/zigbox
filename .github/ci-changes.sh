@@ -2,7 +2,7 @@
 # Decides what ci.yml runs. Reads the changed paths, one per line, on stdin and writes
 # `name=true|false` lines (to $GITHUB_OUTPUT, or stdout when that is unset):
 #
-#   code      the build, tidy, test, errors-site, fuzz and dbus-live jobs
+#   code      the build, tidy, test, errors-site, fuzz, fuzz-provenance and dbus-live jobs
 #   demo_<d>  one VM demo, <d> in m0 m1 m2 m3 m4 m5 m6 m6b m7 m8 m8b m10
 #   demo_m8_packages  the four-guest packages demo (demo-m8-packages): the package sources, the
 #             packaging files and the packages harness (not the m8 demo's own rules)
