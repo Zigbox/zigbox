@@ -1,6 +1,7 @@
 //! The lazy start's diagnostics that slice 4 raises (docs/briefs/S2-lazy-start.md,
 //! "Diagnostics"): an image too large for the server's table (E1207) and `--lazy` with an
-//! option it does not take (E1208). The rest of the 12xx group comes with slice 5.
+//! option it does not take (E1208); and slice 5's: the start from a registry (W1201, E1202)
+//! and the reads it serves (W1202, E1203, E1206).
 
 const std = @import("std");
 const assert = std.debug.assert;
@@ -78,4 +79,81 @@ pub fn out_of_memory(diag: *Diag, tree: Digest) void {
     diag.cause("this host has too little free memory for its chunk buffers and tables", .{});
     diag.context("tree", "{s}", .{tree.text()});
     diag.fix(.{ .sentence = "run it without --lazy, which reads the whole image first" });
+}
+
+/// ZBX-W1201: `reference` names an image without a lazy index: the run pulls it whole.
+pub fn no_index(diag: *Diag, reference: []const u8) void {
+    assert(reference.len > 0);
+    assert(diag.code == null);
+    diag.raise(.W1201);
+    diag.while_("starting {s} lazily", .{reference});
+    diag.cause("its manifest has no lazy index: no zbx with layer writer 2 pushed it", .{});
+    diag.context("image", "{s}", .{reference});
+    diag.fix(.{ .sentence = "nothing to do: the image is pulled whole, then run" });
+}
+
+/// Why `index_refused` refused an index.
+pub const Refused = enum { no_tree, hash, tree, inflate };
+
+/// ZBX-E1202: the index the registry sent for `reference` was refused before anything was
+/// written.
+pub fn index_refused(diag: *Diag, reference: []const u8, why: Refused) void {
+    assert(reference.len > 0);
+    assert(diag.code == null);
+    diag.raise(.E1202);
+    diag.while_("checking the lazy index of {s}", .{reference});
+    const cause = switch (why) {
+        .no_tree => "the manifest has a lazy index but names no tree for it to describe",
+        .hash => "the index's bytes do not hash to the manifest's value",
+        .tree => "the index's trees do not check against the manifest's org.zigbox.tree",
+        .inflate => "the index's range in the layer is not one whole compressed stream",
+    };
+    diag.cause("{s}", .{cause});
+    diag.context("image", "{s}", .{reference});
+    diag.fix(.{ .sentence = "run it without --lazy, which pulls the whole image" });
+}
+
+/// ZBX-W1202: `source` sent bytes for chunk `chunk` of the object `object` that do not match
+/// the chunk's hash; another source was asked, and this one is not asked for the object again.
+pub fn chunk_lied(diag: *Diag, source: []const u8, object: Digest, chunk: u32) void {
+    assert(source.len > 0);
+    assert(diag.code == null);
+    diag.raise(.W1202);
+    diag.while_("fetching a chunk of a lazily started image", .{});
+    diag.cause("{s} sent bytes that do not match chunk {d}'s hash; none were used", .{
+        source,
+        chunk,
+    });
+    diag.context("object", "{s}", .{object.text()});
+    diag.context("source", "{s}", .{source});
+    diag.fix(.{ .sentence = "nothing to do here: the next source is asked; tell its owner" });
+}
+
+/// ZBX-E1203: no source gave chunk `chunk` of `object` within `lazy_read_deadline_ms`: the
+/// reading process got `EIO`. `tried` is what each source did, already rendered.
+pub fn chunk_unavailable(diag: *Diag, object: Digest, chunk: u32, tried: []const u8) void {
+    assert(tried.len > 0);
+    assert(diag.code == null);
+    diag.raise(.E1203);
+    diag.while_("fetching a chunk of a lazily started image", .{});
+    diag.cause(
+        "chunk {d} could not be fetched within {d} s; the reading process got EIO ({s})",
+        .{ chunk, constants.lazy_read_deadline_ms / 1000, tried },
+    );
+    diag.context("object", "{s}", .{object.text()});
+    diag.fix(.{ .sentence = "check the network and the registry, then read the file again" });
+}
+
+/// ZBX-E1206: the store's disk is too full to keep fetched chunks: the read got `EIO`.
+pub fn store_full(diag: *Diag, object: Digest, chunk: u32) void {
+    assert(diag.code == null);
+    assert(constants.lazy_store_free_bytes_min > 0);
+    diag.raise(.E1206);
+    diag.while_("keeping a fetched chunk of a lazily started image", .{});
+    diag.cause(
+        "the store's disk has less than {d} MiB free; chunk {d} was not kept, the read got EIO",
+        .{ constants.lazy_store_free_bytes_min / 4 / (1024 * 1024), chunk },
+    );
+    diag.context("object", "{s}", .{object.text()});
+    diag.fix(.{ .sentence = "free space on the disk that holds the store, then read it again" });
 }

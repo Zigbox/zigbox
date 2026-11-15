@@ -842,7 +842,11 @@ const build_cases = [_]Case{
 /// diagnostics as `fuse/diagnose.zig` builds them.
 const lazy_cases = [_]Case{
     .{ .code = .E1201, .args = &.{}, .direct = lazy_out_of_memory, .exit = 1 },
+    .{ .code = .W1201, .args = &.{}, .direct = lazy_no_index, .warning = true, .exit = 0 },
     .{ .code = .E1202, .args = &.{}, .direct = lazy_index_disagrees, .exit = 1 },
+    .{ .code = .W1202, .args = &.{}, .direct = lazy_lied, .warning = true, .exit = 0 },
+    .{ .code = .E1203, .args = &.{}, .direct = lazy_unavailable, .exit = 1 },
+    .{ .code = .E1206, .args = &.{}, .direct = lazy_store_full, .exit = 1 },
     .{ .code = .E1207, .args = &.{}, .direct = lazy_too_large, .exit = 1 },
     .{
         .code = .E1208,
@@ -859,6 +863,25 @@ fn lazy_out_of_memory(diag: *Diag) void {
 fn lazy_index_disagrees(diag: *Diag) void {
     const tree_digest = Digest.parse("b3:" ++ test_util.repeat('7', 64)).?;
     lazy_diagnose.index_disagrees(diag, tree_digest);
+}
+
+fn lazy_no_index(diag: *Diag) void {
+    lazy_diagnose.no_index(diag, "registry.example/team/app:1");
+}
+
+fn lazy_lied(diag: *Diag) void {
+    const object = Digest.parse("b3:" ++ test_util.repeat('5', 64)).?;
+    lazy_diagnose.chunk_lied(diag, "registry", object, 3);
+}
+
+fn lazy_unavailable(diag: *Diag) void {
+    const object = Digest.parse("b3:" ++ test_util.repeat('5', 64)).?;
+    lazy_diagnose.chunk_unavailable(diag, object, 3, "registry: timed out");
+}
+
+fn lazy_store_full(diag: *Diag) void {
+    const object = Digest.parse("b3:" ++ test_util.repeat('5', 64)).?;
+    lazy_diagnose.store_full(diag, object, 3);
 }
 
 fn lazy_too_large(diag: *Diag) void {

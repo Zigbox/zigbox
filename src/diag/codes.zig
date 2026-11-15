@@ -278,8 +278,12 @@ pub const Code = enum(u16) {
     E1016,
     E1017,
     W1003,
+    W1201,
     E1201,
     E1202,
+    W1202,
+    E1203,
+    E1206,
     E1207,
     E1208,
     B0001,
@@ -4624,6 +4628,20 @@ pub const registry = [_]Entry{
         ,
     },
     .{
+        .code = .W1201,
+        .severity = .warning,
+        .blame = .external,
+        .summary = "the image has no lazy index: pulling it whole",
+        .explanation =
+        \\zbx run --lazy starts a container from an image's lazy index: the list of
+        \\its files and the chunks they are made of, which a zbx with layer writer 2
+        \\puts in the image when it pushes it. This image has none: it was pushed
+        \\by another tool, or by an older zbx.
+        \\
+        \\The run goes on as without --lazy: the whole image is pulled, then run.
+        ,
+    },
+    .{
         .code = .E1201,
         .severity = .@"error",
         .blame = .environment,
@@ -4654,6 +4672,48 @@ pub const registry = [_]Entry{
         \\
         \\Nothing was started and nothing was written. Run it without --lazy: a
         \\whole pull checks every layer against the manifest instead.
+        ,
+    },
+    .{
+        .code = .W1202,
+        .severity = .warning,
+        .blame = .external,
+        .summary = "a source sent a chunk that does not match its hash",
+        .explanation =
+        \\zbx run --lazy fetches the chunks of the image's files as they are read,
+        \\and checks each against its hash in the image's lazy index before any of
+        \\it is used. This source sent bytes that do not match: none were used, the
+        \\next source was asked, and this one is not asked for that file again.
+        \\
+        \\The source, or the network on the way, is at fault. Tell its owner.
+        ,
+    },
+    .{
+        .code = .E1203,
+        .severity = .@"error",
+        .blame = .external,
+        .summary = "a chunk could not be fetched in time: the read got EIO",
+        .explanation =
+        \\zbx run --lazy fetches the chunks of the image's files as they are read.
+        \\No source gave this chunk within the read's deadline, so the process that
+        \\read it got an input/output error (EIO). The cause says what each source
+        \\did. The container goes on; reading the file again tries again.
+        \\
+        \\Check the network and the registry. Run the image without --lazy to
+        \\read it all before the container starts.
+        ,
+    },
+    .{
+        .code = .E1206,
+        .severity = .@"error",
+        .blame = .environment,
+        .summary = "the store's disk is too full to keep fetched chunks",
+        .explanation =
+        \\zbx run --lazy keeps each chunk it fetches in the store, so the next read
+        \\is local. The disk that holds the store has too little free space left
+        \\to keep one more: the read that needed it got an input/output error (EIO).
+        \\
+        \\Free space on that disk, then read the file again.
         ,
     },
     .{
