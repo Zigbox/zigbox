@@ -150,6 +150,10 @@ pub const exec_history = @import("runtime/exec_history.zig");
 /// single-threaded child inside the user's namespace (`store.namespace`).
 pub const store = @import("store/store.zig");
 
+/// Lazy start's chunk resolver (docs/briefs/S2-lazy-start.md): `lazy.Source` is what a peer
+/// source implements, `lazy.Resolver` what the FUSE server reads through.
+pub const lazy = @import("lazy/lazy.zig");
+
 /// The doctor's `Facts`, which `store.namespace.outside_owners` fills. It is large: keep one in
 /// static storage or on the heap, not on a small thread's stack.
 pub const Facts = @import("doctor.zig").Facts;
@@ -351,6 +355,9 @@ test "the module's surface is what the contract names" {
     _ = trust.policy.parse;
     _ = trust.dsse.parse;
     _ = trust.statement.parse;
+    _ = lazy.Source;
+    _ = lazy.Range;
+    _ = lazy.Resolver;
     try std.testing.expect(std.meta.fieldNames(ExecExit).len == 3);
     try std.testing.expect(std.meta.fieldNames(Status).len == 3);
 }

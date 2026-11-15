@@ -42,6 +42,7 @@ const pack_fuzz = @import("fuzz_pack.zig");
 const lazy_index_fuzz = @import("fuzz_lazy_index.zig");
 const chaining_fuzz = @import("fuzz_chaining.zig");
 const lock_fuzz = @import("fuzz_lock.zig");
+const lazy_sim = @import("lazy/sim.zig");
 const build_file_fuzz = @import("fuzz_build_file.zig");
 const dockerignore_fuzz = @import("fuzz_dockerignore.zig");
 const dockerfile_fuzz = @import("fuzz_dockerfile.zig");
@@ -101,6 +102,7 @@ const fuzzers = [_]Fuzzer{
     .{ .name = "lazy_index", .run_iteration = lazy_index_fuzz.fuzz_lazy_index },
     .{ .name = "chaining", .run_iteration = chaining_fuzz.fuzz_chaining },
     .{ .name = "lock", .run_iteration = lock_fuzz.fuzz_lock },
+    .{ .name = "lazy_resolver", .run_iteration = lazy_sim.fuzz_lazy_resolver },
     .{ .name = "build_file", .run_iteration = build_file_fuzz.fuzz_build_file },
     .{ .name = "dockerignore", .run_iteration = dockerignore_fuzz.fuzz_dockerignore },
     .{ .name = "dockerfile", .run_iteration = dockerfile_fuzz.fuzz_dockerfile },
