@@ -212,7 +212,7 @@ pub const all = [_]Fixture{
     build(.{
         .name = "ubuntu_2404_restricted",
         .apparmor_restrict = "1\n",
-        .probes = .{ .userns = .denied, .overlay = .setup_denied, .fuse = .setup_denied },
+        .probes = .{ .userns = .denied, .overlay = .setup_denied },
     }),
     build(.{
         .name = "fedora_40",
@@ -263,19 +263,19 @@ pub const all = [_]Fixture{
     build(.{
         .name = "userns_disabled",
         .max_user_namespaces = "0\n",
-        .probes = .{ .userns = .denied, .overlay = .setup_denied, .fuse = .setup_denied },
+        .probes = .{ .userns = .denied, .overlay = .setup_denied },
     }),
     build(.{ .name = "userns_missing", .max_user_namespaces = null }),
     build(.{
         .name = "debian_clone_off",
         .unprivileged_userns_clone = "0\n",
         .apparmor_restrict = null,
-        .probes = .{ .userns = .denied, .overlay = .setup_denied, .fuse = .setup_denied },
+        .probes = .{ .userns = .denied, .overlay = .setup_denied },
     }),
     // The sysctls say yes and the probe says no: seccomp or an LSM is in the way.
     build(.{
         .name = "probe_denied_sysctls_ok",
-        .probes = .{ .userns = .denied, .overlay = .setup_denied, .fuse = .setup_denied },
+        .probes = .{ .userns = .denied, .overlay = .setup_denied },
     }),
     // The sysctl restricts, yet this process (under an AppArmor profile) can unshare.
     build(.{ .name = "restricted_but_working", .apparmor_restrict = "1\n" }),
@@ -339,6 +339,8 @@ pub const all = [_]Fixture{
     build(.{ .name = "kernel_newer_major_lower_minor", .kernel = "6.0.1" }),
     // The default host without pasta: the net check warns and says how to install it.
     build(.{ .name = "pasta_missing" }),
+    // S2: no /dev/fuse: `zbx run --lazy` would refuse (E1201), so the fuse check warns (W1203).
+    build(.{ .name = "fuse_missing", .probes = .{ .fuse = .no_device } }),
     // A pasta from before 2024_02_16: the run would refuse it, so the net check warns.
     build(.{
         .name = "pasta_old",

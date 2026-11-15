@@ -492,10 +492,10 @@ test "the lazy surface Zigcube's agent plugs its swarm into" {
     // only by decision. Method: `zigbox.lazy` declares exactly these names, a `Source` has
     // exactly these fields with these types, and a start takes a list of them.
     try expect_exactly(lazy, &.{
-        "Digest",    "Wanted",   "ObjectIndex", "FetchError", "Request",
-        "PeerToken", "Fetched",  "Source",      "Range",      "Location",
-        "Object",    "Catalog",  "ReadError",   "Event",      "Outcome",
-        "Log",       "FreeBytes", "Report",     "Resolver",   "Options",
+        "Digest",    "Wanted",    "ObjectIndex", "FetchError", "Request",
+        "PeerToken", "Fetched",   "Source",      "Range",      "Location",
+        "Object",    "Catalog",   "ReadError",   "Event",      "Outcome",
+        "Log",       "FreeBytes", "Report",      "Resolver",   "Options",
     });
     const Source = lazy.Source;
     const fields = std.meta.fieldNames(Source);

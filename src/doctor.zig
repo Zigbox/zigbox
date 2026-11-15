@@ -12,9 +12,10 @@
 //!   FAIL  the requirement is not met, or could not be checked. A failed read, a probe that
 //!         could not run and a malformed file are all FAIL with the reason: a fault is never
 //!         reported as ok, and never as warn. A FAIL carries a diagnostic (DIAGNOSTICS.md):
-//!         its check's own code (ZBX-E0101 to E0106, blame environment), its causes, and at
-//!         least one fix, with a runnable command where the fix is one. A check that could not
-//!         run uses its own code too, and its cause says that it could not run, and why.
+//!         its check's own code (ZBX-E0101 to E0106, or E1201 for fuse; blame environment),
+//!         its causes, and at least one fix, with a runnable command where the fix is one. A
+//!         check that could not run uses its own code too, and its cause says that it could not
+//!         run, and why.
 //!   warn  the requirement is demonstrably met by a direct test, yet a related setting says it
 //!         should not be. Today that is one situation: the user-namespace probe succeeded but
 //!         a sysctl (`kernel.unprivileged_userns_clone=0` or
@@ -47,7 +48,7 @@ const Host = host_mod.Host;
 
 pub const Status = enum { ok, fail, warn };
 
-pub const CheckId = enum { kernel, userns, cgroup, overlay, subid, seccomp, net, fuse };
+pub const CheckId = enum { kernel, userns, cgroup, overlay, subid, seccomp, fuse, net };
 
 pub const Detail = text_util.Bounded(constants.detail_bytes_max);
 /// The diagnostic code of each check: one per check, so a FAIL line and its block name the same
@@ -60,14 +61,18 @@ pub fn code_of(id: CheckId) diag_codes.Code {
         .overlay => .E0104,
         .subid => .E0105,
         .seccomp => .E0106,
-        // S2: FUSE, which only `zbx run --lazy` needs, is the same check the run makes (E1201).
-        .fuse => .E1201,
-        // The net check only ever warns (a missing pasta fails nothing): its code is W0102.
-        .net => unreachable, // `Check.problem` is never called for it.
+        // The fuse and net checks only ever warn (`warns_only`): their codes are W1203 and W0102.
+        .fuse, .net => unreachable, // `Check.problem` is never called for them.
     };
     assert(diag_codes.entry(code).blame == .environment);
     assert(diag_codes.entry(code).severity == .@"error");
     return code;
+}
+
+/// The checks whose requirement only an opt-in needs (`--net user`, `--lazy`): they warn, never
+/// FAIL, whatever they find, and leave the exit code alone. They come last in the report.
+pub fn warns_only(id: CheckId) bool {
+    return id == .fuse or id == .net;
 }
 
 /// The code of the warning a check can give (M6), or null for a check that never warns. A
@@ -77,7 +82,9 @@ pub fn warning_code_of(id: CheckId) ?diag_codes.Code {
     const code: ?diag_codes.Code = switch (id) {
         .userns => .W0101,
         .net => .W0102,
-        .kernel, .cgroup, .overlay, .subid, .seccomp, .fuse => null,
+        // S2: FUSE is needed only by `zbx run --lazy`, an opt-in; the run itself refuses E1201.
+        .fuse => .W1203,
+        .kernel, .cgroup, .overlay, .subid, .seccomp => null,
     };
     if (code) |found| {
         assert(diag_codes.entry(found).severity == .warning);
@@ -1287,35 +1294,27 @@ fn evaluate_fuse(facts: *const Facts, check: *Check) void {
         check.pass("FUSE mounts inside a user namespace (zbx run --lazy)", .{});
         return;
     }
+    // Only `zbx run --lazy` needs FUSE, and it refuses with E1201 on this host: a warning (W1203),
+    // as the net check's for `--net user`.
     if (probe.is(.no_device)) {
-        check.problem("/dev/fuse is missing or not openable: zbx run --lazy cannot start", .{});
-        check.cause_symptom();
-        check.cause("zbx run --lazy serves the image over FUSE, which needs /dev/fuse " ++
-            "readable and writable by this user", .{});
-        check.context_path("/dev/fuse");
+        check.warning("/dev/fuse is missing or not openable: zbx run --lazy cannot start", .{});
         check.fix("load the fuse module:", "sudo modprobe fuse");
-        check.fix("or run without --lazy, which needs no FUSE", "");
-        return;
-    }
-    if (probe.is(.denied)) {
-        check.problem("a FUSE mount inside a user namespace was refused", .{});
-        check.cause_symptom();
-        check.cause("/dev/fuse opened, but the kernel refused mount(fuse) from a user " ++
-            "namespace: it may be older than Linux 4.18, or a security policy forbids it", .{});
-        check.fix("use Linux 4.18 or newer, or run without --lazy, which needs no FUSE", "");
-        return;
-    }
-    if (probe.is(.map_denied)) return map_denied(check);
-    if (probe.is(.setup_denied)) {
-        check.problem("could not enter the user and mount namespaces the probe needs", .{});
-        check.cause_symptom();
-        check.cause("the FUSE probe needs a user namespace first and the kernel refused " ++
-            "to create one, so FUSE itself was never tried (see the userns check)", .{});
+    } else if (probe.is(.denied)) {
+        check.warning("a FUSE mount inside a user namespace was refused: zbx run --lazy " ++
+            "cannot start (Linux 4.18 or newer allows it, unless a security policy forbids it)", .{});
+        check.fix("look for the policy that denies it:", dmesg_policy);
+    } else if (probe.is(.map_denied) or probe.is(.setup_denied)) {
+        check.warning("the FUSE probe got no user namespace: zbx run --lazy cannot start " ++
+            "(see the userns check)", .{});
         check.fix("fix the userns check first (ZBX-E0101); FUSE needs the same permission", "");
-        return;
+    } else if (probe.err) |err| {
+        check.warning("the fuse probe could not run: {s}", .{error_reason(err)});
+        check.fix("check the process limits:", "ulimit -u");
+    } else {
+        check.warning("the fuse probe did not report a result: zbx run --lazy may not start", .{});
     }
-    assert(!probe.is(.ok));
-    probe_problem(check, "fuse", probe);
+    check.fix("or run without --lazy, which needs no FUSE", "");
+    assert(check.status == .warn);
 }
 
 /// M6b: the line of the overlay check says, after the overlay, whether this user could make an
@@ -2055,12 +2054,12 @@ test "uid 0 gets no free pass: root is judged like anyone else" {
 test "every check has its own code, and a FAIL's diagnostic is blamed on the environment" {
     // Goal: the mapping from check to code is total and distinct (one code per check, E0101 to
     // E0106), and a failing check carries a diagnostic with a cause, a fix and the exit code
-    // of its blame. Method: the empty host fails every check.
-    // The net check only warns, so it has no code.
+    // of its blame. Method: the empty host fails every check that reads files.
+    // The fuse and net checks only warn, so they have no code.
     var seen: [constants.doctor_checks_count]diag_codes.Code = undefined;
     var index: usize = 0;
     for (std.enums.values(CheckId)) |id| {
-        if (id == .net) continue;
+        if (warns_only(id)) continue;
         seen[index] = code_of(id);
         for (seen[0..index]) |earlier| try testing.expect(earlier != seen[index]);
         try testing.expect(std.mem.startsWith(u8, @tagName(seen[index]), "E01"));
@@ -2075,8 +2074,10 @@ test "every check has its own code, and a FAIL's diagnostic is blamed on the env
     evaluate(&facts, &report);
     var failures: u32 = 0;
     for (report.checks) |check| {
-        // The simulator's defaults let the kernel and overlay checks pass; the rest read files.
-        const expected = check.id != .kernel and check.id != .overlay and check.id != .net;
+        // The simulator's defaults let the kernel, overlay and fuse checks pass; the rest read
+        // files.
+        const passes = check.id == .kernel or check.id == .overlay or check.id == .fuse;
+        const expected = !passes and check.id != .net;
         try testing.expectEqual(expected, check.status == .fail);
         if (!expected) continue;
         failures += 1;
@@ -2140,14 +2141,14 @@ test "a failed read at every step of the healthy host is a FAIL, never ok" {
     const fixture = fixtures.all[0];
     var target: HostSim = undefined;
     var calls_total: u32 = 0;
-    // The calls of the six checks that can fail; the net check after them only ever warns, so
+    // The calls of the six checks that can fail; the fuse and net checks after them only warn, so
     // a fault in one of its calls leaves the exit code alone.
     var facts: Facts = undefined;
     target.init(3, fixture.files);
     fixture.apply(&target);
     facts.reset();
     for (std.enums.values(CheckId)) |id| {
-        if (id != .net) gather_one(target.interface(), &facts, id);
+        if (!warns_only(id)) gather_one(target.interface(), &facts, id);
     }
     const calls_before_net = target.call_count;
     for (kinds) |kind| {

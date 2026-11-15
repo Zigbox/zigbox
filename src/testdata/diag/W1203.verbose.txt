@@ -1,0 +1,7 @@
+warning[ZBX-W1203]: lazy start (--lazy) is not possible on this host
+  while  running the fuse check of zbx doctor
+  cause  /dev/fuse is missing or not openable: zbx run --lazy cannot start
+  fix    load the fuse module:   sudo modprobe fuse
+         or run without --lazy, which needs no FUSE
+  more   zbx explain W1203
+  docs   https://zigbox.github.io/zigbox/errors/W1203.html

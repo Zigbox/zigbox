@@ -363,7 +363,7 @@ fn prepare_proc_refused(sim: *HostSim) void {
 const run_restricted = fixtures.build(.{
     .name = "run_restricted",
     .apparmor_restrict = "1\n",
-    .probes = .{ .userns = .denied, .overlay = .setup_denied, .fuse = .setup_denied },
+    .probes = .{ .userns = .denied, .overlay = .setup_denied },
     .extra_files = &sim_run.extra_files,
 });
 
@@ -1358,6 +1358,13 @@ const base_cases = [_]Case{
         .code = .W0102,
         .args = &.{"doctor"},
         .fixture = "pasta_missing",
+        .exit = 0,
+        .from_report = true,
+    },
+    .{
+        .code = .W1203,
+        .args = &.{"doctor"},
+        .fixture = "fuse_missing",
         .exit = 0,
         .from_report = true,
     },

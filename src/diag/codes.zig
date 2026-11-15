@@ -286,6 +286,7 @@ pub const Code = enum(u16) {
     E1206,
     E1207,
     E1208,
+    W1203,
     B0001,
 };
 
@@ -4748,6 +4749,23 @@ pub const registry = [_]Entry{
         \\
         \\The cause names the option. Nothing was started. Leave out --lazy, or
         \\the other option.
+        ,
+    },
+    .{
+        .code = .W1203,
+        .severity = .warning,
+        .blame = .environment,
+        .summary = "lazy start (--lazy) is not possible on this host",
+        .explanation =
+        \\zbx run --lazy serves the image's files through FUSE from the zbx
+        \\process while the container runs. That needs /dev/fuse and a kernel that
+        \\lets a user namespace mount FUSE, and the fuse check of zbx doctor found
+        \\this host lacks one of them: the cause says which. Nothing else depends on
+        \\it, so this is a warning and "zbx doctor" still exits 0.
+        \\
+        \\Load the fuse module (sudo modprobe fuse), or run without --lazy: the
+        \\whole image is then read before the container starts. A run that asks for
+        \\--lazy on this host is refused as ZBX-E1201 before anything starts.
         ,
     },
     .{

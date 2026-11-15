@@ -1680,3 +1680,33 @@ test "threads_in_status reads the Threads line and nothing else" {
     try testing.expectEqual(@as(?u32, 2), threads_in_status("Threads: 2"));
     try testing.expectEqual(@as(?u32, null), threads_in_status("xThreads: 2\n"));
 }
+
+test "a diagnostic line of diag_json_bytes_max bytes is kept whole, and one byte more is cut" {
+    // Goal: the record keeps the JSON line exactly up to its bound (3056, the lazy record's
+    // room, docs/decisions/2026-11-15-diag-json-bytes-3056.md); past it, the short object that
+    // names the code. Method: grow the last cause one byte at a time until the line is the
+    // bound, then one byte longer.
+    const max = constants.diag_json_bytes_max;
+    const filler = @import("../test_util.zig").repeat('a', constants.diag_field_bytes_max);
+    var diag: Diag = undefined;
+    var big: [constants.output_bytes_max]u8 = undefined;
+    var buffer: [max]u8 = undefined;
+    for ([_]usize{ max, max + 1 }) |target| {
+        var length: usize = 1;
+        const line = while (length <= filler.len) : (length += 1) {
+            diag.reset();
+            diag.raise(.E0201);
+            for (0..constants.diag_whiles_count_max) |_| diag.while_("{s}", .{filler});
+            for (1..constants.diag_causes_count_max) |_| diag.cause("{s}", .{filler});
+            diag.cause("{s}", .{filler[0..length]});
+            const rendered = std.mem.trimEnd(u8, render.render(&diag, .json, false, &big), "\n");
+            if (rendered.len == target) break rendered;
+        } else return error.TestUnexpectedResult; // The fields no longer reach the bound.
+        const kept = diagnostic_json(&diag, &buffer);
+        if (target == max) {
+            try testing.expectEqualStrings(line, kept);
+        } else {
+            try testing.expectEqualStrings("{\"code\":\"ZBX-E0201\",\"truncated\":true}", kept);
+        }
+    }
+}
