@@ -8,7 +8,9 @@
 //!   1. The translator never crashes: it returns bytes, `Refused` or `Unresolved`.
 //!   2. A refusal has a registered code, a line inside the file (or 0), a sentence for what and
 //!      one for the fix.
-//!   3. `Unresolved` happens only when the file names a `missing/` image.
+//!   3. `Unresolved` happens only after the resolver refused a `missing/` image. The resolver
+//!      counts its refusals: the file's text need not hold `missing/` itself, since an escape
+//!      inside the name (`mis\sing/`) reads as the byte after it, as Docker reads it.
 //!   4. Accepted bytes are a build file: they parse with the builder's own reader, and written
 //!      back in the canonical form read as the same file.
 //!   5. The same input gives the same bytes again (nothing is kept between translations).
@@ -119,11 +121,16 @@ fn mutate(random: std.Random, buffer: []u8, length_in: usize) []const u8 {
     return buffer[0..length];
 }
 
+/// The resolver: every image is found but a `missing/` one. Its context counts the references
+/// it refused, which is what property 3 checks `Unresolved` against.
 const Table = struct {
     fn resolve(context: *anyopaque, reference: []const u8) error{Unresolved}!translate.ImageFacts {
-        _ = context;
+        const refused: *u32 = @ptrCast(@alignCast(context));
         assert(reference.len > 0);
-        if (std.mem.startsWith(u8, reference, "missing/")) return error.Unresolved;
+        if (std.mem.startsWith(u8, reference, "missing/")) {
+            refused.* += 1;
+            return error.Unresolved;
+        }
         return .{ .env = &.{"PATH=/usr/bin:/bin"}, .workdir = "" };
     }
 };
@@ -133,7 +140,7 @@ fn options_of(
     args: []const translate.BuildArg,
     target: ?[]const u8,
     hermetic: bool,
-    context: *u8,
+    context: *u32,
 ) translate.Options {
     assert(text.len <= text_bytes_max);
     return .{
@@ -183,11 +190,11 @@ pub fn fuzz_dockerfile(seed: u64) void {
     const args: [1]translate.BuildArg = .{.{ .name = "VERSION", .value = "2" }};
     const with_args = random.boolean();
     const target: ?[]const u8 = if (random.boolean()) "base" else null;
-    var context: u8 = 0;
+    var refused: u32 = 0;
     // `--hermetic` refuses a step with the network or a cache, and takes a pinned fetch.
     const hermetic = random.uintLessThan(u8, 4) == 0;
     const given_args: []const translate.BuildArg = if (with_args) &args else &.{};
-    const options = options_of(text, given_args, target, hermetic, &context);
+    const options = options_of(text, given_args, target, hermetic, &refused);
     const result = translate.translate(ws, &options);
     if (result) |bytes| {
         check_accepted(bytes);
@@ -198,6 +205,22 @@ pub fn fuzz_dockerfile(seed: u64) void {
         assert(std.mem.eql(u8, again[0..bytes.len], second));
     } else |err| switch (err) {
         error.Refused => check_refusal(&ws.refusal, text),
-        error.Unresolved => assert(std.mem.indexOf(u8, text, "missing/") != null),
+        error.Unresolved => assert(refused > 0),
     }
+}
+
+test "an escape inside a missing image's name is Unresolved, and the fuzzer accepts it" {
+    // Goal: `FROM mis\sing/image:1` reads as `missing/image:1`, as Docker reads it, so the
+    // translator returns `Unresolved` for a text without `missing/` in it. The fuzzer once
+    // asserted on the text and crashed here (seed 413147408027486679, 10000 iterations, in the
+    // 6644th, whose seed is below).
+    const heap = std.heap.page_allocator;
+    const ws = try heap.create(translate.Workspace);
+    defer heap.destroy(ws);
+    var refused: u32 = 0;
+    const text = "FROM mis\\sing/image:1\n";
+    const options = options_of(text, &.{}, null, false, &refused);
+    try std.testing.expectError(error.Unresolved, translate.translate(ws, &options));
+    try std.testing.expectEqual(@as(u32, 1), refused);
+    fuzz_dockerfile(16532042994754154576);
 }
