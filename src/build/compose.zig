@@ -45,6 +45,8 @@ const schedule = @import("schedule.zig");
 const assemble = @import("assemble.zig");
 const copy_mod = @import("copy.zig");
 const image_user = @import("../image_user.zig");
+const copy_owner = @import("copy_owner.zig");
+const copy_job = @import("copy_job.zig");
 const result_mod = @import("result.zig");
 const roots = @import("../store/roots.zig");
 const pull_lib = @import("../pull.zig");
@@ -53,6 +55,7 @@ const manifest = @import("../registry/manifest.zig");
 const digest_sha = @import("../registry/digest.zig");
 const trust_gate = @import("../trust/gate.zig");
 const trust_record = @import("../trust/record.zig");
+const pin_mod = @import("pin.zig");
 
 const Host = host_mod.Host;
 const Digest = digest_mod.Digest;
@@ -74,6 +77,10 @@ pub const Workspace = struct {
     cache: cache.Workspace,
     result: step_mod.Result,
     outputs: [constants.build_steps_max]Digest,
+    /// By step index: what its output is checked against (`pin.zig`), set in `begin`.
+    wants: [constants.build_steps_max]pin_mod.Want,
+    /// The output excludes of the step `begin` is keying (`pin.excludes`).
+    output_paths: [constants.build_output_excludes_max][]const u8,
     base_env: [constants.env_vars_count_max][]const u8,
     env: [constants.build_step_env_max][]const u8,
     argv: [constants.build_step_argv_max][]const u8,
@@ -104,6 +111,14 @@ pub const Workspace = struct {
     copying: copy_mod.Workspace,
     user_ws: image_user.Workspace,
     copy_keys: [constants.build_copy_entries_max]key_mod.Copy,
+    /// A copy step's `.chown` and `.chmod`: each entry's stamp, its `.to`, and the selection as
+    /// the stamp leaves it (the selection itself when the entry has neither).
+    copy_stamps: [constants.build_copy_entries_max]copy_owner.Stamp,
+    copy_tos: [constants.build_copy_entries_max][]const u8,
+    copy_chowns: [constants.build_copy_entries_max]?[]const u8,
+    copy_stamped: [constants.build_copy_entries_max]Digest,
+    copy_selections: [constants.build_copy_entries_max]Digest,
+    copy_owner: copy_owner.Workspace,
     cache_mounts: [constants.build_step_caches_max]key_mod.CacheMount,
     bind_keys: [constants.build_step_binds_max]key_mod.Bind,
     /// How many users of each tree this build rooted are still at work (`hold`, `unroot`): one
@@ -139,6 +154,8 @@ pub const Options = struct {
     verbose: bool,
     /// `--clear-caches`: empty this build file's cache directories before any step runs.
     clear_caches: bool = false,
+    /// `--pin`, `--locked` or `--hermetic` (M9 slice 3c, `pin.zig`).
+    pins: pin_mod.Mode = .plain,
 };
 
 /// The most a report line holds: a JSON step record (two digests, a name, numbers) is the
@@ -182,6 +199,7 @@ pub fn run_steps(
         .row_failed = null,
         .json = options.json,
         .verbose = options.verbose,
+        .pins = options.pins,
         .started_ms = host.monotonic_ms(),
         .started_s = host.time_now(),
         .name_width = name_width(&loaded.file),
@@ -201,6 +219,7 @@ pub fn run_steps(
     try context.header();
     context.warn_network();
     context.warn_caches();
+    if (options.pins == .hermetic) try context.check_hermetic();
     make_plan(loaded, &ws.plan);
     const executor: schedule.Executor = .{
         .context = &context,
@@ -211,6 +230,8 @@ pub fn run_steps(
     const outcome = schedule.run(&ws.plan, parallel_bound(host), executor);
     try context.finish(outcome);
     try context.build_image();
+    // Once, and only when the build succeeded: a failed build leaves the lock as it was.
+    if (options.pins == .pin) try context.save_pins();
 }
 
 /// The width of the name column: the longest step name, or `image`.
@@ -366,6 +387,8 @@ pub const Context = struct {
     row_failed: ?Error,
     json: bool,
     verbose: bool,
+    /// `--pin`, `--locked`, `--hermetic`, or none of them.
+    pins: pin_mod.Mode = .plain,
     started_ms: u64,
     /// The wall clock at the start, in the seconds a root record keeps (`unroot`).
     started_s: u64,
@@ -485,6 +508,7 @@ pub const Context = struct {
         var handed_over = false;
         defer if (!handed_over and !step.copy.given) context.drop(spec.input_tree);
         fill_lists(file, step, ws, &spec);
+        const lock_pin = context.output_excludes(index, &spec);
         spec.needs = fill_needs(loaded, index, ws);
         if (!step.copy.given) try context.resolve_binds(index, &spec);
         // The binds' selections are rooted too; they go as the input tree goes, and a worker
@@ -494,21 +518,10 @@ pub const Context = struct {
         // a worker starts.
         try context.check_interrupt();
         if (step.copy.given) return context.begin_copy(index, &spec);
-        key_mod.compute(&spec, &ws.key) catch {
-            diagnose.step_env_refused(context.diag, name, loaded.shown(), step.env.count, "");
-            return error.Failed;
-        };
-        var failure: cache.Failure = undefined;
-        const found = cache.lookup(context.store, &ws.cache, &ws.key, &failure) catch {
-            return context.cache_failed(&failure);
-        };
-        switch (found) {
-            .hit => |output| {
-                ws.outputs[index] = output;
-                try context.report(index, true, output);
-                return .hit;
-            },
-            .miss => {},
+        if (try context.lookup(index, &spec, lock_pin)) |output| {
+            ws.outputs[index] = output;
+            try context.report(index, true, output);
+            return .hit;
         }
         // A `step:` base is a tree this build made: the gate judged the image the chain
         // started from when that step ran, and a derived tree has no statement of its own.
@@ -518,6 +531,33 @@ pub const Context = struct {
         try context.fork_worker(index, &spec);
         handed_over = true; // The slot holds the roots now; `settle` or `abort_step` drops them.
         return .running;
+    }
+
+    /// Computes the run step's key into `ws.key`, judges its pin, and looks the key up: the
+    /// output on a hit, once it is checked against the pin; null on a miss.
+    fn lookup(
+        context: *Context,
+        index: u8,
+        spec: *const key_mod.Spec,
+        lock_pin: ?*const lock_file.Pin,
+    ) Error!?Digest {
+        const ws = context.ws;
+        const step = &context.loaded.file.steps[index];
+        assert(!step.copy.given);
+        key_mod.compute(spec, &ws.key) catch {
+            const shown = context.loaded.shown();
+            diagnose.step_env_refused(context.diag, spec.name, shown, step.env.count, "");
+            return error.Failed;
+        };
+        try context.judge_pin(index, lock_pin);
+        var failure: cache.Failure = undefined;
+        const found = cache.lookup(context.store, &ws.cache, &ws.key, &failure) catch {
+            return context.cache_failed(&failure);
+        };
+        return switch (found) {
+            .hit => |output| try context.check_pin(index, output),
+            .miss => null,
+        };
     }
 
     /// The policy gate on a step that is about to run (a hit runs nothing and is not checked):
@@ -687,8 +727,18 @@ pub const Context = struct {
             .output => |digest| digest,
         };
         ws.key = slot.key;
+        // An output refused for drift is not cached: a later `--locked` build runs the step
+        // again rather than hitting the refused output for ever.
+        if (context.pins.enforces()) {
+            _ = context.check_pin(slot.index, output) catch {
+                context.unroot(output);
+                return .{ .index = slot.index, .ok = false };
+            };
+        }
         const kept = context.record(output) catch return .{ .index = slot.index, .ok = false };
-        ws.outputs[slot.index] = kept;
+        ws.outputs[slot.index] = context.check_pin(slot.index, kept) catch {
+            return .{ .index = slot.index, .ok = false };
+        };
         context.report(slot.index, false, kept) catch |err| {
             context.row_failed = err;
             return .{ .index = slot.index, .ok = false };
@@ -852,7 +902,12 @@ pub const Context = struct {
                 context.unroot(source);
             };
             const selected = try context.copy_select(index, &entry, source);
-            ws.copy_keys[at] = .{ .source = selected, .to = file.text(entry.to) };
+            ws.copy_keys[at] = .{
+                .source = selected,
+                .to = file.text(entry.to),
+                .chown = if (entry.chown) |text| file.text(text) else null,
+                .chmod = if (entry.chmod) |text| file.text(text) else null,
+            };
             rooted += 1;
             try context.check_interrupt(); // An entry's import and selection can take seconds.
         }
@@ -876,6 +931,10 @@ pub const Context = struct {
                 if (context.loaded.graph.base_step[index] == null) {
                     try context.check_base(file.text(step.base), spec);
                 }
+                // The stamped trees are written under this lock, so `store gc` cannot take them
+                // before the cache entry holds the output they go into.
+                try context.copy_stamp(index, spec.base_tree, entries.len);
+                try context.check_interrupt(); // A restamp of a large selection takes seconds.
                 const made = try context.copy_assemble(spec.base_tree, entries.len);
                 break :blk cache.record(store, &ws.cache, &ws.key, made, &failure) catch
                     return context.cache_failed(&failure);
@@ -1046,13 +1105,59 @@ pub const Context = struct {
             .replace = true,
         };
         var tree = base;
-        for (ws.copy_keys[0..count]) |part| {
-            tree = assemble.merge(merging, tree, part.source) catch {
+        for (ws.copy_keys[0..count], ws.copy_stamped[0..count]) |part, stamped| {
+            tree = assemble.merge(merging, tree, stamped) catch {
                 context.assembly_failed("copy", part.to);
                 return error.Failed;
             };
         }
         return tree;
+    }
+
+    /// Each entry's selection with its `.chown` and `.chmod` applied (`copy_job`), in
+    /// `ws.copy_stamped`. A `.chown` name is looked up in the step's base, as `.user` is.
+    fn copy_stamp(context: *Context, index: u8, base: Digest, count: usize) Error!void {
+        const ws = context.ws;
+        const name = context.loaded.file.text(context.loaded.file.steps[index].name);
+        for (ws.copy_keys[0..count], 0..) |part, at| {
+            ws.copy_selections[at] = part.source;
+            ws.copy_tos[at] = part.to;
+            ws.copy_stamps[at] = .{};
+            if (part.chmod) |text| ws.copy_stamps[at].mode = copy_owner.mode_of(text);
+            ws.copy_chowns[at] = part.chown;
+            const text = part.chown orelse continue;
+            const found = image_user.resolve(context.store, &ws.user_ws, base, text, context.diag);
+            const resolved = found catch {
+                context.diag.reset();
+                const refusal: diagnose.OwnerRefusal = if (ws.user_ws.too_large) |file|
+                    .{ .too_large = file }
+                else
+                    .missing;
+                diagnose.copy_owner_not_found(context.diag, name, text, refusal);
+                return error.Failed;
+            };
+            var owner: copy_owner.Owner = .{ .uid = resolved.user.uid, .gid = resolved.user.gid };
+            // BuildKit: a uid alone, as a number, is its own group, whatever passwd says.
+            if (copy_owner.uid_alone(text)) owner.gid = owner.uid;
+            if (owner.uid == copy_owner.id_unowned or owner.gid == copy_owner.id_unowned) {
+                diagnose.copy_owner_not_found(context.diag, name, text, .unowned);
+                return error.Failed;
+            }
+            ws.copy_stamps[at].owner = owner;
+        }
+        const job: copy_job.Request = .{
+            .host = context.host,
+            .facts = context.facts,
+            .store = context.store,
+            .name = name,
+            .selections = ws.copy_selections[0..count],
+            .tos = ws.copy_tos[0..count],
+            .chowns = ws.copy_chowns[0..count],
+            .stamps = ws.copy_stamps[0..count],
+            .ws = &ws.copy_owner,
+            .stamped = ws.copy_stamped[0..count],
+        };
+        copy_job.restamp(&job, context.diag) catch return error.Failed;
     }
 
     /// Writes the entry under the shared lock, and returns the tree it names.
@@ -1171,6 +1276,100 @@ pub const Context = struct {
             context.loaded.shown(), file.steps_count + 1,
         }) catch unreachable; // `row_bytes` holds a shown path and a count.
         return context.emit(line);
+    }
+
+    /// Sets the step's output excludes in `spec` (`pin.excludes`) and returns its lock pin.
+    /// Every step's want starts as none; `judge_pin` sets it once the key is known.
+    fn output_excludes(context: *Context, index: u8, spec: *key_mod.Spec) ?*const lock_file.Pin {
+        const ws = context.ws;
+        const file = &context.loaded.file;
+        const step = &file.steps[index];
+        ws.wants[index] = .none;
+        const lock_pin = pin_mod.lock_pin(&ws.locking.lock, context.loaded.shown(), file, step);
+        const keyed = pin_mod.keyed(step, lock_pin != null, context.pins);
+        spec.output_exclude = pin_mod.excludes(file, step, keyed, &ws.output_paths);
+        assert(keyed == (spec.output_exclude != null));
+        return lock_pin;
+    }
+
+    /// What the step's output is checked against, now that `ws.key` is its key; a stale lock
+    /// pin under `--locked` or `--hermetic` is E0822.
+    pub fn judge_pin(context: *Context, index: u8, lock_pin: ?*const lock_file.Pin) Error!void {
+        const ws = context.ws;
+        const file = &context.loaded.file;
+        const step = &file.steps[index];
+        assert(ws.wants[index] == .none);
+        const expect: ?Digest = if (step.expect) |text|
+            Digest.parse(file.text(text)) orelse unreachable // The parser checked it.
+        else
+            null;
+        switch (pin_mod.judge(step, expect, lock_pin, ws.key.digest, context.pins)) {
+            .want => |want| ws.wants[index] = want,
+            .stale => |pinned_key| {
+                diagnose.pin_stale(context.diag, file.text(step.name), pinned_key, ws.key.digest);
+                return error.Failed;
+            },
+        }
+    }
+
+    /// The output a step's dependents are keyed by: its pin when it matches. Drift is E0822
+    /// under `--locked` or `--hermetic` (no dependent runs), else W0803 and the new output.
+    fn check_pin(context: *Context, index: u8, output: Digest) Error!Digest {
+        const pinned = switch (context.ws.wants[index]) {
+            .none, .pinning => return output,
+            .expect => |digest| digest,
+        };
+        if (pinned.eql(output)) return pinned;
+        const name = context.loaded.file.text(context.loaded.file.steps[index].name);
+        if (context.pins.enforces()) {
+            diagnose.pin_drifted(context.diag, true, name, pinned, output);
+            return error.Failed;
+        }
+        var warning: Diag = undefined;
+        warning.reset();
+        diagnose.pin_drifted(&warning, false, name, pinned, output);
+        context.write_warning(&warning);
+        assert(!pinned.eql(output));
+        return output;
+    }
+
+    /// `--hermetic`: E0814 for the first step with a cache mount or an unpinned network step,
+    /// before any step runs.
+    pub fn check_hermetic(context: *Context) Error!void {
+        assert(context.pins == .hermetic);
+        const loaded = context.loaded;
+        const lock_held = &context.ws.locking.lock;
+        const shown = loaded.shown();
+        const found = pin_mod.hermetic_refusal(lock_held, shown, &loaded.file) orelse return;
+        const name = loaded.file.text(loaded.file.steps[found.index].name);
+        diagnose.hermetic_step(context.diag, name, found.cache);
+        return error.Failed;
+    }
+
+    /// `--pin`: records the steps being pinned, with their keys and outputs, and writes the
+    /// lock once, atomically. Nothing to pin leaves the lock as it is.
+    pub fn save_pins(context: *Context) Error!void {
+        assert(context.pins == .pin);
+        const ws = context.ws;
+        const file = &context.loaded.file;
+        const locking = &ws.locking;
+        var count: u32 = 0;
+        var failure: lock_file.Failure = undefined;
+        for (0..file.steps_count) |index| {
+            if (ws.wants[index] != .pinning) continue;
+            const name = file.text(file.steps[index].name);
+            const key = ws.timings[index].key;
+            locking.lock.put_pin(context.loaded.shown(), name, key, ws.outputs[index]) catch {
+                image_diagnose.lock_failure(context.diag, locking.located.text(), .full);
+                return error.Failed;
+            };
+            count += 1;
+        }
+        if (count == 0) return;
+        lock_file.save(context.host, context.host.filesystem(), locking, &failure) catch {
+            image_diagnose.lock_failure(context.diag, locking.located.text(), failure);
+            return error.Failed;
+        };
     }
 
     /// `W0801` once, on stderr, before any step runs, when the build file has steps with
@@ -1371,7 +1570,7 @@ pub const Context = struct {
             // The name may come from the base image's config, which the file never wrote.
             const set_here = context.loaded.file.image.config.user != null;
             const where = if (set_here) ".image .config" else "the base image's config";
-            diagnose.user_not_found(context.diag, where, text);
+            diagnose.user_not_found(context.diag, where, text, ws.user_ws.too_large);
             return error.Failed;
         };
         var buffer: [24]u8 = undefined;

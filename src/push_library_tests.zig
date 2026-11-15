@@ -90,6 +90,7 @@ const Caller = struct {
             .tree = result.digest,
             .settings = &caller.settings,
             .labels = null,
+            .writer_version = zigbox.push.pack.layer_writer_version,
         };
         var made: zigbox.push.Packed = undefined;
         var failure: zigbox.push.pack.Failure = undefined;
@@ -129,6 +130,7 @@ test "two callers of zigbox.push, with stores of their own, make the same image"
         .tree = one.tree,
         .settings = &first.settings,
         .labels = null,
+        .writer_version = zigbox.push.pack.layer_writer_version,
     };
     var again: zigbox.push.Packed = undefined;
     var failure: zigbox.push.pack.Failure = undefined;

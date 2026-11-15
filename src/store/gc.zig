@@ -13,8 +13,9 @@
 //!   - file objects no kept tree names (and their chunk lists), and chunk lists with no object;
 //!   - tree objects no kept tree reaches;
 //!   - materialized directories (`cache/<digest>`) of a tree that is neither a root nor live;
-//!   - downloaded blobs (`blobs/sha256/<digest>`) that no image record names. An image record
-//!     (`images/`, `images.zig`) keeps its tree, its config blob and its layer blobs. Cut
+//!   - downloaded blobs (`blobs/sha256/<digest>`) that no image record and no build cache
+//!     entry names. An image record (`images/`, `images.zig`) keeps its tree, its config blob
+//!     and its layer blobs; a cache entry keeps the blob of each fetch its key names. Cut
 //!     downloads (`blobs/partial/`) are a pull's to resume, so only those older than
 //!     `constants.store_partial_seconds` are planned, as their own class: no pull is
 //!     writing one that old, and an apply holds the lock a pull holds shared.
@@ -46,6 +47,7 @@ const host_mod = @import("../host.zig");
 const digest_mod = @import("digest.zig");
 const fs_mod = @import("fs.zig");
 const build_cache = @import("../build/cache.zig");
+const build_key = @import("../build/key.zig");
 const generation = @import("generation.zig");
 const images = @import("images.zig");
 const layout = @import("layout.zig");
@@ -605,7 +607,19 @@ fn reach_build_cache(run: *Run) Error!void {
         var entry: build_cache.Entry = undefined;
         if (build_cache.parse(bytes, key, &entry) != .ok) continue;
         try mark_tree_from(run, entry.tree, .tolerate_missing);
+        try keep_fetched(run, entry.preimage);
     }
+}
+
+/// A cache entry's fetches keep their blobs (`blobs/sha256/<hex>`), so a later miss of a step
+/// whose entry is still here copies them again without the network. A preimage the reader does
+/// not know keeps nothing, as an entry that does not parse roots nothing.
+fn keep_fetched(run: *Run, preimage: []const u8) Error!void {
+    assert(run.blobs_live.slots.len > 0);
+    assert(preimage.len <= constants.build_key_preimage_bytes_max);
+    var hashes: [constants.build_copy_entries_max][32]u8 = undefined;
+    const count = build_key.fetched(preimage, &hashes) orelse return;
+    for (hashes[0..count]) |hash| try keep_blob(run, .{ .bytes = hash });
 }
 
 /// Image records keep their trees and their blobs.
@@ -639,7 +653,7 @@ fn keep_blob(run: *Run, blob: Sha256) Error!void {
     assert(run.blobs_live.slots.len > 0);
     const key: Digest = .{ .bytes = blob.bytes };
     if (run.blobs_live.put(key, 0) == .full) {
-        run.failure.* = .{ .too_big = "the blobs that images keep" };
+        run.failure.* = .{ .too_big = "the blobs that images and fetches keep" };
         return error.Failed;
     }
 }

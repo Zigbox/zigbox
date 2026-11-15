@@ -398,6 +398,7 @@ pub const HostSim = struct {
         .channel = channel,
         .listen_loopback = listen_loopback,
         .mount_fuse = mount_fuse,
+        .tcp4_socket = tcp4_socket,
         .send_handle = send_handle,
         .receive_handle = receive_handle,
         .is_unix_stream = is_unix_stream,
@@ -871,6 +872,12 @@ pub const HostSim = struct {
         assert(target.len > 0);
         try sim.begin_call();
         if (sim.world.fuse_refused) return sim.model_error(sim_world.errno_perm);
+        return sim.world.make_listener() orelse sim.model_error(sim_world.errno_nomem);
+    }
+
+    fn tcp4_socket(context: *anyopaque) host.Error!host.Handle {
+        const sim = from_context(context);
+        try sim.begin_call();
         return sim.world.make_listener() orelse sim.model_error(sim_world.errno_nomem);
     }
 

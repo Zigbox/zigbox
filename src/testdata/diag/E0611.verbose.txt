@@ -1,0 +1,10 @@
+error[ZBX-E0611]: a socket could not be made inside the container
+  while  making a socket in the container web
+  cause  a security policy, or another user's container, refuses it
+  cause  joining the container's user namespace failed: operation not permitted
+         (EPERM)
+  name   web
+  step   join_user
+  fix    run as the user that started the container, then check the host:   zbx doctor
+  more   zbx explain E0611
+  docs   https://zigbox.github.io/zigbox/errors/E0611.html

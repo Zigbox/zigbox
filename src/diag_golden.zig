@@ -18,6 +18,8 @@ const aws_diagnose = @import("aws/diagnose.zig");
 const push_diagnose = @import("push/diagnose.zig");
 const build_diagnose = @import("build/diagnose.zig");
 const lazy_diagnose = @import("fuse/diagnose.zig");
+const import_diagnose = @import("import_diagnose.zig");
+const refusal_mod = @import("dockerfile/refusal.zig");
 const trust_diagnose = @import("trust/diagnose.zig");
 const policy_mod = @import("trust/policy.zig");
 const verdict_mod = @import("trust/verdict.zig");
@@ -28,6 +30,8 @@ const panic = @import("diag/panic.zig");
 const render = @import("diag/render.zig");
 const test_util = @import("test_util.zig");
 const vm_golden = @import("mac/vm_golden.zig");
+const socket_diagnose = @import("runtime/socket_diagnose.zig");
+const run_diagnose = @import("runtime/diagnose.zig");
 const fixtures = @import("doctor_fixtures.zig");
 const run = @import("runtime/run.zig");
 const doctor = @import("doctor.zig");
@@ -806,6 +810,9 @@ const build_cases = [_]Case{
     .{ .code = .E0801, .args = &build_graph_args, .prepare = prepare_build_missing, .exit = 1 },
     .{ .code = .E0802, .args = &build_graph_args, .prepare = prepare_build_cycle, .exit = 1 },
     .{ .code = .E0803, .args = &build_graph_args, .prepare = prepare_build_escape, .exit = 1 },
+    .{ .code = .E0610, .args = &.{}, .direct = socket_no_network, .exit = 1 },
+    .{ .code = .E0611, .args = &.{}, .direct = socket_step_failed, .exit = 1 },
+    .{ .code = .E0612, .args = &.{}, .direct = hosts_file_missing, .exit = 1 },
     .{ .code = .E0804, .args = &.{}, .direct = build_base_not_locked, .exit = 1 },
     .{ .code = .E0805, .args = &.{}, .direct = build_step_failed, .exit = 1 },
     .{ .code = .E0806, .args = &.{}, .direct = build_output_refused, .exit = 1 },
@@ -814,7 +821,20 @@ const build_cases = [_]Case{
     .{ .code = .W0801, .args = &.{}, .direct = build_network_steps, .warning = true, .exit = 0 },
     .{ .code = .E0817, .args = &.{}, .direct = build_user_not_found, .exit = 1 },
     .{ .code = .E0818, .args = &.{}, .direct = build_glob_pool, .exit = 1 },
+    .{ .code = .E0820, .args = &.{}, .direct = build_fetch_failed, .exit = 3 },
+    .{ .code = .E0821, .args = &.{}, .direct = build_fetch_mismatch, .exit = 3 },
     .{ .code = .W0802, .args = &.{}, .direct = build_cache_steps, .warning = true, .exit = 0 },
+    .{ .code = .E0810, .args = &.{}, .direct = import_read_failed, .exit = 1 },
+    .{ .code = .E0811, .args = &.{}, .direct = import_e0811, .exit = 1 },
+    .{ .code = .E0812, .args = &.{}, .direct = import_e0812, .exit = 1 },
+    .{ .code = .E0813, .args = &.{}, .direct = import_e0813, .exit = 1 },
+    .{ .code = .E0814, .args = &.{}, .direct = import_e0814, .exit = 1 },
+    .{ .code = .E0815, .args = &.{}, .direct = import_e0815, .exit = 1 },
+    .{ .code = .E0816, .args = &.{}, .direct = import_output_exists, .exit = 1 },
+    .{ .code = .W0810, .args = &.{}, .direct = import_not_hermetic, .warning = true, .exit = 0 },
+    .{ .code = .W0811, .args = &.{}, .direct = import_dropped, .warning = true, .exit = 0 },
+    .{ .code = .E0822, .args = &.{}, .direct = build_pin_drifted, .exit = 3 },
+    .{ .code = .W0803, .args = &.{}, .direct = build_pin_warned, .warning = true, .exit = 0 },
 };
 
 /// The lazy start's codes that slice 4 raises (fuse/diagnose.zig). E1207 needs a tree too large
@@ -2569,6 +2589,27 @@ fn expect_direct(
     };
 }
 
+fn build_fetch_failed(diag: *Diag) void {
+    build_diagnose.fetch_failed(
+        diag,
+        "fetch",
+        "https://example.org/tool-1.2.tar.gz",
+        .{ .status = 404 },
+    );
+}
+
+fn build_fetch_mismatch(diag: *Diag) void {
+    const expected = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855";
+    const received = "2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824";
+    build_diagnose.fetch_mismatch(
+        diag,
+        "fetch",
+        "https://example.org/tool-1.2.tar.gz",
+        expected,
+        received,
+    );
+}
+
 /// E0804 to E0806 come from a build's steps, which slice 3's `zbx build` runs: until then the
 /// golden is the diagnostic as `build/diagnose.zig` builds it.
 fn build_base_not_locked(diag: *Diag) void {
@@ -2591,8 +2632,21 @@ fn build_network_steps(diag: *Diag) void {
     build_diagnose.network_steps(diag, "fetch, vendor", 2);
 }
 
+fn socket_no_network(diag: *Diag) void {
+    socket_diagnose.no_socket_network(diag, "web", .host);
+}
+
+fn socket_step_failed(diag: *Diag) void {
+    const failure: socket_diagnose.Failure = .{ .err = error.AccessDenied, .errno = 1 };
+    socket_diagnose.step_failed(diag, "web", .join_user, failure);
+}
+
+fn hosts_file_missing(diag: *Diag) void {
+    run_diagnose.hosts_file_invalid(diag, .missing, "/srv/mesh/hosts");
+}
+
 fn build_user_not_found(diag: *Diag) void {
-    build_diagnose.user_not_found(diag, "step \"a\"", "nobody2");
+    build_diagnose.user_not_found(diag, "step \"a\"", "nobody2", null);
 }
 
 fn build_interrupted(diag: *Diag) void {
@@ -2609,6 +2663,69 @@ fn build_cache_steps(diag: *Diag) void {
 
 fn build_output_refused(diag: *Diag) void {
     build_diagnose.output_refused(diag, "compile", "/run/control", "FIFO");
+}
+
+fn import_read_failed(diag: *Diag) void {
+    import_diagnose.read_failed(diag, "Dockerfile", .missing);
+}
+
+fn import_e0811(diag: *Diag) void {
+    var refusal: refusal_mod.Refusal = undefined;
+    _ = refusal_mod.refuse(&refusal, .E0811, 3, "Dockerfile:3 has FROM --platform=linux/arm64, " ++
+        "but zbx builds only for the host, linux/amd64", .{}, "write --platform=$BUILDPLATFORM, " ++
+        "or remove the flag", .{}) catch {};
+    import_diagnose.refused(diag, &refusal, "Dockerfile");
+}
+
+fn import_e0812(diag: *Diag) void {
+    var refusal: refusal_mod.Refusal = undefined;
+    _ = refusal_mod.refuse(&refusal, .E0812, 5, "Dockerfile:5 uses `VERSION`, an ARG with no " ++
+        "default and no --build-arg", .{}, "give ARG VERSION a default, or pass it with " ++
+        "--build-arg in the build file", .{}) catch {};
+    import_diagnose.refused(diag, &refusal, "Dockerfile");
+}
+
+fn import_e0813(diag: *Diag) void {
+    var refusal: refusal_mod.Refusal = undefined;
+    _ = refusal_mod.refuse(&refusal, .E0813, 9, "Dockerfile:9 names a second stage " ++
+        "`build`", .{}, "give each stage its own name", .{}) catch {};
+    import_diagnose.refused(diag, &refusal, "Dockerfile");
+}
+
+fn import_e0814(diag: *Diag) void {
+    var refusal: refusal_mod.Refusal = undefined;
+    _ = refusal_mod.refuse(&refusal, .E0814, 7, "Dockerfile:7 makes step fetch, which " ++
+        "has the network", .{}, "drop --hermetic, or change Dockerfile:7 so it needs " ++
+        "neither the network nor a cache", .{}) catch {};
+    import_diagnose.refused(diag, &refusal, "Dockerfile");
+}
+
+fn import_e0815(diag: *Diag) void {
+    var refusal: refusal_mod.Refusal = undefined;
+    _ = refusal_mod.refuse(&refusal, .E0815, 12, "Dockerfile:12 makes a string of 70000 " ++
+        "bytes, more than the build file's limit", .{}, "move the text into a script in the " ++
+        "context and COPY it", .{}) catch {};
+    import_diagnose.refused(diag, &refusal, "Dockerfile");
+}
+
+fn import_output_exists(diag: *Diag) void {
+    import_diagnose.output_exists(diag, "zbx.build.zon");
+}
+
+fn import_not_hermetic(diag: *Diag) void {
+    import_diagnose.not_hermetic(diag, "\"build-2\" (net, matched \"apk add\")", 1);
+}
+
+fn import_dropped(diag: *Diag) void {
+    import_diagnose.dropped(diag, "EXPOSE 8080 (label)", 1);
+}
+
+fn build_pin_drifted(diag: *Diag) void {
+    build_diagnose.pin_drifted(diag, true, "fetch", Digest.of("pinned"), Digest.of("served"));
+}
+
+fn build_pin_warned(diag: *Diag) void {
+    build_diagnose.pin_drifted(diag, false, "fetch", Digest.of("pinned"), Digest.of("served"));
 }
 
 fn build_tag_not_recorded(diag: *Diag) void {

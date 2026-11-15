@@ -23,6 +23,9 @@ const layout = @import("../store/layout.zig");
 const lazy = @import("lazy.zig");
 const land_mod = @import("land.zig");
 const schedule_mod = @import("schedule.zig");
+const index_mod = @import("index.zig");
+const inflate_range = index_mod.inflate_range;
+const range_trailer_bytes = index_mod.range_trailer_bytes;
 
 const Schedule = schedule_mod.Schedule;
 const Ticket = schedule_mod.Ticket;
@@ -924,34 +927,6 @@ fn now_ms(io: Io) u64 {
     assert(ms >= 0);
     return @intCast(ms);
 }
-
-/// Slice 2's `index.inflate_range` (src/lazy/index.zig on claude/s2-slice2), copied unchanged
-/// until that branch merges; then this and the two constants go, and the call above uses it.
-/// Inflates one compressed range (whole deflate blocks from an empty history) to exactly
-/// `out.len` bytes. `range` holds the `length` compressed bytes and `range_trailer_bytes` of
-/// room after them, which this overwrites with an empty final block.
-pub fn inflate_range(
-    range: []u8,
-    length: usize,
-    out: []u8,
-    window: *[flate.max_window_len]u8,
-) error{Malformed}!void {
-    assert(length >= 1);
-    assert(range.len >= length + range_trailer_bytes);
-    range[length..][0..range_trailer_bytes].* = range_trailer;
-    var input: std.Io.Reader = .fixed(range[0 .. length + range_trailer_bytes]);
-    var inflate: flate.Decompress = .init(&input, .raw, window);
-    inflate.reader.readSliceAll(out) catch return error.Malformed;
-    if (inflate.reader.takeByte()) |_| {
-        return error.Malformed;
-    } else |err| switch (err) {
-        error.EndOfStream => {},
-        error.ReadFailed => return error.Malformed,
-    }
-}
-
-pub const range_trailer = [2]u8{ 0x03, 0x00 };
-pub const range_trailer_bytes: u32 = range_trailer.len;
 
 comptime {
     assert(slots >= 2);

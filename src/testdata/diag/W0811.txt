@@ -1,0 +1,5 @@
+warning[ZBX-W0811]: parts of the Dockerfile did not carry over
+  cause  not carried over: EXPOSE 8080 (label)
+  fix    nothing to do unless one matters; the report says what became of each
+  more   zbx explain W0811 · rerun with --verbose for the full cause chain
+  docs   https://zigbox.github.io/zigbox/errors/W0811.html

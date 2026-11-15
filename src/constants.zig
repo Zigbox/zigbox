@@ -777,6 +777,11 @@ pub const state_export_time_max: u64 = 0o77777777777;
 pub const sim_fs_nodes_max: u32 = 640;
 pub const sim_fs_path_bytes_max: u32 = 192;
 pub const sim_fs_pool_bytes_max: u32 = 3 * 1024 * 1024;
+// The `lazy_index` fuzzer's own pool (`SimFs.use_pool`): its incompressible file of up to three
+// chunks, the imported object and two packed layers of it.
+pub const sim_fs_pool_lazy_fuzz_bytes_max: u32 = 24 * 1024 * 1024;
+// The `chaining` fuzzer's longest input: 256 runs of its shortest run size, the BLAKE3 piece.
+pub const fuzz_chaining_bytes_max: u32 = 256 * 1024;
 pub const sim_fs_handles_max: u32 = 8;
 
 // Registry and pull (M4, docs/briefs/M4-pull.md). Every byte a registry sends is bounded: it is
@@ -923,6 +928,9 @@ pub const image_import_stack_max: u32 = 32768;
 pub const lock_entries_max: u32 = 256;
 pub const lock_pool_bytes: u32 = 64 * 1024;
 pub const lock_file_bytes_max: u32 = 160 * 1024;
+/// The output pins a lock holds (M9 slice 3c, owner 2026-11-14): equal to `build_steps_max`, so
+/// a build file cannot pin more steps than it has.
+pub const lock_pins_max: u32 = 256;
 /// The buffer a blob is hashed and copied through.
 pub const blob_io_bytes: u32 = 64 * 1024;
 /// How many hosts one name may resolve to that are tried.
@@ -970,8 +978,17 @@ pub const build_step_binds_max: u32 = 4;
 pub const build_root_holds_max: u32 = build_parallel_max * (1 + build_step_binds_max) +
     2 * build_copy_entries_max;
 pub const build_copy_entries_max: u32 = 64;
+/// A pinned fetch (`.fetch = .{ .url, .sha256 }`, docs/briefs/M9-dockerfile-import.md): the bytes
+/// one download may hold (more is E0820, and the partial file is removed), and the redirects it
+/// follows, as a pull does. Its URL is bounded by `registry_url_bytes_max` and its idle time by
+/// `net_idle_timeout_ms` (owner, 2026-11-14).
+pub const build_fetch_bytes_max: u64 = 1024 * 1024 * 1024;
+pub const build_fetch_redirects_max: u32 = 4;
 /// The lines of one `.exclude` list (`.dockerignore` syntax).
 pub const build_exclude_lines_max: u32 = 256;
+/// The paths in one step's `.output_exclude` (M9 slice 3c, owner 2026-11-14): the four defaults
+/// for a pinned step, with room for one per package manager's log and cache directories.
+pub const build_output_excludes_max: u32 = 32;
 /// The sources of one copy entry.
 pub const build_copy_sources_max: u32 = build_step_inputs_max;
 /// A build's file, step and copy exclude lines, read as one list (later lines win).
@@ -1021,6 +1038,30 @@ pub const build_step_format_version: u32 = 1;
 /// `SOURCE_DATE_EPOCH` for every step, 1980-01-01T00:00:00Z: the earliest time `zip` stores.
 /// Every file a step sees carries it as its mtime (`store_mtime_seconds`).
 pub const build_source_date_epoch: u64 = 315_532_800;
+
+// M9 `zbx import` (docs/briefs/M9-dockerfile-import.md). A Dockerfile, its `.dockerignore` and
+// what the import holds of them are bounded here; the build file it writes is bounded by the
+// `build_*` constants above, and going past one of those is E0815.
+/// The largest Dockerfile read (the survey's largest is under 16 KiB).
+pub const import_dockerfile_bytes_max: u32 = 256 * 1024;
+/// The largest `.dockerignore` read; its lines are the build file's `.exclude`.
+pub const import_dockerignore_bytes_max: u32 = 64 * 1024;
+/// Instructions in one Dockerfile, every stage counted.
+pub const import_instructions_max: u32 = 2048;
+/// Stages in one Dockerfile.
+pub const import_stages_max: u32 = 64;
+/// Words in one instruction after splitting (sources, pairs, argv).
+pub const import_words_max: u32 = 256;
+/// Variables one stage can hold: arguments, `ENV` and the base image's environment.
+pub const import_variables_max: u32 = 256;
+/// Bytes of words and variable values made while translating one instruction or stage.
+pub const import_scratch_bytes_max: u32 = 256 * 1024;
+/// `--build-arg` given on one command line.
+pub const import_build_args_max: u32 = 64;
+/// Lines of the import report (steps, notes and flags).
+pub const import_report_lines_max: u32 = 1024;
+/// The report's text, held whole before it is written.
+pub const import_report_bytes_max: u32 = 128 * 1024;
 /// A key's preimage (`build/key.zig`): one step's strings are at most the file's pool, its
 /// base's env at most an image's settings, and the rest (digests, needs, the fixed environment,
 /// the length prefixes) fits in the margin.
@@ -1099,6 +1140,10 @@ comptime {
     assert(build_file_copies_max >= build_steps_max);
     assert(build_exclude_lines_max <= build_file_list_texts_max);
     assert(build_copy_sources_max <= build_file_list_texts_max);
+    // A fetched file is one store object, its hash read in chunks; it follows a pull's redirects.
+    assert(build_fetch_bytes_max <= store_file_bytes_max);
+    assert(build_fetch_redirects_max == registry_redirects_max);
+    assert(build_fetch_redirects_max > 0);
     // Needs and binds together are mounts beside `/src` and `/out`; the parser holds the sum.
     assert(build_step_binds_max + 2 <= mounts_max);
     assert(build_step_caches_max + 2 <= mounts_max);
@@ -1109,8 +1154,21 @@ comptime {
     assert(build_glob_pool_bytes_max / build_glob_matches_max >= 64);
     assert(build_exclude_lines_max * build_pattern_bytes_max <= build_pool_bytes);
     assert(build_glob_parts_max * 2 <= build_pattern_bytes_max);
+    // M9 import: a Dockerfile's steps fit the build file, and its words fit a list.
+    assert(import_stages_max <= build_steps_max);
+    assert(import_instructions_max >= build_steps_max);
+    assert(import_words_max >= build_step_argv_max);
+    assert(import_words_max >= build_copy_sources_max);
+    assert(import_variables_max >= build_config_env_max);
+    assert(import_dockerfile_bytes_max <= import_scratch_bytes_max);
+    assert(import_build_args_max <= import_variables_max);
     // Step indexes are `u16`.
     assert(build_steps_max <= std.math.maxInt(u16));
+    assert(lock_pins_max == build_steps_max);
+    assert(build_output_excludes_max >= 4);
+    assert(build_output_excludes_max <= build_file_list_texts_max);
+    assert(build_step_name_bytes_max <= std.math.maxInt(u8));
+    assert(path_bytes_max <= std.math.maxInt(u16));
 }
 
 // Fuzz runner.
@@ -1414,7 +1472,7 @@ comptime {
     const candidates_bytes_max = (container_path_dirs_count + 1) * (command_word_bytes_max + 20);
     const paths_needed = derived_paths_max * (rootfs_bytes_max + 16) + candidates_bytes_max +
         2 * id_map_line_bytes_max + 2 * etc_file_bytes_max + 512 +
-        pasta_path_bytes_max + state_path_bytes_max + 80 + 2;
+        pasta_path_bytes_max + state_path_bytes_max + 80 + 2 + mount_path_bytes_max + 1;
     // Each state volume: its name, its target twice, its data directory, and a stage path below
     // the rootfs and one below /dev, each with its NUL.
     const state_paths = state_volumes_max * (state_name_bytes_max + 2 * state_target_bytes_max +
@@ -1902,11 +1960,13 @@ comptime {
 
 /// The version of the layer writer: the tar form and the gzip stream a pack produces. The same
 /// tree and config give the same bytes for one version. A change to either is a new version.
-pub const layer_writer_version: u32 = 1;
+pub const layer_writer_version: u32 = 2;
 
 /// Annotation keys of a packed manifest.
 pub const pack_annotation_tree = "org.zigbox.tree";
 pub const pack_annotation_writer = "org.zigbox.layer-writer";
+/// The layer descriptor's annotation that points at the lazy index (layer writer 2).
+pub const pack_annotation_lazy_index = "org.zigbox.lazy-index";
 
 /// The OCI media types a pack writes.
 pub const oci_manifest_media_type = "application/vnd.oci.image.manifest.v1+json";
@@ -1983,19 +2043,33 @@ comptime {
     assert(layer_writer_version >= 1);
 }
 
-// Lazy start (S2): the FUSE server (slice 4). `lazy_nodes_max`, `lazy_fuse_threads` and
-// `lazy_index_bytes_max` are the S2 brief's bounds, approved by the owner on 2026-11-14; the rest
-// follow from them and from the store's chunk size.
+// ---- Lazy start (S2, docs/briefs/S2-lazy-start.md) ----------------------------------------
 
-/// The FUSE node table, fixed at start: room for this many entries below the root (each name in
-/// a directory: a file's hard links are entries that share one node). A tree with more entries
-/// is not served lazily. The table has a node more, the root's.
-pub const lazy_nodes_max: u32 = 262_144;
-/// Server threads reading `/dev/fuse`.
-pub const lazy_fuse_threads: u32 = 4;
-/// The lazy index's longest form. Its directory objects are what the server keeps in memory to
-/// answer lookups, so their total is held to it too (the room is reserved, and touched as used).
+/// The longest lazy index taken; a longer one is refused as too large (`E1207`). A 4 GiB file's
+/// chunk list is 4,096 records of 80 bytes, about 320 KiB; 64 MiB is far beyond any real image.
 pub const lazy_index_bytes_max: u32 = 64 * 1024 * 1024;
+
+/// The most names (paths) a tree started lazily may have: the FUSE node table, fixed at start. A
+/// tree with more is refused for lazy (`E1207`) and pulled whole. It bounds the layer writer's
+/// index memory too.
+pub const lazy_nodes_max: u32 = 262144;
+
+/// The longest compressed range fetched in one request, and so the longest chunk range an index
+/// may list.
+pub const lazy_range_bytes_max: u32 = 8 * 1024 * 1024;
+
+comptime {
+    assert(lazy_index_bytes_max >= store_tree_bytes_max);
+    assert(lazy_nodes_max > 0);
+    assert(std.math.isPowerOfTwo(lazy_nodes_max));
+    assert(lazy_range_bytes_max >= 2 * store_chunk_bytes);
+    assert(layer_writer_version == 2);
+}
+
+// Lazy start (S2): the FUSE server (slice 4). `lazy_nodes_max`, `lazy_fuse_threads` and
+// `lazy_index_bytes_max` are the S2 brief's bounds, approved by the owner on 2026-11-14, and are
+// defined with the index and the resolver; the rest follow from them and the store's chunk size.
+
 /// The most bytes one FUSE `READ` asks for (`max_read` and `max_pages`): one whole chunk.
 pub const fuse_read_bytes_max: u32 = store_chunk_bytes;
 pub const fuse_max_pages: u16 = @intCast(fuse_read_bytes_max / 4096);
@@ -2018,11 +2092,9 @@ pub const fuse_poll_ms: u32 = 100;
 pub const fuse_init_timeout_ms: u32 = 10_000;
 
 comptime {
-    assert(lazy_nodes_max > 0);
     assert(lazy_nodes_max < std.math.maxInt(u32) / 4);
     assert(lazy_fuse_threads >= 1);
     assert(lazy_fuse_threads <= 64);
-    assert(lazy_index_bytes_max >= store_tree_bytes_max);
     assert(fuse_read_bytes_max == store_chunk_bytes);
     assert(fuse_read_bytes_max % 4096 == 0);
     assert(fuse_max_pages <= 256); // The kernel's `FUSE_MAX_MAX_PAGES`.
@@ -2038,7 +2110,7 @@ comptime {
 }
 
 // Lazy start (S2): the chunk resolver (`src/lazy/`). The values are the brief's, approved by the
-// owner on 2026-11-14 (docs/briefs/S2-lazy-start.md, decision 4).
+// owner on 2026-11-14 (docs/briefs/S2-lazy-start.md, decision 4). `lazy_range_bytes_max` is above.
 /// One request to one source, for at most `lazy_range_bytes_max`.
 pub const lazy_attempt_timeout_ms: u32 = 10_000;
 /// The longest a read waits for a chunk that is not local before it fails with `EIO` (E1203).
@@ -2053,14 +2125,14 @@ pub const lazy_fetches_max: u32 = 8;
 pub const lazy_fill_fetches_max: u32 = 2;
 /// After two reads of consecutive chunks of one file, the chunks fetched ahead of the reader.
 pub const lazy_readahead_chunks: u32 = 4;
-/// The most compressed bytes one `Range` request asks for (neighbouring chunks coalesced).
-pub const lazy_range_bytes_max: u32 = 8 * 1024 * 1024;
 /// Below this many free bytes on the store's disk the fill stops; below a quarter of it a read's
 /// fetch fails (E1206).
 pub const lazy_store_free_bytes_min: u64 = 1024 * 1024 * 1024;
 /// The sources one resolver asks after the store: the peers a library caller passes, and the
 /// registry. A run that passes more peers is refused.
 pub const lazy_sources_max: u32 = 8;
+/// The readers that may wait on the resolver at once: the FUSE server's threads.
+pub const lazy_fuse_threads: u32 = 4;
 /// The chunks one request may carry: a range of `lazy_range_bytes_max` holds this many chunks
 /// that compress at all. Stored incompressible, each chunk carries a header and 7 fit; the
 /// job takes what the range holds, so the bound is never passed.

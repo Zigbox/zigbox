@@ -17,13 +17,14 @@ const trees = @import("../store/trees.zig");
 const key_mod = @import("key.zig");
 const step = @import("step.zig");
 const tests = @import("step_tests.zig");
+const pin = @import("pin.zig");
 
 const testing = std.testing;
 const Digest = digest_mod.Digest;
 
 /// What the command leaves in its upper layer, written when the hook fires.
 const Layer = struct {
-    kind: enum { added, deleted, fifo, nothing },
+    kind: enum { added, deleted, fifo, nothing, excluded },
 
     fn write(context: *anyopaque) void {
         const layer: *const Layer = @ptrCast(@alignCast(context));
@@ -45,9 +46,32 @@ const Layer = struct {
             .fifo => {
                 tests.files.put(tests.join(&path, upper, "/pipe"), .fifo, 0o644, .{ 0, 0 }, "");
             },
+            .excluded => write_excluded(upper),
         }
     }
 };
+
+/// What a pinned step writes besides its content: a log under /var/log (a default exclude) and
+/// a file under /skip (a written one), next to /opt/tool, which is content.
+fn write_excluded(top: []const u8) void {
+    var path: [constants.sim_fs_path_bytes_max]u8 = undefined;
+    tests.files.put_dir(tests.join(&path, top, "/opt"), 0o755);
+    tests.files.put_file(tests.join(&path, top, "/opt/tool"), 0o755, "#!tool\n");
+    tests.files.put_dir(tests.join(&path, top, "/var"), 0o755);
+    tests.files.put_dir(tests.join(&path, top, "/var/log"), 0o755);
+    tests.files.put_file(tests.join(&path, top, "/var/log/fetch.log"), 0o644, "12:00:01\n");
+    tests.files.put_dir(tests.join(&path, top, "/skip"), 0o755);
+    tests.files.put_file(tests.join(&path, top, "/skip/stamp"), 0o644, "12:00:02\n");
+}
+
+/// The command's writes to `/out`, for a step that is not a root step.
+fn write_out_excluded(context: *anyopaque) void {
+    _ = context;
+    write_excluded(tests.find_out().?);
+}
+
+/// A pinned step's excludes: the default list, which has /var/log, and a written path.
+const pinned_excludes = pin.default_excludes ++ [_][]const u8{"/skip"};
 
 /// The step's upper layer, while the container's directory exists.
 fn find_upper() ?[]const u8 {
@@ -92,6 +116,15 @@ fn run_root(
     kind: @TypeOf(@as(Layer, undefined).kind),
     exit: @import("../host.zig").ExitStatus,
 ) !Ran {
+    return run_root_excluding(seed, kind, exit, null);
+}
+
+fn run_root_excluding(
+    seed: u64,
+    kind: @TypeOf(@as(Layer, undefined).kind),
+    exit: @import("../host.zig").ExitStatus,
+    output_exclude: ?[]const []const u8,
+) !Ran {
     const fixture = try tests.setup(seed, "fetch");
     tests.sim.world.command_exit = exit;
     const before = sim_run.baseline(&tests.sim);
@@ -101,7 +134,8 @@ fn run_root(
         .context = &layer,
         .call = Layer.write,
     };
-    const spec = root_spec(&fixture);
+    var spec = root_spec(&fixture);
+    spec.output_exclude = output_exclude;
     const request: step.Request = .{
         .host = tests.sim.interface(),
         .facts = &tests.facts,
@@ -166,4 +200,45 @@ test "a root step that exits non-zero commits nothing" {
     const ran = try run_root(15, .added, .{ .exited = 2 });
     try testing.expectEqual(@as(?codes.Code, .E0805), tests.diag.code);
     try tests.expect_clean(&ran.fixture, &ran.before);
+}
+
+test "a pinned root step's output leaves out /var/log and its written excludes" {
+    // Goal: the excludes reach the commit (`commit_output`). Method: the layer adds /opt/tool,
+    // /var/log/fetch.log and /skip/stamp; with the default excludes and /skip, only /opt/tool
+    // is in the output. Without excludes all three are, so the check can fail.
+    const ran = try run_root_excluding(16, .excluded, .{ .exited = 0 }, &pinned_excludes);
+    try testing.expectEqual(@as(?codes.Code, null), tests.diag.code);
+    try testing.expect(try has(tests.result.output, "opt/tool"));
+    try testing.expect(!(try has(tests.result.output, "var/log/fetch.log")));
+    try testing.expect(!(try has(tests.result.output, "skip")));
+    try tests.expect_clean(&ran.fixture, &ran.before);
+    _ = try run_root_excluding(16, .excluded, .{ .exited = 0 }, null);
+    try testing.expectEqual(@as(?codes.Code, null), tests.diag.code);
+    try testing.expect(try has(tests.result.output, "var/log/fetch.log"));
+    try testing.expect(try has(tests.result.output, "skip/stamp"));
+}
+
+test "a pinned step's /out leaves out /var/log and its written excludes" {
+    // Goal: the excludes reach the import of /out (`import_output`). Method: the command writes
+    // /opt/tool, /var/log/fetch.log and /skip/stamp to /out; with the excludes only /opt/tool
+    // is in the output, and without them all three are.
+    for ([_]?[]const []const u8{ &pinned_excludes, null }) |output_exclude| {
+        const fixture = try tests.setup(17, "fetch");
+        const before = sim_run.baseline(&tests.sim);
+        var unused: u8 = 0;
+        tests.files.hook = .{
+            .rename_to_contains = "fetch.log",
+            .context = &unused,
+            .call = write_out_excluded,
+        };
+        var spec = tests.spec_for(&fixture);
+        spec.output_exclude = output_exclude;
+        try tests.run_it(&spec);
+        try testing.expectEqual(@as(?codes.Code, null), tests.diag.code);
+        const kept = output_exclude == null;
+        try testing.expect(try has(tests.result.output, "opt/tool"));
+        try testing.expectEqual(kept, try has(tests.result.output, "var/log/fetch.log"));
+        try testing.expectEqual(kept, try has(tests.result.output, "skip/stamp"));
+        try tests.expect_clean(&fixture, &before);
+    }
 }

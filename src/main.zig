@@ -179,7 +179,14 @@ test {
     _ = @import("layer/tar_write.zig");
     _ = @import("push/pack.zig");
     _ = @import("fuzz_pack.zig");
+    _ = @import("fuzz_lazy_index.zig");
+    _ = @import("fuzz_chaining.zig");
     _ = @import("push/pack_tests.zig");
+    _ = @import("lazy/chaining.zig");
+    _ = @import("lazy/index.zig");
+    _ = @import("lazy/seen.zig");
+    _ = @import("lazy/verify.zig");
+    _ = @import("lazy/index_tests.zig");
     _ = @import("push/export.zig");
     _ = @import("push/source.zig");
     _ = @import("push/diagnose.zig");
@@ -219,6 +226,7 @@ test {
     _ = @import("pull_library_tests.zig");
     _ = @import("push_library_tests.zig");
     _ = @import("build_library_tests.zig");
+    _ = @import("dockerfile_library_tests.zig");
     _ = @import("package_library_tests.zig");
     _ = @import("host_real_net.zig");
     _ = @import("testing/vm/registry_server.zig");
@@ -247,6 +255,7 @@ test {
     _ = @import("runtime/pasta.zig");
     _ = @import("runtime/net_tests.zig");
     _ = @import("runtime/listen_tests.zig");
+    _ = @import("runtime/hosts_file_tests.zig");
     // CI path selection (`.github/ci-changes.sh`).
     _ = @import("ci_changes_tests.zig");
 }
@@ -286,6 +295,7 @@ test {
     _ = @import("runtime/exec_history.zig");
     _ = @import("runtime/exec_tests.zig");
     _ = @import("runtime/exec_worker_tests.zig");
+    _ = @import("runtime/container_socket_tests.zig");
 }
 
 test {
@@ -309,7 +319,23 @@ test {
 }
 
 test {
+    _ = @import("build/pin_tests.zig");
+}
+
+test {
     _ = @import("build/copy_tests.zig");
+    _ = @import("build/copy_owner_tests.zig");
+    _ = @import("build/fetch_tests.zig");
+    _ = @import("build/fetch_tree.zig");
+}
+
+test {
+    _ = @import("fuzz_dnf.zig");
+}
+
+test {
+    // The library's start behind the trust gate (docs/briefs/library-trust-gate.md).
+    _ = @import("trust/start_gate_tests.zig");
 }
 
 test {
@@ -384,6 +410,22 @@ test {
 }
 
 test {
+    // The Dockerfile translator (M9 slice 3).
+    _ = @import("dockerfile/refusal.zig");
+    _ = @import("dockerfile/lines.zig");
+    _ = @import("dockerfile/words.zig");
+    _ = @import("dockerfile/network.zig");
+    _ = @import("dockerfile/report.zig");
+    _ = @import("dockerfile/translate.zig");
+    _ = @import("dockerfile/stages.zig");
+    _ = @import("dockerfile/config.zig");
+    _ = @import("dockerfile/steps.zig");
+    _ = @import("dockerfile/translate_tests.zig");
+    _ = @import("import_diagnose.zig");
+    _ = @import("import_tests.zig");
+}
+
+test {
     // CDI devices (M10 slice 2): the spec parser and resolver, a run with one, and the fuzzer.
     _ = @import("runtime/cdi.zig");
     _ = @import("runtime/cdi_tests.zig");
@@ -396,4 +438,5 @@ test {
     // Globs and `.dockerignore` matching (M9), and the fuzzer that checks them.
     _ = @import("build/glob.zig");
     _ = @import("fuzz_dockerignore.zig");
+    _ = @import("fuzz_dockerfile.zig");
 }

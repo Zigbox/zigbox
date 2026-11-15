@@ -2,8 +2,8 @@
 # Decides what ci.yml runs. Reads the changed paths, one per line, on stdin and writes
 # `name=true|false` lines (to $GITHUB_OUTPUT, or stdout when that is unset):
 #
-#   code      the build, tidy, test, errors-site, fuzz and dbus-live jobs
-#   demo_<d>  one VM demo, <d> in m0 m1 m2 m3 m4 m5 m6 m6b m7 m8 m8b m10 s2_lazy
+#   code      the build, tidy, test, errors-site, fuzz, fuzz-provenance and dbus-live jobs
+#   demo_<d>  one VM demo, <d> in m0 m1 m2 m3 m4 m5 m6 m6b m7 m8 m8b m9 m10 c4 s2_lazy
 #   demo_m8_packages  the four-guest packages demo (demo-m8-packages): the package sources, the
 #             packaging files and the packages harness (not the m8 demo's own rules)
 #
@@ -15,7 +15,7 @@
 # for the package files, the VM guests, the build and the workflow (docs/demos/m8.md).
 set -euo pipefail
 
-demos=(m0 m1 m2 m3 m4 m5 m6 m6b m7 m8 m8b m10 s2_lazy)
+demos=(m0 m1 m2 m3 m4 m5 m6 m6b m7 m8 m8b m9 m10 c4 s2_lazy)
 declare -A want=()
 want_packages=0
 
@@ -71,9 +71,9 @@ classify() {
   case "$p" in
     # Not part of any CI demo: the Mac build, the weekly top-20 run, the Z7 check, packaging, docs
     # and the site, and tests of the code (they never reach the zbx binary a demo runs).
-    docs/demos/m*.md)
+    docs/demos/m*.md | docs/demos/c4.md)
       suffix=${p#docs/demos/}; suffix=${suffix%.md}
-      case "$suffix" in m0 | m1 | m2 | m3 | m4 | m5 | m6 | m6b | m7 | m8 | m8b | m10) want_one "$suffix" ;; esac
+      case "$suffix" in m0 | m1 | m2 | m3 | m4 | m5 | m6 | m6b | m7 | m8 | m8b | m9 | m10 | c4) want_one "$suffix" ;; esac
       return ;;
     # The packages demo: the package sources, the packaging files and their harness. They set
     # no demo but demo-m8-packages.
@@ -81,7 +81,8 @@ classify() {
       want_packages=1; return ;;
     src/testing/vm/*m8_packages*) want_packages=1; return ;;
     src/mac/* | src/macos_main.zig | src/mac_release.zig | src/testing/mac* | \
-      src/testing/vm/*top20* | src/testing/vm/*z7* | LICENSE | docs/* | site/* | *.md) return ;;
+      src/testing/vm/*top20* | src/testing/vm/*z7* | \
+      src/testing/vm/*s2_probe* | LICENSE | docs/* | site/* | *.md) return ;;
     # The FUSE kernel test runs in demo-s2-lazy's guest, unlike other tests.
     src/fuse/kernel_tests.zig | src/fuse_kernel_test_root.zig) want_one s2_lazy; return ;;
     src/*_tests.zig | src/*/*_tests.zig | src/fuzz*.zig | src/tidy.zig | src/errors_site.zig | \
@@ -91,6 +92,8 @@ classify() {
     src/testing/vm/m8b/* | src/testing/vm/*_m8b.zig) want_one m8b; return ;;
     src/testing/vm/*_m10.zig | src/testing/vm/m10_fixture/*) want_one m10; return ;;
     src/testing/vm/*_s2_lazy.zig) want_one s2_lazy; return ;;
+    src/testing/vm/m9_* | src/testing/vm/*_m9.zig) want_one m9; return ;;
+    src/testing/vm/*_c4.zig | src/testing/vm/c4/* | src/testing/vm/c4_fixture/*) want_one c4; return ;;
     src/testing/vm/*_m8.zig | src/testing/vm/m8_*) want_one m8; return ;;
     src/testing/vm/m7_* | src/testing/vm/*_m7.zig) want_from m7; return ;;
     src/testing/vm/*_m6b.zig) want_from m6b; return ;;
@@ -102,7 +105,10 @@ classify() {
     src/testing/vm/*_m1.zig) want_from m1; return ;;
     # The source areas only some demos exercise. Anything else under src/ is the runtime every
     # demo runs on.
-    src/build/* | src/build_commands.zig) want_one m7; return ;;
+    # The Dockerfile translator and its fixtures (demo-m9's ACCEPT imports them) are M9's; the
+    # builder under them is M7's and M9's, which builds what it imports.
+    src/dockerfile/* | src/import_*.zig | src/build/dockerfile_fixtures/*) want_one m9; return ;;
+    src/build/* | src/build_commands.zig) want_one m7; want_one m9; return ;;
     src/fuse/* | src/host_real_fuse.zig | src/lazy/*) want_one s2_lazy; return ;;
     src/trust/* | src/push/*) want_one m8; return ;;
     src/registry/* | src/pull*.zig | src/lock_*.zig) want_from m4; return ;;

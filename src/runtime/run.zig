@@ -372,8 +372,14 @@ pub fn inspect(handle: *const Handle) Status {
 }
 
 /// Everything a run's handle holds before the first check: what the caller gave, and the state
-/// of a run that has not begun.
-fn init_handle(host: Host, container: *const Spec, options: StartOptions, handle: *Handle) void {
+/// of a run that has not begun. `start` does this first; so does a start refused before it (the
+/// library's trust gate, `trust/start_gate.zig`), which leaves the handle so.
+pub fn init_handle(
+    host: Host,
+    container: *const Spec,
+    options: StartOptions,
+    handle: *Handle,
+) void {
     assert(container.devices.len <= constants.run_devices_max);
     assert(@intFromPtr(handle) != 0);
     handle.host = host;
@@ -429,6 +435,7 @@ pub fn start(
     try check_root(host, container, options, handle, diag);
     try check_limits(container.limits, diag);
     try check_listen(container, diag);
+    try check_hosts_file(host, container, diag);
     try check_network(host, container, handle, diag);
     try resolve_mounts(host, container, handle, diag);
     try resolve_devices(host, container, handle, &cdi_storage, diag);
@@ -652,6 +659,7 @@ fn build_plan(
         .network = container.network,
         .listen = if (container.listen) |listen| listen.port else null,
         .host_resolv = host_resolv,
+        .hosts_file = container.hosts_file,
         .pasta = if (container.network == .user) .{
             .path = handle.pasta_path.slice(),
             .log = handle.pasta_log.slice(),
@@ -1002,6 +1010,42 @@ fn check_rootfs(host: Host, rootfs: []const u8, handle: *Handle, diag: *Diag) Er
     }
     @memcpy(handle.rootfs[0..rootfs.len], rootfs);
     handle.rootfs_len = @intCast(rootfs.len);
+}
+
+/// A run with `--hosts-file` (ZB-6): `--net none`, an absolute path, and a regular file this
+/// user can read now. The plan binds the path at /etc/hosts, so a failure there is a failed
+/// start, not a note.
+fn check_hosts_file(host: Host, container: *const Spec, diag: *Diag) Error!void {
+    assert(diag.code == null);
+    const path = container.hosts_file;
+    if (path.len == 0) return;
+    const problem = spec_mod.hosts_file_problem(container.network, path) orelse
+        hosts_file_look(host, path);
+    if (problem) |found| {
+        diagnose.hosts_file_invalid(diag, found, path);
+        return error.StartFailed;
+    }
+    assert(container.network == .none);
+}
+
+/// What the host says about a well-formed hosts file path: there, a regular file, readable. The
+/// first byte is read (an empty file reads none), which never blocks on a regular file; a FIFO
+/// would, and is refused before the read as not a regular file.
+fn hosts_file_look(host: Host, path: []const u8) ?spec_mod.HostsFileProblem {
+    assert(path.len > 0);
+    assert(path.len <= constants.mount_path_bytes_max);
+    const found = host.stat(path) catch |err| switch (err) {
+        error.NotFound => return .missing, // ENOENT, or ENOTDIR: a file where a directory is.
+        error.AccessDenied => return .unreadable, // A directory this user cannot search.
+        else => return .lookup_failed, // ELOOP, ENAMETOOLONG, EIO: not a permission problem.
+    };
+    if (found.mode & 0o170000 != 0o100000) return .not_a_file;
+    var first: [1]u8 = undefined;
+    _ = host.read_prefix(path, &first) catch |err| switch (err) {
+        error.AccessDenied => return .unreadable,
+        else => return .read_failed,
+    };
+    return null;
 }
 
 /// A run with `--listen`: it needs `--net none`, and no forwards (which imply `--net user`). The

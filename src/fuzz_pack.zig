@@ -11,6 +11,9 @@
 //!   3. The tar writer never writes past its header bounds: the layer file is a multiple of the
 //!      block size once decompressed, which the applier's success shows, and every header
 //!      assertion in `tar_write.zig` stays on in this build.
+//!   4. With layer writer 2 (each iteration picks 1 or 2), the index anchor is the same at both
+//!      buffer sizes, and inflating from each recorded offset gives the chunk
+//!      (`fuzz_lazy_index.check_layer`); M4's reader takes the layer as in property 2.
 
 const std = @import("std");
 const assert = std.debug.assert;
@@ -28,6 +31,7 @@ const layout = @import("store/layout.zig");
 const support = @import("store/test_support.zig");
 const PathBuf = @import("store/fs.zig").PathBuf;
 const pack = @import("push/pack.zig");
+const lazy_index_fuzz = @import("fuzz_lazy_index.zig");
 
 const root_path = "/data/store";
 
@@ -43,11 +47,18 @@ var layer: reader_mod.Layer = undefined;
 
 const pieces = [_]u32{ 1024, 1500, 4099, 65536, constants.pack_io_bytes };
 
-fn pack_at(tree: @import("store/digest.zig").Digest, piece: u32) pack.Packed {
+fn pack_at(tree: @import("store/digest.zig").Digest, piece: u32, version: u32) pack.Packed {
     var made: pack.Packed = undefined;
     var failure: pack.Failure = undefined;
-    const input: pack.Input = .{ .tree = tree, .settings = &settings, .labels = null };
+    const input: pack.Input = .{
+        .tree = tree,
+        .settings = &settings,
+        .labels = null,
+        .writer_version = version,
+    };
     packing.piece = piece;
+    packing.names_max = constants.lazy_nodes_max;
+    packing.index_bytes_max = constants.lazy_index_bytes_max;
     pack.pack_pieces(&store, &packing, input, &made, &failure) catch
         @panic("a whole tree must pack");
     return made;
@@ -140,10 +151,13 @@ pub fn fuzz_pack(seed: u64) void {
     import.import(&store, &imports, "/src", options, &imported, &diag) catch
         @panic("a generated tree must import");
 
-    const first = pack_at(imported.digest, pieces[random.uintLessThan(usize, pieces.len)]);
+    const version = random.intRangeAtMost(u32, 1, constants.layer_writer_version);
+    const first_piece = pieces[random.uintLessThan(usize, pieces.len)];
+    const first = pack_at(imported.digest, first_piece, version);
     // Drop the record, or the second pack would recall the first and compare it with itself.
-    pack.forget(&store, imported.digest);
-    const other = pack_at(imported.digest, pieces[random.uintLessThan(usize, pieces.len)]);
+    pack.forget(&store, imported.digest, version);
+    const other_piece = pieces[random.uintLessThan(usize, pieces.len)];
+    const other = pack_at(imported.digest, other_piece, version);
     assert(!first.cached);
     assert(!other.cached);
     assert(first.layer_size == other.layer_size);
@@ -151,6 +165,16 @@ pub fn fuzz_pack(seed: u64) void {
     assert(first.config.eql(other.config));
     assert(first.manifest.eql(other.manifest));
     assert(first.diff_id.eql(other.diff_id));
+    assert((first.index != null) == (version == 2));
+    assert((other.index != null) == (version == 2));
+    if (first.index) |anchor| {
+        const same = other.index.?;
+        assert(anchor.offset == same.offset);
+        assert(anchor.length == same.length);
+        assert(anchor.size == same.size);
+        assert(anchor.digest.eql(same.digest));
+        _ = lazy_index_fuzz.check_layer(&store, &first, imported.digest);
+    }
 
     files.put_dir("/out", 0o755);
     var path: PathBuf = undefined;

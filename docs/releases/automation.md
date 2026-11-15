@@ -139,6 +139,9 @@ read, so a concurrent change to the formula makes it fail, never overwrite.
   token only in `GH_TOKEN`.
 - Every tool is pinned: Zig by SHA-256 (`setup-zig`, `setup-zig-macos`), `gh` 2.74.0 by SHA-256
   (`setup-gh`), every action by full commit SHA. Every checkout sets `persist-credentials: false`.
+- Local actions load from the workflow's own commit (`github.workflow_sha`, checked out sparsely
+  at `.release-tools`), not from the release commit's checkout: a release commit predates later
+  tooling fixes, so `./.github/actions/...` would run the old action. `test` fails if one comes back.
 - The system tools are called by absolute path where a secret is in reach.
 
 ## Bill of materials

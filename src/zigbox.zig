@@ -6,8 +6,15 @@
 //!     an image digest; the command, the name, the labels and the environment (`env`) are the
 //!     contract's. `limits` (memory bytes, pids, CPU thousandths) is enforced by the container's
 //!     cgroup scope.
-//!   - `start(host, spec, options, handle, diag)`: starts it; on return the command is running.
-//!     `StartOptions.detached` marks the run as one whose supervisor outlives the caller.
+//!   - `start(host, spec, options, handle, gate, diag)`: starts it; on return the command is
+//!     running. `StartOptions.detached` marks the run as one whose supervisor outlives the
+//!     caller. Before anything is made, the run passes the node's trust policy exactly as
+//!     `zbx run` does (`trust/start_gate.zig`): the same policy files (`/etc/zbx/policy.zon`,
+//!     then the user's), the same verdict and tamper check, the same refusal codes (E0903 to
+//!     E0907). There is no way to skip it. With no policy file it reads nothing more and changes
+//!     nothing; `gate` (a `GateWorkspace`, about 17 MiB) is the caller's memory for it, one start
+//!     at a time per workspace. `exec_start` runs the gate `zbx exec` runs the same way. No
+//!     export starts a container or a command ungated: a build step's start is internal.
 //!   - `wait(handle)`: how it ended, as an `ExitReason`. `StartOptions.timeout_ms` ends a run
 //!     that lasts too long (SIGTERM, then SIGKILL after `grace_ms`); `timed_out(handle)` says so.
 //!   - `signal(handle, number)`: sends it a signal, with the forwarding rule of PID 1.
@@ -33,6 +40,7 @@
 const std = @import("std");
 
 const run = @import("runtime/run.zig");
+const start_gate = @import("trust/start_gate.zig");
 
 pub const Spec = run.Spec;
 pub const Label = run.Label;
@@ -43,8 +51,20 @@ pub const ExitReason = run.ExitReason;
 pub const StartOptions = run.StartOptions;
 pub const Warn = run.Warn;
 pub const Error = run.Error;
+/// The memory `start`'s trust gate works in: the caller's, in static or heap storage.
+pub const GateWorkspace = start_gate.Workspace;
 
-pub const start = run.start;
+/// `run.start` behind the trust gate. The ungated start is not part of the library.
+pub const start = start_gate.start;
+
+comptime {
+    // The gated starts are the library's, so a merge that points either name back at the ungated
+    // one fails to compile here rather than shipping quietly (the two signatures differ).
+    std.debug.assert(@TypeOf(start) == @TypeOf(start_gate.start));
+    std.debug.assert(@TypeOf(exec_start) == @TypeOf(start_gate.exec_start));
+    std.debug.assert(@TypeOf(start) != @TypeOf(run.start));
+    std.debug.assert(@TypeOf(exec_start) != @TypeOf(exec.start));
+}
 pub const wait = run.wait;
 pub const signal = run.signal;
 pub const inspect = run.inspect;
@@ -93,19 +113,35 @@ pub const open_log = logs.open_log;
 
 /// `exec` (M6b): a command in a running container, by its name, with what the container has and
 /// nothing more (its namespaces, cgroup, capabilities, `no_new_privs` and seccomp filter). The
-/// caller's `ExecHandle` (about 600 KiB; keep it in static storage or on the heap) holds the
-/// plan and the state; `exec_start` returns once the command runs, `exec_wait` reaps it. With
+/// caller's `ExecHandle` (at most 640 KiB, asserted at compile time; keep it in static storage
+/// or on the heap) holds the plan and the state; `exec_start` returns once the command runs,
+/// `exec_wait` reaps it. With
 /// `ExecSpec.terminal` the command gets a pseudo-terminal sized as the caller's; without, its
 /// streams are the caller's. The thread that starts it must be the process's only thread at
 /// that moment and must be the one that waits. `ExecExit.code` is the command's exit code.
+/// `exec_start(host, spec, options, handle, gate, diag)` first meets the node's trust policy as
+/// `zbx exec` does (`trust/start_gate.zig`): a refusal is `StartFailed` with E0903 to E0905 and
+/// nothing started. `gate` is a `GateWorkspace`, one start or exec at a time.
 pub const exec = @import("runtime/exec.zig");
 pub const ExecSpec = exec.Spec;
 pub const ExecOptions = exec.Options;
 pub const ExecHandle = exec.Handle;
 pub const ExecExit = exec.Exit;
-pub const exec_start = exec.start;
+pub const exec_start = start_gate.exec_start;
 pub const exec_wait = exec.wait;
 pub const exec_signal = exec.signal;
+/// A new, unconnected IPv4 TCP socket made inside a running container's network namespace
+/// (`docs/decisions/2026-11-14-zigcube-c4-requests.md`): `container_socket(host, name, .tcp4,
+/// &diag)` returns a close-on-exec descriptor the caller owns, or `error.SocketFailed` with the
+/// diagnostic in `diag`. Callable from any thread, many times, by a process that did not start
+/// the container; it needs the same state directory and uid as `exec_start`. Threads: each
+/// thread passes a `Host` of its own (one `HostReal` per thread); a `Host` is not shared. The
+/// container must have been started with `--net none` (the default): `--net host` and
+/// `--net user` (pasta) are refused with E0610.
+pub const container_socket_module = @import("runtime/container_socket.zig");
+pub const container_socket = container_socket_module.open;
+pub const ContainerSocketKind = container_socket_module.Kind;
+pub const ContainerSocketError = container_socket_module.Error;
 /// The recent execs of a container, as `zbx bundle` shows them.
 pub const exec_history = @import("runtime/exec_history.zig");
 
@@ -228,9 +264,10 @@ pub const package = struct {
 
     /// `zig build packages-check` over a tree the caller assembled: `apt/` and
     /// `rpm/<architecture>/` for both architectures, as `zig build packages` lays them out.
-    pub const check_tree = check_file.check;
-    pub const CheckOptions = check_file.Options;
-    pub const CheckError = check_file.Error;
+    /// Its errors are `CheckFailed` and `OutOfMemory` only, and its options have no test key.
+    pub const check_tree = check_file.check_tree;
+    pub const CheckOptions = check_file.TreeOptions;
+    pub const CheckError = check_file.TreeError;
     pub const CheckSource = check_file.Source;
     pub const TreeSource = check_file.TreeSource;
 };
@@ -243,21 +280,47 @@ pub const trust = @import("trust_export.zig");
 /// State volumes (M6): their names, layout, records and locks (`state/state.zig`).
 pub const state = @import("state/state.zig");
 
-/// The build (M7): the build file's parser, the step graph and its order, the cache key, one
-/// step's run, and the scheduler, for a caller that is not the command line. The caller reads
-/// the file with `build.file.parse`, orders it with `build.graph.order`, works out a step's key
-/// with `build.key.compute`, runs a step with `build.step.run_step` (its own `Workspace`, `Diag`
-/// and store) and drives the steps with `build.schedule.run`. Nothing here reads the environment,
-/// and nothing prints unless the request sets `stream`: then each line of the step's output goes
-/// to stderr behind `<step> | `. A failure is a coded `Diag`. `docs/demos/m7.md` has the limits.
+/// The build (M7): the build file's parser, the step graph and its order, the cache key, a
+/// step's names and its sweeps, and the scheduler, for a caller that is not the command line.
+/// The caller reads the file with `build.file.parse`, orders it with `build.graph.order`, works
+/// out a step's key with `build.key.compute` and drives the steps with `build.schedule.run`,
+/// with an executor of its own. A step's start (`run_step`) is not exported: it runs its base
+/// with no trust gate, because `zbx build` judges each base, bound to the manifest its lock
+/// names, before the step (docs/decisions/2026-11-13-library-trust-gate.md). Nothing here
+/// reads the environment or prints. A failure is a coded `Diag`. `docs/demos/m7.md` has the
+/// limits.
 pub const build = struct {
     pub const file = @import("build/file.zig");
     pub const graph = @import("build/graph.zig");
     pub const glob = @import("build/glob.zig");
     pub const key = @import("build/key.zig");
-    pub const step = @import("build/step.zig");
+    pub const step = struct {
+        const step_file = @import("build/step.zig");
+        pub const Error = step_file.Error;
+        pub const Request = step_file.Request;
+        pub const Result = step_file.Result;
+        pub const Workspace = step_file.Workspace;
+        pub const hostname = step_file.hostname;
+        pub const umask = step_file.umask;
+        pub const name_prefix = step_file.name_prefix;
+        pub const log_group_bytes = step_file.log_group_bytes;
+        pub const log_group = step_file.log_group;
+        pub const cache_dir_name = step_file.cache_dir_name;
+        pub const output_root_prefix = step_file.output_root_prefix;
+        pub const sweep = step_file.sweep;
+        pub const clear_caches = step_file.clear_caches;
+    };
     pub const schedule = @import("build/schedule.zig");
 };
+
+/// The Dockerfile translator (M9): `dockerfile.translate(ws, options)` turns a Dockerfile, its
+/// `.dockerignore` and the build arguments into the bytes of a `zbx.build.zon`, and fills
+/// `ws.report` and the references it reached. Pure: the caller's `Resolver` says what a base
+/// image's env and workdir are, and nothing is read, pulled or written here. A refusal is
+/// `error.Refused` with `ws.refusal` (a code, a line, what and a fix); an image the resolver
+/// cannot find is `error.Unresolved`. `dockerfile.report` renders the report (text and
+/// `zbx.import/1`). The workspace is large: give it static or heap memory.
+pub const dockerfile = @import("dockerfile/translate.zig");
 
 test "the module's surface is what the contract names" {
     // Goal: a rename or a removal in the runtime that Zigcube relies on fails here, loudly.
@@ -266,6 +329,7 @@ test "the module's surface is what the contract names" {
     _ = Status;
     _ = ExitReason;
     _ = start;
+    _ = GateWorkspace;
     _ = wait;
     _ = signal;
     _ = inspect;
@@ -277,6 +341,7 @@ test "the module's surface is what the contract names" {
     _ = LogReader;
     _ = exec_start;
     _ = exec_wait;
+    _ = container_socket;
     _ = pull.pull;
     _ = pull.Workspace;
     _ = aws_credentials_resolve;
@@ -335,6 +400,16 @@ test "the package writer's surface is exactly what the decision names" {
     _ = package.dnf.write;
     _ = package.check_tree;
     _ = package.TreeSource.source;
+    // The check exposes nothing of the OpenPGP module: no test key, no signing error.
+    try std.testing.expectEqual(1, std.meta.fieldNames(package.CheckOptions).len);
+    try std.testing.expect(@hasField(package.CheckOptions, "signatures_required"));
+    const check_errors = @typeInfo(package.CheckError).error_set.error_names.?;
+    try std.testing.expectEqual(2, check_errors.len);
+    for (check_errors) |found| {
+        const known = std.mem.eql(u8, found, "CheckFailed") or
+            std.mem.eql(u8, found, "OutOfMemory");
+        try std.testing.expect(known);
+    }
 }
 
 test "the module's surface for a second product's diagnostics" {

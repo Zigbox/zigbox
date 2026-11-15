@@ -1,0 +1,43 @@
+// Imported by `zbx import` from Dockerfile: target stage1, --network detect.
+// Edit this file from here on: `zbx build` reads it, not the Dockerfile.
+.{
+    .version = 1,
+    .steps = .{
+        // Dockerfile:5  COPY . .
+        .{
+            .name = "build-1",
+            .base = "golang:1.22",
+            .copy = .{
+                .{ .src = .{ "." }, .to = "/src/" },
+            },
+        },
+        // Dockerfile:6  RUN GOARCH=$TARGETARCH go build -o /out/app-$TARGETARCH .
+        .{
+            .name = "build-2",
+            .base = "step:build-1",
+            .env = .{ "TARGETARCH=amd64" },
+            .run = .{ "/bin/sh", "-c", "GOARCH=$TARGETARCH go build -o /out/app-$TARGETARCH ." },
+            .output = .root,
+            .workdir = "/src",
+        },
+        // Dockerfile:9  COPY --from=busybox:1.36 /bin/busybox /bin/busybox
+        .{
+            .name = "stage1-1",
+            .base = "alpine:3.20",
+            .copy = .{
+                .{ .from = "busybox:1.36", .src = .{ "/bin/busybox" }, .to = "/bin/busybox" },
+            },
+        },
+        // Dockerfile:10  COPY --from=build /out/app-${TARGETARCH} /usr/local/bin/app
+        .{
+            .name = "stage1-2",
+            .base = "step:stage1-1",
+            .copy = .{
+                .{ .from = "step:build-2", .src = .{ "/out/app-amd64" }, .to = "/usr/local/bin/app" },
+            },
+        },
+    },
+    .image = .{
+        .base = "step:stage1-2",
+    },
+}
