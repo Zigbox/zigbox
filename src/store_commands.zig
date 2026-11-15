@@ -402,9 +402,12 @@ fn put_tags_json(job: *const Job, image: *const images.Image, diag: *Diag) Error
 }
 
 /// The image records, after the roots: text as a second table when there are any, JSON as the
-/// members of "images". Each shows every tag it was pulled as and the tree it became.
+/// members of "images". Each shows every tag it was pulled as and the tree it became, and a
+/// lazily started image how much of it is local (`partial 38%`; S2).
 const LsImages = struct {
     job: *const Job,
+    store: *const Store,
+    memory: usage.Memory,
     diag: *Diag,
     json: bool,
     count: u32 = 0,
@@ -416,28 +419,49 @@ const LsImages = struct {
         if (self.failed) return;
         const first = self.count == 0;
         self.count += 1;
-        const done = if (self.json) self.put_json(image, first) else self.put_text(image, first);
+        const local = self.local_percent(image);
+        const done = if (self.json)
+            self.put_json(image, local, first)
+        else
+            self.put_text(image, local, first);
         done catch {
             self.failed = true;
         };
     }
 
-    fn put_json(self: *LsImages, image: *const images.Image, first: bool) Error!void {
+    /// Null for a whole image, and for a partial one whose tree cannot be walked (shown as
+    /// partial without a percent: `ls` shows rather than refuses).
+    fn local_percent(self: *LsImages, image: *const images.Image) ?u8 {
+        if (!image.partial) return null;
+        var failure: usage.Failure = undefined;
+        return usage.tree_local_percent(self.store, &self.memory, image.tree, &failure) catch null;
+    }
+
+    fn put_json(self: *LsImages, image: *const images.Image, local: ?u8, first: bool) Error!void {
         assert(self.json);
         assert(self.count > 0);
         try put(self.job, if (first) "{" else ",{", self.diag);
         try put_tags_json(self.job, image, self.diag);
         var buffer: [512]u8 = undefined;
         const fields = ",\"manifest\":\"{s}\",\"platform\":\"{s}\",\"tree\":\"{s}\"," ++
-            "\"time\":{d}}}";
+            "\"time\":{d}";
         // Cannot fail: a manifest, a platform, a tree and a time are under 200 bytes.
         const text = std.fmt.bufPrint(&buffer, fields, .{
             &image.manifest.text(), image.platform_text(), image.tree.text(), image.time,
         }) catch unreachable; // Same bound.
         try put(self.job, text, self.diag);
+        if (image.partial) {
+            try put(self.job, ",\"partial\":true", self.diag);
+            if (local) |percent| {
+                // Cannot fail: a number of at most 3 digits.
+                const more = std.fmt.bufPrint(&buffer, ",\"local_percent\":{d}", .{percent});
+                try put(self.job, more catch unreachable, self.diag); // Same bound.
+            }
+        }
+        try put(self.job, "}", self.diag);
     }
 
-    fn put_text(self: *LsImages, image: *const images.Image, first: bool) Error!void {
+    fn put_text(self: *LsImages, image: *const images.Image, local: ?u8, first: bool) Error!void {
         assert(!self.json);
         assert(self.count > 0);
         var buffer: [constants.output_bytes_max]u8 = undefined;
@@ -457,6 +481,15 @@ const LsImages = struct {
             commands.clock_text(image.time, &when),
             image.tree.text(),
         }) catch unreachable; // Same bound.
+        if (image.partial) {
+            writer.undo(1); // The row's newline: the state goes at its end.
+            // Cannot fail: the row is at most 8.5 KiB of the 16 KiB buffer.
+            if (local) |percent| {
+                writer.print("  partial {d}%\n", .{percent}) catch unreachable;
+            } else {
+                writer.writeAll("  partial\n") catch unreachable; // Same bound.
+            }
+        }
         try put(self.job, writer.buffered(), self.diag);
     }
 };
@@ -471,7 +504,13 @@ fn images_unreadable(diag: *Diag, store: *const Store) Error {
 
 fn ls_images(job: *Job, store: *const Store, json: bool, diag: *Diag) Error!void {
     assert(diag.code == null);
-    var visitor: LsImages = .{ .job = job, .diag = diag, .json = json };
+    var visitor: LsImages = .{
+        .job = job,
+        .store = store,
+        .memory = usage_memory(job),
+        .diag = diag,
+        .json = json,
+    };
     image_find.scan(store, &job.workspace.image_memory, &job.workspace.image, &visitor) catch {
         return images_unreadable(diag, store);
     };

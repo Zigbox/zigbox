@@ -28,6 +28,7 @@ const layout = @import("../store/layout.zig");
 const xattrs = @import("../store/xattrs.zig");
 const Digest = @import("../store/digest.zig").Digest;
 const run = @import("../runtime/run.zig");
+const records = @import("../runtime/records.zig");
 const nodes = @import("nodes.zig");
 const ops = @import("ops.zig");
 const cache_mod = @import("cache.zig");
@@ -141,7 +142,14 @@ pub const Server = struct {
     pub fn lazy(server: *Server) run.Lazy {
         assert(server.state == .idle);
         assert(server.fd == -1);
-        return .{ .context = server, .prepare = prepare, .serve = serve };
+        return .{ .context = server, .prepare = prepare, .serve = serve, .record = record };
+    }
+
+    /// The run record's `.lazy`, from the resolver's report; null before it started.
+    fn record(context: *anyopaque) ?records.Lazy {
+        const server: *Server = @ptrCast(@alignCast(context));
+        const found = server.report() orelse return null;
+        return record_of(&found, server.source_names().len);
     }
 
     /// After the run (or a start that failed): stops the serving threads, joins them, and
@@ -376,4 +384,19 @@ fn free_catalog(memory: resolver.CatalogMemory) void {
 comptime {
     assert(table_bytes <= std.math.maxInt(usize));
     assert(cache_bytes <= std.math.maxInt(usize));
+}
+
+/// A report as the run record keeps it: the percent local by bytes, as the summary line says it.
+pub fn record_of(report: *const lazy_mod.Report, sources: usize) records.Lazy {
+    assert(report.bytes_local <= report.bytes_total);
+    assert(sources <= constants.lazy_sources_max);
+    const percent = if (report.bytes_total == 0) 100 else report.bytes_local * 100 /
+        report.bytes_total;
+    return .{
+        .sources = @intCast(sources),
+        .demand_bytes = report.fetched_on_demand_bytes,
+        .fill_bytes = report.fetched_fill_bytes,
+        .errors = report.errors,
+        .local_percent = @intCast(percent),
+    };
 }

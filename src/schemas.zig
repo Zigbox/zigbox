@@ -171,6 +171,11 @@ const ps_schema =
     \\"items":{"type":"object","required":["host","target"],
     \\"properties":{"host":{"type":"string"},"target":{"type":"string"}}}},
     \\"listen":{"type":"string","description":"M8b: --listen (127.0.0.1:PORT)"},
+    \\"lazy":{"type":"object","description":"S2: a lazy run's fetching; absent for any other",
+    \\"required":["local_percent","fetched_bytes","errors"],
+    \\"properties":{"local_percent":{"type":"integer","description":"of the image's bytes"},
+    \\"fetched_bytes":{"type":"integer","description":"on first read and in the background"},
+    \\"errors":{"type":"integer","description":"reads that failed (EIO)"}}},
     \\"devices":{"type":"array","description":"M10: each --device; absent for a run with none",
     \\"items":{"type":"object","required":["asked"],
     \\"properties":{"asked":{"type":"string","description":"as given"},
@@ -332,7 +337,10 @@ const store_ls_schema =
     \\"manifest":{"type":"string","pattern":"^sha256:[0-9a-f]{64}$"},
     \\"platform":{"type":"string"},
     \\"tree":{"type":"string","pattern":"^b3:[0-9a-f]{64}$"},
-    \\"time":{"type":"integer"}}}}}}
+    \\"time":{"type":"integer"},
+    \\"partial":{"const":true,"description":"S2: started lazily, not every file local"},
+    \\"local_percent":{"type":"integer",
+    \\"description":"S2: of a partial image's bytes; absent when its tree cannot be read"}}}}}}
 ;
 
 const store_du_schema =

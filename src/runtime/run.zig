@@ -222,6 +222,22 @@ pub const Lazy = struct {
     /// spawned. A refusal says why in `diag` and ends the start.
     prepare: *const fn (context: *anyopaque, tree: Digest, diag: *Diag) bool,
     serve: *const fn (context: *anyopaque, device: host_mod.Handle) host_mod.Error!void,
+    /// What the run has fetched so far, for its record (`.lazy`, version 11): asked each time
+    /// the record is written. Null, or a null answer (the server never started), writes a lazy
+    /// run's record with zero counts.
+    record: ?*const fn (context: *anyopaque) ?records.Lazy = null,
+
+    fn record_now(lazy: *const Lazy) records.Lazy {
+        const none: records.Lazy = .{
+            .sources = 0,
+            .demand_bytes = 0,
+            .fill_bytes = 0,
+            .errors = 0,
+            .local_percent = 0,
+        };
+        const ask = lazy.record orelse return none;
+        return ask(lazy.context) orelse none;
+    }
 };
 
 /// The longest `StartOptions.stream_prefix`: a build step's name and ` | `.
@@ -274,6 +290,8 @@ pub const Handle = struct {
     publish_count: u32,
     /// The listener `--listen` asked for, for the record and `zbx ps`; never a descriptor.
     listen: ?spec_mod.Listen,
+    /// A lazy run's server, asked for the record's `.lazy`; null for any other run.
+    lazy: ?Lazy,
     /// For `--net user`: where pasta is, and the file its output goes to (empty: none).
     pasta_path: text_util.Bounded(constants.pasta_path_bytes_max),
     pasta_log: text_util.Bounded(constants.state_path_bytes_max + 80),
@@ -395,6 +413,7 @@ pub fn init_handle(
     handle.network = container.network;
     handle.publish_count = 0;
     handle.listen = container.listen;
+    handle.lazy = options.lazy;
     handle.pasta_path = .{};
     handle.pasta_log = .{};
     handle.end_reason = .none;
@@ -1592,6 +1611,7 @@ fn save_record(handle: *Handle, exit: records.Exit, ended: ?u64, why: ?*const Di
         .devices = handle.devices,
         .user = handle.user,
         .binding = handle.binding,
+        .lazy = if (handle.lazy) |*lazy| lazy.record_now() else null,
         .diagnostic = if (why) |found| diagnostic_json(found, &json) else "",
     };
     records.save(handle.host, &dir, &view) catch |err| {
