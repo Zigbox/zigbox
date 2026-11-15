@@ -585,6 +585,7 @@ const Receiver = struct {
     sink: net.Sink,
     body_bytes_max: u64,
     range_from: u64 = 0,
+    range_last: ?u64 = null,
     buffer: ?*net.BufferSink = null,
     total_timeout_ms: u32,
 
@@ -624,6 +625,7 @@ fn request_of(
         .idle_timeout_ms = constants.net_idle_timeout_ms,
         .total_timeout_ms = receiver.total_timeout_ms,
         .range_from = receiver.range_from,
+        .range_last = receiver.range_last,
         .secret = basic.len > 0, // An ECR answer is held under the same care as its token.
     };
 }
@@ -929,4 +931,114 @@ fn blob_sink_failed(download: *const blobs_mod.Download, diag: *Diag, err: Error
         .none => unreachable, // Handled above.
     }
     return error.Failed;
+}
+
+// ---- Ranges --------------------------------------------------------------------------------
+
+/// Why `fetch_range` got no bytes; the failure is in the `Diag` too.
+pub const RangeError = error{
+    /// The registry does not hold the blob (`404`).
+    NotFound,
+    Failed,
+};
+
+/// Bytes `offset` to `offset + out.len - 1` of blob `digest` by one closed `Range` request to the
+/// place that answered the resolve, within `timeout_ms` for the whole call. Only a `206` whose
+/// Content-Range starts at `offset` is an answer; its bytes are unverified, for the caller to
+/// check. Returns how many came: fewer than asked when the blob ends sooner.
+pub fn fetch_range(
+    client: *Client,
+    reference: *const Reference,
+    digest: Sha256,
+    offset: u64,
+    out: []u8,
+    timeout_ms: u32,
+    diag: *Diag,
+) RangeError!usize {
+    assert(out.len > 0);
+    assert(timeout_ms > 0);
+    assert(diag.code == null);
+    assert(client.winner < client.places.count);
+    const origin = client.places.origins[client.winner];
+    var target_storage: [manifest_target_bytes_max]u8 = undefined;
+    const digest_text = digest.text();
+    const target = std.fmt.bufPrint(
+        &target_storage,
+        "/v2/{s}/blobs/{s}",
+        .{ reference.repository(), &digest_text },
+    ) catch unreachable; // The storage holds the longest repository and a digest.
+    var buffer: net.BufferSink = .{ .buffer = out };
+    var head: net.Head = .{};
+    for (0..2) |attempt| {
+        const receiver: Receiver = .{
+            .sink = buffer.sink(),
+            .body_bytes_max = out.len,
+            .range_from = offset,
+            .range_last = offset + out.len - 1,
+            .buffer = &buffer,
+            .total_timeout_ms = timeout_ms,
+        };
+        try request_following(client, origin, target, "", true, receiver, &head, diag);
+        if (head.status == 401 and attempt == 0 and client.basic_len == 0) {
+            client.token_len = 0; // The token ran out mid-run: a fresh one, once.
+            try authenticate(client, reference, origin, &head, diag);
+            continue;
+        }
+        break;
+    }
+    return range_answer(reference, origin, target, &head, buffer.len, offset, client, diag);
+}
+
+/// The bytes a range request got, or why it got none.
+fn range_answer(
+    reference: *const Reference,
+    origin: Origin,
+    target: []const u8,
+    head: *const net.Head,
+    got: u32,
+    offset: u64,
+    client: *const Client,
+    diag: *Diag,
+) RangeError!usize {
+    assert(target.len > 0);
+    assert(diag.code == null);
+    var url_storage: [constants.registry_url_bytes_max]u8 = undefined;
+    switch (head.status) {
+        206 => {
+            if (range_starts_at(head.content_range.slice() orelse "", offset)) return got;
+            diagnose.unusable_document(diag, error.BadDescriptor, wrong_range);
+            return error.Failed;
+        },
+        200 => {
+            const url = url_of(&url_storage, origin, target);
+            diagnose.http_error(diag, 200, url, "it answered a range request with the whole blob");
+            return error.Failed;
+        },
+        else => {
+            const seen: Seen = .{ .basic = client.basic_len > 0 };
+            check_status(reference, origin, target, head, seen, diag) catch {};
+            assert(diag.code != null);
+            return if (head.status == 404) error.NotFound else error.Failed;
+        },
+    }
+}
+
+/// Whether a Content-Range ("bytes first-last/total") starts at `offset`.
+pub fn range_starts_at(text: []const u8, offset: u64) bool {
+    assert(text.len <= constants.registry_header_bytes_max);
+    const prefix = "bytes ";
+    if (!std.mem.startsWith(u8, text, prefix)) return false;
+    const rest = text[prefix.len..];
+    const dash = std.mem.indexOfScalar(u8, rest, '-') orelse return false;
+    const first = std.fmt.parseInt(u64, rest[0..dash], 10) catch return false;
+    return first == offset;
+}
+
+test "a Content-Range is read only when it starts where the request did" {
+    // Goal: an answer for another range is never taken as the bytes asked for.
+    try std.testing.expect(range_starts_at("bytes 10-19/100", 10));
+    try std.testing.expect(!range_starts_at("bytes 0-99/100", 10));
+    try std.testing.expect(!range_starts_at("bytes */100", 10));
+    try std.testing.expect(!range_starts_at("items 10-19/100", 10));
+    try std.testing.expect(!range_starts_at("", 0));
 }

@@ -236,32 +236,23 @@ test "catalog_of: an index from the same trees gives each object its node's attr
     try resolver.check_objects(&table, catalog.objects);
 }
 
-test "catalog_of: a node whose mode did not make its object id is refused as malformed" {
-    // Goal: the attributes come from the node, and an id they do not give is refused. Method:
-    // the tree names `small` with mode 0o755, but its object id (in the tree and the index
-    // alike) was made with mode 0o644; the index is otherwise right.
+test "catalog_of: an index object made with another mode is refused as malformed" {
+    // Goal: the attributes come from the node, and an index id they do not give is refused.
+    // Method: the tree names `small` with mode 0o755 (the table refuses a node that disagrees
+    // with its own id), but the index lists for it an id made with mode 0o644.
     const contents = contents_three();
     var ids: [3]Digest = undefined;
     const root = try three_files(&contents, .{ 0o644, 0o600, 0o755 }, &ids);
-    // The same root, but `small`'s entry keeps an id made with mode 0o644 under mode 0o755.
     const small_attrs: object_mod.Attrs = .{
         .mode = 0o644,
         .uid = 0,
         .gid = 0,
         .xattrs = &xattrs.empty,
     };
+    const honest = ids[2];
     ids[2] = object_mod.object_id(Digest.of(contents[2]), small_attrs);
-    const writer = fixture.begin();
-    const names = [3][]const u8{ "big", "empty", "small" };
-    const modes = [3]u16{ 0o644, 0o600, 0o755 };
-    for (names, contents, modes, ids) |name, content, mode, id| {
-        try writer.begin(name, .file, mode, 0, 0, &xattrs.empty);
-        try writer.end_file(content.len, Digest.of(content), id);
-    }
-    const lying_root = try fixture.finish_root(own);
-    std.debug.print("DBG roots {}\n", .{lying_root.eql(root)});
-    try testing.expect(!lying_root.eql(root));
-    try expect_malformed(lying_root, &ids, &contents, .none);
+    try testing.expect(!ids[2].eql(honest));
+    try expect_malformed(root, &ids, &contents, .none);
 }
 
 test "catalog_of: an index whose chunks do not join into the content is refused" {
@@ -281,12 +272,9 @@ fn expect_malformed(
     contents: []const []const u8,
     lie: Lie,
 ) !void {
-    std.debug.print("DBG build\n", .{});
     var built = try build_index(root, ids, contents, lie);
     defer built.deinit();
-    std.debug.print("DBG parse\n", .{});
     const index = try index_mod.parse(built.bytes);
-    std.debug.print("DBG table\n", .{});
     var table: nodes.Table = undefined;
     const region = try table_of(root, &table);
     defer gpa.free(region);

@@ -239,4 +239,6 @@ test {
     _ = @import("resolver.zig");
     _ = @import("sim.zig");
     _ = @import("resolver_test.zig");
+    _ = @import("registry_range.zig");
+    _ = @import("registry_range_test.zig");
 }
