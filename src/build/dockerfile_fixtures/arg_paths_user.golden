@@ -1,0 +1,30 @@
+// Imported by `zbx import` from Dockerfile: target stage0, --network detect.
+// Edit this file from here on: `zbx build` reads it, not the Dockerfile.
+.{
+    .version = 1,
+    .steps = .{
+        // Dockerfile:6  RUN addgroup ${NAME} && adduser -S -G ${NAME} -u ${GF_UID} ${NAME}
+        .{
+            .name = "stage0-1",
+            .base = "alpine:3.20",
+            .env = .{ "BIN_NAME=vault", "NAME=vault", "GF_UID=472" },
+            .run = .{ "/bin/sh", "-c", "addgroup ${NAME} && adduser -S -G ${NAME} -u ${GF_UID} ${NAME}" },
+            .output = .root,
+        },
+        // Dockerfile:7  COPY dist/$BIN_NAME /bin/
+        .{
+            .name = "stage0-2",
+            .base = "step:stage0-1",
+            .copy = .{
+                .{ .src = .{ "dist/vault" }, .to = "/bin/" },
+            },
+        },
+    },
+    .image = .{
+        .base = "step:stage0-2",
+        .config = .{
+            .cmd = .{ "server", "-dev" },
+            .user = "472",
+        },
+    },
+}

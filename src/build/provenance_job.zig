@@ -112,7 +112,11 @@ pub fn fill(request: *const Request, record: *provenance.Record, diag: *Diag) Er
     record.finished = request.host.time_now();
     for (file.steps_slice(), 0..) |step, index| {
         const made = record.add_step(file.text(step.name));
-        const reference = file.text(step.base);
+        // A `step:` base is never in zbx.lock: the step records the image its chain began
+        // with, as the image base does below.
+        const start = graph_mod.chain_start(&loaded.graph, @intCast(index));
+        const reference = file.text(file.steps[start].base);
+        assert(!std.mem.startsWith(u8, reference, "step:"));
         const entry = &lock.entries[lock.find(reference).?]; // The build resolved it.
         made.base = record.add_base(reference, entry.manifest.bytes, entry.tree.bytes);
         made.key = request.keys[index].bytes;

@@ -1,4 +1,4 @@
-error[ZBX-E0817]: a user or group name is not in the image
+error[ZBX-E0817]: a user, group or owner id cannot be used
   cause  step "a" .user "nobody2" is not in /etc/passwd of its base
   fix    add the user in an earlier step and base this step on it with .base = "step:NAME", or write the id as a number
   more   zbx explain E0817 · rerun with --verbose for the full cause chain

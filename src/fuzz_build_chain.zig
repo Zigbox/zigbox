@@ -13,12 +13,16 @@
 //!   3. A copy is a pure function of what its patterns take: a file the patterns do not name,
 //!      added to the source, gives the same selection.
 //!   4. A cache never changes a key: the same spec with and without cache mounts has one key.
+//!   5. A copy step's `.chown` and `.chmod` (`copy_owner.restamp`, drawn on some copy steps) is
+//!      idempotent, changes nothing outside `.to`, and leaves each directory the base already
+//!      has on the way to `.to` with its own mode and owner.
 
 const std = @import("std");
 const assert = std.debug.assert;
 const assemble = @import("build/assemble.zig");
 const constants = @import("constants.zig");
 const copy = @import("build/copy.zig");
+const copy_owner = @import("build/copy_owner.zig");
 const Diag = @import("diag/diag.zig").Diag;
 const digest_mod = @import("store/digest.zig");
 const fs_sim = @import("store/fs_sim.zig");
@@ -43,6 +47,7 @@ var reference_files: fs_sim.SimFs = undefined;
 var store: layout.Store = undefined;
 var import_ws: import.Workspace = undefined;
 var copy_ws: copy.Workspace = undefined;
+var owner_ws: copy_owner.Workspace = undefined;
 var failure: assemble.Failure = undefined;
 var diag: Diag = undefined;
 
@@ -57,6 +62,8 @@ const Step = struct {
     mask: u16,
     to: u8,
     replace_names: bool,
+    /// A copy step's `.chown` and `.chmod`; most change nothing.
+    stamp: copy_owner.Stamp,
 };
 
 const destinations = [_][]const u8{ "/", "/opt/", "/a/b/" };
@@ -81,9 +88,25 @@ fn draw(random: std.Random) Plan {
             .mask = random.int(u16) | 1,
             .to = random.uintLessThan(u8, destinations.len),
             .replace_names = random.boolean(),
+            .stamp = draw_stamp(random),
         };
     }
     return plan;
+}
+
+fn draw_stamp(random: std.Random) copy_owner.Stamp {
+    const owners = [_]?copy_owner.Owner{
+        null, .{ .uid = 0, .gid = 0 }, .{ .uid = 1000, .gid = 1000 }, .{ .uid = 7, .gid = 65536 },
+    };
+    const modes = [_]?u16{ null, 0o600, 0o755, 0o4711 };
+    if (random.boolean()) return .{};
+    const stamp: copy_owner.Stamp = .{
+        .owner = owners[random.uintLessThan(usize, owners.len)],
+        .mode = modes[random.uintLessThan(usize, modes.len)],
+    };
+    if (stamp.mode) |mode| assert(mode <= 0o7777);
+    if (stamp.owner) |owner| assert(owner.uid != copy_owner.id_unowned);
+    return stamp;
 }
 
 /// A layer at `/uK` for step `at`: files, some with names the base and source already use (a
@@ -169,6 +192,14 @@ fn select(source: Digest, mask: u16, to: []const u8) Error!?Digest {
     return selected;
 }
 
+/// The selection `selected`, laid at `to`, with `stamp`; itself when the stamp changes nothing.
+fn restamp(selected: Digest, to: []const u8, stamp: copy_owner.Stamp) Error!Digest {
+    if (!stamp.changes()) return selected;
+    const owner_context: copy_owner.Context = .{ .store = &store, .failure = &failure };
+    return copy_owner.restamp(owner_context, &owner_ws, selected, to, stamp) catch
+        error.StepFailed;
+}
+
 /// Runs the whole chain: the base and source imports, then each step. `digests` gets the tree
 /// after each; the count of steps done is returned (all of them when it does not fail).
 fn run_chain(plan: *const Plan, digests: *[steps_max + 2]Digest) Error!u32 {
@@ -195,7 +226,8 @@ fn run_chain(plan: *const Plan, digests: *[steps_max + 2]Digest) Error!u32 {
                 return error.StepFailed;
             current = result.digest;
         } else if (try select(source, step.mask, destinations[step.to])) |selected| {
-            current = assemble.merge(context(true), current, selected) catch {
+            const laid = try restamp(selected, destinations[step.to], step.stamp);
+            current = assemble.merge(context(true), current, laid) catch {
                 return error.StepFailed;
             };
         }
@@ -236,6 +268,7 @@ pub fn fuzz_build_chain(seed: u64) void {
     const points = reference_files.mutations - started;
     assert(points > 0);
     check_purity(&plan, &expected);
+    check_stamps(&plan, &expected);
 
     // The run that crashes, and the run after it.
     fresh(&files, seed, &plan);
@@ -310,4 +343,107 @@ fn check_key(random: std.Random) void {
     key_mod.compute(&with, &cached) catch unreachable; // A small spec.
     assert(std.mem.eql(u8, plain.preimage(), cached.preimage()));
     assert(plain.digest.eql(cached.digest));
+}
+
+/// Property 5 on the clean file system, for each copy step whose stamp changes something.
+fn check_stamps(plan: *const Plan, expected: *const [steps_max + 2]Digest) void {
+    const source = expected[1];
+    for (plan.steps[0..plan.count], 0..) |step, at| {
+        if (step.root) continue;
+        if (!step.stamp.changes()) continue;
+        const to = destinations[step.to];
+        const taken = select(source, step.mask, to) catch unreachable; // A clean file system.
+        const selected = taken orelse continue;
+        const once = restamp(selected, to, step.stamp) catch unreachable; // Clean.
+        const twice = restamp(once, to, step.stamp) catch unreachable; // Clean.
+        assert(once.eql(twice));
+        const before = if (at == 0) expected[0] else expected[2 + at - 1];
+        const plain = assemble.merge(context(true), before, selected) catch unreachable; // Clean.
+        const laid = assemble.merge(context(true), before, once) catch unreachable; // Clean.
+        assert(laid.eql(expected[2 + at]));
+        check_outside(plain, laid, before, to);
+    }
+}
+
+var plain_bytes: [constants.store_tree_bytes_max]u8 = undefined;
+var laid_bytes: [constants.store_tree_bytes_max]u8 = undefined;
+var base_bytes: [constants.store_tree_bytes_max]u8 = undefined;
+
+fn decoder_of(digest: Digest, buffer: []u8) tree.Decoder {
+    var errno: u16 = 0;
+    const bytes = trees.load(&store, digest, buffer, &errno) catch unreachable; // Clean.
+    var decoder: tree.Decoder = undefined;
+    decoder.init(bytes) catch unreachable; // Written by the store.
+    return decoder;
+}
+
+/// Down the names of `to`, the stamped merge `laid` differs from the unstamped `plain` only on
+/// the way: every other entry is the same, and a directory on the way that `base` has keeps
+/// its mode and owner. Below `to` the stamp may change anything.
+fn check_outside(plain: Digest, laid: Digest, base: Digest, to: []const u8) void {
+    var plain_at = plain;
+    var laid_at = laid;
+    var base_at: ?Digest = base;
+    var names = std.mem.tokenizeScalar(u8, to, '/');
+    while (names.next()) |name| {
+        var plain_decoder = decoder_of(plain_at, &plain_bytes);
+        var laid_decoder = decoder_of(laid_at, &laid_bytes);
+        const base_entry = if (base_at) |digest| entry_named(digest, name) else null;
+        var plain_entry: tree.Entry = undefined;
+        var laid_entry: tree.Entry = undefined;
+        var next: ?[2]Digest = null;
+        while (plain_decoder.next(&plain_entry) catch unreachable) { // Written by the store.
+            assert(laid_decoder.next(&laid_entry) catch unreachable); // Same names.
+            assert(std.mem.eql(u8, plain_entry.name, laid_entry.name));
+            assert(plain_entry.kind == laid_entry.kind);
+            if (!std.mem.eql(u8, plain_entry.name, name)) {
+                assert(same(&plain_entry, &laid_entry));
+                continue;
+            }
+            assert(laid_entry.kind == .dir);
+            if (base_entry) |kept| {
+                if (kept.kind == .dir) {
+                    assert(kept.mode == laid_entry.mode);
+                    assert(kept.uid == laid_entry.uid);
+                    assert(kept.gid == laid_entry.gid);
+                }
+            }
+            next = .{ plain_entry.subtree, laid_entry.subtree };
+        }
+        assert(!(laid_decoder.next(&laid_entry) catch unreachable)); // Same names.
+        plain_at = next.?[0];
+        laid_at = next.?[1];
+        base_at = if (base_entry) |kept| (if (kept.kind == .dir) kept.subtree else null) else null;
+    }
+}
+
+const Kept = struct { kind: tree.Kind, mode: u16, uid: u32, gid: u32, subtree: Digest };
+
+/// The entry `name` of `digest`, or null.
+fn entry_named(digest: Digest, name: []const u8) ?Kept {
+    var decoder = decoder_of(digest, &base_bytes);
+    var entry: tree.Entry = undefined;
+    while (decoder.next(&entry) catch unreachable) { // Written by the store.
+        if (!std.mem.eql(u8, entry.name, name)) continue;
+        return .{
+            .kind = entry.kind,
+            .mode = entry.mode,
+            .uid = entry.uid,
+            .gid = entry.gid,
+            .subtree = entry.subtree,
+        };
+    }
+    return null;
+}
+
+fn same(a: *const tree.Entry, b: *const tree.Entry) bool {
+    assert(a.kind == b.kind);
+    assert(std.mem.eql(u8, a.name, b.name));
+    if (a.mode != b.mode or a.uid != b.uid or a.gid != b.gid) return false;
+    if (!std.mem.eql(u8, a.xattrs, b.xattrs)) return false;
+    return switch (a.kind) {
+        .file => a.object.eql(b.object),
+        .dir => a.subtree.eql(b.subtree),
+        .symlink => std.mem.eql(u8, a.target, b.target),
+    };
 }

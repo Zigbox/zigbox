@@ -208,6 +208,7 @@ test {
     _ = @import("pull_library_tests.zig");
     _ = @import("push_library_tests.zig");
     _ = @import("build_library_tests.zig");
+    _ = @import("dockerfile_library_tests.zig");
     _ = @import("package_library_tests.zig");
     _ = @import("host_real_net.zig");
     _ = @import("testing/vm/registry_server.zig");
@@ -299,6 +300,7 @@ test {
 
 test {
     _ = @import("build/copy_tests.zig");
+    _ = @import("build/copy_owner_tests.zig");
 }
 
 test {
@@ -382,6 +384,22 @@ test {
 }
 
 test {
+    // The Dockerfile translator (M9 slice 3).
+    _ = @import("dockerfile/refusal.zig");
+    _ = @import("dockerfile/lines.zig");
+    _ = @import("dockerfile/words.zig");
+    _ = @import("dockerfile/network.zig");
+    _ = @import("dockerfile/report.zig");
+    _ = @import("dockerfile/translate.zig");
+    _ = @import("dockerfile/stages.zig");
+    _ = @import("dockerfile/config.zig");
+    _ = @import("dockerfile/steps.zig");
+    _ = @import("dockerfile/translate_tests.zig");
+    _ = @import("import_diagnose.zig");
+    _ = @import("import_tests.zig");
+}
+
+test {
     // CDI devices (M10 slice 2): the spec parser and resolver, a run with one, and the fuzzer.
     _ = @import("runtime/cdi.zig");
     _ = @import("runtime/cdi_tests.zig");
@@ -394,4 +412,5 @@ test {
     // Globs and `.dockerignore` matching (M9), and the fuzzer that checks them.
     _ = @import("build/glob.zig");
     _ = @import("fuzz_dockerignore.zig");
+    _ = @import("fuzz_dockerfile.zig");
 }

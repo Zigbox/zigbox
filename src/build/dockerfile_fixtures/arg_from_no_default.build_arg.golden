@@ -1,0 +1,17 @@
+// Imported by `zbx import` from Dockerfile: target stage0, --network detect, --build-arg GO_VERSION=1.22.
+// Edit this file from here on: `zbx build` reads it, not the Dockerfile.
+.{
+    .version = 1,
+    .steps = .{
+        // Dockerfile:4  RUN go version
+        .{
+            .name = "stage0-1",
+            .base = "golang:1.22-alpine",
+            .run = .{ "/bin/sh", "-c", "go version" },
+            .output = .root,
+        },
+    },
+    .image = .{
+        .base = "step:stage0-1",
+    },
+}

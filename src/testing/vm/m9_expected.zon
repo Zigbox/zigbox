@@ -1,0 +1,7 @@
+.{
+    // The result digest of the demo project (src/testing/vm/m9_project, imported from its
+    // Dockerfile), as a recorded run of `zig build demo-m9` prints it in the clean VM: VM run
+    // 43658112204 on e685559, the first after the final stage stopped running `adduser`, whose
+    // /etc/shadow line held the day it ran.
+    .digest = "b3:2021670fd368b076b06bab2f3e2beebab5b79bdcfe6896399ffcd6e3c2558e91",
+}

@@ -1,0 +1,29 @@
+// Imported by `zbx import` from Dockerfile: target stage0, --network detect.
+// Edit this file from here on: `zbx build` reads it, not the Dockerfile.
+.{
+    .version = 1,
+    .steps = .{
+        // Dockerfile:5  RUN ["pwsh",      "-Command",      "Write-Output hello"]
+        .{
+            .name = "stage0-1",
+            .base = "mcr.microsoft.com/powershell:lts-alpine-3.20",
+            .run = .{ "pwsh", "-Command", "Write-Output hello" },
+            .output = .root,
+            .workdir = "/app",
+        },
+        // Dockerfile:8  COPY a.txt      b.txt ./
+        .{
+            .name = "stage0-2",
+            .base = "step:stage0-1",
+            .copy = .{
+                .{ .src = .{ "a.txt", "b.txt" }, .to = "/app/" },
+            },
+        },
+    },
+    .image = .{
+        .base = "step:stage0-2",
+        .config = .{
+            .workdir = "/app",
+        },
+    },
+}

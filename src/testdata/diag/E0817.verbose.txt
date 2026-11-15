@@ -1,4 +1,4 @@
-error[ZBX-E0817]: a user or group name is not in the image
+error[ZBX-E0817]: a user, group or owner id cannot be used
   while  planning the build
   cause  step "a" .user "nobody2" is not in /etc/passwd of its base
   name   nobody2
