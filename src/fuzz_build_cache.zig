@@ -9,6 +9,9 @@
 //!   2. Damaged bytes never crash the reader. Whatever it still accepts (`ok`) renders back to
 //!      exactly the damaged bytes: it accepts only what `render` writes.
 //!   3. The same bytes under another name never parse `ok`: the name is the preimage's hash.
+//!   4. The preimage reads back field by field (`key.fetched`), `.output_exclude` included,
+//!      from none to the most a step may have (M9 slice 3c), and a damaged preimage never
+//!      crashes the reader.
 
 const std = @import("std");
 const assert = std.debug.assert;
@@ -32,6 +35,26 @@ fn random_digest(random: std.Random) Digest {
 
 const names = [_][]const u8{ "a", "build", "step-2", "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx" };
 const argvs = [_][]const []const u8{ &.{"true"}, &.{ "sh", "-c", "echo hi" }, &.{ "go", "build" } };
+const exclude_paths = [_][]const u8{ "/var/log", "/tmp", "/a/b", "/x" };
+var excludes: [constants.build_output_excludes_max][]const u8 = undefined;
+
+/// No excludes, an empty list, or up to the most a step may have.
+fn random_excludes(random: std.Random) ?[]const []const u8 {
+    switch (random.uintLessThan(u8, 4)) {
+        0 => return null,
+        1 => return &.{},
+        else => {
+            const count = if (random.boolean())
+                excludes.len
+            else
+                random.intRangeAtMost(usize, 1, excludes.len);
+            for (excludes[0..count]) |*path| {
+                path.* = exclude_paths[random.uintLessThan(usize, exclude_paths.len)];
+            }
+            return excludes[0..count];
+        },
+    }
+}
 
 fn make_key(random: std.Random) void {
     const spec: key_mod.Spec = .{
@@ -44,10 +67,13 @@ fn make_key(random: std.Random) void {
         .env = if (random.boolean()) &.{"A=1"} else &.{},
         .network = random.boolean(),
         .name = names[random.uintLessThan(usize, names.len)],
+        .output_exclude = random_excludes(random),
     };
     key_mod.compute(&spec, &key) catch unreachable; // A small spec.
     assert(key.len <= constants.build_key_preimage_bytes_max);
     assert(key.len > key_mod.magic.len);
+    var hashes: [constants.build_copy_entries_max][32]u8 = undefined;
+    assert(key_mod.fetched(key.preimage(), &hashes).? == 0); // No copies, so no fetches.
 }
 
 /// Damages a copy of `bytes` in `damaged` and returns the result.
@@ -106,6 +132,12 @@ pub fn fuzz_build_cache(seed: u64) void {
     assert(std.mem.eql(u8, entry.preimage, key.preimage()));
     assert(std.mem.eql(u8, cache.render(&again, entry.tree, entry.preimage), text));
     for (0..64) |_| check_damaged(random, damage(random, text));
+    for (0..16) |_| {
+        const bytes = damage(random, key.preimage());
+        if (bytes.len > constants.build_key_preimage_bytes_max) continue;
+        var hashes: [constants.build_copy_entries_max][32]u8 = undefined;
+        if (key_mod.fetched(bytes, &hashes)) |count| assert(count <= hashes.len);
+    }
     var noise: [96]u8 = undefined;
     random.bytes(&noise);
     check_damaged(random, noise[0..random.uintLessThan(usize, noise.len + 1)]);

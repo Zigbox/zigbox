@@ -93,6 +93,10 @@ fn render_step(file: *const BuildFile, step: *const file_mod.Step, writer: *Writ
     if (step.caches.given) try render_caches(file, step, writer);
     if (step.binds.given) try render_binds(file, step, writer);
     if (step.exclude.given) try render_span(file, 3, "exclude", step.exclude, writer);
+    if (step.expect) |expect| try render_field(file, 3, "expect", expect, writer);
+    if (step.output_exclude.given) {
+        try render_span(file, 3, "output_exclude", step.output_exclude, writer);
+    }
     try writer.writeAll("        },\n");
 }
 
@@ -334,6 +338,8 @@ fn equal_step_more(
     if (!same_optional(a, b, step_a.user, step_b.user)) return false;
     if (!same_optional(a, b, step_a.workdir, step_b.workdir)) return false;
     if (!same_span(a, b, step_a.exclude, step_b.exclude)) return false;
+    if (!same_optional(a, b, step_a.expect, step_b.expect)) return false;
+    if (!same_span(a, b, step_a.output_exclude, step_b.output_exclude)) return false;
     if (step_a.copy.given != step_b.copy.given) return false;
     if (step_a.run.given != step_b.run.given) return false;
     if (step_a.caches.given != step_b.caches.given) return false;
@@ -607,5 +613,38 @@ test "every builder addition is printed, read back equal and printed the same" {
             std.debug.print("equal after: {s} -> {s}\n", .{ pair[0], pair[1] });
             return error.TestUnexpectedResult;
         }
+    }
+}
+
+test "a pin and output excludes are printed, read back equal and told apart" {
+    // Goal: the canonical form carries `.expect` and `.output_exclude` (M9 slice 3c). Method:
+    // one network step with both, round tripped; then each value changed once.
+    const pinned =
+        \\.{ .version = 1, .image = .{}, .steps = .{ .{ .name = "fetch", .base = "x",
+        \\  .run = .{ "true" }, .network = true,
+        \\  .expect = "b3:0000000000000000000000000000000000000000000000000000000000000000",
+        \\  .output_exclude = .{ "/var/log", "/srv/tmp" } } } }
+    ;
+    const canonical = try round_trip(pinned);
+    try testing.expect(std.mem.indexOf(u8, canonical, ".expect = \"b3:0000") != null);
+    const excludes = ".output_exclude = .{ \"/var/log\", \"/srv/tmp\" }";
+    try testing.expect(std.mem.indexOf(u8, canonical, excludes) != null);
+    const empty = try round_trip(
+        \\.{ .version = 1, .image = .{}, .steps = .{ .{ .name = "a", .base = "x",
+        \\  .run = .{ "true" }, .output_exclude = .{} } } }
+    );
+    try testing.expect(std.mem.indexOf(u8, empty, ".output_exclude = .{}") != null);
+    var problem: file_mod.Problem = undefined;
+    try testing.expectEqual(.parsed, file_mod.parse(pinned, &first, &problem));
+    const changed = [_][2][]const u8{
+        .{ "b3:0000", "b3:1000" }, .{ "/srv/tmp", "/srv/tmq" }, .{ ", \"/srv/tmp\"", "" },
+    };
+    for (changed) |pair| {
+        var buffer: [pinned.len]u8 = undefined;
+        const length = std.mem.replace(u8, pinned, pair[0], pair[1], &buffer);
+        assert(length == 1);
+        const text = buffer[0 .. pinned.len - pair[0].len + pair[1].len];
+        try testing.expectEqual(.parsed, file_mod.parse(text, &second, &problem));
+        try testing.expect(!equal(&first, &second));
     }
 }

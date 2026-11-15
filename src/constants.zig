@@ -925,6 +925,9 @@ pub const image_import_stack_max: u32 = 32768;
 pub const lock_entries_max: u32 = 256;
 pub const lock_pool_bytes: u32 = 64 * 1024;
 pub const lock_file_bytes_max: u32 = 160 * 1024;
+/// The output pins a lock holds (M9 slice 3c, owner 2026-11-14): equal to `build_steps_max`, so
+/// a build file cannot pin more steps than it has.
+pub const lock_pins_max: u32 = 256;
 /// The buffer a blob is hashed and copied through.
 pub const blob_io_bytes: u32 = 64 * 1024;
 /// How many hosts one name may resolve to that are tried.
@@ -983,6 +986,9 @@ pub const build_fetch_redirects_max: u32 = 4;
 pub const build_fetch_url_shown_bytes_max: u32 = 256;
 /// The lines of one `.exclude` list (`.dockerignore` syntax).
 pub const build_exclude_lines_max: u32 = 256;
+/// The paths in one step's `.output_exclude` (M9 slice 3c, owner 2026-11-14): the four defaults
+/// for a pinned step, with room for one per package manager's log and cache directories.
+pub const build_output_excludes_max: u32 = 32;
 /// The sources of one copy entry.
 pub const build_copy_sources_max: u32 = build_step_inputs_max;
 /// A build's file, step and copy exclude lines, read as one list (later lines win).
@@ -1161,6 +1167,11 @@ comptime {
     assert(import_build_args_max <= import_variables_max);
     // Step indexes are `u16`.
     assert(build_steps_max <= std.math.maxInt(u16));
+    assert(lock_pins_max == build_steps_max);
+    assert(build_output_excludes_max >= 4);
+    assert(build_output_excludes_max <= build_file_list_texts_max);
+    assert(build_step_name_bytes_max <= std.math.maxInt(u8));
+    assert(path_bytes_max <= std.math.maxInt(u16));
 }
 
 // Fuzz runner.
@@ -1464,7 +1475,7 @@ comptime {
     const candidates_bytes_max = (container_path_dirs_count + 1) * (command_word_bytes_max + 20);
     const paths_needed = derived_paths_max * (rootfs_bytes_max + 16) + candidates_bytes_max +
         2 * id_map_line_bytes_max + 2 * etc_file_bytes_max + 512 +
-        pasta_path_bytes_max + state_path_bytes_max + 80 + 2;
+        pasta_path_bytes_max + state_path_bytes_max + 80 + 2 + mount_path_bytes_max + 1;
     // Each state volume: its name, its target twice, its data directory, and a stage path below
     // the rootfs and one below /dev, each with its NUL.
     const state_paths = state_volumes_max * (state_name_bytes_max + 2 * state_target_bytes_max +

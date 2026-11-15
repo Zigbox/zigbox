@@ -62,6 +62,10 @@ pub const Spec = struct {
     /// The step's cache directories (`.caches`). Not read by `compute`: a cache never changes
     /// what a step's output is defined by. The step mounts them (`step.zig`).
     caches: []const CacheMount = &.{},
+    /// M9 slice 3c: the paths left out of a pinned step's output (`.output_exclude`, or the
+    /// defaults `pin.default_excludes`), in the file's order; null for a step that is not
+    /// pinned, which has no output excludes and the key it had before.
+    output_exclude: ?[]const []const u8 = null,
 };
 
 /// A cache directory of a step: kept per build file under the store, bound at `path`.
@@ -119,6 +123,8 @@ const Tag = enum(u8) {
     /// Copy entries when any is a fetch (slice 3b): each starts with its `CopyKind`. A step with
     /// no fetch keeps `copies`, so its key is the one it had before.
     copy_entries = 17,
+    // 18 and 19 are left for slice 3b, so the two slices merge without renumbering.
+    output_exclude = 20,
 };
 
 /// The fixed environment a step sees after the image's and the build file's, as `KEY=VALUE`.
@@ -255,6 +261,12 @@ fn encode_more(encoder: *Encoder, spec: *const Spec) Error!void {
         }
     }
     if (spec.copies.len > 0) try encode_copies(encoder, spec.copies);
+    if (spec.output_exclude) |paths| {
+        assert(paths.len <= constants.build_output_excludes_max);
+        try encoder.tag(.output_exclude);
+        try encoder.int(@intCast(paths.len));
+        for (paths) |path| try encoder.string(path);
+    }
 }
 
 fn encode_copies(encoder: *Encoder, copies: []const Copy) Error!void {
@@ -392,6 +404,11 @@ const Decoder = struct {
                     _ = decoder.take(digest_bytes) orelse return null;
                     decoder.copy_rest() orelse return null;
                 }
+            },
+            .output_exclude => {
+                const count = decoder.int() orelse return null;
+                if (count > constants.build_output_excludes_max) return null;
+                for (0..count) |_| decoder.string() orelse return null;
             },
             // `copy_entries` is read by `fetches`; the M7 fields come before the M9 ones and
             // never after: either here is a preimage that is not one.
@@ -664,7 +681,7 @@ test "key: an M7 step keeps its key; each M9 field changes it; an excluded file 
     const plain = try key_of(&base, 0);
     const plain_hex = plain.hex();
     try testing.expectEqualStrings(golden_key_hex, &plain_hex);
-    var seen: [8]Digest = undefined;
+    var seen: [11]Digest = undefined;
     var count: usize = 0;
     const variants = [_]Spec{
         with_more(base, .{ .root_output = true }),
@@ -679,6 +696,9 @@ test "key: an M7 step keeps its key; each M9 field changes it; an excluded file 
             .to = "/c",
             .chmod = "0755",
         }} }),
+        with_more(base, .{ .output_exclude = &.{} }),
+        with_more(base, .{ .output_exclude = &.{"/var/log"} }),
+        with_more(base, .{ .output_exclude = &.{ "/var/log", "/tmp" } }),
     };
     for (variants) |variant| {
         const changed = try key_of(&variant, 1);
@@ -690,12 +710,38 @@ test "key: an M7 step keeps its key; each M9 field changes it; an excluded file 
     try testing.expectEqual(variants.len, count);
 }
 
+test "key: the preimage reader takes the most output excludes, and refuses one more" {
+    // Goal: gc's reader of a preimage agrees with `compute` at the bound of `.output_exclude`.
+    // Method: a spec with the most excludes reads back; the same preimage with its count raised
+    // by one and one more path appended is refused, not read past.
+    const most = constants.build_output_excludes_max;
+    const paths: [most][]const u8 = @splat("/x");
+    const spec = with_more(sample(&.{}), .{ .output_exclude = &paths });
+    try compute(&spec, &key_storage[0]);
+    var out: [constants.build_copy_entries_max][32]u8 = undefined;
+    const preimage = key_storage[0].preimage();
+    try testing.expectEqual(@as(?u32, 0), fetched(preimage, &out));
+    // `.output_exclude` is the last field: its tag, its count, then each path as length, bytes.
+    const path_bytes = 4 + "/x".len;
+    const at = preimage.len - (1 + 4 + most * path_bytes);
+    try testing.expectEqual(@backingInt(Tag.output_exclude), preimage[at]);
+    var longer: [constants.build_key_preimage_bytes_max]u8 = undefined;
+    try testing.expect(preimage.len + path_bytes <= longer.len);
+    @memcpy(longer[0..preimage.len], preimage);
+    std.mem.writeInt(u32, longer[at + 1 ..][0..4], most + 1, .little);
+    @memcpy(longer[preimage.len..][0..path_bytes], &[_]u8{ 2, 0, 0, 0, '/', 'x' });
+    try testing.expectEqual(@as(?u32, null), fetched(longer[0 .. preimage.len + path_bytes], &out));
+    std.mem.writeInt(u32, longer[at + 1 ..][0..4], most, .little);
+    try testing.expectEqual(@as(?u32, 0), fetched(longer[0..preimage.len], &out));
+}
+
 fn with_more(spec: Spec, more: struct {
     root_output: bool = false,
     user: ?[]const u8 = null,
     workdir: ?[]const u8 = null,
     binds: []const Bind = &.{},
     copies: []const Copy = &.{},
+    output_exclude: ?[]const []const u8 = null,
 }) Spec {
     var result = spec;
     result.root_output = more.root_output;
@@ -703,6 +749,7 @@ fn with_more(spec: Spec, more: struct {
     result.workdir = more.workdir;
     result.binds = more.binds;
     result.copies = more.copies;
+    result.output_exclude = more.output_exclude;
     return result;
 }
 
@@ -796,6 +843,7 @@ test "key: the preimage reader finds each fetch's hash, past every other field" 
             .{ .source = sample_digest(7), .to = "/c", .chown = "1:2" },
             .{ .source = sample_digest(0), .to = "/g/h", .fetch = hash_b },
         },
+        .output_exclude = &.{ "/var/log", "/tmp" },
     });
     try compute(&spec, &key_storage[0]);
     var out: [constants.build_copy_entries_max][32]u8 = undefined;

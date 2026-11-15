@@ -196,6 +196,9 @@ pub const Code = enum(u8) {
     E0607,
     E0608,
     E0609,
+    E0610,
+    E0611,
+    E0612,
     E0701,
     E0702,
     E0703,
@@ -238,6 +241,9 @@ pub const Code = enum(u8) {
     E0816,
     W0810,
     W0811,
+    // M9 slice 3c (output pins). Slice 3b adds its fetch codes here too, without reordering.
+    E0822,
+    W0803,
     E0901,
     E0902,
     E0903,
@@ -3136,6 +3142,64 @@ pub const registry = [_]Entry{
         ,
     },
     .{
+        .code = .E0610,
+        .severity = .@"error",
+        .blame = .user,
+        .summary = "a socket can be made only in a container with --net none",
+        .explanation =
+        \\A socket made for a container lives in the container's network namespace.
+        \\zbx makes one only in a container started with --net none (the default),
+        \\whose namespace holds nothing but its own loopback. A container started with
+        \\--net host shares the host's network namespace, so a socket made "in" it
+        \\would be the host's: that would open a port on the host under the
+        \\container's name. A container with --net user reaches the outside through
+        \\pasta, and sockets in it are not offered.
+        \\
+        \\Start the container with --net none (or without --net) and ask again.
+        ,
+    },
+    .{
+        .code = .E0611,
+        .severity = .@"error",
+        .blame = .environment,
+        .summary = "a socket could not be made inside the container",
+        .explanation =
+        \\zbx makes the socket with a short-lived helper process that joins the
+        \\container's user and network namespaces, opens the socket and hands it back
+        \\with SCM_RIGHTS. One of those steps failed; the step and the system error
+        \\are in the message. Usual causes: the caller is not the user that started
+        \\the container (joining its user namespace is then refused), the container
+        \\ended while the helper ran, or the caller has no free descriptor. A caller
+        \\that ignores SIGCHLD has its helper reaped by the kernel, and the wait for
+        \\it fails with ECHILD: leave SIGCHLD at its default to use this call.
+        \\
+        \\The helper is a child of the caller and never enters the container's PID
+        \\namespace, so nothing inside the container can see or signal it.
+        ,
+    },
+    .{
+        .code = .E0612,
+        .severity = .@"error",
+        .blame = .user,
+        .summary = "the hosts file cannot be bound at /etc/hosts",
+        .explanation =
+        \\--hosts-file binds a file you own, read-only, at /etc/hosts in place of the
+        \\one zbx generates. It is refused for a container with a network (a
+        \\container with --net user or --net host resolves names through DNS, and a
+        \\hosts file would shadow it), for a path that is not absolute, and for a
+        \\path that is missing, not a regular file, not readable by you, or that
+        \\cannot be followed to a file (a loop of symbolic links) or read when the
+        \\container starts. The cause says which.
+        \\
+        \\The file itself is bound, not a copy: rewriting it in place is seen inside
+        \\at once, replacing it by renaming another file over it is not. The path is
+        \\not kept in the container's run record, so nothing that reads the record
+        \\(zbx ps, a bundle, an agent that adopts the container) learns it, and a
+        \\container run again gets it only if it is given again. /etc/resolv.conf and
+        \\/etc/hostname are generated as before.
+        ,
+    },
+    .{
         .code = .E0701,
         .severity = .@"error",
         .blame = .environment,
@@ -3775,6 +3839,11 @@ pub const registry = [_]Entry{
         \\The cause names the first such line and why. Nothing is written. Drop
         \\--hermetic to import with the steps flagged (W0810), or change the step:
         \\fetch the files once, outside the build, and copy them in.
+        \\
+        \\zbx build --hermetic is --locked, and refuses the same way any step with a
+        \\cache mount and any network step without a pin (.expect, or a current pin in
+        \\zbx.lock); the cause names the step. Pin a network step with zbx build --pin
+        \\first, and drop its caches.
         ,
     },
     .{
@@ -3845,6 +3914,50 @@ pub const registry = [_]Entry{
         \\
         \\The cause names each part. Read the list to be sure none of them matters to
         \\the image, and change any copy that zbx build would refuse.
+        ,
+    },
+    .{
+        .code = .E0822,
+        .severity = .@"error",
+        .blame = .external,
+        .summary = "a pinned step's output differs from its pin",
+        .explanation =
+        \\A pin is the output digest a network step is expected to produce: written
+        \\by hand as the step's .expect, or recorded in zbx.lock by zbx build --pin.
+        \\Under --locked or --hermetic a pinned step whose output differs from its
+        \\pin (drift) stops the build: no step that depends on it runs, and the lock
+        \\is not changed. What the network served changed, most often a mirror that
+        \\published a new package version. A lock pin also records the step's key; a
+        \\pin whose key no longer matches the step (the step was changed) is stale,
+        \\and is refused the same way rather than pinned again.
+        \\
+        \\The cause names the step, the pinned digest and the new one, or, for a stale
+        \\pin, the two keys. Run zbx build without --locked to see the new output. To
+        \\accept it, delete the step's pin from zbx.lock and run zbx build --pin, or
+        \\edit .expect.
+        \\
+        \\zbx build --pin records the output of each network step that has no pin
+        \\and no .caches, once the build succeeds. --locked adds no pin and enforces
+        \\each one. --hermetic is --locked that also refuses, before anything runs, a
+        \\step with .caches or a network step with no pin (ZBX-E0814). --pin with
+        \\either of the others is refused (ZBX-E0005).
+        ,
+    },
+    .{
+        .code = .W0803,
+        .severity = .warning,
+        .blame = .external,
+        .summary = "a pinned step drifted, and its new output was used",
+        .explanation =
+        \\A pinned network step (one with .expect, or with a pin in zbx.lock) produced
+        \\an output that differs from its pin. Without --locked the build goes on with
+        \\the new output, so every step after it misses and rebuilds, and the pin is
+        \\left as it was: the warning repeats on every build until a person accepts
+        \\the change or the network serves the pinned bytes again.
+        \\
+        \\The cause names the step, the pinned digest and the new one. To accept the
+        \\new output, delete the step's pin from zbx.lock and run zbx build --pin, or
+        \\edit .expect. To refuse drift instead, build with --locked (E0822).
         ,
     },
     .{
@@ -4670,6 +4783,7 @@ pub fn can_end_run(code: Code) bool {
         .E0801, .E0802, .E0803, .E0804, .E0805, .E0806, .E0807, .W0801 => false,
         .E0808, .E0817, .E0818, .E0820, .E0821, .W0802 => false,
         .E0810, .E0811, .E0812, .E0813, .E0814, .E0815, .E0816, .W0810, .W0811 => false,
+        .E0822, .W0803 => false,
         .E0901, .E0902, .E0908, .E0909, .E0910, .E0911, .W0901, .W0902, .W0903 => false,
         .E1006, .E1007 => false,
         .E0220, .E0221, .E0222, .E0223, .E0224, .E0225, .E0226, .E0227 => false,

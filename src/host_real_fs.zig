@@ -17,7 +17,7 @@ const HostReal = host_real.HostReal;
 const check = HostReal.check;
 
 pub fn interface(context: *HostReal) fs.Fs {
-    assert(context.open_count < 1 << 20);
+    assert(context.opened_now() < 1 << 20);
     assert(@intFromPtr(&vtable) != 0);
     return .{ .context = context, .vtable = &vtable };
 }
@@ -93,7 +93,7 @@ fn lstat(context: *anyopaque, path: [:0]const u8) host.Error!fs.Stat {
 
 fn fstat(context: *anyopaque, fd: fs.Fd) host.Error!fs.Stat {
     const self = from_context(context);
-    assert(self.open_count > 0);
+    assert(self.opened_now() > 0);
     return stat_at(@intCast(fd), "", linux.AT.SYMLINK_NOFOLLOW | linux.AT.EMPTY_PATH);
 }
 
@@ -149,18 +149,18 @@ fn read_dir(context: *anyopaque, path: [:0]const u8, visitor: fs.Visitor) host.E
     const flags: linux.O = .{ .ACCMODE = .RDONLY, .DIRECTORY = true, .CLOEXEC = true };
     const opened = linux.open(path.ptr, flags, 0);
     try check(opened);
-    self.open_count += 1;
+    self.count_open(1);
     const descriptor: i32 = @intCast(opened);
     defer {
         _ = linux.close(descriptor);
-        self.open_count -= 1;
+        self.count_close();
     }
     return list_entries(descriptor, visitor);
 }
 
 fn read_dir_fd(context: *anyopaque, fd: fs.Fd, visitor: fs.Visitor) host.Error!void {
     const self = from_context(context);
-    assert(self.open_count > 0);
+    assert(self.opened_now() > 0);
     // A directory descriptor is read once, from its start: the importer opens one per listing.
     return list_entries(@intCast(fd), visitor);
 }
@@ -204,7 +204,7 @@ fn read_link(context: *anyopaque, path: [:0]const u8, buffer: []u8) host.Error!u
 
 fn read_link_fd(context: *anyopaque, fd: fs.Fd, buffer: []u8) host.Error!u32 {
     const self = from_context(context);
-    assert(self.open_count > 0);
+    assert(self.opened_now() > 0);
     assert(buffer.len > 0);
     // An empty path reads the link the `O_PATH | O_NOFOLLOW` descriptor itself names.
     const result = linux.readlinkat(@intCast(fd), "", buffer.ptr, buffer.len);
@@ -220,7 +220,7 @@ fn open_directory(context: *anyopaque, path: [:0]const u8) host.Error!fs.Fd {
     const result = linux.open(path.ptr, flags, 0);
     try check(result);
     assert(result <= std.math.maxInt(i32));
-    self.open_count += 1;
+    self.count_open(1);
     return @intCast(result);
 }
 
@@ -258,7 +258,7 @@ fn open_beneath(
     );
     try check(result);
     assert(result <= std.math.maxInt(i32));
-    self.open_count += 1;
+    self.count_open(1);
     return @intCast(result);
 }
 
@@ -297,13 +297,13 @@ fn open_read(context: *anyopaque, path: [:0]const u8) host.Error!fs.Fd {
     const result = linux.open(path.ptr, flags, 0);
     try check(result);
     assert(result <= std.math.maxInt(i32));
-    self.open_count += 1;
+    self.count_open(1);
     return @intCast(result);
 }
 
 fn read(context: *anyopaque, fd: fs.Fd, buffer: []u8) host.Error!u32 {
     const self = from_context(context);
-    assert(self.open_count > 0);
+    assert(self.opened_now() > 0);
     assert(buffer.len > 0);
     const result = linux.read(@intCast(fd), buffer.ptr, buffer.len);
     try check(result);
@@ -313,7 +313,7 @@ fn read(context: *anyopaque, fd: fs.Fd, buffer: []u8) host.Error!u32 {
 
 fn read_at(context: *anyopaque, fd: fs.Fd, offset: u64, buffer: []u8) host.Error!u32 {
     const self = from_context(context);
-    assert(self.open_count > 0);
+    assert(self.opened_now() > 0);
     assert(buffer.len > 0);
     const result = linux.pread(@intCast(fd), buffer.ptr, buffer.len, @intCast(offset));
     try check(result);
@@ -333,7 +333,7 @@ fn open_append(context: *anyopaque, path: [:0]const u8) host.Error!fs.Fd {
     const result = linux.open(path.ptr, flags, 0);
     try check(result);
     assert(result <= std.math.maxInt(i32));
-    self.open_count += 1;
+    self.count_open(1);
     return @intCast(result);
 }
 
@@ -351,7 +351,7 @@ fn create(context: *anyopaque, path: [:0]const u8, mode: u16) host.Error!fs.Fd {
     const result = linux.open(path.ptr, flags, mode);
     try check(result);
     assert(result <= std.math.maxInt(i32));
-    self.open_count += 1;
+    self.count_open(1);
     return @intCast(result);
 }
 
@@ -368,7 +368,7 @@ fn lock(
     const opened = linux.open(path.ptr, flags, 0o600);
     try check(opened);
     assert(opened <= std.math.maxInt(i32));
-    self.open_count += 1;
+    self.count_open(1);
     const descriptor: i32 = @intCast(opened);
     // flock(2): LOCK_SH 1, LOCK_EX 2, LOCK_NB 4.
     const operation: i32 = (if (exclusive) @as(i32, 2) else @as(i32, 1)) | 4;
@@ -393,7 +393,7 @@ fn lock(
 
 fn write(context: *anyopaque, fd: fs.Fd, bytes: []const u8) host.Error!u32 {
     const self = from_context(context);
-    assert(self.open_count > 0);
+    assert(self.opened_now() > 0);
     assert(bytes.len > 0);
     const result = linux.write(@intCast(fd), bytes.ptr, bytes.len);
     try check(result);
@@ -404,15 +404,15 @@ fn write(context: *anyopaque, fd: fs.Fd, bytes: []const u8) host.Error!u32 {
 fn fsync(context: *anyopaque, fd: fs.Fd) host.Error!void {
     assert(fd < std.math.maxInt(i32));
     const self = from_context(context);
-    assert(self.open_count > 0);
+    assert(self.opened_now() > 0);
     try check(linux.fsync(@intCast(fd)));
 }
 
 fn close(context: *anyopaque, fd: fs.Fd) void {
     assert(fd < std.math.maxInt(i32));
     const self = from_context(context);
-    assert(self.open_count > 0);
-    self.open_count -= 1;
+    assert(self.opened_now() > 0);
+    self.count_close();
     // A close error on a descriptor that was fsynced loses nothing and cannot be acted on.
     _ = linux.close(@intCast(fd));
 }
@@ -538,11 +538,11 @@ fn sync_directory(context: *anyopaque, path: [:0]const u8) host.Error!void {
     const flags: linux.O = .{ .ACCMODE = .RDONLY, .DIRECTORY = true, .CLOEXEC = true };
     const opened = linux.open(path.ptr, flags, 0);
     try check(opened);
-    self.open_count += 1;
+    self.count_open(1);
     const descriptor: i32 = @intCast(opened);
     const result = check(linux.fsync(descriptor));
     _ = linux.close(descriptor);
-    self.open_count -= 1;
+    self.count_close();
     try result;
 }
 

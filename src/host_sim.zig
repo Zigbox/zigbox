@@ -397,6 +397,7 @@ pub const HostSim = struct {
         .pipe = pipe,
         .channel = channel,
         .listen_loopback = listen_loopback,
+        .tcp4_socket = tcp4_socket,
         .send_handle = send_handle,
         .receive_handle = receive_handle,
         .is_unix_stream = is_unix_stream,
@@ -859,6 +860,12 @@ pub const HostSim = struct {
     fn listen_loopback(context: *anyopaque, port: u16) host.Error!host.Handle {
         const sim = from_context(context);
         assert(port > 0);
+        try sim.begin_call();
+        return sim.world.make_listener() orelse sim.model_error(sim_world.errno_nomem);
+    }
+
+    fn tcp4_socket(context: *anyopaque) host.Error!host.Handle {
+        const sim = from_context(context);
         try sim.begin_call();
         return sim.world.make_listener() orelse sim.model_error(sim_world.errno_nomem);
     }

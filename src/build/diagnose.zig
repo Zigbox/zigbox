@@ -165,7 +165,7 @@ fn parse_fix(diag: *Diag, problem: *const file_mod.Problem) void {
         .unknown_field => {
             var fields: [sentence_bytes_max]u8 = undefined;
             var writer = std.Io.Writer.fixed(&fields);
-            // The longest list, a step's, is fourteen short names: it fits.
+            // The longest list, a step's, is sixteen short names: it fits.
             write_fields(&writer, problem.level.allowed()) catch unreachable;
             fix_sentence(diag, "use a field that {s} takes: {s}", .{ level, writer.buffered() });
         },
@@ -200,6 +200,26 @@ fn parse_fix(diag: *Diag, problem: *const file_mod.Problem) void {
     }
 }
 
+/// The fixes of the problems of `.expect` and `.output_exclude` (M9 slice 3c).
+fn pin_fix(diag: *Diag, kind: file_mod.ProblemKind) void {
+    assert(diag.code != null);
+    const sentence: []const u8 = switch (kind) {
+        .bad_expect => "write .expect as the output digest a build printed, b3: and 64 " ++
+            "lowercase hex digits, or remove it and run zbx build --pin",
+        .expect_without_network => "remove .expect: a step without .network = true is " ++
+            "keyed by what it reads, so its output needs no pin",
+        .expect_with_caches => "remove .expect, or remove the step's .caches: what a cache " ++
+            "holds is not in the key, so the output cannot be pinned",
+        .bad_output_exclude => "write each .output_exclude entry as an absolute path other " ++
+            "than /, with no empty, . or .. part, for example \"/var/log\"",
+        .output_exclude_on_copy => "remove .output_exclude from the copy step: leave a path " ++
+            "out by not copying it",
+        else => unreachable, // `value_fix` sends only these kinds.
+    };
+    assert(sentence.len > 0);
+    diag.fix(.{ .sentence = sentence });
+}
+
 /// The fixes of a `.fetch` that does not load (`value_fix`'s).
 fn fetch_fix(diag: *Diag, kind: file_mod.ProblemKind) void {
     assert(diag.code != null);
@@ -217,6 +237,7 @@ fn fetch_fix(diag: *Diag, kind: file_mod.ProblemKind) void {
 fn value_fix(diag: *Diag, problem: *const file_mod.Problem) void {
     assert(diag.code != null);
     assert(problem.word_len <= problem.word.len);
+    if (pin_problem(problem.kind)) return pin_fix(diag, problem.kind);
     var word_echo: Echo = undefined;
     const word = text_util.sanitise(&word_echo, problem.word_text());
     switch (problem.kind) {
@@ -332,10 +353,43 @@ fn describe(writer: *std.Io.Writer, problem: *const file_mod.Problem) std.Io.Wri
     }
 }
 
+/// Whether the problem is one of `.expect` or `.output_exclude` (M9 slice 3c).
+fn pin_problem(kind: ProblemKind) bool {
+    return switch (kind) {
+        .bad_expect,
+        .expect_without_network,
+        .expect_with_caches,
+        .bad_output_exclude,
+        .output_exclude_on_copy,
+        => true,
+        else => false,
+    };
+}
+
+/// The problems of `.expect` and `.output_exclude`: `word` is the value, echoed.
+fn describe_pin(writer: *std.Io.Writer, kind: ProblemKind, word: []const u8) !void {
+    assert(pin_problem(kind));
+    assert(word.len <= constants.arg_echo_bytes_max);
+    switch (kind) {
+        .bad_expect => try writer.print(".expect \"{s}\" is not an output digest " ++
+            "(b3: and 64 lowercase hex digits)", .{word}),
+        .expect_without_network => try writer.writeAll(".expect is given on a step " ++
+            "without .network = true"),
+        .expect_with_caches => try writer.writeAll(".expect is given on a step with " ++
+            ".caches, whose output depends on what the caches hold"),
+        .bad_output_exclude => try writer.print("the .output_exclude path \"{s}\" is not " ++
+            "an absolute path written plainly, or is /", .{word}),
+        .output_exclude_on_copy => try writer.writeAll(".output_exclude is given on a " ++
+            "copy step, whose output is only what it copies"),
+        else => unreachable, // `describe_value` sends only `pin_problem` kinds.
+    }
+}
+
 /// The problems of a value the parser read whole: `word` is the value, echoed.
 fn describe_value(writer: *std.Io.Writer, kind: ProblemKind, word: []const u8) !void {
     assert(@tagName(kind).len > 0);
     assert(word.len <= constants.arg_echo_bytes_max);
+    if (pin_problem(kind)) return describe_pin(writer, kind, word);
     switch (kind) {
         .bad_version => try writer.writeAll(".version is not a whole number from 1"),
         .newer_version => try writer.print(".version is {s}, and this zbx reads version {d}", .{
@@ -656,6 +710,7 @@ fn list_max(level: Level, field: ?Field) u32 {
         .binds => constants.build_step_binds_max,
         .exclude => constants.build_exclude_lines_max,
         .src => constants.build_copy_sources_max,
+        .output_exclude => constants.build_output_excludes_max,
         else => 0,
     };
     assert(result <= constants.build_strings_max);
@@ -1644,4 +1699,62 @@ test "the step-name hint's example is a .base line the build file parser takes" 
     const parsed = file_mod.parse(text, file, &problem);
     try std.testing.expectEqual(file_mod.ParseResult.parsed, parsed);
     try std.testing.expectEqualStrings("step:build", file.text(file.steps[1].base));
+}
+
+// ---- Output pins (M9 slice 3c) --------------------------------------------------------------
+
+/// `E0822` under `--locked` or `--hermetic`, else `W0803`: the pinned step `name` produced
+/// `got`, not its pin `pinned`. The JSON view has the step and both digests as fields.
+pub fn pin_drifted(diag: *Diag, locked: bool, name: []const u8, pinned: Digest, got: Digest) void {
+    assert(diag.code == null);
+    assert(!pinned.eql(got));
+    diag.raise(if (locked) .E0822 else .W0803);
+    diag.while_("checking step {s} against its pin", .{name});
+    diag.cause("step {s} produced {s}, and its pin is {s}", .{ name, got.text(), pinned.text() });
+    diag.context("step", "{s}", .{name});
+    diag.context("pinned", "{s}", .{pinned.text()});
+    diag.context("output", "{s}", .{got.text()});
+    if (locked) {
+        diag.fix(.{ .sentence = "build without --locked to see the new output; to accept " ++
+            "it, delete the pin from zbx.lock and run zbx build --pin, or edit .expect" });
+    } else {
+        diag.fix(.{ .sentence = "to accept the new output, delete the pin from zbx.lock " ++
+            "and run zbx build --pin, or edit .expect" });
+    }
+    assert(diag.code != null);
+}
+
+/// `E0822` under `--locked` or `--hermetic`: the lock's pin for step `name` was recorded for
+/// `pinned_key`, and the step's key is now `key`, so the pin says nothing about this step.
+pub fn pin_stale(diag: *Diag, name: []const u8, pinned_key: Digest, key: Digest) void {
+    assert(diag.code == null);
+    assert(!pinned_key.eql(key));
+    diag.raise(.E0822);
+    diag.while_("checking step {s} against its pin", .{name});
+    diag.cause("the pin of step {s} is stale: it was recorded for key {s}, and the step's " ++
+        "key is now {s}", .{ name, pinned_key.text(), key.text() });
+    diag.context("step", "{s}", .{name});
+    diag.context("pinned", "{s}", .{pinned_key.text()});
+    diag.context("key", "{s}", .{key.text()});
+    diag.fix(.{ .sentence = "run zbx build --pin: it replaces the stale pin with the " ++
+        "changed step's" });
+    assert(diag.code.? == .E0822);
+}
+
+/// `E0814` from `zbx build --hermetic`: step `name` has a cache mount (`cache`), or the network
+/// and no pin.
+pub fn hermetic_step(diag: *Diag, name: []const u8, cache: bool) void {
+    assert(diag.code == null);
+    assert(name.len > 0);
+    diag.raise(.E0814);
+    diag.while_("planning the build", .{});
+    if (cache) {
+        diag.cause("step {s} has a cache mount, which --hermetic refuses", .{name});
+        diag.fix(.{ .sentence = "drop the step's .caches, or build without --hermetic" });
+    } else {
+        diag.cause("step {s} uses the network and has no pin, which --hermetic refuses", .{name});
+        diag.fix(.{ .sentence = "pin it with zbx build --pin, or give it .expect" });
+    }
+    diag.context("step", "{s}", .{name});
+    assert(diag.code.? == .E0814);
 }
