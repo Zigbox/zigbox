@@ -166,6 +166,7 @@ test {
     _ = @import("fuse/serve.zig");
     _ = @import("fuse/kernel_tests.zig");
     _ = @import("fuse/lazy_server_tests.zig");
+    _ = @import("fuse/resolver_tests.zig");
     _ = @import("host_real_fuse.zig");
 }
 
