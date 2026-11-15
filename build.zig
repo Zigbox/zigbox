@@ -466,7 +466,27 @@ fn add_fuzz_step(
     const description = "Run one seeded fuzzer: zig build fuzz -- <fuzzer> [seed] [iterations]";
     const step = b.step("fuzz", description);
     step.dependOn(&run.step);
+    add_fuzz_macos_step(b, options);
     return fuzz;
+}
+
+/// `zig build fuzz-macos`: the fuzzers compiled for a Mac, analysed only (nothing requests the
+/// binary, so no code is generated and no SDK is needed). The macOS job builds them natively, and
+/// they reach `cli.run`, so a Linux-only path that is not cut at comptime fails there and nowhere
+/// else (S2 slice 4's FUSE server did). This catches it on Linux in seconds; `check` runs it.
+fn add_fuzz_macos_step(b: *std.Build, options: *std.Build.Step.Options) void {
+    const fuzz = b.addExecutable(.{
+        .name = "fuzz",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/fuzz.zig"),
+            .target = b.resolveTargetQuery(.{ .cpu_arch = .aarch64, .os_tag = .macos }),
+            .optimize = .ReleaseSafe,
+            .link_libc = false,
+            .imports = &.{.{ .name = "build_options", .module = options.createModule() }},
+        }),
+    });
+    const step = b.step("fuzz-macos", "Compile the fuzzers for aarch64-macos, without a binary");
+    step.dependOn(&fuzz.step);
 }
 
 /// The spec's release criterion: a static binary under 4 MiB (2 MiB until M4's TLS client and
@@ -965,7 +985,8 @@ fn add_check_step(b: *std.Build, fuzz: *std.Build.Step.Compile) void {
     run.addArtifactArg(fuzz);
     run.has_side_effects = true;
     const gates = [_][]const u8{
-        "install", "test", "tidy", "release", "errors-site-check", "harness", "trust-wasm",
+        "install",    "test",       "tidy", "release", "errors-site-check", "harness",
+        "trust-wasm", "fuzz-macos",
     };
     for (gates) |name| {
         const gate = b.top_level_steps.get(name) orelse @panic(name);
