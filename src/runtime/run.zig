@@ -71,6 +71,7 @@ const gpu_mod = @import("gpu.zig");
 const devices_diagnose = @import("devices_diagnose.zig");
 
 const Host = host_mod.Host;
+const Digest = @import("../store/digest.zig").Digest;
 const Plan = plan_mod.Plan;
 const Session = session_mod.Session;
 
@@ -207,6 +208,20 @@ pub const StartOptions = struct {
     /// `mirror`, the container's streams are always pipes, even when they would be a
     /// terminal; empty is off. At most `stream_prefix_bytes_max`.
     stream_prefix: []const u8 = "",
+    /// Serve the tree lazily (`Lazy`); only a run of a tree from the store (`Spec.image`).
+    lazy: ?Lazy = null,
+};
+
+/// A run whose tree is served lazily (`zbx run --lazy`, S2): the caller's FUSE server. The tree
+/// is not materialized; the setup child mounts FUSE on the overlay's lower layer and hands the
+/// descriptor to this process, which `serve` takes (`Session.Fuse`). The caller joins its
+/// serving threads once the run has ended, started or not.
+pub const Lazy = struct {
+    context: *anyopaque,
+    /// Builds the server's view of the tree in this process, before the container's child is
+    /// spawned. A refusal says why in `diag` and ends the start.
+    prepare: *const fn (context: *anyopaque, tree: Digest, diag: *Diag) bool,
+    serve: *const fn (context: *anyopaque, device: host_mod.Handle) host_mod.Error!void,
 };
 
 /// The longest `StartOptions.stream_prefix`: a build step's name and ` | `.
@@ -429,7 +444,14 @@ pub fn start(
     // After the checks that need nothing from the host, and before anything is created: a run
     // with a limit and no way to enforce it is refused here, with nothing to clean up.
     const scope_input = try prepare_scope(handle, container.limits, options.build_step, diag);
+    if (options.lazy != null) assert(container.image != null);
     if (container.image) |image| try prepare_image(handle, container, image, options, diag);
+    if (options.lazy) |lazy| {
+        if (!lazy.prepare(lazy.context, handle.image.digest, diag)) {
+            assert(diag.code != null);
+            return error.StartFailed;
+        }
+    }
     // The volumes last, so that nothing above can fail with them held; from here every way out
     // of `start` that is not a running container lets them go.
     volumes_mod.take(host, container.state, handle.name_slice(), &handle.volumes, diag) catch
@@ -444,6 +466,9 @@ pub fn start(
     const capture = open_log(handle, options);
     handle.session.start(host, &handle.plan, &handle.facts, capture);
     handle.session.stdin_null = options.stdin_null;
+    if (options.lazy) |lazy| {
+        handle.session.serve_with(.{ .context = lazy.context, .serve = lazy.serve });
+    }
     handle.session.execute(diag, run_info(handle)) catch |err| {
         close_log(handle);
         handle.ended = failed_start(diag); // Asserts that the diagnostic has a code.
@@ -630,6 +655,7 @@ fn build_plan(
         .workdir = container.workdir,
         .user = container.user,
         .overlay = if (handle.has_image) handle.image.overlay() else null,
+        .lazy = handle.has_image and handle.image.lazy,
         .network = container.network,
         .listen = if (container.listen) |listen| listen.port else null,
         .host_resolv = host_resolv,
@@ -903,6 +929,7 @@ fn prepare_image(
         image,
         handle.name_slice(),
         container.read_only,
+        options.lazy != null,
         null,
         options.tree_check,
         &handle.image,

@@ -387,6 +387,7 @@ pub const wait_interrupts_max: u32 = 1024;
 pub const child_exit_setup_failed: u8 = 125;
 /// EIO: the errno that stands for a failure with none (an error made inside host.zig).
 pub const errno_io: u16 = 5;
+pub const errno_pipe: u16 = 32;
 /// SIGKILL, the same number on x86_64 and aarch64.
 pub const signal_kill: u8 = 9;
 /// SIGINT (Ctrl-C), the same number on x86_64 and aarch64.
@@ -776,6 +777,11 @@ pub const state_export_time_max: u64 = 0o77777777777;
 pub const sim_fs_nodes_max: u32 = 640;
 pub const sim_fs_path_bytes_max: u32 = 192;
 pub const sim_fs_pool_bytes_max: u32 = 3 * 1024 * 1024;
+// The `lazy_index` fuzzer's own pool (`SimFs.use_pool`): its incompressible file of up to three
+// chunks, the imported object and two packed layers of it.
+pub const sim_fs_pool_lazy_fuzz_bytes_max: u32 = 24 * 1024 * 1024;
+// The `chaining` fuzzer's longest input: 256 runs of its shortest run size, the BLAKE3 piece.
+pub const fuzz_chaining_bytes_max: u32 = 256 * 1024;
 pub const sim_fs_handles_max: u32 = 8;
 
 // Registry and pull (M4, docs/briefs/M4-pull.md). Every byte a registry sends is bounded: it is
@@ -1963,11 +1969,13 @@ comptime {
 
 /// The version of the layer writer: the tar form and the gzip stream a pack produces. The same
 /// tree and config give the same bytes for one version. A change to either is a new version.
-pub const layer_writer_version: u32 = 1;
+pub const layer_writer_version: u32 = 2;
 
 /// Annotation keys of a packed manifest.
 pub const pack_annotation_tree = "org.zigbox.tree";
 pub const pack_annotation_writer = "org.zigbox.layer-writer";
+/// The layer descriptor's annotation that points at the lazy index (layer writer 2).
+pub const pack_annotation_lazy_index = "org.zigbox.lazy-index";
 
 /// The OCI media types a pack writes.
 pub const oci_manifest_media_type = "application/vnd.oci.image.manifest.v1+json";
@@ -2042,4 +2050,118 @@ comptime {
     assert(pack_link_paths_bytes >= path_bytes_max + 1);
     assert(pack_config_bytes_max >= image_settings_bytes_max);
     assert(layer_writer_version >= 1);
+}
+
+// ---- Lazy start (S2, docs/briefs/S2-lazy-start.md) ----------------------------------------
+
+/// The longest lazy index taken; a longer one is refused as too large (`E1207`). A 4 GiB file's
+/// chunk list is 4,096 records of 80 bytes, about 320 KiB; 64 MiB is far beyond any real image.
+pub const lazy_index_bytes_max: u32 = 64 * 1024 * 1024;
+
+/// The most names (paths) a tree started lazily may have: the FUSE node table, fixed at start. A
+/// tree with more is refused for lazy (`E1207`) and pulled whole. It bounds the layer writer's
+/// index memory too.
+pub const lazy_nodes_max: u32 = 262144;
+
+/// The longest compressed range fetched in one request, and so the longest chunk range an index
+/// may list.
+pub const lazy_range_bytes_max: u32 = 8 * 1024 * 1024;
+
+comptime {
+    assert(lazy_index_bytes_max >= store_tree_bytes_max);
+    assert(lazy_nodes_max > 0);
+    assert(std.math.isPowerOfTwo(lazy_nodes_max));
+    assert(lazy_range_bytes_max >= 2 * store_chunk_bytes);
+    assert(layer_writer_version == 2);
+}
+
+// Lazy start (S2): the FUSE server (slice 4). `lazy_nodes_max`, `lazy_fuse_threads` and
+// `lazy_index_bytes_max` are the S2 brief's bounds, approved by the owner on 2026-11-14, and are
+// defined with the index and the resolver; the rest follow from them and the store's chunk size.
+
+/// The most bytes one FUSE `READ` asks for (`max_read` and `max_pages`): one whole chunk.
+pub const fuse_read_bytes_max: u32 = store_chunk_bytes;
+pub const fuse_max_pages: u16 = @intCast(fuse_read_bytes_max / 4096);
+/// A request read from `/dev/fuse`: the kernel's minimum read buffer. The server is read-only and
+/// asks for `max_write` of one page, so every request it answers fits; the kernel refuses a longer
+/// one (a large `setxattr`) to its caller without sending it.
+pub const fuse_request_bytes: u32 = 8192;
+pub const fuse_max_write: u32 = 4096;
+/// A reply: the out-header and the longest data, a read of `fuse_read_bytes_max`.
+pub const fuse_reply_bytes: u32 = 16 + fuse_read_bytes_max;
+/// How long the kernel may cache names and attributes: the tree never changes while it is served.
+pub const fuse_valid_seconds: u64 = 365 * 24 * 60 * 60;
+/// FUSE requests the kernel keeps in flight to the server, and when it starts to throttle.
+pub const fuse_max_background: u16 = 64;
+pub const fuse_congestion_threshold: u16 = 48;
+/// How long a serving thread waits on `/dev/fuse` before it looks at the stop flag again: the
+/// most `finish` waits for an idle thread after the container is gone.
+pub const fuse_poll_ms: u32 = 100;
+/// How long `serve` waits for the kernel's `INIT` on a new connection before refusing the run.
+pub const fuse_init_timeout_ms: u32 = 10_000;
+
+comptime {
+    assert(lazy_nodes_max < std.math.maxInt(u32) / 4);
+    assert(lazy_fuse_threads >= 1);
+    assert(lazy_fuse_threads <= 64);
+    assert(fuse_read_bytes_max == store_chunk_bytes);
+    assert(fuse_read_bytes_max % 4096 == 0);
+    assert(fuse_max_pages <= 256); // The kernel's `FUSE_MAX_MAX_PAGES`.
+    assert(fuse_request_bytes >= 8192); // The kernel's `FUSE_MIN_READ_BUFFER`.
+    assert(fuse_request_bytes >= 40 + 40 + fuse_max_write);
+    assert(fuse_request_bytes >= 40 + 1024 + 1); // A lookup of the longest name the kernel sends.
+    assert(fuse_reply_bytes > fuse_read_bytes_max);
+    assert(fuse_congestion_threshold < fuse_max_background);
+    assert(fuse_poll_ms > 0);
+    assert(fuse_poll_ms <= 1000);
+    assert(fuse_init_timeout_ms % fuse_poll_ms == 0);
+    assert(fuse_init_timeout_ms >= 10 * fuse_poll_ms);
+}
+
+// Lazy start (S2): the chunk resolver (`src/lazy/`). The values are the brief's, approved by the
+// owner on 2026-11-14 (docs/briefs/S2-lazy-start.md, decision 4). `lazy_range_bytes_max` is above.
+/// One request to one source, for at most `lazy_range_bytes_max`.
+pub const lazy_attempt_timeout_ms: u32 = 10_000;
+/// The longest a read waits for a chunk that is not local before it fails with `EIO` (E1203).
+pub const lazy_read_deadline_ms: u32 = 30_000;
+/// A read that needs only sources that are down fails after this long instead.
+pub const lazy_down_fail_ms: u32 = 2_000;
+/// A source that is down gets one request (a probe) per this long; one success brings it back.
+pub const lazy_down_probe_ms: u32 = 5_000;
+/// Requests on behalf of readers (and their readahead) at once, across every source.
+pub const lazy_fetches_max: u32 = 8;
+/// Requests of the background fill at once; they never hold a slot a reader is waiting for.
+pub const lazy_fill_fetches_max: u32 = 2;
+/// After two reads of consecutive chunks of one file, the chunks fetched ahead of the reader.
+pub const lazy_readahead_chunks: u32 = 4;
+/// Below this many free bytes on the store's disk the fill stops; below a quarter of it a read's
+/// fetch fails (E1206).
+pub const lazy_store_free_bytes_min: u64 = 1024 * 1024 * 1024;
+/// The sources one resolver asks after the store: the peers a library caller passes, and the
+/// registry. A run that passes more peers is refused.
+pub const lazy_sources_max: u32 = 8;
+/// The readers that may wait on the resolver at once: the FUSE server's threads.
+pub const lazy_fuse_threads: u32 = 4;
+/// The chunks one request may carry: a range of `lazy_range_bytes_max` holds this many chunks
+/// that compress at all. Stored incompressible, each chunk carries a header and 7 fit; the
+/// job takes what the range holds, so the bound is never passed.
+pub const lazy_job_chunks_max: u32 = lazy_range_bytes_max / store_chunk_bytes;
+/// Fetch slots: each has a range buffer and a chunk buffer, fixed at start.
+pub const lazy_slots: u32 = lazy_fetches_max + lazy_fill_fetches_max;
+/// Chunks the resolver tracks at once: every slot's chunks, and each waiting reader's chunk
+/// with its readahead.
+pub const lazy_pending_max: u32 = lazy_slots * lazy_job_chunks_max +
+    lazy_fuse_threads * (1 + lazy_readahead_chunks);
+
+comptime {
+    assert(lazy_attempt_timeout_ms < lazy_read_deadline_ms);
+    assert(lazy_down_fail_ms < lazy_attempt_timeout_ms);
+    assert(lazy_down_fail_ms < lazy_down_probe_ms);
+    assert(lazy_fill_fetches_max < lazy_fetches_max);
+    assert(lazy_readahead_chunks <= lazy_job_chunks_max);
+    assert(lazy_range_bytes_max % store_chunk_bytes == 0);
+    assert(lazy_job_chunks_max >= 1);
+    assert(lazy_sources_max <= 8); // A source set is one byte per object.
+    assert(lazy_store_free_bytes_min % 4 == 0);
+    assert(lazy_pending_max <= 1024);
 }

@@ -502,6 +502,11 @@ pub const VTable = struct {
     /// Makes a TCP listener on `127.0.0.1:port` in the caller's network namespace: `socket`
     /// (close-on-exec), `bind`, `listen`. A failure carries the failing call's errno.
     listen_loopback: *const fn (context: *anyopaque, port: u16) Error!Handle,
+    /// Opens `/dev/fuse` (close-on-exec) and mounts its connection on the directory `target`,
+    /// read-only, `nosuid` and `nodev`, for the lazy server: the descriptor, which the server
+    /// reads its requests from. A failure carries the failing call's errno and leaves nothing
+    /// open.
+    mount_fuse: *const fn (context: *anyopaque, target: [:0]const u8) Error!Handle,
     /// Makes a new, unconnected IPv4 TCP socket in the caller's network namespace: `socket`
     /// (close-on-exec) and nothing else. A failure carries the errno.
     tcp4_socket: *const fn (context: *anyopaque) Error!Handle,
@@ -1078,6 +1083,15 @@ pub const Host = struct {
     pub fn listen_loopback(host: Host, port: u16) Error!Handle {
         assert(port > 0);
         const result = try host.vtable.listen_loopback(host.context, port);
+        assert(host.vtable.last_errno(host.context) == 0);
+        return result;
+    }
+
+    /// Mounts a FUSE connection on `target` (`mount_fuse` in the vtable).
+    pub fn mount_fuse(host: Host, target: [:0]const u8) Error!Handle {
+        assert(target.len > 0);
+        assert(target[target.len] == 0);
+        const result = try host.vtable.mount_fuse(host.context, target);
         assert(host.vtable.last_errno(host.context) == 0);
         return result;
     }

@@ -158,7 +158,9 @@ pub const SimFs = struct {
     hook: ?Hook = null,
     nodes: [constants.sim_fs_nodes_max]Node,
     count: u32,
-    pool: [constants.sim_fs_pool_bytes_max]u8,
+    /// Where file bytes go: `pool_inline`, or a caller's larger buffer (`use_pool`).
+    pool: []u8,
+    pool_inline: [constants.sim_fs_pool_bytes_max]u8,
     pool_len: u32,
     opens: [constants.sim_fs_handles_max]Open,
     prng: std.Random.Xoshiro256,
@@ -177,10 +179,20 @@ pub const SimFs = struct {
     builder: xattrs.Builder,
     blob: [constants.store_xattr_blob_bytes_max]u8,
 
+    /// Puts file bytes in `buffer` from now on, for a test that holds more than the inline pool
+    /// (which stays small: a `SimFs` often lives on the stack). Called right after `init`.
+    pub fn use_pool(sim: *SimFs, buffer: []u8) void {
+        assert(sim.pool_len == 0);
+        assert(buffer.len >= sim.pool_inline.len);
+        assert(buffer.len <= std.math.maxInt(u32));
+        sim.pool = buffer;
+    }
+
     /// Initialises in place. The tree is empty (the root exists and cannot be removed).
     pub fn init(sim: *SimFs, seed: u64) void {
         sim.count = 0;
         sim.clock = 0;
+        sim.pool = &sim.pool_inline;
         sim.pool_len = 0;
         sim.opens = @splat(closed_slot);
         sim.prng = std.Random.Xoshiro256.init(seed);
@@ -511,6 +523,13 @@ pub const SimFs = struct {
         node.data_len -= 1;
         node.synced_len = @min(node.synced_len, node.data_len);
         sim.bytes_live -= 1;
+    }
+
+    /// The bytes `append` copies before it writes: none for the file at the pool's end, which
+    /// grows in place, and the whole file for any other.
+    fn moved_bytes(sim: *const SimFs, node: *const Node) u32 {
+        const at_end = node.data_at + node.data_len == sim.pool_len;
+        return if (at_end) 0 else node.data_len;
     }
 
     fn append(sim: *SimFs, node: *Node, bytes: []const u8) void {
@@ -1047,7 +1066,9 @@ pub const SimFs = struct {
             if (room == 0) return sim.fail(errno_nospc);
             length = @min(length, room);
         }
-        if (sim.pool_len + node.data_len + length > sim.pool.len) return sim.fail(errno_nospc);
+        if (sim.pool_len + sim.moved_bytes(node) + length > sim.pool.len) {
+            return sim.fail(errno_nospc);
+        }
         sim.append(node, bytes[0..length]);
         node.mtime = sim.clock;
         sim.touch(slot.node);

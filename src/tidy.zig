@@ -164,6 +164,15 @@ const shipped_files = [_][]const u8{
     "src/store/verify.zig",
     "src/store/walk.zig",
     "src/store/xattrs.zig",
+    "src/fuse/abi.zig",
+    "src/fuse/cache.zig",
+    "src/fuse/diagnose.zig",
+    "src/fuse/lazy_server.zig",
+    "src/fuse/nodes.zig",
+    "src/fuse/ops.zig",
+    "src/fuse/resolver.zig",
+    "src/fuse/serve.zig",
+    "src/host_real_fuse.zig",
 };
 const asserts_per_function_min: u32 = 2;
 
@@ -768,9 +777,8 @@ fn is_shipped(path: []const u8) bool {
 const fuzzer_entry = ".{ .name = \"";
 const workflow_path = ".github/workflows/ci.yml";
 
-/// The first fuzzer registered in `fuzz_source` (a `.{ .name = "x", ...}` entry) that the CI
-/// matrix in `workflow` does not list (a line `- x`), or null if every one is listed. STYLE.md:
-/// CI runs every fuzzer.
+/// The first fuzzer registered in `fuzz_source` (a `.{ .name = "x", ...}` entry) that no CI step
+/// in `workflow` runs, or null if every one is run. STYLE.md: CI runs every fuzzer.
 pub fn fuzzer_missing_from(fuzz_source: []const u8, workflow: []const u8) ?[]const u8 {
     assert(fuzz_source.len > 0);
     var lines = std.mem.splitScalar(u8, fuzz_source, '\n');
@@ -784,15 +792,27 @@ pub fn fuzzer_missing_from(fuzz_source: []const u8, workflow: []const u8) ?[]con
     return null;
 }
 
+const fuzz_step = "run: zig build fuzz -- ";
+
+/// True if a line of `workflow` runs fuzzer `name`: a matrix item `- name`, or a step
+/// `zig build fuzz -- name ...`, `-- all ...`, or `-- all-but <other> ...` (every fuzzer but
+/// `<other>`).
 fn workflow_lists(workflow: []const u8, name: []const u8) bool {
     assert(name.len > 0);
     var lines = std.mem.splitScalar(u8, workflow, '\n');
     while (lines.next()) |line| {
         const item = std.mem.trim(u8, line, " ");
-        // A step that runs `zig build fuzz -- all` runs every registered fuzzer.
-        if (std.mem.startsWith(u8, item, "run: zig build fuzz -- all")) return true;
         if (std.mem.startsWith(u8, item, "- ")) {
             if (std.mem.eql(u8, item[2..], name)) return true;
+        }
+        if (!std.mem.startsWith(u8, item, fuzz_step)) continue;
+        var words = std.mem.tokenizeScalar(u8, item[fuzz_step.len..], ' ');
+        const first = words.next() orelse continue;
+        if (std.mem.eql(u8, first, "all")) return true;
+        if (std.mem.eql(u8, first, name)) return true;
+        if (std.mem.eql(u8, first, "all-but")) {
+            const excluded = words.next() orelse continue;
+            if (!std.mem.eql(u8, excluded, name)) return true;
         }
     }
     return false;
@@ -1042,7 +1062,7 @@ pub fn main(init: std.process.Init) !u8 {
     const fuzz_source = try root.readFileAlloc(io, "src/fuzz.zig", arena, limit);
     const workflow = try root.readFileAlloc(io, workflow_path, arena, limit);
     if (fuzzer_missing_from(fuzz_source, workflow)) |name| {
-        try out.print("fuzzer {s} is not in the CI matrix of {s}\n", .{ name, workflow_path });
+        try out.print("fuzzer {s} is run by no step of {s}\n", .{ name, workflow_path });
         violations += 1;
     }
     violations += try check_test_reach(io, arena, out, root, sources.items);
@@ -1086,6 +1106,15 @@ test "a fuzzer missing from the CI matrix is found" {
     try testing.expectEqualStrings("cli", fuzzer_missing_from(source, "# - cli\n- diag\n").?);
     const all = "    steps:\n        run: zig build fuzz -- all 10000\n";
     try testing.expect(fuzzer_missing_from(source, all) == null);
+    // A step that runs all but one fuzzer needs that one run by name elsewhere; a name that is
+    // only a prefix of the step's fuzzer does not count.
+    const all_but = "        run: zig build fuzz -- all-but diag 10000\n";
+    try testing.expectEqualStrings("diag", fuzzer_missing_from(source, all_but).?);
+    const split = all_but ++ "        run: zig build fuzz -- diag \"$(seed)\" 10000\n";
+    try testing.expect(fuzzer_missing_from(source, split) == null);
+    const prefix = all_but ++ "        run: zig build fuzz -- diagnostic 1 10000\n";
+    try testing.expectEqualStrings("diag", fuzzer_missing_from(source, prefix).?);
+    try testing.expect(fuzzer_missing_from(source, "run: zig build fuzz -- all-but\n") != null);
 }
 
 test "line length: 100 columns pass, 101 fail, multibyte counts as one column" {

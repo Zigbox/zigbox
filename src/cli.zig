@@ -22,6 +22,8 @@ const panic = @import("diag/panic.zig");
 const render = @import("diag/render.zig");
 const diagnose = @import("runtime/diagnose.zig");
 const image_mod = @import("runtime/image.zig");
+const lazy_server_mod = @import("fuse/lazy_server.zig");
+const lazy_diagnose = @import("fuse/diagnose.zig");
 const reference_mod = @import("registry/reference.zig");
 const layout = @import("store/layout.zig");
 const runtime = @import("runtime/run.zig");
@@ -402,6 +404,8 @@ pub const RunArgs = struct {
     all: bool = false,
     /// `--read-only`: the rootfs is mounted read-only, with a tmpfs at /tmp and /run.
     read_only: bool = false,
+    /// `--lazy` (S2, experimental): the image's tree is served from the store over FUSE.
+    lazy: bool = false,
     /// `--net` as typed. No `--net` is `none` (unless `--publish` was given, which implies
     /// `user`), and a run with neither says so when it fails.
     net: ?[]const u8 = null,
@@ -658,6 +662,7 @@ const Token = union(enum) {
     follow,
     /// `--read-only` and `-d`: options of `run` without a value; `--all` is `ps`'s.
     read_only,
+    lazy,
     detach,
     all,
     /// `--confirm`, whose value is the next argument, and `--confirm=<value>`: `store gc`'s.
@@ -816,6 +821,7 @@ fn classify(argument: []const u8) Token {
     }
     if (std.mem.eql(u8, argument, "--follow")) return .follow;
     if (std.mem.eql(u8, argument, "--read-only")) return .read_only;
+    if (std.mem.eql(u8, argument, "--lazy")) return .lazy;
     if (std.mem.eql(u8, argument, "-d")) return .detach;
     if (std.mem.eql(u8, argument, "--detach")) return .detach;
     if (std.mem.eql(u8, argument, "--all")) return .all;
@@ -965,7 +971,7 @@ pub fn scan_options(args: []const []const u8) Options {
             .strict, .require_provenance, .public_inline, .apply => {},
             .run_option_inline, .env_inline, .unknown_option, .last, .no_redact => {},
             .import_inline, .import_flag => {},
-            .read_only, .detach, .all, .follow => {},
+            .read_only, .lazy, .detach, .all, .follow => {},
             .operand => {
                 if (!seen_operand) first = command_named(args[index]);
                 seen_operand = true;
@@ -1054,7 +1060,7 @@ pub fn parse(
                 p.run.command = args[index + 1 ..];
                 break;
             },
-            .detach, .read_only => try take_run_flag(diag, &p.run, given, argument),
+            .detach, .read_only, .lazy => try take_run_flag(diag, &p.run, given, argument),
             .last, .no_redact => try take_bundle_flag(diag, &p.bundle, given, argument),
             .provenance => try take_provenance(diag, &invocation.provenance, given, argument),
             .resolve_only => try take_pull_option(diag, &p.pull, given, argument),
@@ -1116,6 +1122,7 @@ fn take_run_flag(
     if (!is_run) return unknown_option(diag, argument);
     run_args.detach = run_args.detach or classify(argument) == .detach;
     run_args.read_only = run_args.read_only or classify(argument) == .read_only;
+    run_args.lazy = run_args.lazy or classify(argument) == .lazy;
 }
 
 /// `--provenance`, which only `inspect` takes.
@@ -3962,6 +3969,7 @@ fn run_container(
         .binding = binding_of(subject.binding),
     };
     const ran = ran_of(invocation, &prepared);
+    if (given.lazy) try check_lazy(&given, invocation, diag);
     if (given.detach) return run_detached(host, invocation, &container, times, storage, &ran, diag);
     return run_foreground(host, invocation, &container, times, storage, &ran, diag);
 }
@@ -4091,6 +4099,7 @@ fn run_foreground(
     assert(!invocation.run.detach);
     assert(container.command.len > 0);
     var reporter: Reporter = .{ .host = host, .options = invocation.options };
+    var refusing: RefusingLazy = .{ .host = host };
     const options: runtime.StartOptions = .{
         .warn = .{ .context = &reporter, .call = report_warning },
         .timeout_ms = times.timeout_ms,
@@ -4098,9 +4107,12 @@ fn run_foreground(
         .image_workspace = &storage.image,
         .tree_check = tree_check_of(storage),
         .mirror = true,
+        .lazy = if (invocation.run.lazy) lazy_of(&refusing) else null,
     };
     const handle = &storage.handle;
     if (container.listen != null) try check_listen_send(host, invocation, diag);
+    // The serving threads end with the container's mount namespace: joined after the run.
+    defer if (invocation.run.lazy) lazy_finish();
     runtime.start(host, container, options, handle, diag) catch {
         keep_bundle_of_bug(host, &storage.workspace, handle, diag);
         return error.StartFailed;
@@ -4114,6 +4126,59 @@ fn run_foreground(
     };
     report_outcome(host, invocation.options, handle, &reason, ran, invocation.run.net != null);
     return code;
+}
+
+/// The real FUSE server for `--lazy` (S2): `zbx`'s `main` sets it, on the real host. Every other
+/// caller (the tests, the fuzzers, a library) leaves it null, and a lazy run refuses to serve.
+pub var lazy_server: ?*lazy_server_mod.Server = null;
+
+/// A lazy run's server: the real one, or one that refuses to serve (no real host).
+fn lazy_of(refusing: *RefusingLazy) runtime.Lazy {
+    const server = lazy_server orelse return refusing.lazy();
+    return server.lazy();
+}
+
+fn lazy_finish() void {
+    const server = lazy_server orelse return;
+    server.finish();
+    assert(server.fd == -1);
+}
+
+/// The server of a lazy run without `main`'s: it builds no table and refuses the descriptor,
+/// so the run fails at the step that serves the tree.
+const RefusingLazy = struct {
+    host: Host,
+
+    fn lazy(refusing: *RefusingLazy) runtime.Lazy {
+        assert(lazy_server == null);
+        return .{ .context = refusing, .prepare = prepare, .serve = serve };
+    }
+
+    fn prepare(context: *anyopaque, tree: digest_prefix.Digest, diag: *Diag) bool {
+        _ = context;
+        _ = tree;
+        assert(lazy_server == null);
+        assert(diag.code == null);
+        return true;
+    }
+
+    fn serve(context: *anyopaque, device: host_mod.Handle) host_mod.Error!void {
+        const refusing: *RefusingLazy = @ptrCast(@alignCast(context));
+        assert(lazy_server == null);
+        refusing.host.close(device);
+        return error.Unsupported;
+    }
+};
+
+/// `--lazy` in slice 4 runs an image from the store in the foreground: its server lives in this
+/// process, so `-d` (which leaves it) and `--rootfs` (no tree) are refused.
+fn check_lazy(given: *const RunArgs, invocation: *const Invocation, diag: *Diag) RunError!void {
+    assert(given.lazy);
+    assert(diag.code == null);
+    if (!given.detach and invocation.operand != null) return;
+    const flag: []const u8 = if (given.detach) "-d" else "--rootfs";
+    lazy_diagnose.flag_refused(diag, flag);
+    return error.StartFailed;
 }
 
 /// `--listen-send` names an open Unix stream socket of this process, before anything starts

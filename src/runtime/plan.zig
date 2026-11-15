@@ -127,6 +127,11 @@ pub const Kind = enum {
     /// configured and the host's ports bound. Only then is the child let go.
     await_pasta,
     release_child,
+    /// In a lazy plan: receives the FUSE descriptor the child mounted (`send_fuse`), answers
+    /// `INIT` and starts the serving threads (the caller's `Session.Fuse`). Before
+    /// `await_report`: the child's overlay mount waits in the kernel until `INIT` is answered,
+    /// and reads the FUSE root, so the server must answer while the child still runs its steps.
+    serve_fuse,
     await_report,
     /// In a plan with a listener (`--listen`): receives the listener the child made and sent
     /// (`send_listener`). After `await_report`, so the child's own failure is read first.
@@ -140,6 +145,10 @@ pub const Kind = enum {
     set_umask,
     make_mounts_private,
     bind_rootfs,
+    /// In a lazy plan: opens `/dev/fuse` and mounts it on the overlay's lower layer, then sends
+    /// the descriptor to the parent over the channel and closes its own.
+    mount_fuse,
+    send_fuse,
     /// In a plan that runs a tree from the store: the overlay replaces the bind of a rootfs.
     mount_overlay,
     make_proc_dir,
@@ -261,7 +270,7 @@ pub fn side_of(kind: Kind) Side {
         .make_pipes, .spawn, .deny_setgroups, .write_gid_map, .write_uid_map => .parent,
         .run_newuidmap, .run_newgidmap, .spawn_keeper, .start_scope => .parent,
         .start_pasta, .await_pasta => .parent,
-        .release_child, .await_report, .receive_listener, .reap => .parent,
+        .release_child, .serve_fuse, .await_report, .receive_listener, .reap => .parent,
         else => .child,
     };
     // The kinds are declared parent first, so the order of the enum says which side a kind is.
@@ -298,6 +307,9 @@ pub const child_steps_count: u32 = 41 + 2 * constants.container_devices_count +
 
 /// The steps a listener adds: making it and sending it in the child, receiving it in the parent.
 pub const listener_steps_count: u32 = 3;
+
+/// The steps a lazy plan adds: mounting and sending in the child, serving in the parent.
+pub const lazy_steps_count: u32 = 3;
 
 /// The steps a scope adds to the parent's: the keeper and the scope itself.
 pub const scope_steps_count: u32 = 2;
@@ -441,6 +453,9 @@ pub const Input = struct {
     /// The port of the TCP listener on the container's loopback that is handed to the caller
     /// (`--listen`, M8b); only with `network` `none`.
     listen: ?u16 = null,
+    /// The overlay's lower layer is a FUSE mount served by the parent (`--lazy`, S2) rather than
+    /// the tree's materialized farm; only with `overlay`.
+    lazy: bool = false,
 
     fn hostname_text(input: *const Input) []const u8 {
         const result = input.hostname orelse input.name;
@@ -550,6 +565,8 @@ pub const Plan = struct {
     /// A plan with a listener: its port (zero: none).
     has_listener: bool,
     listen_port: u16,
+    /// A lazy plan: the overlay's lower layer is a FUSE mount the parent serves.
+    lazy: bool,
     /// The state volumes: how many, how many of them read-only, and each one's name and target.
     state_count: u32,
     state_read_only_count: u32,
@@ -610,6 +627,8 @@ pub const Plan = struct {
         if (plan.hosts_file) assert(input.network == .none);
         if (plan.has_listener) assert(input.network == .none);
         if (plan.has_listener) assert(plan.listen_port > 0);
+        plan.lazy = input.lazy;
+        if (plan.lazy) assert(input.overlay != null);
         plan.has_workdir = input.workdir.len > 0;
         plan.has_umask = input.umask != null;
         plan.umask = input.umask orelse 0;
@@ -637,6 +656,7 @@ pub const Plan = struct {
         plan.push_parent_start(input);
         assert(plan.count == plan.first_child());
         plan.push_child_steps(input);
+        if (plan.lazy) plan.push(.serve_fuse, empty_text, empty_text, 0);
         plan.push(.await_report, empty_text, empty_text, 0);
         if (plan.has_listener) plan.push(.receive_listener, empty_text, empty_text, 0);
         plan.push(.reap, empty_text, empty_text, 0);
@@ -652,7 +672,9 @@ pub const Plan = struct {
         assert(plan.steps[1].kind == .spawn);
         assert(plan.steps[plan.count - 1].kind == .reap);
         const tail = plan.tail_count();
-        assert(plan.steps[plan.count - tail].kind == .await_report);
+        const lazy: u32 = @intFromBool(plan.lazy);
+        assert((plan.steps[plan.count - tail].kind == .serve_fuse) == plan.lazy);
+        assert(plan.steps[plan.count - tail + lazy].kind == .await_report);
         assert((plan.steps[plan.count - 2].kind == .receive_listener) == plan.has_listener);
         // The child's steps are one contiguous run, between `release_child` and `await_report`.
         const child_start = plan.first_child();
@@ -678,9 +700,10 @@ pub const Plan = struct {
         if (!plan.has_pasta) assert(plan.publish_count == 0);
     }
 
-    /// The parent's steps after the child's: `await_report` and `reap`, and the listener's.
+    /// The parent's steps after the child's: `await_report` and `reap`, the listener's, and
+    /// `serve_fuse` in a lazy plan.
     pub fn tail_count(plan: *const Plan) u32 {
-        return 2 + @as(u32, @intFromBool(plan.has_listener));
+        return 2 + @as(u32, @intFromBool(plan.has_listener)) + @intFromBool(plan.lazy);
     }
 
     pub fn steps_expected(plan: *const Plan) u32 {
@@ -696,11 +719,12 @@ pub const Plan = struct {
         const state = state_steps_count * plan.state_count +
             state_read_only_steps_count * plan.state_read_only_count;
         const listener = listener_steps_count * @as(u32, @intFromBool(plan.has_listener));
+        const lazy = lazy_steps_count * @as(u32, @intFromBool(plan.lazy));
         const scope = scope_steps_count * @intFromBool(plan.scoped);
         const given_hosts: u32 = if (plan.hosts_file) 2 else 0; // The hosts file's stage/unstage.
         const user_devices = user_device_steps_count * plan.device_count;
         return plan.cdi_steps() + base + scope + read_only + extras + pasta + state +
-            plan.mount_steps + listener + user_devices - given_hosts;
+            plan.mount_steps + listener + user_devices + lazy - given_hosts;
     }
 
     /// The steps the CDI devices add: the nodes (one), the mounts (two), ldconfig (one).
@@ -723,6 +747,12 @@ pub const Plan = struct {
     }
 
     /// Whether the container has a network namespace of its own.
+    /// Whether the plan hands descriptors over the channel: a listener, a FUSE descriptor, or
+    /// both (the FUSE descriptor first).
+    pub fn has_channel(plan: *const Plan) bool {
+        return plan.has_listener or plan.lazy;
+    }
+
     pub fn isolated(plan: *const Plan) bool {
         assert(plan.count <= constants.plan_steps_max);
         const result = plan.network.isolated();
@@ -1027,6 +1057,10 @@ pub const Plan = struct {
         if (plan.has_umask) plan.push(.set_umask, empty_text, empty_text, 0);
         plan.push(.make_mounts_private, plan.add_text(&.{"/"}), empty_text, 0);
         if (plan.isolated()) plan.push(.bring_up_loopback, empty_text, empty_text, 0);
+        // The FUSE descriptor goes over the channel before the listener: the parent takes them
+        // in that order (`serve_fuse` before `receive_listener`).
+        if (plan.lazy) plan.push(.mount_fuse, plan.add_text(&.{overlay.?.lower}), empty_text, 0);
+        if (plan.lazy) plan.push(.send_fuse, empty_text, empty_text, 0);
         if (plan.has_listener) plan.push(.make_listener, empty_text, empty_text, 0);
         if (plan.has_listener) plan.push(.send_listener, empty_text, empty_text, 0);
         if (overlay) |layers| {
@@ -1530,6 +1564,7 @@ fn parent_phrase(kind: Kind) []const u8 {
         .start_pasta => "starting pasta for the container's network",
         .await_pasta => "waiting for pasta to configure the container's network",
         .release_child => "letting the container continue",
+        .serve_fuse => "serving the image's tree to the container over FUSE",
         .receive_listener => "receiving the listener the container made",
         .await_report => "waiting for the container to start its command",
         .reap => "waiting for the container to end",
@@ -1609,7 +1644,7 @@ pub fn describe(step: *const Step, buffer: []u8) []const u8 {
         .write_uid_map, .run_newuidmap, .run_newgidmap => parent_phrase(step.kind),
         .spawn_keeper, .start_scope, .start_pasta => parent_phrase(step.kind),
         .await_pasta, .release_child, .await_report, .reap => parent_phrase(step.kind),
-        .receive_listener => parent_phrase(step.kind),
+        .receive_listener, .serve_fuse => parent_phrase(step.kind),
         .die_with_parent => "asking the kernel to end the container if zbx dies",
         .await_release => "waiting for zbx to write the container's id maps",
         .set_hostname => "setting the container's hostname",
@@ -1617,6 +1652,8 @@ pub fn describe(step: *const Step, buffer: []u8) []const u8 {
         .make_mounts_private => "making the container's mounts private",
         .bind_rootfs => "bind-mounting the rootfs onto itself",
         .mount_overlay => "mounting the overlay filesystem of the tree",
+        .mount_fuse => "mounting the image's tree over FUSE",
+        .send_fuse => "handing the FUSE descriptor to zbx",
         .make_proc_dir => "creating /proc in the rootfs",
         .mount_proc => "mounting a fresh /proc",
         .make_dev_dir => "creating /dev in the rootfs",
@@ -1996,6 +2033,39 @@ test "a run of a tree mounts the overlay where a rootfs is bound, and has as man
             state_containers,
         ),
     );
+}
+
+test "a lazy run mounts FUSE on the lower layer and serves it before the overlay is mounted" {
+    // Goal: S2 slice 4's order. Method: a lazy plan has `lazy_steps_count` steps more than the
+    // plain one; the child mounts FUSE on the lower layer and sends the descriptor before the
+    // overlay, and the parent serves it after the go-ahead and before it waits for the report.
+    var plain: Plan = undefined;
+    plain.build(&overlay_input(false));
+    var input = overlay_input(false);
+    input.lazy = true;
+    var plan: Plan = undefined;
+    plan.build(&input);
+    try testing.expect(plan.lazy and plan.has_channel());
+    try testing.expectEqual(plain.count + lazy_steps_count, plan.count);
+    var at: [4]?u32 = @splat(null);
+    const kinds = [_]Kind{ .mount_fuse, .send_fuse, .mount_overlay, .serve_fuse };
+    for (plan.steps[0..plan.count], 0..) |step, index| {
+        for (kinds, &at) |kind, *slot| {
+            if (step.kind == kind) slot.* = @intCast(index);
+        }
+    }
+    try testing.expect(at[0].? < at[1].? and at[1].? < at[2].?);
+    const mount = plan.steps[at[0].?];
+    try testing.expectEqualStrings(store_cache, plan.text(mount.target));
+    var release: ?u32 = null;
+    var report: ?u32 = null;
+    for (plan.steps[0..plan.count], 0..) |step, index| {
+        if (step.kind == .release_child) release = @intCast(index);
+        if (step.kind == .await_report) report = @intCast(index);
+    }
+    try testing.expect(release.? < at[3].? and at[3].? < report.?);
+    try testing.expectEqual(Side.parent, side_of(.serve_fuse));
+    try testing.expectEqual(Side.child, side_of(.mount_fuse));
 }
 
 test "a read-only run of a tree has no upper layer, and a second empty lower one" {

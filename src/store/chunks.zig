@@ -123,7 +123,7 @@ fn partial_directory(store: *const Store, buffer: *PathBuf, id: Digest) [:0]cons
     return store.path(buffer, &.{ "/partial/", &hex });
 }
 
-fn partial_chunk(store: *const Store, buffer: *PathBuf, id: Digest, index: u32) [:0]const u8 {
+pub fn partial_chunk(store: *const Store, buffer: *PathBuf, id: Digest, index: u32) [:0]const u8 {
     assert(store.root_len > 1);
     assert(index < constants.store_chunks_max);
     const hex = id.hex();
@@ -172,7 +172,7 @@ pub fn put_chunk(
     }
     var chunk_storage: PathBuf = undefined;
     const chunk_path = partial_chunk(store, &chunk_storage, wanted.id, index);
-    const duplicate = try chunk_is_held(store, chunk_path, wanted.hashes[index]);
+    const duplicate = try chunk_is_held(store, chunk_path, wanted.hashes[index], failure);
     if (!duplicate) try write_chunk(store, wanted.id, index, bytes, failure);
     var progress = try assemble_if_whole(store, io, wanted, failure);
     progress.duplicate = duplicate;
@@ -196,19 +196,20 @@ pub fn finish(store: *Store, io: []u8, wanted: *const Wanted, failure: *Failure)
 }
 
 /// A held chunk file counts only if it still hashes right (a torn or damaged one is replaced).
-fn chunk_is_held(store: *Store, path: [:0]const u8, hash: Digest) Error!bool {
+/// A file that cannot be read fails the put, with its `failure` filled like every other.
+fn chunk_is_held(store: *Store, path: [:0]const u8, hash: Digest, failure: *Failure) Error!bool {
     assert(path.len > 0);
     assert(hash.bytes.len == constants.store_digest_bytes);
     const fs = store.fs;
     const fd = fs.open_read(path) catch |err| {
         if (err == error.NotFound) return false;
-        return error.StoreFailed;
+        return fail(fs, failure, err);
     };
     defer fs.close(fd);
     var hasher = Hasher.init();
     var buffer: [4096]u8 = undefined;
     while (true) {
-        const count = fs.read(fd, &buffer) catch return error.StoreFailed;
+        const count = fs.read(fd, &buffer) catch |err| return fail(fs, failure, err);
         if (count == 0) break;
         hasher.update(buffer[0..count]);
     }

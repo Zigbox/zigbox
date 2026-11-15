@@ -33,7 +33,7 @@ Zigbox is a rootless, daemonless Linux container runtime, image store and builde
 - `zig build` builds `zig-out/bin/zbx`.
 - `zig build test` runs unit, snapshot and simulation tests.
 - `zig build tidy` checks line length, function length and banned patterns.
-- `zig build fuzz -- <fuzzer> [seed] [iterations]` runs one seeded fuzzer; `zig build fuzz -- all [iterations]` runs every fuzzer once, each with a fresh seed.
+- `zig build fuzz -- <fuzzer> [seed] [iterations]` runs one seeded fuzzer; `zig build fuzz -- all [iterations]` runs every fuzzer once, each with a fresh seed; `zig build fuzz -- all-but <fuzzer> [iterations]` runs every one but `<fuzzer>` (CI runs provenance, the slowest, in a job of its own).
 - `zig build trust-wasm` compiles the pure trust surface (`zigbox.trust`) for `wasm32-freestanding`, so a host, store, clock or I/O dependency in it fails the build; `zig build check` runs it.
 - `zig build packages` writes the deb, rpm, apt and dnf trees under `zig-out/packages/` (`-Dtest-key` signs with the fixed test key, `-Dsignatures=DIR` places the owner's signatures); `zig build packages-check` reads the tree back and checks every file against its metadata (runbook: `docs/releases/packaging.md`). `-Dsigned-at=N` dates the apt `Release`; `zig build packages-redate` re-dates an existing tree; `zig build release-assets` writes the tarballs, SBOM and `SHA256SUMS` (`release-sums` hashes a directory again).
 - `zig build demo-mN` runs milestone N's demo inside the test VM (harness in `src/testing/vm/`, written in Zig).

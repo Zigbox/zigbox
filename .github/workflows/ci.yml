@@ -50,6 +50,7 @@ jobs:
       demo_m8b: ${{ steps.pick.outputs.demo_m8b }}
       demo_m9: ${{ steps.pick.outputs.demo_m9 }}
       demo_m10: ${{ steps.pick.outputs.demo_m10 }}
+      demo_s2_lazy: ${{ steps.pick.outputs.demo_s2_lazy }}
       demo_c4: ${{ steps.pick.outputs.demo_c4 }}
     steps:
       # Two commits: on a pull request the checkout is the merge commit, whose first parent is the
@@ -141,7 +142,7 @@ jobs:
         run: zig build errors-site-check
 
   fuzz:
-    name: fuzz (every fuzzer, fresh seeds)
+    name: fuzz (every fuzzer but provenance, fresh seeds)
     needs: changes
     if: ${{ needs.changes.outputs.code == 'true' }}
     runs-on: ubuntu-24.04
@@ -152,12 +153,29 @@ jobs:
       - uses: ./.github/actions/zig-cache
         with:
           name: fuzz
-      # One job runs every fuzzer in turn (`all`), 10,000 iterations each, as the per-fuzzer jobs
-      # did. Each fuzzer draws a fresh random seed and prints `fuzz: <name> seed=<n> ...` before it
+      # One job runs every fuzzer but provenance in turn (`all-but`), 10,000 iterations each.
+      # Each fuzzer draws a fresh random seed and prints `fuzz: <name> seed=<n> ...` before it
       # starts, flushed, so the last `fuzz:` line before a failure names the fuzzer and its seed;
-      # replay it with `zig build fuzz -- <name> <seed> 10000`.
-      - name: Fuzz every fuzzer
-        run: zig build fuzz -- all 10000
+      # replay it with `zig build fuzz -- <name> <seed> 10000`. Provenance, the slowest by far,
+      # runs in `fuzz-provenance` beside it. `zig build tidy` checks that every fuzzer has a step.
+      - name: Fuzz every fuzzer but provenance
+        run: zig build fuzz -- all-but provenance 10000
+
+  fuzz-provenance:
+    name: fuzz (provenance, fresh seed)
+    needs: changes
+    if: ${{ needs.changes.outputs.code == 'true' }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: ./.github/actions/setup-zig
+      - uses: ./.github/actions/zig-cache
+        with:
+          name: fuzz-provenance
+      # The seed comes from the runner and is printed before the first iteration, as above.
+      - name: Fuzz provenance
+        run: zig build fuzz -- provenance "$(od -An -N8 -tu8 /dev/urandom | tr -d ' ')" 10000
 
   # The D-Bus client against a real dbus-daemon (a private session bus), which is what shows that
   # the simulator's bus and the real one agree: Hello, calls, AddMatch, signals, and bytes the
@@ -740,3 +758,36 @@ jobs:
           key: vm-alpine-${{ hashFiles('src/testing/vm/alpine.zon') }}
       - name: Run the C4 demo
         run: zig build demo-c4 -Daccel=kvm
+
+  # The S2 slice 4 check (docs/briefs/S2-lazy-start.md): `zbx run --lazy` serves the pinned Alpine
+  # minirootfs, imported into the store, over FUSE (no registry). Slice 6's demo-s2 replaces it.
+  demo-s2-lazy:
+    name: demo-s2-lazy (Ubuntu 24.04 VM, KVM, zbx run --lazy over FUSE)
+    needs: changes
+    if: ${{ needs.changes.outputs.demo_s2_lazy == 'true' }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: ./.github/actions/setup-zig
+      - name: Install QEMU
+        uses: ./.github/actions/install-apt
+        with:
+          packages: qemu-system-x86 qemu-utils
+      - name: Enable KVM
+        run: |
+          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' | sudo tee /etc/udev/rules.d/99-kvm4all.rules
+          sudo udevadm control --reload-rules
+          sudo udevadm trigger --name-match=kvm
+      - name: Cache the VM base image
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: .zig-cache/zbx-vm/ubuntu-24.04-server-cloudimg-amd64.img
+          key: vm-image-${{ hashFiles('src/testing/vm/lib/image.zon') }}
+      - name: Cache the Alpine rootfs
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: .zig-cache/zbx-vm/alpine-*.tar.gz
+          key: vm-alpine-${{ hashFiles('src/testing/vm/alpine.zon') }}
+      - name: Run the S2 lazy check
+        run: zig build demo-s2-lazy -Daccel=kvm

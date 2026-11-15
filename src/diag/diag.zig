@@ -186,22 +186,20 @@ pub const Diag = struct {
         assert(diag.code.? == code);
     }
 
+    /// The generic part is only the formatting; the slot and the checks are shared code
+    /// (`text_slot`, `put_end`), because there are hundreds of call sites.
     pub fn cause(diag: *Diag, comptime format: []const u8, args: anytype) void {
-        const slot = diag.causes.next().?; // `.newest` lists always have a slot.
-        slot.* = .{};
-        put(slot, format, args);
-        assert(slot.len > 0);
-        assert(slot.len <= constants.diag_field_bytes_max);
-        assert(diag.causes.count > 0);
+        const slot = text_slot(&diag.causes);
+        slot.print(format, args);
+        put_end(slot, 0);
+        text_slot_end(slot, &diag.causes);
     }
 
     pub fn while_(diag: *Diag, comptime format: []const u8, args: anytype) void {
-        const slot = diag.whiles.next().?; // `.newest` lists always have a slot.
-        slot.* = .{};
-        put(slot, format, args);
-        assert(slot.len > 0);
-        assert(slot.len <= constants.diag_field_bytes_max);
-        assert(diag.whiles.count > 0);
+        const slot = text_slot(&diag.whiles);
+        slot.print(format, args);
+        put_end(slot, 0);
+        text_slot_end(slot, &diag.whiles);
     }
 
     /// Adds a labelled fact, for example `diag.context("path", "{s}", .{path})`. The key is a
@@ -213,14 +211,30 @@ pub const Diag = struct {
         args: anytype,
     ) void {
         comptime check_key(key);
-        const slot = diag.pairs.next() orelse return;
+        const slot = diag.pair_slot(key) orelse return;
+        slot.value.print(format, args);
+        put_end(&slot.value, 0);
+        pair_slot_end(slot, key.len, diag);
+    }
+
+    noinline fn pair_slot(diag: *Diag, key: []const u8) ?*Pair {
+        assert(key.len > 0);
+        assert(key.len <= constants.diag_key_bytes_max);
+        const slot = diag.pairs.next() orelse return null;
+        assert(diag.pairs.count > 0);
         slot.key = @splat(0);
         @memcpy(slot.key[0..key.len], key);
-        slot.key_len = key.len;
+        slot.key_len = @intCast(key.len);
         slot.value = .{};
-        put(&slot.value, format, args);
+        assert(slot.value.len == 0);
+        return slot;
+    }
+
+    noinline fn pair_slot_end(slot: *const Pair, key_len: usize, diag: *const Diag) void {
         assert(slot.value.len > 0);
-        assert(slot.key_len == key.len);
+        assert(slot.value.len <= constants.diag_field_bytes_max);
+        assert(slot.key_len == key_len);
+        assert(slot.key_len > 0);
         assert(diag.pairs.count > 0);
     }
 
@@ -248,15 +262,30 @@ pub const Diag = struct {
         comptime command_format: []const u8,
         command_args: anytype,
     ) void {
+        const slot = diag.fix_slot(sentence) orelse return;
+        slot.command.print(command_format, command_args);
+        put_end(&slot.command, 0);
+        fix_slot_end(slot);
+    }
+
+    noinline fn fix_slot(diag: *Diag, sentence: []const u8) ?*Fix {
         assert(sentence.len > 0);
-        const slot = diag.fixes.next() orelse return;
+        const slot = diag.fixes.next() orelse return null;
+        assert(diag.fixes.count > 0);
         slot.sentence = .{};
         slot.command = .{};
         put(&slot.sentence, "{s}", .{sentence});
-        put(&slot.command, command_format, command_args);
+        assert(slot.sentence.len > 0);
+        assert(slot.command.len == 0);
+        return slot;
+    }
+
+    noinline fn fix_slot_end(slot: *Fix) void {
         slot.needs_root = command_uses_sudo(slot.command.slice());
         slot.template = false;
         assert(slot.command.len > 0);
+        assert(slot.command.len <= constants.diag_command_bytes_max);
+        assert(slot.sentence.len > 0);
     }
 
     /// Marks the fix just added as an example to adapt (a `fix_with` command holds a placeholder).
@@ -401,13 +430,36 @@ fn check_key(comptime key: []const u8) void {
 fn put(field: anytype, comptime format: []const u8, args: anytype) void {
     const start = field.len;
     field.print(format, args);
+    put_end(field, start);
+}
+
+/// The part of `put` after the formatting, shared by every format: one copy per field type.
+noinline fn put_end(field: anytype, start: u32) void {
     assert(field.len >= start);
+    assert(field.len <= field.bytes.len);
     for (field.bytes[start..field.len]) |*byte| {
         if (!text_util.is_printable(byte.*)) byte.* = '?';
     }
     // A field is never empty, so no renderer has to cope with a labelled nothing.
     if (field.len == 0) field.print("(empty)", .{});
     assert(field.len > 0);
+}
+
+/// A cleared slot of a `.newest` text list, which always has one.
+noinline fn text_slot(list: anytype) *Text {
+    const slot = list.next().?; // `.newest` lists always have a slot.
+    slot.* = .{};
+    assert(slot.len == 0);
+    assert(!slot.truncated);
+    assert(list.count > 0);
+    assert(list.count <= list.items.len);
+    return slot;
+}
+
+noinline fn text_slot_end(slot: *const Text, list: anytype) void {
+    assert(slot.len > 0);
+    assert(slot.len <= constants.diag_field_bytes_max);
+    assert(list.count > 0);
 }
 
 const testing = std.testing;

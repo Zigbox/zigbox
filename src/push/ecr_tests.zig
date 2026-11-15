@@ -99,7 +99,7 @@ const World = struct {
             rig.wire.interface(),
             destination,
             &rig.made,
-            .{ .chunk_bytes = 64, .credential = .{ .ecr = world.token.text() } },
+            .{ .chunk_bytes = 256, .credential = .{ .ecr = world.token.text() } },
             &rig.report,
             &rig.diag,
         );

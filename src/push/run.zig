@@ -51,6 +51,7 @@ pub fn pack_operand(
         .tree = ws.source.tree,
         .settings = &ws.source.settings,
         .labels = ws.source.labels(),
+        .writer_version = constants.layer_writer_version,
     };
     var failure: pack.Failure = undefined;
     pack.pack(store, &ws.pack, input, out, &failure) catch {
@@ -198,6 +199,7 @@ pub fn push_operand(
         .tree = ws.source.tree,
         .settings = &ws.source.settings,
         .labels = ws.source.labels(),
+        .writer_version = constants.layer_writer_version,
     };
     var fail: fs_mod.Failure = undefined;
     out.record_failure = null;

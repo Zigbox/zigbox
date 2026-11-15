@@ -5,6 +5,7 @@
 const std = @import("std");
 const assert = std.debug.assert;
 const cli = @import("cli.zig");
+const lazy_server_mod = @import("fuse/lazy_server.zig");
 const constants = @import("constants.zig");
 const guest_serve = @import("guest_serve.zig");
 const host_real = @import("host_real.zig");
@@ -45,12 +46,18 @@ var gc_tables: [constants.store_gc_tables_bytes]u8 align(8) = @splat(0);
 /// The real network's memory (`host_real_net.Memory`, about 2.4 MiB): static, so it is in bss.
 var network_memory: host_real_net.Memory = undefined;
 
+/// The FUSE server of `zbx run --lazy` (S2): the node table, the chunk cache and the serving
+/// threads' buffers, about 100 MiB, static so it is in bss and costs nothing until a lazy run.
+var lazy_server: lazy_server_mod.Server = undefined;
+
 pub fn main(init: std.process.Init.Minimal) u8 {
     if (guest_command(init)) |code| return code;
     network_memory.init();
     var real: HostReal = .{ .environ = init.environ, .network_memory = &network_memory };
     var iterator = init.args.iterate();
     storage.gc_tables = &gc_tables;
+    lazy_server.init(real.interface());
+    cli.lazy_server = &lazy_server;
     const code = cli.run_with(real.interface(), &iterator, &storage);
     assert(real.open_count == 0); // Every file the CLI opened was closed.
     return code;
@@ -147,6 +154,21 @@ test {
     _ = @import("fuzz_layer.zig");
 }
 
+// The lazy start's FUSE server (S2 slice 4).
+test {
+    _ = @import("fuzz_fuse.zig");
+    _ = @import("fuse/abi.zig");
+    _ = @import("fuse/nodes.zig");
+    _ = @import("fuse/ops.zig");
+    _ = @import("fuse/cache.zig");
+    _ = @import("fuse/resolver.zig");
+    _ = @import("fuse/fixture.zig");
+    _ = @import("fuse/serve.zig");
+    _ = @import("fuse/kernel_tests.zig");
+    _ = @import("fuse/lazy_server_tests.zig");
+    _ = @import("host_real_fuse.zig");
+}
+
 test {
     _ = @import("registry/digest.zig");
     _ = @import("registry/blobs.zig");
@@ -161,7 +183,14 @@ test {
     _ = @import("layer/tar_write.zig");
     _ = @import("push/pack.zig");
     _ = @import("fuzz_pack.zig");
+    _ = @import("fuzz_lazy_index.zig");
+    _ = @import("fuzz_chaining.zig");
     _ = @import("push/pack_tests.zig");
+    _ = @import("lazy/chaining.zig");
+    _ = @import("lazy/index.zig");
+    _ = @import("lazy/seen.zig");
+    _ = @import("lazy/verify.zig");
+    _ = @import("lazy/index_tests.zig");
     _ = @import("push/export.zig");
     _ = @import("push/source.zig");
     _ = @import("push/diagnose.zig");
@@ -209,6 +238,7 @@ test {
 }
 
 test {
+    _ = @import("fuzz_fuse_serve.zig");
     // The images: settings, the lock, running by name.
     _ = @import("registry/config.zig");
     _ = @import("lock_file.zig");
@@ -219,6 +249,7 @@ test {
     _ = @import("run_image_tests.zig");
     _ = @import("image_diagnose.zig");
     _ = @import("store/image_find.zig");
+    _ = @import("lazy/lazy.zig");
     _ = @import("testing/vm/checks_m4.zig");
 }
 
