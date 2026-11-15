@@ -8,7 +8,7 @@
 //!      inspect shows the user, workdir and labels; /etc/hello/VERSION is 10001:10001 0644.
 //!   3. Again, as JSON: all hits, the same digest.
 //!   4. README.md (excluded) edited: all hits. `extra.go` added: the build stage's `*.go` copy
-//!      and compile miss, `adduser` hits, a new digest; removed, the first digest, all hits.
+//!      and compile miss, the user step hits, a new digest; removed, the first digest, all hits.
 //!   6. The `tools` stage: flagged `net` and `cache`, W0810 then W0811; `--hermetic` refuses
 //!      it (E0814, Dockerfile:11, nothing written); built with W0801 and W0802, curl runs.
 //!   5. (Second VM) the same import bytes and step 2's digest, the golden of `m9_expected.zon`.
@@ -233,7 +233,7 @@ fn globs_and_excludes(session: *Session, out: *Io.Writer) !void {
     _ = try common.expect_exit(session, out, step4, add_extra, 0);
     const extra = try build_text(session, out, step4);
     checks.check_extra(&extra) catch |err| {
-        return fail_step(out, step4, "expected build-2, build-3 to miss, adduser to hit", err);
+        return fail_step(out, step4, "expected build-2, build-3 to miss, the user step hit", err);
     };
     m7.check_digest_differs(first_digest(), extra.digest) catch |err| {
         return fail_step(out, step4, "expected a new digest with extra.go", err);
