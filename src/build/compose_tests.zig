@@ -30,6 +30,7 @@ const cache = @import("cache.zig");
 const schedule = @import("schedule.zig");
 const verify = @import("../store/verify.zig");
 const gc = @import("../store/gc.zig");
+const store_lock = @import("../store/lock.zig");
 
 const assert = std.debug.assert;
 const testing = std.testing;
@@ -71,6 +72,9 @@ fn start() void {
     composed.outputs = @splat(Digest.of("unset"));
     composed.wants = @splat(.none);
     composed.locking.lock.clear();
+    // No zbx.lock on disk: a test that located one (`pinning_started`) must not leave it to the
+    // next, whose image record would read a file this world does not have.
+    composed.locking.located.exists = false;
     context = .{
         .host = sim.interface(),
         .facts = &facts,
@@ -678,6 +682,9 @@ test "build_image: adds that clash are E0807 naming both, reached through compos
 
 const images = @import("../store/images.zig");
 const net_sim = @import("../registry/net_sim.zig");
+const net_mod = @import("../registry/net.zig");
+const blobs_mod = @import("../registry/blobs.zig");
+const render = @import("../diag/render.zig");
 const oci_digest = @import("../registry/digest.zig");
 const test_registry = @import("../registry/test_registry.zig");
 
@@ -2329,4 +2336,335 @@ test "a copy of . takes the whole project as Docker's COPY . does, and * flatten
     try testing.expect(!whole.eql(flat));
     _ = try owned_entry(flat, &.{ "app", "a.txt" });
     try testing.expectError(error.TestUnexpectedResult, owned_entry(flat, &.{ "app", "src" }));
+}
+
+const fetch_payload = "hello, fetch\n";
+var fetch_wire: net_sim.SimNet = undefined;
+
+/// The fetch tests' server: on the fetch hosts, `/hello.txt` and `/r/hello.txt` answer the
+/// payload and anything else 404; every other host is the test registry, for the base's pull.
+fn fetch_answer(
+    raw: *anyopaque,
+    request: *const net_mod.Request,
+    received: []const u8,
+    served: *net_sim.Served,
+) void {
+    _ = raw;
+    const loopback = std.mem.eql(u8, request.host, "127.0.0.1");
+    const mirror = std.mem.eql(u8, request.host, "mirror.test");
+    if (!loopback and !mirror) {
+        const answering = registry.responder();
+        answering.answer(answering.context, request, received, served);
+        return;
+    }
+    fetch_requests += 1;
+    if (fetch_gc_probe) |*probe| probe.at_request = gc_would_lock();
+    const known = std.mem.endsWith(u8, request.target, "/hello.txt");
+    served.* = if (known) .{ .body = fetch_payload } else .{ .status = 404 };
+}
+
+/// The requests the fetch hosts answered since `fetches_wired`.
+var fetch_requests: u32 = 0;
+
+/// What a `store gc` would have found at a fetch's request and at its step's cache entry.
+const GcProbe = struct {
+    at_request: ?bool = null,
+    at_record: ?bool = null,
+    blob_at_record: bool = false,
+
+    fn look(raw: *anyopaque) void {
+        const probe: *GcProbe = @ptrCast(@alignCast(raw));
+        probe.at_record = gc_would_lock();
+        const blobs: blobs_mod.Blobs = .{ .fs = store.fs, .root = store.root_text() };
+        var path: @import("../store/fs.zig").PathBuf = undefined;
+        probe.blob_at_record = files.kind_of(blobs.final_path(&path, fetch_pin())) != null;
+    }
+};
+
+/// Set by a test to have the fetch server record a `GcProbe.at_request`.
+var fetch_gc_probe: ?GcProbe = null;
+
+/// True if another open of the store's lock file, as `store gc`'s, gets it exclusively now.
+fn gc_would_lock() bool {
+    var storage: @import("../store/fs.zig").PathBuf = undefined;
+    const path = store.path(&storage, &.{store_lock.file_name});
+    const fd = store.fs.lock(path, true, "1 gc") catch return false;
+    store.fs.close(fd);
+    return true;
+}
+
+/// A copy step with one fetch entry; `extra` goes after `.to` (a `.chmod`, say).
+fn fetch_parsed(url: []const u8, sha256: []const u8, to: []const u8, extra: []const u8) !void {
+    var buffer: [1024]u8 = undefined;
+    const text = try std.fmt.bufPrint(&buffer, "{s}{s}{s}{s}{s}{s}{s}{s}{s}{s}{s}", .{
+        ".{ .version = 1, .image = .{}, .steps = .{ .{ .name = \"put\", .base = \"",
+        locked_reference,
+        "\", .copy = .{ .{ .fetch = .{ .url = \"",
+        url,
+        "\", .sha256 = \"",
+        sha256,
+        "\" }, .to = \"",
+        to,
+        "\"",
+        extra,
+        " } } } } }\n",
+    });
+    var problem: file_mod.Problem = undefined;
+    const parsed = file_mod.parse(text, &loaded.file, &problem);
+    try testing.expectEqual(file_mod.ParseResult.parsed, parsed);
+    var refused: graph_mod.Problem = undefined;
+    const ordered = graph_mod.order(&loaded.file, &loaded.graph, &refused);
+    try testing.expectEqual(graph_mod.Result.ordered, ordered);
+}
+
+/// Puts the fetch hosts in front of the registry, and counts their requests from zero.
+fn fetches_wired() void {
+    var unused: u8 = 0;
+    fetch_wire.init(1, .{ .context = &unused, .answer = fetch_answer });
+    sim.wire = &fetch_wire;
+    fetch_requests = 0;
+}
+
+/// The SHA-256 of `fetch_payload`, as the pin.
+fn fetch_pin() oci_digest.Sha256 {
+    return oci_digest.Sha256.of(fetch_payload);
+}
+
+test "a fetch lands at .to with Docker's remote ADD defaults, and its key never holds the URL" {
+    // Goal: the download happens in the copy step, once, on its miss; the file is 0600 and
+    // 0:0, named after the URL when `.to` ends in `/`; another URL with the same bytes is a
+    // hit with no request; `.chmod` and `.to` each move the key. Method: build, then change
+    // one field at a time.
+    registry_started(&registry.fixture.oci.amd64.digest);
+    fetches_wired();
+    const hex = fetch_pin().hex();
+    try fetch_parsed("http://127.0.0.1:8080/hello.txt", &hex, "/opt/", "");
+    try testing.expect(try context.begin(0) == .hit);
+    try testing.expect(diag.code == null);
+    try testing.expectEqual(@as(u32, 1), fetch_requests);
+    try testing.expectEqual(@as(u32, 1), context.misses);
+    const first = composed.outputs[0];
+    const file = try owned_entry(first, &.{ "opt", "hello.txt" });
+    try testing.expectEqual(@as(u16, 0o600), file.mode);
+    try testing.expectEqual(@as(u32, 0), file.uid);
+    try testing.expectEqual(@as(u32, 0), file.gid);
+    try testing.expectEqual(@as(u64, fetch_payload.len), file.size);
+    // A mirror: the step is a hit, so nothing is asked for, and the key is the same.
+    try fetch_parsed("https://mirror.test/r/hello.txt", &hex, "/opt/", "");
+    try testing.expect(try context.begin(0) == .hit);
+    try testing.expectEqual(@as(u32, 1), fetch_requests);
+    try testing.expectEqual(@as(u32, 1), context.hits);
+    try testing.expect(first.eql(composed.outputs[0]));
+    try fetch_parsed("https://mirror.test/r/hello.txt", &hex, "/opt/hello.txt", "");
+    try testing.expect(try context.begin(0) == .hit);
+    try testing.expectEqual(@as(u32, 2), context.hits); // The same path, written in full.
+    // A miss with the blob there: the blob is checked, not asked for.
+    try fetch_parsed("https://mirror.test/hello.txt", &hex, "/opt/h", ", .chmod = \"0644\"");
+    try testing.expect(try context.begin(0) == .hit);
+    try testing.expectEqual(@as(u32, 2), context.misses);
+    try testing.expectEqual(@as(u32, 1), fetch_requests);
+    const moved = try owned_entry(composed.outputs[0], &.{ "opt", "h" });
+    try testing.expectEqual(@as(u16, 0o644), moved.mode);
+    try testing.expectError(error.TestUnexpectedResult, owned_entry(composed.outputs[0], &.{
+        "opt", "hello.txt",
+    }));
+}
+
+test "store gc cannot take the lock from a fetch's request to its step's cache entry" {
+    // Goal: a blob just downloaded cannot be removed by `store gc` before the cache entry that
+    // keeps it is written (the 3b review: fetch on a miss, under the store's shared lock).
+    // Method: the server, and a hook at the cache entry's rename, each try the store's lock
+    // exclusively from another open file, as gc does; both are refused, and the blob is in
+    // `blobs/sha256` at the rename. After the build the lock is free again.
+    registry_started(&registry.fixture.oci.amd64.digest);
+    fetches_wired();
+    fetch_gc_probe = .{};
+    defer fetch_gc_probe = null;
+    const hex = fetch_pin().hex();
+    try fetch_parsed("http://127.0.0.1:8080/hello.txt", &hex, "/opt/", "");
+    files.hook = .{
+        .rename_to_contains = "/build/cache",
+        .context = &fetch_gc_probe.?,
+        .call = GcProbe.look,
+    };
+    try testing.expect(try context.begin(0) == .hit);
+    try testing.expect(diag.code == null);
+    try testing.expectEqual(@as(u32, 1), fetch_requests);
+    try testing.expectEqual(@as(?bool, false), fetch_gc_probe.?.at_request);
+    try testing.expectEqual(@as(?bool, false), fetch_gc_probe.?.at_record);
+    try testing.expect(fetch_gc_probe.?.blob_at_record);
+    try testing.expect(gc_would_lock());
+}
+
+test "a step that hits the cache never downloads: the blob gone and the URL dead do not matter" {
+    // Goal: the fetch runs in copy_miss only (the 3b review's SHOULD 3): a hit needs neither the
+    // blob nor the network, so `store gc` removing the blob after a build costs nothing until
+    // the step misses. Method: build; remove the blob; build again with a URL that 404s.
+    registry_started(&registry.fixture.oci.amd64.digest);
+    fetches_wired();
+    const hex = fetch_pin().hex();
+    try fetch_parsed("http://127.0.0.1:8080/hello.txt", &hex, "/opt/", "");
+    try testing.expect(try context.begin(0) == .hit);
+    const first = composed.outputs[0];
+    const blobs: blobs_mod.Blobs = .{ .fs = store.fs, .root = store.root_text() };
+    var path: @import("../store/fs.zig").PathBuf = undefined;
+    try store.fs.unlink(blobs.final_path(&path, fetch_pin()));
+    try fetch_parsed("http://127.0.0.1:8080/gone/hello.tx", &hex, "/opt/hello.txt", "");
+    try testing.expect(try context.begin(0) == .hit);
+    try testing.expect(diag.code == null);
+    try testing.expectEqual(@as(u32, 1), context.hits);
+    try testing.expectEqual(@as(u32, 1), fetch_requests);
+    try testing.expect(first.eql(composed.outputs[0]));
+    try testing.expect(files.kind_of(blobs.final_path(&path, fetch_pin())) == null);
+}
+
+test "fetched bytes that are not the pin are E0821 in the copy step, and nothing is kept" {
+    // Goal: a wrong `.sha256` fails the download, names both hashes, and leaves no blob and no
+    // file in the store's tmp. Method: pin the hash of other bytes; build; look in the store.
+    registry_started(&registry.fixture.oci.amd64.digest);
+    fetches_wired();
+    const wrong = oci_digest.Sha256.of("other bytes\n");
+    const hex = wrong.hex();
+    try fetch_parsed("http://127.0.0.1:8080/hello.txt", &hex, "/opt/", "");
+    try testing.expectError(error.Failed, context.begin(0));
+    try testing.expectEqual(codes.Code.E0821, diag.code.?);
+    const right = fetch_pin().hex();
+    var shown: [constants.output_bytes_max]u8 = undefined;
+    const text = render.render(&diag, .text, false, &shown);
+    try testing.expect(std.mem.indexOf(u8, text, &hex) != null);
+    try testing.expect(std.mem.indexOf(u8, text, &right) != null);
+    const blobs: blobs_mod.Blobs = .{ .fs = store.fs, .root = store.root_text() };
+    var path: @import("../store/fs.zig").PathBuf = undefined;
+    try testing.expect(files.kind_of(blobs.final_path(&path, wrong)) == null);
+    try testing.expect(files.kind_of(blobs.final_path(&path, fetch_pin())) == null);
+    try testing.expect(store_tmp_empty());
+}
+
+/// True when the store's `tmp/` holds nothing: no download left its file behind.
+fn store_tmp_empty() bool {
+    var path: @import("../store/fs.zig").PathBuf = undefined;
+    const tmp = store.path(&path, &.{"/tmp/"});
+    for (files.nodes[0..files.count]) |*node| {
+        if (!node.alive) continue;
+        const name = node.path[0..node.path_len];
+        if (name.len > tmp.len and std.mem.startsWith(u8, name, tmp)) return false;
+    }
+    return true;
+}
+
+test "a fetch that cannot be downloaded is E0820 naming the step and the URL, never its query" {
+    // Goal: the cause names the URL without its query (a signed URL's token stays out of the
+    // log), and the verbose form names the step. Method: a URL that 404s, with a query.
+    registry_started(&registry.fixture.oci.amd64.digest);
+    fetches_wired();
+    const hex = fetch_pin().hex();
+    try fetch_parsed("http://127.0.0.1:8080/gone.txt?token=secret", &hex, "/opt/x", "");
+    try testing.expectError(error.Failed, context.begin(0));
+    try testing.expectEqual(codes.Code.E0820, diag.code.?);
+    var shown: [constants.output_bytes_max]u8 = undefined;
+    const text = render.render(&diag, .text, false, &shown);
+    const answered = "http://127.0.0.1:8080/gone.txt answered";
+    try testing.expect(std.mem.indexOf(u8, text, answered) != null);
+    try testing.expect(std.mem.indexOf(u8, text, "token") == null);
+    const verbose = render.render(&diag, .verbose, false, &shown);
+    try testing.expect(std.mem.indexOf(u8, verbose, "build step \"put\"") != null);
+    try testing.expect(std.mem.indexOf(u8, verbose, "token") == null);
+    try testing.expect(store_tmp_empty());
+}
+
+const fresh_environment = [_]host_sim.EnvironmentVariable{
+    .{ .name = "XDG_DATA_HOME", .value = "/fresh" },
+};
+
+test "a fetch into a store not made yet lands there, after the base's pull made the store" {
+    // Goal: in a fresh data directory the copy step's base is pulled first, which makes the
+    // store, and the fetch then writes into it (demo-m9 step 7 found the store unmade when the
+    // download came before the plan). Method: a store root with no directory; build.
+    registry_started(&registry.fixture.oci.amd64.digest);
+    fetches_wired();
+    sim.environment_variables = &fresh_environment;
+    files.put_dir("/fresh", 0o755);
+    store.at(sim.interface(), "/fresh/zbx/store");
+    try testing.expect(files.kind_of("/fresh/zbx") == null);
+    const hex = fetch_pin().hex();
+    try fetch_parsed("http://127.0.0.1:8080/hello.txt", &hex, "/opt/", "");
+    try testing.expect(try context.begin(0) == .hit);
+    try testing.expect(diag.code == null);
+    try testing.expectEqual(@as(u32, 1), fetch_requests);
+    try testing.expect(files.kind_of("/fresh/zbx/store/store.zon") != null);
+    const blobs: blobs_mod.Blobs = .{ .fs = store.fs, .root = store.root_text() };
+    var path: @import("../store/fs.zig").PathBuf = undefined;
+    try testing.expect(files.kind_of(blobs.final_path(&path, fetch_pin())) != null);
+}
+
+test "a blob damaged before its copy step misses is downloaded again, not used" {
+    // Goal: other bytes under the pin's name are not a cached fetch: the step downloads the
+    // file again, replaces them, and builds. (A blob damaged between that check and the read
+    // is E0511 in fetch_tree, which re-hashes as it reads.) Method: put other bytes under the
+    // pinned hash's name; build.
+    registry_started(&registry.fixture.oci.amd64.digest);
+    fetches_wired();
+    const hex = fetch_pin().hex();
+    try fetch_parsed("http://127.0.0.1:8080/hello.txt", &hex, "/opt/x", "");
+    const blobs: blobs_mod.Blobs = .{ .fs = store.fs, .root = store.root_text() };
+    var path: @import("../store/fs.zig").PathBuf = undefined;
+    for ([_][]const u8{ "/data/zbx/store/blobs", "/data/zbx/store/blobs/sha256" }) |dir| {
+        if (files.kind_of(dir) == null) files.put_dir(dir, 0o755);
+    }
+    files.put_file(blobs.final_path(&path, fetch_pin()), 0o644, "damaged\n");
+    try testing.expect(try context.begin(0) == .hit);
+    try testing.expect(diag.code == null);
+    try testing.expectEqual(@as(u32, 1), fetch_requests);
+    const file = try owned_entry(composed.outputs[0], &.{ "opt", "x" });
+    try testing.expectEqual(@as(u64, fetch_payload.len), file.size);
+}
+
+test "a fetch entry's .chown sets the file's owner, as a source entry's does" {
+    // Goal: `.chown` applies to a fetched file (Docker's `ADD --chown` of a URL). Method: a
+    // host that maps a full range of ids; `.chown = "1000:1001"`; read the entry.
+    registry_started(&registry.fixture.oci.amd64.digest);
+    sim.files = &sim_run.files;
+    fetches_wired();
+    const hex = fetch_pin().hex();
+    try fetch_parsed("http://127.0.0.1:8080/hello.txt", &hex, "/opt/", ", .chown = \"1000:1001\"");
+    try testing.expect(try context.begin(0) == .hit);
+    try testing.expect(diag.code == null);
+    const file = try owned_entry(composed.outputs[0], &.{ "opt", "hello.txt" });
+    try testing.expectEqual(@as(u32, 1000), file.uid);
+    try testing.expectEqual(@as(u32, 1001), file.gid);
+    try testing.expectEqual(@as(u16, 0o600), file.mode);
+}
+
+test "a fetch-first copy step records the same provenance cold and warm, but for the times" {
+    // Goal: the step's input in the record is the pin on both paths (the 3b review's MUST 2: a
+    // cold build recorded the fetched tree, a warm one a zero placeholder). Method: build the
+    // step (a miss: it downloads) and the image, read the record; build both again (the
+    // step a hit), read it, and compare them with the times set equal.
+    registry_started(&registry.fixture.oci.amd64.digest);
+    fetches_wired();
+    const hex = fetch_pin().hex();
+    try fetch_parsed("http://127.0.0.1:8080/hello.txt", &hex, "/opt/", "");
+    try testing.expect(try context.begin(0) == .hit);
+    try testing.expectEqual(@as(u32, 1), context.misses);
+    try testing.expectEqual(@as(u32, 1), fetch_requests);
+    sim.stdout_len = 0;
+    try context.build_image();
+    const first = sim.stdout();
+    const at = std.mem.indexOf(u8, first, "built b3:").?;
+    const digest = Digest.parse(first[at + 6 ..][0..constants.store_digest_text_bytes]).?;
+    try stored_record(digest, &first_record);
+    try testing.expect(try context.begin(0) == .hit);
+    try testing.expectEqual(@as(u32, 1), context.hits);
+    sim.stdout_len = 0;
+    try context.build_image();
+    try testing.expectEqual(@as(u32, 1), fetch_requests);
+    try stored_record(digest, &provenance_work.parsed);
+    var again: provenance.Record = first_record;
+    again.started = provenance_work.parsed.started;
+    again.finished = provenance_work.parsed.finished;
+    var left: [constants.statement_bytes_max]u8 = undefined;
+    var right: [constants.statement_bytes_max]u8 = undefined;
+    const cold = provenance.render(&left, &again);
+    try testing.expectEqualStrings(cold, provenance.render(&right, &provenance_work.parsed));
+    try testing.expect(std.mem.indexOf(u8, cold, &hex) != null);
 }

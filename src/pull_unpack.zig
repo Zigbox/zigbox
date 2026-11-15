@@ -211,7 +211,7 @@ fn unpack_layer(
         return error.Failed;
     };
     if (!actual.eql(digest)) {
-        registry_diagnose.blob_damaged(diag, place.root, digest, actual);
+        registry_diagnose.blob_damaged(diag, place.root, .layer, digest, actual);
         return error.Failed;
     }
 }

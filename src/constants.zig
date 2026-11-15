@@ -810,6 +810,9 @@ pub const registry_token_response_bytes_max: u32 = 32 * 1024;
 /// A challenge, a request path with its query, a redirect target, and one response header.
 pub const registry_challenge_bytes_max: u32 = 1024;
 pub const registry_url_bytes_max: u32 = 2048;
+/// A host name copied out of a redirect's Location: a DNS name is at most 253 bytes
+/// (`net.parse_url` refuses a longer one).
+pub const registry_host_bytes_max: u32 = 256;
 pub const registry_header_bytes_max: u32 = 128;
 /// The head of a response (status line and headers) and of a request.
 pub const registry_head_bytes_max: u32 = 16 * 1024;
@@ -984,6 +987,9 @@ pub const build_copy_entries_max: u32 = 64;
 /// `net_idle_timeout_ms` (owner, 2026-11-14).
 pub const build_fetch_bytes_max: u64 = 1024 * 1024 * 1024;
 pub const build_fetch_redirects_max: u32 = 4;
+/// The part of a fetch's URL a diagnostic echoes (E0820, E0821); a longer one is cut with an
+/// ellipsis. The query is never echoed: it can hold a signed token.
+pub const build_fetch_url_shown_bytes_max: u32 = 256;
 /// The lines of one `.exclude` list (`.dockerignore` syntax).
 pub const build_exclude_lines_max: u32 = 256;
 /// The paths in one step's `.output_exclude` (M9 slice 3c, owner 2026-11-14): the four defaults
@@ -1144,6 +1150,9 @@ comptime {
     assert(build_fetch_bytes_max <= store_file_bytes_max);
     assert(build_fetch_redirects_max == registry_redirects_max);
     assert(build_fetch_redirects_max > 0);
+    assert(build_fetch_url_shown_bytes_max <= registry_url_bytes_max);
+    assert(registry_host_bytes_max >= 253);
+    assert(registry_host_bytes_max < registry_url_bytes_max);
     // Needs and binds together are mounts beside `/src` and `/out`; the parser holds the sum.
     assert(build_step_binds_max + 2 <= mounts_max);
     assert(build_step_caches_max + 2 <= mounts_max);

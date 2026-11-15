@@ -76,8 +76,8 @@ footer{border-top:1px solid var(--line);padding-block:24px;color:var(--muted);
 <p class="summary">a fetch could not be downloaded</p>
 <dl class="facts"><div><dt>Kind</dt><dd>error</dd></div><div><dt>Blame</dt><dd>external</dd></div><div><dt>Exit code</dt><dd>3</dd></div></dl>
 <h2>What it means</h2>
-<p>A copy entry's .fetch is downloaded in the parent, before any step runs, through the same HTTP client a pull uses (proxies from the environment, SSL_CERT_FILE honoured). Only https:// is fetched; plain http:// only for a loopback host. A redirect may not go from https to http, nor from a host that is not loopback to one that is, and at most 4 redirects are followed. A body over 1 GiB is refused.</p>
-<p>The message says why: the HTTP status, the network error, the size bound, the redirects. If the bytes are in the store already (blobs/sha256 under the pinned hash, from an earlier build or a pull), nothing is downloaded, so a build on a host that can reach the URL fills the store for one that cannot.</p>
+<p>A copy entry's .fetch is downloaded in the parent when its copy step misses the cache, through the same HTTP client a pull uses (proxies from the environment, SSL_CERT_FILE honoured). Only https:// is fetched; plain http:// only for a loopback host. A redirect may not go from https to http, nor from a host that is not loopback to one that is (127.1, 0x7f.0.0.1 and the other spellings of 127/8 and 0.0.0.0 count as loopback), and at most 4 redirects are followed. A body over 1 GiB is refused.</p>
+<p>The message says why: the HTTP status, the network error, the size bound, the redirects. A step that hits the cache downloads nothing, and neither does one whose bytes are in the store already (blobs/sha256 under the pinned hash, from an earlier build or a pull), so a build on a host that can reach the URL fills the store for one that cannot.</p>
 <h2>Offline</h2>
 <p>The same text, without a network:</p>
 <pre class="term">zbx explain E0820</pre>

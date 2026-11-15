@@ -1543,7 +1543,16 @@ pub fn result_operand(diag: *Diag, operand: []const u8, absent: bool) void {
 }
 
 /// The URL of a fetch as a message shows it: control bytes replaced, a long one cut.
-const UrlEcho = [256]u8;
+const UrlEcho = [constants.build_fetch_url_shown_bytes_max]u8;
+
+/// The URL a fetch diagnostic shows: without its query, which can hold a signed token that a
+/// log or a pasted error would leak. `net.parse_url` refuses a `#`, so there is no fragment.
+fn url_without_query(url: []const u8) []const u8 {
+    assert(url.len > 0);
+    const end = std.mem.indexOfScalar(u8, url, '?') orelse url.len;
+    assert(end <= url.len);
+    return url[0..end];
+}
 
 /// ZBX-E0820: a fetch could not be downloaded. A failure to write the blob cache is not this
 /// code: it is E0416 or E0417, as a pull's is (`registry/diagnose.zig` `cache_failed`).
@@ -1551,8 +1560,9 @@ pub fn fetch_failed(diag: *Diag, step: []const u8, url: []const u8, reason: fetc
     assert(diag.code == null);
     assert(reason != .mismatch);
     assert(reason != .io);
+    assert(reason != .interrupted);
     var url_echo: UrlEcho = undefined;
-    const shown = text_util.sanitise(&url_echo, url);
+    const shown = text_util.sanitise(&url_echo, url_without_query(url));
     diag.raise(.E0820);
     diag.while_("downloading the .fetch of build step \"{s}\"", .{step});
     switch (reason) {
@@ -1565,7 +1575,7 @@ pub fn fetch_failed(diag: *Diag, step: []const u8, url: []const u8, reason: fetc
             shown, constants.build_fetch_redirects_max,
         }),
         .refused => |refusal| diag.cause("{s} redirected {s}", .{ shown, refusal_words(refusal) }),
-        .io, .mismatch => unreachable, // Asserted above.
+        .io, .mismatch, .interrupted => unreachable, // Asserted above.
     }
     diag.context("step", "{s}", .{step});
     diag.context("url", "{s}", .{shown});
@@ -1614,7 +1624,7 @@ pub fn fetch_mismatch(
     assert(diag.code == null);
     assert(!std.mem.eql(u8, expected, received));
     var url_echo: UrlEcho = undefined;
-    const shown = text_util.sanitise(&url_echo, url);
+    const shown = text_util.sanitise(&url_echo, url_without_query(url));
     diag.raise(.E0821);
     diag.while_("downloading the .fetch of build step \"{s}\"", .{step});
     diag.cause("the bytes downloaded are not those .sha256 pins", .{});

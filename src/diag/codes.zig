@@ -3701,18 +3701,19 @@ pub const registry = [_]Entry{
         .blame = .external,
         .summary = "a fetch could not be downloaded",
         .explanation =
-        \\A copy entry's .fetch is downloaded in the parent, before any step runs,
-        \\through the same HTTP client a pull uses (proxies from the environment,
-        \\SSL_CERT_FILE honoured). Only https:// is fetched; plain http:// only for a
-        \\loopback host. A redirect may not go from https to http, nor from a host
-        \\that is not loopback to one that is, and at most 4 redirects are followed.
-        \\A body over 1 GiB is refused.
+        \\A copy entry's .fetch is downloaded in the parent when its copy step misses
+        \\the cache, through the same HTTP client a pull uses (proxies from the
+        \\environment, SSL_CERT_FILE honoured). Only https:// is fetched; plain
+        \\http:// only for a loopback host. A redirect may not go from https to http,
+        \\nor from a host that is not loopback to one that is (127.1, 0x7f.0.0.1 and
+        \\the other spellings of 127/8 and 0.0.0.0 count as loopback), and at most 4
+        \\redirects are followed. A body over 1 GiB is refused.
         \\
         \\The message says why: the HTTP status, the network error, the size bound,
-        \\the redirects. If the bytes are in the store already (blobs/sha256 under
-        \\the pinned hash, from an earlier build or a pull), nothing is downloaded,
-        \\so a build on a host that can reach the URL fills the store for one that
-        \\cannot.
+        \\the redirects. A step that hits the cache downloads nothing, and neither
+        \\does one whose bytes are in the store already (blobs/sha256 under the
+        \\pinned hash, from an earlier build or a pull), so a build on a host that
+        \\can reach the URL fills the store for one that cannot.
         ,
     },
     .{
@@ -3772,19 +3773,20 @@ pub const registry = [_]Entry{
         .summary = "a Dockerfile instruction or flag is not supported",
         .explanation =
         \\zbx import translates what a build file can say the same way, and refuses
-        \\the rest rather than guess: ADD from a URL, a git repository or a local
-        \\archive, a RUN --mount of a secret, an ssh agent or a tmpfs, a bind from the
-        \\context or an image, --network=host, --security=insecure, --device, ONBUILD,
-        \\COPY heredocs and --parents, FROM --platform for another platform, FROM
-        \\scratch with steps, and the pattern forms of variable substitution (${X#p}
-        \\and the like).
+        \\the rest rather than guess: ADD from a URL without --checksum=sha256:<hex>
+        \\(with it, the URL written in full, it is a pinned fetch), a git repository
+        \\or a local archive, a RUN --mount of a secret, an ssh agent or a tmpfs, a
+        \\bind from the context or an image, --network=host, --security=insecure,
+        \\--device, ONBUILD, COPY heredocs and --parents, FROM --platform for another
+        \\platform, FROM scratch with steps, and the pattern forms of variable
+        \\substitution (${X#p} and the like).
         \\
         \\The cause names the instruction or flag and its line; the fix says what to
-        \\write instead, often a RUN that fetches with a checksum. Where zbx differs
-        \\from Docker: steps run rootless, with a fixed environment and timestamps;
-        \\there is no daemon cache, only the store's; a RUN with no detected fetch has
-        \\no network; and image references are pinned once in zbx.lock and never
-        \\re-resolved by a build.
+        \\write instead, often an ADD --checksum or a RUN that fetches with a
+        \\checksum. Where zbx differs from Docker: steps run rootless, with a fixed
+        \\environment and timestamps; there is no daemon cache, only the store's; a
+        \\RUN with no detected fetch has no network; and image references are pinned
+        \\once in zbx.lock and never re-resolved by a build.
         ,
     },
     .{
@@ -4672,6 +4674,13 @@ pub const registry = [_]Entry{
 
 /// The longest tag: a kind letter and four digits.
 const tag_bytes: u32 = 5;
+
+// E0820's explanation names the fetch bounds in words ("at most 4 redirects", "over 1 GiB"):
+// a change to either constant fails here until the text says the new value.
+comptime {
+    assert(constants.build_fetch_redirects_max == 4);
+    assert(constants.build_fetch_bytes_max == 1024 * 1024 * 1024);
+}
 
 comptime {
     const fields = std.meta.fieldNames(Code);

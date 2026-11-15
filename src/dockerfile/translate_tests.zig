@@ -93,6 +93,14 @@ pub const cases = [_]Case{
     .{ .dockerfile = "network_forms", .golden = "network_forms" },
     .{ .dockerfile = "bind_hermetic", .golden = "bind_hermetic", .hermetic = true },
     .{ .dockerfile = "copy_dot_spellings", .golden = "copy_dot_spellings" },
+    .{ .dockerfile = "add_checksum", .golden = "add_checksum" },
+    .{ .dockerfile = "add_checksum", .golden = "add_checksum", .hermetic = true },
+    .{ .dockerfile = "add_checksum_sha512", .golden = "add_checksum_sha512" },
+    .{ .dockerfile = "add_checksum_local", .golden = "add_checksum_local" },
+    .{ .dockerfile = "add_checksum_git", .golden = "add_checksum_git" },
+    .{ .dockerfile = "add_checksum_arg", .golden = "add_checksum_arg" },
+    .{ .dockerfile = "add_checksum_http", .golden = "add_checksum_http" },
+    .{ .dockerfile = "add_checksum_noname", .golden = "add_checksum_noname" },
 };
 
 pub fn options_of(case: *const Case, dockerfile: []const u8, table: *Table) translate.Options {
@@ -186,6 +194,7 @@ fn golden(comptime name: []const u8) []const u8 {
 
 /// Whether the golden is a translation: the refusal goldens are listed here.
 fn exists(comptime name: []const u8) bool {
+    @setEvalBranchQuota(4000);
     const refusals = [_][]const u8{
         "arg_from_no_default",
         "add_url",
@@ -200,6 +209,11 @@ fn exists(comptime name: []const u8) bool {
         "from_mount_stage_arg",
         "copy_several",
         "bind_no_steps",
+        "add_checksum_sha512",
+        "add_checksum_local",
+        "add_checksum_git",
+        "add_checksum_http",
+        "add_checksum_noname",
     };
     for (refusals) |refused| {
         if (std.mem.eql(u8, refused, name)) return false;
@@ -310,4 +324,26 @@ test "the report notes each copy part that zbx build refuses for now" {
         try testing.expectEqualStrings(want.what, got.what_text());
         try testing.expect(std.mem.indexOf(u8, got.became_text(), "E0802") != null);
     }
+}
+
+test "ADD --checksum drops --exclude with a note, and still fetches" {
+    // Goal: a flag that has no meaning on a fetch is said so in the report (W0811), not lost.
+    // Method: one ADD --checksum with --exclude, then the same without; only the first notes.
+    const ws = try workspace();
+    defer testing.allocator.destroy(ws);
+    var table: Table = .{};
+    const case: Case = .{ .dockerfile = "generated", .golden = "generated" };
+    const sum = "5607b439e7580027cf8f2a5b34606ba5cc1079988db4cf213e0beeaf03269a62";
+    const flag = "FROM alpine:3.20\nADD --exclude=*.md --checksum=sha256:" ++ sum;
+    const options = options_of(&case, flag ++ " https://e.org/t.gz /t\n", &table);
+    const output = try translate.translate(ws, &options);
+    try testing.expect(std.mem.indexOf(u8, output, ".fetch = .{") != null);
+    const dropped = ws.report.dropped_slice();
+    try testing.expectEqual(1, dropped.len);
+    try testing.expectEqual(2, dropped[0].line);
+    try testing.expectEqualStrings("ADD --exclude of a fetch", dropped[0].what_text());
+    const plain = options_of(&case, "FROM alpine:3.20\nADD --checksum=sha256:" ++ sum ++
+        " https://e.org/t.gz /t\n", &table);
+    _ = try translate.translate(ws, &plain);
+    try testing.expectEqual(0, ws.report.dropped_slice().len);
 }
