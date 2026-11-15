@@ -628,3 +628,26 @@ test "a list of attributes too long to read leaves them all out with a warning, 
         try testing.expectEqual(codes.Code.E0414, diag.code.?);
     }
 }
+
+test "an import without a parent leaves out each excluded path, with everything below it" {
+    // Goal: a `/out` output's `.output_exclude` (M9 slice 3c) never changes the digest. Method:
+    // the sample tree, then the same tree with an excluded file and an excluded directory added
+    // and imported with the excludes, then with a file outside them added.
+    start(1, 0);
+    var warnings: Warnings = .{};
+    const plain = try run_import("/src", &warnings);
+    files.put_dir("/src/tmp", 0o755);
+    files.put_file("/src/tmp/when", 0o644, "Thu");
+    files.put_file("/src/run.log", 0o644, "noise");
+    var options = warnings.options(false);
+    options.exclude = &.{ "/tmp", "/run.log", "/absent" };
+    var result: import.Result = undefined;
+    diag.reset();
+    try import.import(&store, &workspace, "/src", options, &result, &diag);
+    try testing.expect(result.digest.eql(plain.digest));
+    try testing.expectEqual(plain.files, result.files);
+    files.put_file("/src/kept", 0o644, "content");
+    try import.import(&store, &workspace, "/src", options, &result, &diag);
+    try testing.expect(!result.digest.eql(plain.digest));
+    try support.check_whole(&files, root_path, store.chunk_bytes);
+}

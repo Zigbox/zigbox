@@ -502,6 +502,9 @@ pub const VTable = struct {
     /// Makes a TCP listener on `127.0.0.1:port` in the caller's network namespace: `socket`
     /// (close-on-exec), `bind`, `listen`. A failure carries the failing call's errno.
     listen_loopback: *const fn (context: *anyopaque, port: u16) Error!Handle,
+    /// Makes a new, unconnected IPv4 TCP socket in the caller's network namespace: `socket`
+    /// (close-on-exec) and nothing else. A failure carries the errno.
+    tcp4_socket: *const fn (context: *anyopaque) Error!Handle,
     /// Sends `handle` over the channel end `channel` (`SCM_RIGHTS`, one byte of data).
     send_handle: *const fn (context: *anyopaque, channel: Handle, handle: Handle) Error!void,
     /// Whether `handle` is an open descriptor of this process that is a Unix stream socket
@@ -1075,6 +1078,15 @@ pub const Host = struct {
     pub fn listen_loopback(host: Host, port: u16) Error!Handle {
         assert(port > 0);
         const result = try host.vtable.listen_loopback(host.context, port);
+        assert(host.vtable.last_errno(host.context) == 0);
+        return result;
+    }
+
+    /// Makes an unconnected IPv4 TCP socket in this process's network namespace.
+    pub fn tcp4_socket(host: Host) Error!Handle {
+        assert(@intFromPtr(host.vtable) != 0);
+        const result = try host.vtable.tcp4_socket(host.context);
+        assert(result < std.math.maxInt(i32));
         assert(host.vtable.last_errno(host.context) == 0);
         return result;
     }

@@ -10,7 +10,9 @@
 //!
 //! A number is never looked up for itself (it need not be in the file); a name that is not found
 //! is `E0521`, naming the file. Supplementary groups are not set: a process of the container
-//! has its one group.
+//! has its one group. A passwd past `passwd_bytes_max`, or a group past `file_bytes_max`, is
+//! not read; `Workspace.too_large` names it, so a refusal says why the name was not found. A
+//! copy's `.chown` reads "1000" as BuildKit does, 1000:1000 (`build/copy_owner.uid_alone`).
 
 const std = @import("std");
 const assert = std.debug.assert;
@@ -31,9 +33,23 @@ pub const Error = error{Failed};
 pub const Workspace = struct {
     tree: [constants.store_tree_bytes_max]u8,
     file: [file_bytes_max]u8,
+    /// After `resolve_from`: `passwd` or `group` when that file was longer than zbx reads
+    /// (`bytes_max_of`) and so was taken as absent, or null. A caller whose name was not found
+    /// says this instead of "not in the file".
+    too_large: ?[]const u8,
 };
 
 pub const file_bytes_max: u32 = 256 * 1024;
+/// Passwd is read into half the buffer, as group is read while it is held.
+pub const passwd_bytes_max: u32 = file_bytes_max / 2;
+
+/// The most bytes of `file` (`passwd` or `group`) that are read.
+pub fn bytes_max_of(file: []const u8) u32 {
+    assert(file.len > 0);
+    if (std.mem.eql(u8, file, passwd)) return passwd_bytes_max;
+    assert(std.mem.eql(u8, file, group));
+    return file_bytes_max;
+}
 
 pub const passwd = "/etc/passwd";
 pub const group = "/etc/group";
@@ -214,21 +230,26 @@ fn child_of(
 }
 
 /// The text of a file of the tree at `/directory/name`, or null if it is not a plain file there
-/// (a symlink is not followed) or is longer than the buffer.
+/// (a symlink is not followed) or is longer than the buffer (`too_large` set).
 fn file_of(
     store: *const Store,
     workspace: *Workspace,
     root: Digest,
     directory: []const u8,
     name: []const u8,
+    too_large: *bool,
 ) ?[]const u8 {
     assert(directory.len > 0);
     assert(name.len > 0);
+    too_large.* = false;
     const subtree = child_of(store, &workspace.tree, root, directory, true) orelse return null;
     const object = child_of(store, &workspace.tree, subtree, name, false) orelse return null;
     var path: @import("store/fs.zig").PathBuf = undefined;
     const where = store.id_path(&path, "objects", object, "");
-    return store.fs.read_whole(where, &workspace.file) catch null;
+    return store.fs.read_whole(where, &workspace.file) catch |err| {
+        too_large.* = err == error.FileTooLarge;
+        return null;
+    };
 }
 
 /// The ids the image's `User` names; `E0521` if a name is not in the image.
@@ -252,20 +273,26 @@ pub fn resolve_from(
     diag: *Diag,
 ) Error!Resolved {
     assert(diag.code == null);
+    workspace.too_large = null;
     if (user_text.len == 0) return Resolved.with_home(.{ .uid = 0, .gid = 0 }, "/root");
     // Both files are needed at once, so the first is copied aside: the second read reuses the
     // buffer. Passwd is cut to the half of the buffer, group to the other.
-    const half = file_bytes_max / 2;
-    const first = file_of(store, workspace, root, "etc", "passwd");
-    var kept: [half]u8 = undefined;
+    var too_large = false;
+    const first = file_of(store, workspace, root, "etc", "passwd", &too_large);
+    var kept: [passwd_bytes_max]u8 = undefined;
     var passwd_file: ?[]const u8 = null;
     if (first) |text| {
-        if (text.len <= half) {
+        if (text.len <= passwd_bytes_max) {
             @memcpy(kept[0..text.len], text);
             passwd_file = kept[0..text.len];
-        }
+        } else too_large = true;
     }
-    const second = file_of(store, workspace, root, "etc", "group");
+    if (too_large) workspace.too_large = passwd;
+    const second = file_of(store, workspace, root, "etc", "group", &too_large);
+    if (too_large) {
+        if (workspace.too_large == null) workspace.too_large = group;
+    }
+    if (passwd_file) |text| assert(text.len <= passwd_bytes_max);
     return resolve_text_from(user_text, passwd_file, second, flag_image, diag);
 }
 

@@ -293,7 +293,10 @@ const roots = [_][]const u8{
     "src/testing/vm/main_m7.zig",
     "src/testing/vm/main_m8.zig",
     "src/testing/vm/main_m8b.zig",
+    "src/testing/vm/main_m9.zig",
     "src/testing/vm/main_m10.zig",
+    "src/testing/vm/main_s2_probe.zig",
+    "src/testing/vm/main_c4.zig",
     "src/testing/vm/main_z7.zig",
     "src/testing/vm/main_m8_packages.zig",
     "src/testing/vm/main_top20.zig",
@@ -327,7 +330,10 @@ const linux_only = [_][]const u8{
     "src/testing/vm/main_m7.zig",
     "src/testing/vm/main_m8.zig",
     "src/testing/vm/main_m8b.zig",
+    "src/testing/vm/main_m9.zig",
     "src/testing/vm/main_m10.zig",
+    "src/testing/vm/main_s2_probe.zig",
+    "src/testing/vm/main_c4.zig",
     "src/testing/vm/main_z7.zig",
     "src/testing/vm/main_m8_packages.zig",
     "src/testing/vm/main_top20.zig",
@@ -378,6 +384,7 @@ fn add_test_step(
         module.addAnonymousImport("seccomp_policy", .{
             .root_source_file = b.path("src/runtime/policy/seccomp.zon"),
         });
+        add_m9_cases(b, module);
         if (std.mem.eql(u8, root, macos_root)) link_macos(module, add_vm_image(b, options));
         // The demos are built on the VM module; the module's own root needs no import of itself.
         const needs_vm = std.mem.startsWith(u8, root, "src/testing/vm/main") or
@@ -424,7 +431,13 @@ fn add_tidy_step(b: *std.Build) void {
     const run = b.addRunArtifact(tidy);
     run.setCwd(b.path("."));
     // Formatting is checked alongside the mechanical rules: both must pass before review.
-    const format = b.addFmt(.{ .paths = &.{ b.path("src"), b.path("build.zig") }, .check = true });
+    // The golden import is the bytes `zbx import` writes, which put a one-element tuple in
+    // spaces where `zig fmt` would not (`.{ "go.mod" }`): a golden is not reformatted.
+    const format = b.addFmt(.{
+        .paths = &.{ b.path("src"), b.path("build.zig") },
+        .exclude_paths = &.{b.path("src/testing/vm/m9_expected.build.zon")},
+        .check = true,
+    });
     const step = b.step("tidy", "Check formatting, line and function length, banned patterns");
     step.dependOn(&format.step);
     step.dependOn(&run.step);
@@ -560,9 +573,24 @@ const demos = [_]struct { step: []const u8, root: []const u8, help: []const u8 }
         .help = "Run the M8b demo: --listen hands a loopback listener from the container out",
     },
     .{
+        .step = "demo-m9",
+        .root = "src/testing/vm/main_m9.zig",
+        .help = "Run the M9 demo: zbx import of a Dockerfile, build, the fixtures, two VMs",
+    },
+    .{
         .step = "demo-m10",
         .root = "src/testing/vm/main_m10.zig",
         .help = "Run the M10 demo: --device and --gpu with a fake vendor, doctor, refusals",
+    },
+    .{
+        .step = "demo-s2-probe",
+        .root = "src/testing/vm/main_s2_probe.zig",
+        .help = "Run the S2 probe: a no-libc FUSE server under a userxattr overlay, as a user",
+    },
+    .{
+        .step = "demo-c4",
+        .root = "src/testing/vm/main_c4.zig",
+        .help = "Run the C4 demo: container_socket, exec's network, an adopted socket (0.5.2)",
     },
     .{
         .step = "demo-z7",
@@ -660,6 +688,68 @@ fn add_harness_imports(b: *std.Build, step: []const u8, module: *std.Build.Modul
         });
     }
     if (std.mem.eql(u8, step, "demo-m10")) add_gpu_fixtures(b, module);
+    if (std.mem.eql(u8, step, "demo-m9")) add_m9_cases(b, module);
+    if (std.mem.eql(u8, step, "demo-s2-probe")) add_s2_probe_fixture(b, module);
+    if (std.mem.eql(u8, step, "demo-c4")) add_c4_supervisor(b, module);
+}
+
+/// demo-s2-probe's throwaway FUSE server (S2 slice 1), static x86_64 with no libc, embedded in
+/// the harness, which serves it to the guest. It is x86_64 because the test VM's guest is; if an
+/// arm64 guest is added, this target must follow the guest's architecture.
+fn add_s2_probe_fixture(b: *std.Build, harness_module: *std.Build.Module) void {
+    const target = b.resolveTargetQuery(.{ .cpu_arch = .x86_64, .os_tag = .linux });
+    const probe = b.addExecutable(.{
+        .name = "fuse_probe",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/testing/vm/s2_probe/fuse_probe.zig"),
+            .target = target,
+            .optimize = .ReleaseSafe,
+            .strip = true,
+            .link_libc = false,
+        }),
+    });
+    harness_module.addAnonymousImport("fuse_probe", .{
+        .root_source_file = probe.getEmittedBin(),
+    });
+}
+
+/// demo-c4's stand-in for Zigcube's per-replica supervisor: a multi-threaded program that links
+/// the `zigbox` module, built for the guest (x86_64, static, no libc) and served to it.
+fn add_c4_supervisor(b: *std.Build, harness_module: *std.Build.Module) void {
+    const target = b.resolveTargetQuery(.{ .cpu_arch = .x86_64, .os_tag = .linux });
+    const options = b.addOptions();
+    options.addOption([]const u8, "version", "0.0.0-demo");
+    const library = b.createModule(.{
+        .root_source_file = b.path("src/zigbox.zig"),
+        .target = target,
+        .optimize = .ReleaseSafe,
+        .link_libc = false,
+        .imports = &.{.{ .name = "build_options", .module = options.createModule() }},
+    });
+    const supervisor = b.addExecutable(.{
+        .name = "c4-supervisor",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/testing/vm/c4_fixture/supervisor.zig"),
+            .target = target,
+            .optimize = .ReleaseSafe,
+            .link_libc = false,
+            // Stripped: unstripped it is over the harness's 8 MiB body limit for a served file.
+            .strip = true,
+            .imports = &.{.{ .name = "zigbox", .module = library }},
+        }),
+    });
+    harness_module.addAnonymousImport("c4_supervisor", .{
+        .root_source_file = supervisor.getEmittedBin(),
+    });
+}
+
+/// demo-m9's fixtures (the Dockerfiles and their goldens): a harness can embed only files under
+/// `src/testing/vm/`, so the fixtures' own index is handed to it as an import. Data, like the
+/// seccomp policy: the test roots get it too, at no cost to those that do not read it.
+fn add_m9_cases(b: *std.Build, module: *std.Build.Module) void {
+    module.addAnonymousImport("m9_vm_cases", .{
+        .root_source_file = b.path("src/build/dockerfile_fixtures/vm_cases.zig"),
+    });
 }
 
 /// demo-m10's fake driver library (soname `libzbxgpu.so.1`) and the program that needs it, built

@@ -44,8 +44,8 @@ pub fn lock_unreadable(diag: *Diag, path: []const u8, problem: ?lock_file.Proble
             .incomplete_entry => "begins an entry that lacks a field (or repeats one)",
             .no_version => "the file has no .version",
             .newer => "has a newer version than this zbx reads",
-            .duplicate => "repeats an image that an earlier entry has",
-            .too_big => "is past the entries a lock holds",
+            .duplicate => "repeats the .version, or an image or pin an earlier entry has",
+            .too_big => "is past the entries or pins a lock holds",
         };
         if (found.line > 0) {
             diag.cause("'{s}' line {d} {s}", .{ path, found.line, what });

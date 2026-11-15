@@ -1,0 +1,19 @@
+// Imported by `zbx import` from Dockerfile: target stage0, --network detect.
+// Edit this file from here on: `zbx build` reads it, not the Dockerfile.
+.{
+    .version = 1,
+    .exclude = .{ "**/*.log", "node_modules", "!node_modules/keep", ".git" },
+    .steps = .{
+        // Dockerfile:3  COPY . /app
+        .{
+            .name = "stage0-1",
+            .base = "alpine:3.20",
+            .copy = .{
+                .{ .src = .{ "." }, .to = "/app" },
+            },
+        },
+    },
+    .image = .{
+        .base = "step:stage0-1",
+    },
+}

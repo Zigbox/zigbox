@@ -109,7 +109,17 @@ jobs:
           ref: ${{ github.event.workflow_run.head_sha || github.sha }}
           fetch-depth: 0
           persist-credentials: false
-      - uses: ./.github/actions/setup-gh
+      # Local actions load from the workflow's own commit, not the release commit, so a fix to
+      # release tooling reaches a release commit made before it (docs/releases/automation.md).
+      - name: Check out the release tools at the workflow's commit
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.workflow_sha }}
+          path: .release-tools
+          persist-credentials: false
+          sparse-checkout: /.github/actions/
+          sparse-checkout-cone-mode: false
+      - uses: ./.release-tools/.github/actions/setup-gh
       - name: Plan
         id: plan
         run: |
@@ -197,7 +207,17 @@ jobs:
         with:
           ref: ${{ needs.plan.outputs.sha }}
           persist-credentials: false
-      - uses: ./.github/actions/setup-zig-macos
+      # Local actions load from the workflow's own commit, not the release commit, so a fix to
+      # release tooling reaches a release commit made before it (docs/releases/automation.md).
+      - name: Check out the release tools at the workflow's commit
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.workflow_sha }}
+          path: .release-tools
+          persist-credentials: false
+          sparse-checkout: /.github/actions/
+          sparse-checkout-cone-mode: false
+      - uses: ./.release-tools/.github/actions/setup-zig-macos
       - name: The VM kernel
         run: test -f .zig-cache/zbx-vm/kernel/Image || zig build vm-kernel-fetch
       - name: Every gate
@@ -220,7 +240,17 @@ jobs:
         with:
           ref: ${{ needs.plan.outputs.sha }}
           persist-credentials: false
-      - uses: ./.github/actions/setup-gh
+      # Local actions load from the workflow's own commit, not the release commit, so a fix to
+      # release tooling reaches a release commit made before it (docs/releases/automation.md).
+      - name: Check out the release tools at the workflow's commit
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.workflow_sha }}
+          path: .release-tools
+          persist-credentials: false
+          sparse-checkout: /.github/actions/
+          sparse-checkout-cone-mode: false
+      - uses: ./.release-tools/.github/actions/setup-gh
       # The App is installed on the tap and the site only, never on this repository.
       - name: Mint the App token
         id: app
@@ -263,8 +293,18 @@ jobs:
         with:
           ref: ${{ needs.plan.outputs.sha }}
           persist-credentials: false
-      - uses: ./.github/actions/setup-gh
-      - uses: ./.github/actions/find-draft
+      # Local actions load from the workflow's own commit, not the release commit, so a fix to
+      # release tooling reaches a release commit made before it (docs/releases/automation.md).
+      - name: Check out the release tools at the workflow's commit
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.workflow_sha }}
+          path: .release-tools
+          persist-credentials: false
+          sparse-checkout: /.github/actions/
+          sparse-checkout-cone-mode: false
+      - uses: ./.release-tools/.github/actions/setup-gh
+      - uses: ./.release-tools/.github/actions/find-draft
         id: found
         with:
           tag: ${{ needs.plan.outputs.tag }}
@@ -276,7 +316,11 @@ jobs:
           set -euo pipefail
           notes="docs/releases/$VERSION.md"
           if [ -n "$ID" ]; then
+            # tag_name and target_commitish are passed again: a PATCH of a draft without them
+            # turns its tag into an "untagged-..." placeholder, and every later find-draft,
+            # upload and download by tag then misses it (0.5.1, run 43621485097).
             gh api -X PATCH "repos/$GITHUB_REPOSITORY/releases/$ID" -f name="zigbox $VERSION" \
+              -f tag_name="$TAG" -f target_commitish="$SHA" \
               -F body=@"$notes" -F prerelease="$PRERELEASE" > /dev/null
             echo "draft: refreshed the notes of release $ID"
             exit 0
@@ -306,17 +350,27 @@ jobs:
           ref: ${{ needs.plan.outputs.sha }}
           # Nothing here pushes; the token must not sit in .git/config for the build to read.
           persist-credentials: false
+      # Local actions load from the workflow's own commit, not the release commit, so a fix to
+      # release tooling reaches a release commit made before it (docs/releases/automation.md).
+      - name: Check out the release tools at the workflow's commit
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.workflow_sha }}
+          path: .release-tools
+          persist-credentials: false
+          sparse-checkout: /.github/actions/
+          sparse-checkout-cone-mode: false
       # No toolchain cache here: the toolchain runs while the subkey is unlocked, so it is
       # downloaded and checked against its SHA-256 on every run.
-      - uses: ./.github/actions/setup-zig
+      - uses: ./.release-tools/.github/actions/setup-zig
         with:
           cache: 'false'
-      - uses: ./.github/actions/setup-gh
+      - uses: ./.release-tools/.github/actions/setup-gh
       - name: Install rpm
         run: |
           sudo apt-get update -q
           sudo apt-get install -y -q rpm
-      - uses: ./.github/actions/find-draft
+      - uses: ./.release-tools/.github/actions/find-draft
         with:
           tag: ${{ needs.plan.outputs.tag }}
           sha: ${{ needs.plan.outputs.sha }}
@@ -392,9 +446,19 @@ jobs:
         with:
           ref: ${{ needs.plan.outputs.sha }}
           persist-credentials: false
+      # Local actions load from the workflow's own commit, not the release commit, so a fix to
+      # release tooling reaches a release commit made before it (docs/releases/automation.md).
+      - name: Check out the release tools at the workflow's commit
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.workflow_sha }}
+          path: .release-tools
+          persist-credentials: false
+          sparse-checkout: /.github/actions/
+          sparse-checkout-cone-mode: false
       # No toolchain cache: the toolchain runs while the key is unlocked (as on Linux).
-      - uses: ./.github/actions/setup-zig-macos
-      - uses: ./.github/actions/setup-gh
+      - uses: ./.release-tools/.github/actions/setup-zig-macos
+      - uses: ./.release-tools/.github/actions/setup-gh
       # Before the keychain exists: this step downloads, and the build needs the file.
       - name: The VM kernel
         run: test -f .zig-cache/zbx-vm/kernel/Image || zig build vm-kernel-fetch
@@ -418,7 +482,7 @@ jobs:
           DeveloperIDG2CA.cer f16cd3c54c7f83cea4bf1a3e6a0819c8aaa8e4a1528fd144715f350643d2df3a
           DeveloperIDCA.cer 7afc9d01a62f03a2de9637936d4afe68090d2de18d03f29c88cfb0b1ba63587f
           PINS
-      - uses: ./.github/actions/find-draft
+      - uses: ./.release-tools/.github/actions/find-draft
         env:
           GH_TOKEN: ${{ github.token }}
         with:
@@ -510,7 +574,7 @@ jobs:
         run: |
           cd zig-out/mac-release
           /usr/bin/shasum -a 256 -c "zbx-$VERSION-macos-universal.zip.sha256"
-      - uses: ./.github/actions/mac-check-zip
+      - uses: ./.release-tools/.github/actions/mac-check-zip
         with:
           zip: zig-out/mac-release/zbx-${{ needs.plan.outputs.version }}-macos-universal.zip
           version: ${{ needs.plan.outputs.version }}
@@ -570,8 +634,18 @@ jobs:
         with:
           ref: ${{ needs.plan.outputs.sha }}
           persist-credentials: false
-      - uses: ./.github/actions/setup-gh
-      - uses: ./.github/actions/find-draft
+      # Local actions load from the workflow's own commit, not the release commit, so a fix to
+      # release tooling reaches a release commit made before it (docs/releases/automation.md).
+      - name: Check out the release tools at the workflow's commit
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.workflow_sha }}
+          path: .release-tools
+          persist-credentials: false
+          sparse-checkout: /.github/actions/
+          sparse-checkout-cone-mode: false
+      - uses: ./.release-tools/.github/actions/setup-gh
+      - uses: ./.release-tools/.github/actions/find-draft
         with:
           tag: ${{ needs.plan.outputs.tag }}
           sha: ${{ needs.plan.outputs.sha }}
@@ -600,7 +674,7 @@ jobs:
           permission-actions: read
       # The diff against the tap is checked now, while a refusal still leaves only a draft.
       - name: The tap's formula differs only where it may
-        uses: ./.github/actions/tap-formula
+        uses: ./.release-tools/.github/actions/tap-formula
         env:
           GH_TOKEN: ${{ steps.app.outputs.token }}
         with:
@@ -626,8 +700,18 @@ jobs:
         with:
           ref: ${{ needs.plan.outputs.sha }}
           persist-credentials: false
-      - uses: ./.github/actions/setup-gh
-      - uses: ./.github/actions/find-draft
+      # Local actions load from the workflow's own commit, not the release commit, so a fix to
+      # release tooling reaches a release commit made before it (docs/releases/automation.md).
+      - name: Check out the release tools at the workflow's commit
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.workflow_sha }}
+          path: .release-tools
+          persist-credentials: false
+          sparse-checkout: /.github/actions/
+          sparse-checkout-cone-mode: false
+      - uses: ./.release-tools/.github/actions/setup-gh
+      - uses: ./.release-tools/.github/actions/find-draft
         id: found
         with:
           tag: ${{ needs.plan.outputs.tag }}
@@ -687,7 +771,17 @@ jobs:
         with:
           ref: ${{ needs.plan.outputs.sha }}
           persist-credentials: false
-      - uses: ./.github/actions/setup-gh
+      # Local actions load from the workflow's own commit, not the release commit, so a fix to
+      # release tooling reaches a release commit made before it (docs/releases/automation.md).
+      - name: Check out the release tools at the workflow's commit
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.workflow_sha }}
+          path: .release-tools
+          persist-credentials: false
+          sparse-checkout: /.github/actions/
+          sparse-checkout-cone-mode: false
+      - uses: ./.release-tools/.github/actions/setup-gh
       - name: Download the published formula and zip, and check the hash
         env:
           GH_TOKEN: ${{ github.token }}
@@ -711,7 +805,7 @@ jobs:
           permission-contents: write
       - name: The tap's formula differs only where it may
         id: diff
-        uses: ./.github/actions/tap-formula
+        uses: ./.release-tools/.github/actions/tap-formula
         env:
           GH_TOKEN: ${{ steps.app.outputs.token }}
         with:
@@ -745,7 +839,17 @@ jobs:
         with:
           ref: ${{ needs.plan.outputs.sha }}
           persist-credentials: false
-      - uses: ./.github/actions/setup-gh
+      # Local actions load from the workflow's own commit, not the release commit, so a fix to
+      # release tooling reaches a release commit made before it (docs/releases/automation.md).
+      - name: Check out the release tools at the workflow's commit
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.workflow_sha }}
+          path: .release-tools
+          persist-credentials: false
+          sparse-checkout: /.github/actions/
+          sparse-checkout-cone-mode: false
+      - uses: ./.release-tools/.github/actions/setup-gh
       - name: Mint the App token
         id: app
         uses: actions/create-github-app-token@64ab729a6294000f5aa4a4bc0b73d1f32bc45510 # v3.3.0
@@ -806,6 +910,16 @@ jobs:
         with:
           ref: ${{ needs.plan.outputs.sha }}
           persist-credentials: false
+      # Local actions load from the workflow's own commit, not the release commit, so a fix to
+      # release tooling reaches a release commit made before it (docs/releases/automation.md).
+      - name: Check out the release tools at the workflow's commit
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.workflow_sha }}
+          path: .release-tools
+          persist-credentials: false
+          sparse-checkout: /.github/actions/
+          sparse-checkout-cone-mode: false
       - name: Download the published zip
         shell: /bin/bash --noprofile --norc -euo pipefail {0}
         run: |
@@ -815,7 +929,7 @@ jobs:
           zip="zbx-$VERSION-macos-universal.zip"
           /usr/bin/curl -fsSL --retry 3 -O "$base/$zip" -O "$base/$zip.sha256"
           /usr/bin/shasum -a 256 -c "$zip.sha256"
-      - uses: ./.github/actions/mac-check-zip
+      - uses: ./.release-tools/.github/actions/mac-check-zip
         with:
           zip: ${{ runner.temp }}/public/zbx-${{ needs.plan.outputs.version }}-macos-universal.zip
           version: ${{ needs.plan.outputs.version }}
@@ -847,8 +961,18 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      - uses: ./.github/actions/setup-zig
-      - uses: ./.github/actions/zig-cache
+      # Local actions load from the workflow's own commit, not the release commit, so a fix to
+      # release tooling reaches a release commit made before it (docs/releases/automation.md).
+      - name: Check out the release tools at the workflow's commit
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.workflow_sha }}
+          path: .release-tools
+          persist-credentials: false
+          sparse-checkout: /.github/actions/
+          sparse-checkout-cone-mode: false
+      - uses: ./.release-tools/.github/actions/setup-zig
+      - uses: ./.release-tools/.github/actions/zig-cache
         with:
           name: release-test
       - name: Install rpm and ShellCheck
@@ -857,6 +981,14 @@ jobs:
           sudo apt-get install -y -q rpm shellcheck
       - name: ShellCheck
         run: shellcheck .github/release-sign.sh .github/release-sign-test.sh .github/release-prepare-check.sh .github/release-prepare-test.sh .github/package-refresh.sh .github/package-refresh-test.sh
+      - name: Every local action loads from the workflow's commit
+        run: |
+          # A release commit predates later tooling fixes, so `./.github/actions/...` (resolved in
+          # the release commit's checkout) would run the old action (docs/releases/automation.md).
+          if grep -nE "uses: *['\"]?\./\.github/actions/" .github/workflows/release.yml; then
+            echo "release: load local actions from ./.release-tools/.github/actions/, not ./.github/actions/" >&2
+            exit 1
+          fi
       - name: Sign with a throwaway key
         run: .github/release-sign-test.sh "$RUNNER_TEMP/out"
       - name: The draft check passes the honest draft and refuses tampered ones
@@ -906,7 +1038,17 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      - uses: ./.github/actions/setup-zig-macos
+      # Local actions load from the workflow's own commit, not the release commit, so a fix to
+      # release tooling reaches a release commit made before it (docs/releases/automation.md).
+      - name: Check out the release tools at the workflow's commit
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.workflow_sha }}
+          path: .release-tools
+          persist-credentials: false
+          sparse-checkout: /.github/actions/
+          sparse-checkout-cone-mode: false
+      - uses: ./.release-tools/.github/actions/setup-zig-macos
       - name: The VM kernel
         run: test -f .zig-cache/zbx-vm/kernel/Image || zig build vm-kernel-fetch
       # Apple's public Developer ID intermediates, pinned by SHA-256: imported here as in `mac`
@@ -995,7 +1137,7 @@ jobs:
           /usr/bin/shasum -a 256 -c zbx-*-macos-universal.zip.sha256
           version=$(sed -n 's/^ *\.version = "\([^"]*\)",.*/\1/p' ../../build.zig.zon | head -n 1)
           echo "version=$version" >> "$GITHUB_OUTPUT"
-      - uses: ./.github/actions/mac-check-zip
+      - uses: ./.release-tools/.github/actions/mac-check-zip
         with:
           zip: zig-out/mac-release/zbx-${{ steps.zip.outputs.version }}-macos-universal.zip
           version: ${{ steps.zip.outputs.version }}
@@ -1030,7 +1172,17 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      - uses: ./.github/actions/setup-gh
+      # Local actions load from the workflow's own commit, not the release commit, so a fix to
+      # release tooling reaches a release commit made before it (docs/releases/automation.md).
+      - name: Check out the release tools at the workflow's commit
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.workflow_sha }}
+          path: .release-tools
+          persist-credentials: false
+          sparse-checkout: /.github/actions/
+          sparse-checkout-cone-mode: false
+      - uses: ./.release-tools/.github/actions/setup-gh
       - name: Draft, upload, download, edit
         run: |
           set -euo pipefail
@@ -1047,7 +1199,7 @@ jobs:
           "$GH" release download "$TAG" --repo "$GITHUB_REPOSITORY" --dir "$RUNNER_TEMP/dl"
           cmp "$RUNNER_TEMP/f.txt" "$RUNNER_TEMP/dl/f.txt"
           "$GH" release view "$TAG" --repo "$GITHUB_REPOSITORY" --json isDraft --jq .isDraft | grep -qx true
-      - uses: ./.github/actions/find-draft
+      - uses: ./.release-tools/.github/actions/find-draft
         id: found
         with:
           tag: ${{ env.TAG }}
@@ -1059,8 +1211,14 @@ jobs:
         run: |
           set -euo pipefail
           echo "second notes" > "$RUNNER_TEMP/notes.md"
+          # The same refresh as the draft job's: the draft must still be found by its tag after
+          # it, for the signing jobs' find-draft and upload (0.5.1, run 43621485097).
           gh api -X PATCH "repos/$GITHUB_REPOSITORY/releases/$ID" -f name="draft check" \
+            -f tag_name="$TAG" -f target_commitish="$GITHUB_SHA" \
             -F body=@"$RUNNER_TEMP/notes.md" -F prerelease=true > /dev/null
+          tag=$(gh api "repos/$GITHUB_REPOSITORY/releases/$ID" --jq .tag_name)
+          [ "$tag" = "$TAG" ] || { echo "draft-test: a refresh left the tag $tag" >&2; exit 1; }
+          "$GH" release upload "$TAG" "$RUNNER_TEMP/f.txt" --clobber --repo "$GITHUB_REPOSITORY"
           gh api -X PATCH "repos/$GITHUB_REPOSITORY/releases/$ID" -F draft=false \
             -f tag_name="$TAG" -f target_commitish="$GITHUB_SHA" \
             -F prerelease=true -f make_latest=false > /dev/null

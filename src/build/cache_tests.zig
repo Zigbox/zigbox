@@ -468,6 +468,41 @@ test "gc keeps a tree only a cache entry names, and collects it when the entry i
     try testing.expectEqual(unrooted, try plan_total());
 }
 
+test "gc keeps a fetched blob while a cache entry's key names it, and takes it after" {
+    // Goal: a fetch's blob is kept as a cache entry's tree is (slice 3b), so a later miss of
+    // that step copies it again with no network. Method: a blob in `blobs/sha256/` that no
+    // image names; record an entry whose key has a fetch of that hash, and the plan is the
+    // same as with no blob; remove the entry and the plan takes the blob (and the tree).
+    start();
+    const output = source_tree("one");
+    const empty = try plan_total();
+    const hash: [32]u8 = @splat(0x5e);
+    const hex = comptime std.fmt.bytesToHex(hash, .lower);
+    files.put_dir(root_path ++ "/blobs", 0o755);
+    files.put_dir(root_path ++ "/blobs/sha256", 0o755);
+    files.put_file(root_path ++ "/blobs/sha256/" ++ hex, 0o644, "fetched");
+    try testing.expectEqual(empty + 1, try plan_total());
+    var fetch_key: key_mod.Key = undefined;
+    const spec: key_mod.Spec = .{
+        .platform = "linux/amd64",
+        .base_tree = filled(1),
+        .base_env = &.{},
+        .input_tree = filled(0),
+        .needs = &.{},
+        .argv = &.{},
+        .env = &.{},
+        .network = false,
+        .name = "fetch",
+        .copies = &.{.{ .source = filled(0), .to = "/opt/f", .fetch = hash }},
+    };
+    try key_mod.compute(&spec, &fetch_key);
+    _ = do_record(&fetch_key, output);
+    try testing.expectEqual(empty, try plan_total());
+    var buffer: [constants.sim_fs_path_bytes_max]u8 = undefined;
+    files.remove_path(entry_path(&fetch_key, &buffer));
+    try testing.expectEqual(empty + 1, try plan_total());
+}
+
 test "gc: entries that parse not, or name a tree that is gone, root nothing and do not stop it" {
     // Goal: a bad entry is a miss for a lookup and nothing for gc. Method: with a dropped root,
     // add a stray name, garbage under a key's name, an entry for a tree that is not in the

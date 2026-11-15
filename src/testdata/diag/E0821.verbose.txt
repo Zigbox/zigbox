@@ -1,0 +1,13 @@
+error[ZBX-E0821]: the fetched bytes do not match their pinned hash
+  while  downloading the .fetch of build step "fetch"
+  cause  the bytes downloaded are not those .sha256 pins
+  cause  https://example.org/tool-1.2.tar.gz sent
+         sha256:2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824
+  step   fetch
+  url    https://example.org/tool-1.2.tar.gz
+  expect sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855
+  actual sha256:2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824
+  fix    if .sha256 (or ADD --checksum) was copied wrongly, correct it; it pins sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855
+         otherwise find out why the file changed before trusting it
+  more   zbx explain E0821
+  docs   https://zigbox.github.io/zigbox/errors/E0821.html

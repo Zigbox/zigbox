@@ -98,8 +98,11 @@ pub const log_group_bytes = 16;
 pub fn log_group(out: *[log_group_bytes]u8, absolute_file: []const u8) []const u8 {
     assert(absolute_file.len > 0);
     assert(absolute_file[0] == '/');
-    const digest = Digest.of(absolute_file).text();
-    @memcpy(out, digest[0..log_group_bytes]);
+    // The hex alone: the group names directories that are mounted (`build/caches/<group>`),
+    // and a mount's host path may not hold the `:` of `b3:` (volume.path_problem).
+    const hex = Digest.of(absolute_file).hex();
+    @memcpy(out, hex[0..log_group_bytes]);
+    assert(std.mem.indexOfScalar(u8, out, ':') == null);
     return out;
 }
 
@@ -239,7 +242,7 @@ fn resolve_identity(
         var where: [constants.build_step_name_bytes_max + 8]u8 = undefined;
         // The buffer holds the name at its bound plus `step ""`.
         const named = std.fmt.bufPrint(&where, "step \"{s}\"", .{spec.name}) catch unreachable;
-        diagnose.user_not_found(diag, named, text);
+        diagnose.user_not_found(diag, named, text, ws.user_ws.too_large);
         return error.Failed;
     };
     ws.user = found.user;
@@ -832,6 +835,8 @@ fn import_output(store: *Store, job: *Job, diag: *Diag) Error!void {
         .save_root = true,
         .keep_existing_root = true,
         .label = labelled,
+        // A pinned step's `.output_exclude` (M9 slice 3c): absent from the output.
+        .exclude = job.request.spec.output_exclude orelse &.{},
     };
     const ws = job.ws;
     const out = ws.paths.out_text();
@@ -851,14 +856,19 @@ fn commit_output(store: *Store, job: *Job, diag: *Diag) Error!void {
     const labelled = std.fmt.bufPrint(&label, output_root_prefix ++ "{s}", .{
         job.request.spec.name,
     }) catch unreachable; // The buffer holds the prefix and the longest name.
-    var excluded: [constants.mounts_max][]const u8 = undefined;
-    assert(ws.mount_count <= excluded.len);
+    const output_exclude = job.request.spec.output_exclude orelse &.{};
+    var excluded: [constants.mounts_max + constants.build_output_excludes_max][]const u8 =
+        undefined;
+    assert(ws.mount_count <= constants.mounts_max);
+    assert(output_exclude.len <= constants.build_output_excludes_max);
     for (ws.mounts[0..ws.mount_count], 0..) |mount, at| excluded[at] = mount.target;
+    // A pinned step's `.output_exclude` (M9 slice 3c): left as the base has it.
+    for (output_exclude, ws.mount_count..) |path, at| excluded[at] = path;
     const options: import_mod.Options = .{
         .squash_owner = job.squash_owner,
         .warn = null,
         .parent = job.request.spec.base_tree,
-        .exclude = excluded[0..ws.mount_count],
+        .exclude = excluded[0 .. ws.mount_count + output_exclude.len],
         .refuse_special = .{ .context = &refusal, .call = Refusal.call },
         .save_root = true,
         .keep_existing_root = true,

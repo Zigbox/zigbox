@@ -1,0 +1,12 @@
+warning[ZBX-W0803]: a pinned step drifted, and its new output was used
+  while  checking step fetch against its pin
+  cause  step fetch produced
+         b3:b922cead1d43ac4c5de35fa6c1949849a32f507027021955be167f3023d0fe10,
+         and its pin is
+         b3:e4e7636c21ce34009ed2398a68e7297fc189ba08cd95198f60f295d3249ef26e
+  step   fetch
+  pinned b3:e4e7636c21ce34009ed2398a68e7297fc189ba08cd95198f60f295d3249ef26e
+  output b3:b922cead1d43ac4c5de35fa6c1949849a32f507027021955be167f3023d0fe10
+  fix    to accept the new output, delete the pin from zbx.lock and run zbx build --pin, or edit .expect
+  more   zbx explain W0803
+  docs   https://zigbox.github.io/zigbox/errors/W0803.html

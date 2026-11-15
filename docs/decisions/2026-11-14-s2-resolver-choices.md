@@ -43,7 +43,8 @@ questions before choosing. The rulings:
 
 - **One inflater.** Each chunk's range is inflated by slice 2's `index.inflate_range`
   (`docs/decisions/2026-11-14-s2-index-format.md`): raw deflate closed by an appended empty final
-  block. Until slice 2 merges, `resolver.zig` holds a verbatim copy, marked for replacement.
+  block. `resolver.zig` held a verbatim copy until slice 2 merged; the merge replaced it with
+  slice 2's function.
 - **Wake times are in the future.** `Schedule.tick` returns only deadlines, rounds and probes still
   to come. A due probe or round is taken by the next free slot; returning `now` for it once hid a
   2 s deadline behind it (found by the simulation, `src/lazy/sim.zig`).

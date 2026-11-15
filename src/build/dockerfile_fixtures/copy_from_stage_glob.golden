@@ -1,0 +1,34 @@
+// Imported by `zbx import` from Dockerfile: target stage1, --network detect.
+// Edit this file from here on: `zbx build` reads it, not the Dockerfile.
+.{
+    .version = 1,
+    .steps = .{
+        // Dockerfile:4  COPY . .
+        .{
+            .name = "build-1",
+            .base = "golang:1.22",
+            .copy = .{
+                .{ .src = .{ "." }, .to = "/go/src/cli/" },
+            },
+        },
+        // Dockerfile:5  RUN ./scripts/build/binary
+        .{
+            .name = "build-2",
+            .base = "step:build-1",
+            .run = .{ "/bin/sh", "-c", "./scripts/build/binary" },
+            .output = .root,
+            .workdir = "/go/src/cli",
+        },
+        // Dockerfile:7  COPY --from=build /go/src/cli/build/docker-* /usr/local/bin/
+        .{
+            .name = "stage1-1",
+            .base = "alpine:3.20",
+            .copy = .{
+                .{ .from = "step:build-2", .src = .{ "/go/src/cli/build/docker-*" }, .to = "/usr/local/bin/" },
+            },
+        },
+    },
+    .image = .{
+        .base = "step:stage1-1",
+    },
+}

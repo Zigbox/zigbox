@@ -1,0 +1,24 @@
+// Imported by `zbx import` from Dockerfile: target stage0, --network detect.
+// Edit this file from here on: `zbx build` reads it, not the Dockerfile.
+.{
+    .version = 1,
+    .steps = .{
+        // Dockerfile:3  RUN cat <<EOF > /etc/motd
+        .{
+            .name = "stage0-1",
+            .base = "alpine:3.20",
+            .run = .{ "/bin/sh", "-c", "cat <<EOF > /etc/motd\nhello\nEOF\n" },
+            .output = .root,
+        },
+        // Dockerfile:6  RUN echo $((1 << 2)) > /shift
+        .{
+            .name = "stage0-2",
+            .base = "step:stage0-1",
+            .run = .{ "/bin/sh", "-c", "echo $((1 << 2)) > /shift" },
+            .output = .root,
+        },
+    },
+    .image = .{
+        .base = "step:stage0-2",
+    },
+}

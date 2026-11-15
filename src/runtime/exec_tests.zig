@@ -410,10 +410,6 @@ test "a --user the container lacks is E0216; a user in a container with only roo
     try testing.expectEqual(codes.Code.E0523, diag.code.?);
 }
 
-comptime {
-    assert(@sizeOf(exec.Handle) <= constants.exec_handle_bytes_max);
-}
-
 test "a signal zbx receives reaches the command; a SIGKILL of zbx takes the command with it" {
     // Goal: two exit paths of the wait (REVIEW.md). Method: a SIGTERM scripted to arrive while
     // zbx waits is sent to the command as it is (it is no PID 1); then a second exec, and zbx

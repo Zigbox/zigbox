@@ -1,0 +1,3 @@
+E0811 Dockerfile:5
+Dockerfile:5 has ADD https://ffmpeg.org/releases/ffmpeg-7.1.tar.xz, which fetches at build time
+fetch it in a RUN with a checksum: `RUN curl -fsSLo /f <url> && echo "<sha256>  /f" | sha256sum -c`
