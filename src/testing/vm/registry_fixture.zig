@@ -92,8 +92,11 @@ pub const Query = struct {
     target: []const u8,
     /// The bearer token the client presented; empty for none.
     bearer: []const u8,
-    /// The offset of a `Range: bytes=N-` request; zero for none.
+    /// The offset of a `Range: bytes=N-` or `bytes=N-M` request; zero for none.
     range_from: u64 = 0,
+    /// The last byte of a closed `Range: bytes=N-M` request (inclusive); null for an open one
+    /// or none. A closed range is answered 206 even from offset zero (a lazy chunk fetch).
+    range_last: ?u64 = null,
 };
 
 /// What the registry says. All slices are borrowed from the fixture.
@@ -679,7 +682,7 @@ pub const Fixture = struct {
             body = fixture.corrupted.slice();
         }
         const from = query.range_from;
-        if (from == 0 or scenario == .norange) {
+        if ((from == 0 and query.range_last == null) or scenario == .norange) {
             out.body = body;
             return;
         }
@@ -688,10 +691,17 @@ pub const Fixture = struct {
             out.body = "";
             return;
         }
+        // A closed range past the end is cut at the end, as RFC 9110 says.
+        const last = @min(query.range_last orelse body.len - 1, body.len - 1);
+        if (last < from) {
+            out.status = 416;
+            out.body = "";
+            return;
+        }
         out.status = 206;
-        out.body = body[@intCast(from)..];
+        out.body = body[@intCast(from)..@intCast(last + 1)];
         out.content_range = std.fmt.bufPrint(&fixture.range_text, "bytes {d}-{d}/{d}", .{
-            from, body.len - 1, body.len,
+            from, last, body.len,
         }) catch unreachable; // Bounded: three numbers.
     }
 
@@ -905,4 +915,40 @@ test "the faults: wrong digest, cut body, huge, redirects, missing" {
     try testing.expectEqual(@as(u16, 404), out.status);
     ask(&fixture, "/v2/elsewhere/open/manifests/1", "", &out);
     try testing.expectEqual(@as(u16, 404), out.status);
+}
+
+test "a blob by range: open, closed from zero, closed past the end, and beyond it" {
+    // Goal: a closed range is a 206 of exactly its bytes, even from offset zero (a lazy chunk
+    // fetch), cut at the blob's end; an open range from zero is the whole blob, as before.
+    var fixture: Fixture = undefined;
+    fixture.init("http://registry.test", "http://other.test");
+    const layer = &fixture.oci.layer_gzip;
+    const whole = layer.slice();
+    var target: [128]u8 = undefined;
+    const path = try std.fmt.bufPrint(&target, "/v2/fixture/open/blobs/{s}", .{&layer.digest});
+    const base: Query = .{ .host = "registry.test", .target = path, .bearer = "" };
+
+    var out: Answer = .{};
+    var query = base;
+    fixture.answer(query, &out);
+    try testing.expectEqual(@as(u16, 200), out.status);
+    try testing.expectEqual(whole.len, out.body.len);
+
+    out = .{};
+    query.range_last = 9;
+    fixture.answer(query, &out);
+    try testing.expectEqual(@as(u16, 206), out.status);
+    try testing.expectEqualSlices(u8, whole[0..10], out.body);
+
+    out = .{};
+    query.range_from = 5;
+    query.range_last = whole.len + 100;
+    fixture.answer(query, &out);
+    try testing.expectEqual(@as(u16, 206), out.status);
+    try testing.expectEqualSlices(u8, whole[5..], out.body);
+
+    out = .{};
+    query.range_from = whole.len;
+    fixture.answer(query, &out);
+    try testing.expectEqual(@as(u16, 416), out.status);
 }

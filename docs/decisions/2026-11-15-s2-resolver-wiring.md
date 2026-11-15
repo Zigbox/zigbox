@@ -52,29 +52,33 @@ chunk count. No bound or default changed.
   (`fuse/diagnose.zig`: `no_index`, `index_refused`, `chunk_lied`, `chunk_unavailable`,
   `store_full`) and errors-site pages. `can_end_run` was left at its default for them.
 
-## Not done; what is next in 5a
+## Done since (third 5a implementer)
 
-1. **Wire the CLI** (`cli.zig`, `main.zig`): a static `lazy_start.Workspace` in `main.zig`
-   (about 160 MiB, mostly untouched), set `Services.lazy` in `prepare_image` only for
-   `run --lazy` in the foreground with a `lazy_server`. When `prepared.remote`: init `ws.range`
-   (`RegistryRange.init(&ws.client, &pull.library.reference, ws.layer, server.threaded.io())`),
-   then `server.attach(.{ .index = &ws.index, .registry = ws.range.source(), .log, .free })`
-   before `prepare_from`, and `lazy_start.finish(&storage.pull)` after the run. On `.whole`, pull
-   as without `--lazy` (the usual path: `remote` false falls through to `via_lock`/digest).
-   Check that the composed run resolves the tree from the in-memory `image` (compose reads the
-   image record today; the record is 5b, so compose may need the `Image` passed in), and that
-   `choose_user` (reads `/etc/passwd` from the store) works for a remote image or is cut.
-2. The `lazy.Log` (new module, e.g. `lazy_lines.zig`): an atomic shown counter, at most
-   `lazy_errors_shown_max` lines rendered with `render.render` to stderr, then one count line;
-   W1202 through `chunk_lied`, E1203 through `chunk_unavailable` (each `Outcome.text()` joined),
-   E1206 through `store_full`. The lines name the object id and chunk, not the path (the catalog
-   has no path): record that cut in `docs/demos/s2.md`. `lazy.FreeBytes` over `statfs` of the
-   store's directory: `host_real.zig` has a private `StatFs` and `syscall2(.statfs)`; add a
-   `free_bytes(path)` there and pass it through a `cli` `pub var` set by `main.zig`.
-3. Progress line before the run and summary line after it, from `server.report()`.
-4. VM: `src/testing/vm/registry_server.zig` parses only `bytes=N-` (`range_start`) and the
-   fixture answers only `range_from`: it needs closed ranges before `demo-s2-lazy` can pass. Push
-   `HEAD:vm/s2lazy-slice5-a` (vm.yml maps `vm/s2lazy-*` to `demo-s2-lazy`).
+- CLI: `main.zig` holds a static `lazy_start.Workspace` and sets `cli.lazy_workspace` and
+  `cli.free_bytes` (`host_real.free_bytes`, statfs `f_bavail * f_bsize`). `prepare_image` sets
+  `Services.lazy` only for `run --lazy` in the foreground with a `lazy_server`
+  (`lazy_workspace_of`). `check_lazy` runs before `prepare_operand`. `run_foreground` takes a
+  `Lazy` (`none`, `local`, `remote`); on `remote`, `attach_remote` inits `ws.range` and calls
+  `server.attach` with the index, the registry source, the log, the free bytes and `started`;
+  `lazy_finish` prints the summary, finishes the server and wipes the client.
+- `compose` reads the in-memory `Image`, so nothing was needed there. **A named `User` of a
+  remote image is cut** (`choose_user` reads `/etc/passwd` from the store: E0521); numeric works.
+- `lazy_lines.zig`: `Lines` (the `lazy.Log`), at most `constants.lazy_errors_shown_max` (16, the
+  brief's value) lines, then "lazy: N more lines not shown" in the summary; progress line
+  (printed once, from `Remote.started`) and summary line. `Event` gained `id` and `names`;
+  `Report` gained `bytes_local` and `bytes_total` (`schedule.zig`).
+- VM fixture: `registry_server.zig` parses `bytes=a-b`; the fixture answers closed ranges (206,
+  even from 0; 416 past the end).
+- Cuts recorded in `docs/demos/s2.md` under "5a: what a remote lazy run does, and the cuts".
+
+## Not done; what is next
+
+1. `can_end_run` for E1203/E1206: asked the supervisor (recommended false: a run that got EIO
+   still ends); left at the default until answered.
+2. A remote lazy run in a VM demo: no fixture serves a layer-writer-2 image; first live run is
+   `demo-s2` (slice 6).
+3. Lines naming the path, not the object id (map an object to a node path).
+4. Fetch `/etc/passwd` and `/etc/group` through the resolver before the start, for a named `User`.
 
 ## 5b (next implementer after 5a)
 
