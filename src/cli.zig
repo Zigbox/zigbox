@@ -5528,7 +5528,7 @@ test "doctor --output json: every check with its status, a code for a failure or
         try testing.expect(document.get("ok").?.bool);
         const checks = document.get("checks").?.array.items;
         const ids = [_][]const u8{ "kernel", "userns", "cgroup", "overlay", "subid", "seccomp" } ++
-            [_][]const u8{"net"};
+            [_][]const u8{ "fuse", "net" };
         try testing.expectEqual(ids.len, checks.len);
         for (checks, ids) |check, id| {
             try testing.expectEqualStrings(id, check.object.get("id").?.string);

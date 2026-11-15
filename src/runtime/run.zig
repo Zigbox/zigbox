@@ -1684,23 +1684,23 @@ test "threads_in_status reads the Threads line and nothing else" {
 test "a diagnostic line of diag_json_bytes_max bytes is kept whole, and one byte more is cut" {
     // Goal: the record keeps the JSON line exactly up to its bound (3056, the lazy record's
     // room, docs/decisions/2026-11-15-diag-json-bytes-3056.md); past it, the short object that
-    // names the code. Method: grow the last cause one byte at a time until the line is the
-    // bound, then one byte longer.
+    // names the code. Method: fill the whiles and the context, then add causes, growing the last
+    // one a byte at a time (the one before it full or shortened, to step over a new field's
+    // overhead) until the line is the bound, then one byte longer.
     const max = constants.diag_json_bytes_max;
-    const filler = @import("../test_util.zig").repeat('a', constants.diag_field_bytes_max);
     var diag: Diag = undefined;
     var big: [constants.output_bytes_max]u8 = undefined;
     var buffer: [max]u8 = undefined;
     for ([_]usize{ max, max + 1 }) |target| {
-        var length: usize = 1;
-        const line = while (length <= filler.len) : (length += 1) {
-            diag.reset();
-            diag.raise(.E0201);
-            for (0..constants.diag_whiles_count_max) |_| diag.while_("{s}", .{filler});
-            for (1..constants.diag_causes_count_max) |_| diag.cause("{s}", .{filler});
-            diag.cause("{s}", .{filler[0..length]});
-            const rendered = std.mem.trimEnd(u8, render.render(&diag, .json, false, &big), "\n");
-            if (rendered.len == target) break rendered;
+        const line = find: for (1..constants.diag_causes_count_max) |causes| {
+            for ([_]usize{ 0, 16 }) |shorter| {
+                for (1..constants.diag_field_bytes_max + 1) |length| {
+                    fill_diag(&diag, causes, shorter, length);
+                    const json = render.render(&diag, .json, false, &big);
+                    const rendered = std.mem.trimEnd(u8, json, "\n");
+                    if (rendered.len == target) break :find rendered;
+                }
+            }
         } else return error.TestUnexpectedResult; // The fields no longer reach the bound.
         const kept = diagnostic_json(&diag, &buffer);
         if (target == max) {
@@ -1709,4 +1709,22 @@ test "a diagnostic line of diag_json_bytes_max bytes is kept whole, and one byte
             try testing.expectEqualStrings("{\"code\":\"ZBX-E0201\",\"truncated\":true}", kept);
         }
     }
+}
+
+/// Every while and context pair full, `causes` causes: the last `length` bytes long, the one
+/// before it `shorter` bytes short of full.
+fn fill_diag(diag: *Diag, causes: usize, shorter: usize, length: usize) void {
+    assert(causes >= 1);
+    const filler = @import("../test_util.zig").repeat('a', constants.diag_field_bytes_max);
+    diag.reset();
+    diag.raise(.E0201);
+    for (0..constants.diag_whiles_count_max) |_| diag.while_("{s}", .{filler});
+    const keys = [_][]const u8{ "k0", "k1", "k2", "k3", "k4", "k5" };
+    comptime assert(keys.len == constants.diag_context_count_max);
+    inline for (keys) |key| diag.context(key, "{s}", .{filler});
+    for (1..causes) |at| {
+        const cut = if (at + 1 == causes) shorter else 0;
+        diag.cause("{s}", .{filler[cut..]});
+    }
+    diag.cause("{s}", .{filler[0..length]});
 }

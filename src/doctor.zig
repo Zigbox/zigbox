@@ -2009,7 +2009,7 @@ test "the healthy fixtures pass and warn does not change the exit code" {
         "kernel_newer_major_lower_minor", "gpu_cdi_spec",
         "gpu_cdi_refused",                "gpu_driver_no_spec",
         "gpu_render_closed",              "gpu_cdi_yaml",
-        "gpu_cdi_stale",
+        "gpu_cdi_stale",                  "fuse_missing",
     };
     var target: HostSim = undefined;
     for (fixtures.all) |fixture| {

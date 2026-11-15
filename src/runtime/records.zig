@@ -297,8 +297,8 @@ fn write_lazy(writer: *std.Io.Writer, lazy: ?Lazy) void {
     assert(found.local_percent <= 100);
     assert(found.sources <= constants.lazy_sources_max);
     write_format(writer, lazy_format, .{
-        found.sources,     found.demand_bytes,  found.fill_bytes,
-        found.errors,      found.local_percent,
+        found.sources, found.demand_bytes,  found.fill_bytes,
+        found.errors,  found.local_percent,
     });
 }
 
