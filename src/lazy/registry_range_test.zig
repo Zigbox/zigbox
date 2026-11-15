@@ -270,6 +270,8 @@ test "registry range: a registry that drips one byte per answer is cut off" {
     );
     try testing.expectError(error.Failed, dripped);
     try testing.expect(diag.code != null);
+    const cause = diag.last_cause().?;
+    try testing.expect(std.mem.indexOf(u8, cause, "ran past its 120 seconds limit") != null);
     const answers_max = constants.net_request_timeout_ms / 1000;
     try testing.expect(world.requests <= answers_max);
     try testing.expect(world.requests >= answers_max - 1);

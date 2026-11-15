@@ -200,7 +200,13 @@ fn fetch_index(
     );
     fetched catch |err| switch (err) {
         error.Short => return refuse(diag, tree, text, error.Malformed, .inflate),
-        error.Failed => return error.Failed,
+        error.Failed => {
+            diag.while_("fetching the lazy index of '{s}' ({d} seconds in all)", .{
+                text,
+                constants.net_request_timeout_ms / 1000,
+            });
+            return error.Failed;
+        },
     };
     ws.index_fetched = length;
     const bytes = ws.index_bytes[0..size];

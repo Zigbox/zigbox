@@ -1080,7 +1080,8 @@ fn out_of_time(origin: Origin, diag: *Diag) RangeError {
         .port = origin.port,
         .scheme = origin.scheme,
     };
-    diagnose.network_failed(diag, error.TimedOut, target_info, 0);
+    // Stalled, not TimedOut: the cause names the whole request's limit, not the idle one.
+    diagnose.network_failed(diag, error.Stalled, target_info, 0);
     return error.Failed;
 }
 

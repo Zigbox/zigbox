@@ -20,6 +20,10 @@
 //!     `constants.store_partial_seconds` are planned, as their own class: no pull is
 //!     writing one that old, and an apply holds the lock a pull holds shared.
 //!   - leftovers in `tmp/` whose `<pid>-<n>` names a process that is gone (a killed import).
+//!   - the chunks of an object a lazy run fetched in part (`partial/<id>/`, S2) once no kept
+//!     tree names the object, older than `constants.store_partial_seconds`. They are a cache:
+//!     an apply removes them, never trashes them, and a restore does not bring them back. A
+//!     partial image whose record a restore puts back fetches its missing chunks again.
 //!
 //! The plan hash is the BLAKE3 of `"zbx-gc-plan" 0x01`, the store's generation counter
 //! (`generation.zig`, raised by every write) and, in the order of the ids, a tag byte and the id

@@ -971,6 +971,29 @@ test "resolver: a damaged chunk file is fetched again and replaced" {
     try testing.expectEqual(@as(u32, 0), fixture.events_count.load(.monotonic));
 }
 
+test "resolver: chunks a gc removed are fetched again, never taken as damage" {
+    // Goal: the supervisor's condition on the gc sweep of S2 slice 5: gc removes an unheld
+    // object's `partial/<id>/` outright (a restore brings back its tree, not its chunks), and a
+    // lazy read of the object afterwards fetches the chunks again with no event, no lie and no
+    // damage. Method: land chunk 0 of a two-chunk object, remove its chunk directory as gc's
+    // apply does, then read both chunks.
+    setup(&.{2 * chunk_bytes});
+    try testing.expectEqual(land_mod.Landed.landed, land_chunk(0, 0));
+    var path: PathBuf = undefined;
+    const id = fixture.objects[0].wanted.id;
+    const chunk = chunks_mod.partial_chunk(&fixture.store, &path, id, 0);
+    const directory = chunk[0 .. std.mem.lastIndexOfScalar(u8, chunk, '/').?];
+    fixture.files.remove_path(chunk);
+    fixture.files.remove_path(directory);
+    try testing.expect(fixture.files.kind_of(directory) == null);
+    try open_resolver(1, false, false);
+    defer close_resolver();
+    try expect_true_read(0, 0, 0);
+    try expect_true_read(0, 1, 0);
+    try testing.expectEqual(@as(u32, 2), fixture.peers[0].calls.load(.monotonic));
+    try testing.expectEqual(@as(u32, 0), fixture.events_count.load(.monotonic));
+}
+
 test "resolver: a damaged whole object fails the read at once with an event" {
     // Goal: a chunk of a whole object that does not hash right fails its read at once
     // (`Unavailable`, an `unavailable` event, an error counted), with no source asked: a put
