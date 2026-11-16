@@ -29,6 +29,17 @@ pub const Workspace = struct {
     upload: upload.Workspace,
 };
 
+/// The layer writer that push, `push --dry-run` and export use. 0.5.2 keeps lazy start (S2)
+/// dormant: it writes writer 1, 0.5.1's bytes, though the packer knows writer 2
+/// (docs/decisions/2026-11-16-0.5.2-s2-dormant.md). 0.6.0 sets this back to
+/// `constants.layer_writer_version`.
+pub const release_writer_version: u32 = 1;
+
+comptime {
+    assert(release_writer_version >= 1);
+    assert(release_writer_version <= constants.layer_writer_version);
+}
+
 /// Packs what `operand` names into the store's blob cache. A refusal is on `diag`.
 pub fn pack_operand(
     store: *Store,
@@ -51,7 +62,7 @@ pub fn pack_operand(
         .tree = ws.source.tree,
         .settings = &ws.source.settings,
         .labels = ws.source.labels(),
-        .writer_version = constants.layer_writer_version,
+        .writer_version = release_writer_version,
     };
     var failure: pack.Failure = undefined;
     pack.pack(store, &ws.pack, input, out, &failure) catch {
@@ -199,7 +210,7 @@ pub fn push_operand(
         .tree = ws.source.tree,
         .settings = &ws.source.settings,
         .labels = ws.source.labels(),
-        .writer_version = constants.layer_writer_version,
+        .writer_version = release_writer_version,
     };
     var fail: fs_mod.Failure = undefined;
     out.record_failure = null;

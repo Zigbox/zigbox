@@ -842,12 +842,14 @@ const build_cases = [_]Case{
 /// diagnostic as `fuse/diagnose.zig` builds it.
 const lazy_cases = [_]Case{
     .{ .code = .E1207, .args = &.{}, .direct = lazy_too_large, .exit = 1 },
-    .{
-        .code = .E1208,
-        .args = &.{ "run", "--lazy", "--rootfs", "/srv/alpine", "--", "/bin/sh" },
-        .exit = 125,
-    },
+    // 0.5.2 refuses `--lazy` at parse time (E0004), so E1208 is built directly, as the parse
+    // would with `-Dlazy-start` (docs/decisions/2026-11-16-0.5.2-s2-dormant.md).
+    .{ .code = .E1208, .args = &.{}, .direct = lazy_flag_refused, .exit = 125 },
 };
+
+fn lazy_flag_refused(diag: *Diag) void {
+    lazy_diagnose.flag_refused(diag, "--rootfs");
+}
 
 fn lazy_too_large(diag: *Diag) void {
     const tree_digest = Digest.parse("b3:" ++ test_util.repeat('7', 64)).?;
