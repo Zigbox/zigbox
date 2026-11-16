@@ -229,7 +229,7 @@ pub fn sample_plan_listen(
 /// The index of the first step of `kind` in the plan of a run with `--ulimit nofile=...` and
 /// `--sysctl net.core.somaxconn=...`, for a full id mapping (M2b).
 pub fn step_index_knobs(kind: plan_mod.Kind) u32 {
-    assert(kind == .set_rlimit or kind == .write_sysctl);
+    assert(plan_mod.side_of(kind) == .child);
     var plan: plan_mod.Plan = undefined;
     var input = sample_input(sample_mapping, true, false, false, .none, &.{}, null);
     input.rlimits.set(.nofile, .{ .soft = 1024, .hard = 4096 });
@@ -257,7 +257,7 @@ fn sample_input(
     mounts: []const plan_mod.MountInput,
     listen: ?u16,
 ) plan_mod.Input {
-    assert(mapping == .single or mapping.full.uid_start > 0);
+    assert(rootfs_path.len > 0);
     assert(mounts.len <= constants.sim_mounts_max);
     return .{
         .rootfs = rootfs_path,

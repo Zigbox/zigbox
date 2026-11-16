@@ -130,6 +130,13 @@ fn write_record(child: *const Context, record: sync.Record) void {
     child.host.write_handle_all(child.report.write, &bytes) catch return;
 }
 
+/// A host file or device node bound over its target, from the step's source.
+fn bind_file(host: Host, plan: *const Plan, step: *const Step) Error!void {
+    assert(plan_mod.side_of(step.kind) == .child);
+    assert(step.source.len > 0);
+    try mount(host, .bind_file, plan.text(step.target), plan.text(step.source));
+}
+
 fn run_step(child: *const Context, step: *const Step, state: *State) Error!void {
     const host = child.host;
     const plan = child.plan;
@@ -143,13 +150,12 @@ fn run_step(child: *const Context, step: *const Step, state: *State) Error!void 
         .set_hostname => try host.set_hostname(plan.hostname()),
         .set_umask => host.set_umask(plan.umask),
         .make_mounts_private => try mount(host, .make_private, target, null),
-        .bind_rootfs => try mount(host, .bind_tree, target, plan.text(step.source)),
+        .bind_rootfs, .bind_sys => try mount(host, .bind_tree, target, plan.text(step.source)),
         .mount_overlay => try mount(host, .overlay, target, plan.text(step.source)),
         .mount_proc => try mount(host, .proc, target, null),
         .mount_dev => try mount(host, .dev_tmpfs, target, null),
         .mount_shm => try mount(host, .shm_tmpfs, target, plan.text(step.source)),
         .mount_pts => try mount(host, .devpts, target, null),
-        .bind_device => try mount(host, .bind_file, target, plan.text(step.source)),
         .make_proc_dir, .make_dev_dir, .make_tmp_dir => try make_dir(host, target),
         .make_run_dir, .make_sys_dir, .make_etc_dir => try make_dir(host, target),
         .mount_tmp => try mount(host, .tmp_tmpfs, target, null),
@@ -160,7 +166,6 @@ fn run_step(child: *const Context, step: *const Step, state: *State) Error!void 
         .set_no_new_privs => try host.no_new_privs(),
         .install_seccomp => try host.install_seccomp(&seccomp.program),
         .make_shm_dir, .make_pts_dir => try host.make_directory(target, false),
-        .bind_sys => try mount(host, .bind_tree, target, plan.text(step.source)),
         .bring_up_loopback => try host.bring_up_loopback(),
         .make_listener => state.listener = try host.listen_loopback(plan.listen_port),
         .send_listener => try send_listener(child, state),
@@ -169,7 +174,7 @@ fn run_step(child: *const Context, step: *const Step, state: *State) Error!void 
         .mount_sysfs => try mount(host, .sysfs, target, null),
         .create_etc_file => try host.create_file(target, true),
         .stage_etc_file => try host.write_file_mode(target, plan.text(step.source), 0o644),
-        .bind_etc_file => try mount(host, .bind_file, target, plan.text(step.source)),
+        .bind_etc_file, .bind_device, .bind_user_device => try bind_file(host, plan, step),
         .remount_etc_file => try mount(host, .remount_readonly, target, null),
         .unstage_etc_file => try unstage(host, target),
         .remount_sys => try mount(host, .remount_readonly_tree, target, null),
@@ -178,7 +183,6 @@ fn run_step(child: *const Context, step: *const Step, state: *State) Error!void 
         .rearm_death_signal => try rearm_death_signal(child),
         .create_device_file => try host.create_file(target, false),
         .create_user_device => try make_file_target(host, target),
-        .bind_user_device => try mount(host, .bind_file, target, plan.text(step.source)),
         .bind_cdi_nodes, .stage_cdi_mounts => try run_cdi_step(host, plan, step.kind, state),
         .move_cdi_mounts, .run_ldconfig => try run_cdi_step(host, plan, step.kind, state),
         .link_dev => try host.symlink(plan.text(step.source), target),

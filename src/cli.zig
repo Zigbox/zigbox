@@ -1926,6 +1926,36 @@ fn check_gc_args(diag: *Diag, gc_args: *const GcArgs, invocation: *Invocation) P
     invocation.store.trash = gc_args.trash;
 }
 
+/// Where a run option that takes one value keeps it; the repeatable ones are taken above.
+fn run_slot(run_args: *RunArgs, option: RunOption) *?[]const u8 {
+    assert(option != .publish);
+    assert(option != .ulimit);
+    return switch (option) {
+        .rootfs => &run_args.rootfs,
+        .name => &run_args.name,
+        .memory => &run_args.memory,
+        .pids => &run_args.pids,
+        .cpus => &run_args.cpus,
+        .timeout => &run_args.timeout,
+        .grace => &run_args.grace,
+        .net => &run_args.net,
+        .publish => unreachable, // Repeatable: `take_publish` above.
+        .listen => unreachable, // `take_listen` above.
+        .listen_send => &run_args.listen_send,
+        .hosts_file => &run_args.hosts_file,
+        .state => unreachable, // Repeatable: `take_state` above.
+        .tmpfs, .bind, .secret, .mount => unreachable, // Repeatable: `take_mount` above.
+        .device => unreachable, // Repeatable: `take_device` above.
+        .gpu => unreachable, // `take_gpu` above.
+        .user => &run_args.user,
+        .tail => &run_args.tail,
+        .stream => &run_args.stream,
+        .workdir => &run_args.workdir,
+        .shm_size => &run_args.shm_size,
+        .ulimit, .sysctl => unreachable, // Repeatable: `take_ulimit` and `take_sysctl` above.
+    };
+}
+
 /// Reads one value option of `run` and its value (inline, or the next argument). A value that
 /// is missing, or is the `--` that starts the command, is `ZBX-E0005`; giving the same option
 /// twice is `ZBX-E0003`, since one of them would be silently ignored.
@@ -1967,30 +1997,7 @@ fn take_run_option(
     if (option == .gpu) return take_gpu(diag, run_args, value);
     if (option == .ulimit) return take_ulimit(diag, run_args, value);
     if (option == .sysctl) return take_sysctl(diag, run_args, value);
-    const slot = switch (option) {
-        .rootfs => &run_args.rootfs,
-        .name => &run_args.name,
-        .memory => &run_args.memory,
-        .pids => &run_args.pids,
-        .cpus => &run_args.cpus,
-        .timeout => &run_args.timeout,
-        .grace => &run_args.grace,
-        .net => &run_args.net,
-        .publish => unreachable, // Repeatable: `take_publish` above.
-        .listen => unreachable, // `take_listen` above.
-        .listen_send => &run_args.listen_send,
-        .hosts_file => &run_args.hosts_file,
-        .state => unreachable, // Repeatable: `take_state` above.
-        .tmpfs, .bind, .secret, .mount => unreachable, // Repeatable: `take_mount` above.
-        .device => unreachable, // Repeatable: `take_device` above.
-        .gpu => unreachable, // `take_gpu` above.
-        .user => &run_args.user,
-        .tail => &run_args.tail,
-        .stream => &run_args.stream,
-        .workdir => &run_args.workdir,
-        .shm_size => &run_args.shm_size,
-        .ulimit, .sysctl => unreachable, // Repeatable: `take_ulimit` and `take_sysctl` above.
-    };
+    const slot = run_slot(run_args, option);
     if (slot.* != null) return unexpected_argument(diag, command, argument);
     if (option == .user) {
         if (user_problem(value)) |reason| return bad_user(diag, value, reason);
