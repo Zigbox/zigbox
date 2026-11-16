@@ -1,0 +1,5 @@
+error[ZBX-E0310]: a --ulimit is not valid
+  cause  the soft limit is above the hard one
+  fix    a valid limit looks like this:   zbx run --rootfs ./alpine --ulimit nofile=1024:65536 -- /bin/sh
+  more   zbx explain E0310 · rerun with --verbose for the full cause chain
+  docs   https://zigbox.github.io/zigbox/errors/E0310.html

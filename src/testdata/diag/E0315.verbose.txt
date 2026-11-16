@@ -1,0 +1,7 @@
+error[ZBX-E0315]: a --sysctl is not valid
+  while  reading --sysctl
+  cause  'net.core.somaxconn' has no value: write key=value
+  sysctl net.core.somaxconn
+  fix    a valid sysctl looks like this:   zbx run --rootfs ./alpine --sysctl net.core.somaxconn=8192 -- /bin/sh
+  more   zbx explain E0315
+  docs   https://zigbox.github.io/zigbox/errors/E0315.html

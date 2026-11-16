@@ -1,0 +1,14 @@
+error[ZBX-E0312]: can't set a --ulimit in the container
+  while  starting container zbx-9bc203
+  cause  setting a --ulimit resource limit failed: operation not permitted
+         (EPERM)
+  cause  the limit passed zbx's check against your own, so a security policy or
+         a change to your limits since is the usual reason
+  ulimit nofile
+  name   zbx-9bc203
+  rootfs /srv/alpine
+  step   set_rlimit (62 of 69)
+  fix    check your limits:             ulimit -a -H
+         check what this host allows:   zbx doctor
+  more   zbx explain E0312
+  docs   https://zigbox.github.io/zigbox/errors/E0312.html

@@ -1,0 +1,6 @@
+error[ZBX-E0314]: --shm-size is larger than --memory
+  cause  /dev/shm's pages are charged to the container's memory limit, 128 MiB,
+         so a larger /dev/shm can never fill
+  fix    raise --memory, or lower --shm-size to at most it:   zbx run --rootfs ./alpine --memory 512m --shm-size 256m -- /bin/sh
+  more   zbx explain E0314 · rerun with --verbose for the full cause chain
+  docs   https://zigbox.github.io/zigbox/errors/E0314.html

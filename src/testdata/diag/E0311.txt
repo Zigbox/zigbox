@@ -1,0 +1,7 @@
+error[ZBX-E0311]: --ulimit is above your own hard limit
+  cause  --ulimit nofile asks for a hard limit of 1048576, above your own,
+         524288; a rootless run can't raise it
+  fix    for login sessions, raise it in limits.conf, then log in again:                       echo "$(id -un) hard nofile 1048576" | sudo tee -a /etc/security/limits.conf
+         for the systemd user manager, put the unit line under [Service], then log in again:   sudo systemctl edit user@1000.service
+  more   zbx explain E0311 · rerun with --verbose for the full cause chain
+  docs   https://zigbox.github.io/zigbox/errors/E0311.html

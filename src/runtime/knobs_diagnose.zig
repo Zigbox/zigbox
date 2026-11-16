@@ -74,12 +74,12 @@ pub fn ulimit_above_hard(
         "run can't raise it", .{ @tagName(resource), asked_text, hard_text });
     diag.context("unit", "{s}={s}", .{ resource.systemd_property(), asked_text });
     diag.fix_with(
-        "for login sessions, raise it in limits.conf, then log in again:",
+        "raise it for logins (then log in again):",
         "echo \"$(id -un) hard {s} {s}\" | sudo tee -a /etc/security/limits.conf",
         .{ @tagName(resource), asked_text },
     );
     diag.fix_with(
-        "for the systemd user manager, put the unit line under [Service], then log in again:",
+        "or for the user manager, under [Service]:",
         "sudo systemctl edit user@{d}.service",
         .{uid},
     );

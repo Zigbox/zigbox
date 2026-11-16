@@ -3030,12 +3030,11 @@ test "every registered code has a case or is the panic" {
 }
 
 test "TMP dump knob goldens" {
+    @setEvalBranchQuota(100_000);
     var sim: HostSim = undefined;
     inline for (cases) |case| {
         const name = @tagName(case.code);
-        if (comptime std.mem.startsWith(u8, name, "E031") and name[4] != '0' or
-            comptime std.mem.eql(u8, name, "E0310"))
-        {
+        if (comptime std.mem.startsWith(u8, name, "E031")) {
             for (std.enums.values(Style)) |style| {
                 _ = try run_style(&sim, &case, style);
                 std.debug.print("<<<{s} {s}>>>\n{s}<<<END>>>\n", .{ name, @tagName(style), sim.stderr() });

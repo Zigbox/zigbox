@@ -1,0 +1,5 @@
+error[ZBX-E0318]: the kernel refused a --sysctl
+  cause  the kernel refused net.core.somaxconn=8192: not a value this key takes
+  fix    read the key's current value on the host for its form:   sysctl net.core.somaxconn
+  more   zbx explain E0318 · rerun with --verbose for the full cause chain
+  docs   https://zigbox.github.io/zigbox/errors/E0318.html
