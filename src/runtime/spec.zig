@@ -642,6 +642,8 @@ const repeat = @import("../test_util.zig").repeat;
 
 test {
     _ = @import("knobs.zig");
+    _ = @import("knobs_check.zig");
+    _ = @import("knobs_diagnose.zig");
 }
 
 test "name_problem accepts hostname labels and refuses everything else, at the boundaries" {

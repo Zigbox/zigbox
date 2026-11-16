@@ -56,6 +56,8 @@ const common_files = [_]host_sim.File{
     .{ .path = rootfs_path, .content = "", .mode = 0o040755 },
     .{ .path = regular_file_path, .content = "", .mode = 0o100644 },
     .{ .path = "/etc/passwd", .content = "alice:x:1000:1000::/home/alice:/bin/bash\n" },
+    // 8 GiB: the bound of a --shm-size without --memory.
+    .{ .path = "/proc/meminfo", .content = "MemTotal:        8388608 kB\nMemFree: 1 kB\n" },
     .{ .path = "/proc/sys/user/max_user_namespaces", .content = "63488\n" },
     // The root of a cgroup v2 hierarchy that offers the controllers a limit needs, as on any
     // host with systemd. `init_hybrid` takes it away.

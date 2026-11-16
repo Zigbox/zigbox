@@ -47,6 +47,7 @@ const Diag = @import("../diag/diag.zig").Diag;
 const codes = @import("../diag/codes.zig");
 const render = @import("../diag/render.zig");
 const diagnose = @import("diagnose.zig");
+const knobs_check = @import("knobs_check.zig");
 const doctor = @import("../doctor.zig");
 const ids = @import("ids.zig");
 const logfile = @import("logfile.zig");
@@ -461,6 +462,7 @@ pub fn start(
     try check_command(container, diag);
     try check_root(host, container, options, handle, diag);
     try check_limits(container.limits, diag);
+    try check_knobs(host, container, diag);
     try check_listen(container, diag);
     try check_hosts_file(host, container, diag);
     try check_network(host, container, handle, diag);
@@ -1225,6 +1227,20 @@ fn check_limits(limits: spec_mod.Limits, diag: *Diag) Error!void {
     const text = std.fmt.bufPrint(&value, "{d}", .{number}) catch unreachable;
     diagnose.limit_invalid(diag, found.kind, text, found.problem);
     return error.StartFailed;
+}
+
+/// The workload knobs (`--ulimit`, `--shm-size`, `--sysctl`), against the caller's own limits,
+/// the host's memory and the run's network.
+fn check_knobs(host: Host, container: *const Spec, diag: *Diag) Error!void {
+    assert(diag.code == null);
+    assert(container.sysctls.len <= std.math.maxInt(u32));
+    knobs_check.check(host, .{
+        .rlimits = container.rlimits,
+        .sysctls = container.sysctls,
+        .shm_bytes = container.limits.shm_bytes,
+        .memory_bytes = container.limits.memory_bytes,
+        .isolated = container.network.isolated(),
+    }, diag) catch return error.StartFailed;
 }
 
 /// Decides whether this run has a scope. It has one if the user's systemd manager answers; if

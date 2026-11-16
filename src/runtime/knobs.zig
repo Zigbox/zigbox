@@ -170,6 +170,16 @@ fn parse_value(resource: Resource, text: []const u8) ValueError!u64 {
 
 // ---- /dev/shm -------------------------------------------------------------------------------
 
+/// A `--shm-size`: digits with an optional binary unit (`k`, `m`, `g`), as `--memory` takes it.
+/// Null if it is not one; the bounds are `shm_problem`'s and the run's.
+pub fn parse_size(text: []const u8) ?u64 {
+    assert(text.len <= constants.arg_bytes_max);
+    if (std.mem.eql(u8, text, "unlimited")) return null;
+    const value = parse_value(.stack, text) catch return null;
+    assert(value < unlimited);
+    return value;
+}
+
 /// Why a `--shm-size` is refused, after it parsed.
 pub const ShmProblem = enum {
     /// Larger than `--memory` (ZBX-E0314): its pages are charged to the container's memory.
@@ -410,6 +420,18 @@ test "parse_ulimit: every refusal, at the edges" {
     const huge = parse_ulimit("stack=17179869183g").ok.limit.soft;
     try testing.expectEqual(@as(u64, 17179869183 << 30), huge);
     try testing.expectEqual(UlimitProblem.too_large, parse_ulimit("stack=17179869184g").problem);
+}
+
+test "parse_size: units in any case, bare bytes, and every other form refused" {
+    try testing.expectEqual(@as(?u64, 256 << 20), parse_size("256m"));
+    try testing.expectEqual(@as(?u64, 1 << 30), parse_size("1G"));
+    try testing.expectEqual(@as(?u64, 4096), parse_size("4096"));
+    try testing.expectEqual(@as(?u64, 4 << 10), parse_size("4k"));
+    try testing.expectEqual(@as(?u64, null), parse_size(""));
+    try testing.expectEqual(@as(?u64, null), parse_size("unlimited"));
+    try testing.expectEqual(@as(?u64, null), parse_size("1t"));
+    try testing.expectEqual(@as(?u64, null), parse_size("-1m"));
+    try testing.expectEqual(@as(?u64, null), parse_size("999999999999999999g"));
 }
 
 test "Rlimits: set, get, count and the soft-above-hard check" {

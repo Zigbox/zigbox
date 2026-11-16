@@ -19,6 +19,8 @@ const codes = @import("../diag/codes.zig");
 const cdi_steps = @import("cdi_steps.zig");
 const pasta_mod = @import("pasta.zig");
 const plan_mod = @import("plan.zig");
+const knobs = @import("knobs.zig");
+const knobs_diagnose = @import("knobs_diagnose.zig");
 const mounts_diagnose = @import("mounts_diagnose.zig");
 const state_diagnose = @import("../state/diagnose.zig");
 const records = @import("records.zig");
@@ -284,6 +286,18 @@ fn step_kind_failed(
             listener_failed(diag, operation, plan.listen_port, failure);
         },
         .mount_overlay => overlay_failed(diag, operation, failure),
+        .set_rlimit => {
+            const resource: knobs.Resource = @enumFromInt(step.index);
+            knobs_diagnose.rlimit_failed(diag, operation, resource, failure.err, failure.errno);
+        },
+        .write_sysctl => knobs_diagnose.sysctl_failed(
+            diag,
+            operation,
+            plan.text(step.target),
+            plan.text(step.source),
+            failure.err,
+            failure.errno,
+        ),
         .restrict_capabilities,
         .clear_ambient,
         => hardening_failed(diag, .E0207, operation, failure),

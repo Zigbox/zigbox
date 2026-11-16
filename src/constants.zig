@@ -492,6 +492,8 @@ pub const shm_bytes_default: u64 = 64 << 20;
 /// The smallest `--shm-size`: one page of the smaller page size of the two targets (4 KiB). The
 /// largest is `--memory`, or without it the host's `MemTotal`, checked at the run.
 pub const shm_bytes_min: u64 = 4 << 10;
+/// The room for `/proc/meminfo`, read for `MemTotal`: about 1.5 KiB on 6.x kernels.
+pub const meminfo_bytes_max: u32 = 8 << 10;
 /// `--sysctl` given at most this many times.
 pub const sysctls_max: u32 = 16;
 /// The longest value of one `--sysctl`: printable ASCII, written to `/proc/sys` in one write.

@@ -96,6 +96,15 @@ pub const Code = enum(u16) {
     E0307,
     E0308,
     E0309,
+    E0310,
+    E0311,
+    E0312,
+    E0313,
+    E0314,
+    E0315,
+    E0316,
+    E0317,
+    E0318,
     W0301,
     W0302,
     E0401,
@@ -1490,6 +1499,144 @@ pub const registry = [_]Entry{
         \\must belong to this user, with the controllers enabled for its children
         \\(cgroup.subtree_control). Inside the virtual machine, zbx vm stop, and
         \\the next command starts a fresh one.
+        ,
+    },
+    .{
+        .code = .E0310,
+        .severity = .@"error",
+        .blame = .user,
+        .summary = "a --ulimit is not valid",
+        .explanation =
+        \\--ulimit sets a resource limit of the container's processes, as ulimit
+        \\does: --ulimit name=soft[:hard], once per name. One value sets both the
+        \\soft and the hard limit. The names are nofile (open files), nproc
+        \\(processes of the user), memlock (locked memory) and stack. nofile and
+        \\nproc take counts; memlock and stack take sizes in --memory's syntax
+        \\(k, m or g, binary units). Any value may be unlimited. The soft limit
+        \\can't be above the hard one.
+        \\
+        \\Without --ulimit, the container keeps the limits zbx was started with.
+        \\nproc counts every process of the user who runs zbx, inside the
+        \\container and out, because the container's root is that user.
+        ,
+    },
+    .{
+        .code = .E0311,
+        .severity = .@"error",
+        .blame = .environment,
+        .summary = "--ulimit is above your own hard limit",
+        .explanation =
+        \\A rootless run can lower a hard limit but never raise it: raising one
+        \\needs CAP_SYS_RESOURCE in the host's user namespace. zbx checks each
+        \\--ulimit against the hard limit it was started with and refuses one
+        \\above it, rather than set a lower value than was asked.
+        \\
+        \\The limits come from the login session (/etc/security/limits.conf) or,
+        \\for a process started by the systemd user manager, from its unit,
+        \\user@<uid>.service (LimitNOFILE=, LimitNPROC=, LimitMEMLOCK=,
+        \\LimitSTACK=). Raise the one that applies, log in again, and check with
+        \\ulimit -H -a. The user manager's memlock is often 8 MiB.
+        ,
+    },
+    .{
+        .code = .E0312,
+        .severity = .@"error",
+        .blame = .environment,
+        .summary = "can't set a --ulimit in the container",
+        .explanation =
+        \\The container sets each --ulimit on itself (setrlimit) before it drops
+        \\its capabilities. zbx has already checked the limit against the hard
+        \\limit it was started with, so this should not fail: a security policy,
+        \\or limits that changed since the check, is the usual reason.
+        \\
+        \\The cause names the resource and the kernel's reason.
+        ,
+    },
+    .{
+        .code = .E0313,
+        .severity = .@"error",
+        .blame = .user,
+        .summary = "a --shm-size is not valid",
+        .explanation =
+        \\--shm-size sets the size of the container's /dev/shm, a tmpfs, in
+        \\--memory's syntax (k, m or g, binary units). The default is 64 MiB. It
+        \\must be at least one page. Without --memory it can't be larger than the
+        \\host's memory (MemTotal in /proc/meminfo): tmpfs pages are memory, and
+        \\a /dev/shm larger than the host is a mistake, not a limit.
+        ,
+    },
+    .{
+        .code = .E0314,
+        .severity = .@"error",
+        .blame = .user,
+        .summary = "--shm-size is larger than --memory",
+        .explanation =
+        \\The pages of /dev/shm are charged to the memory limit of the
+        \\container that touches them, so /dev/shm already counts against
+        \\--memory. A /dev/shm larger than the limit can never be filled: the
+        \\container is stopped for lack of memory first. zbx refuses the
+        \\combination rather than let it fail later. Equal is allowed.
+        \\
+        \\Raise --memory, or lower --shm-size to at most it.
+        ,
+    },
+    .{
+        .code = .E0315,
+        .severity = .@"error",
+        .blame = .user,
+        .summary = "a --sysctl is not valid",
+        .explanation =
+        \\--sysctl sets a kernel setting of the container's own namespaces:
+        \\--sysctl key=value, with the key in dot form (net.core.somaxconn). A
+        \\value is printable ASCII, with no newline, of at most 256 bytes. A run
+        \\takes at most 16 of them, each key at most once.
+        ,
+    },
+    .{
+        .code = .E0316,
+        .severity = .@"error",
+        .blame = .user,
+        .summary = "a --sysctl is a host setting",
+        .explanation =
+        \\A container can set only the sysctls of the namespaces it has of its
+        \\own: its ipc namespace, and its network namespace unless it runs with
+        \\--net host. zbx keeps a reviewed list of them (Kubernetes' safe set,
+        \\and the namespaced keys databases ask for):
+        \\
+        \\  kernel.shm*, kernel.msg*, kernel.sem, fs.mqueue.*  (ipc)
+        \\  net.core.somaxconn, net.ipv4.ip_local_port_range,
+        \\  net.ipv4.tcp_* and the other net.* keys on the list  (net)
+        \\
+        \\Every other key, vm.max_map_count among them, is the host's: a
+        \\container that set it would change it for every process on the host.
+        \\Set it on the host with sysctl -w, as its administrator.
+        ,
+    },
+    .{
+        .code = .E0317,
+        .severity = .@"error",
+        .blame = .user,
+        .summary = "a --sysctl net.* key with --net host",
+        .explanation =
+        \\With --net host the container shares the host's network namespace, so
+        \\a net.* sysctl would change the host's network, not the container's.
+        \\zbx refuses it. Drop --net host to give the container a network of its
+        \\own (the default, or --net user), where net.* keys are its own.
+        ,
+    },
+    .{
+        .code = .E0318,
+        .severity = .@"error",
+        .blame = .user,
+        .summary = "the kernel refused a --sysctl",
+        .explanation =
+        \\The container writes each --sysctl beneath its own /proc/sys before it
+        \\drops its capabilities. The kernel refused the value, or the write
+        \\failed. A value the key does not take (EINVAL) is the usual reason:
+        \\read the key on the host (sysctl <key>) for its form.
+        \\
+        \\net.ipv4.ping_group_range takes two group ids, which must both be ones
+        \\the container has: within its id map.
         ,
     },
     .{

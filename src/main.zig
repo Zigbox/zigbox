@@ -266,6 +266,7 @@ test {
     // and the runs that use it, in the simulator.
     _ = @import("runtime/pasta.zig");
     _ = @import("runtime/net_tests.zig");
+    _ = @import("runtime/knobs_tests.zig");
     _ = @import("runtime/listen_tests.zig");
     _ = @import("runtime/hosts_file_tests.zig");
     // CI path selection (`.github/ci-changes.sh`).

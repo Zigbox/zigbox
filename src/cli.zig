@@ -22,6 +22,7 @@ const lock_commands = @import("lock_commands.zig");
 const panic = @import("diag/panic.zig");
 const render = @import("diag/render.zig");
 const diagnose = @import("runtime/diagnose.zig");
+const knobs_diagnose = @import("runtime/knobs_diagnose.zig");
 const image_mod = @import("runtime/image.zig");
 const lazy_server_mod = @import("fuse/lazy_server.zig");
 const lazy_lines = @import("lazy_lines.zig");
@@ -124,6 +125,11 @@ const help_text =
     \\  --memory <size> memory limit: 128m, 1g (needs the systemd user manager)
     \\  --pids <n>      limit on processes and threads
     \\  --cpus <n>      CPU limit, in CPUs: 0.5 is half of one
+    \\  --ulimit <name>=<soft>[:<hard>]  a resource limit: nofile, nproc, memlock or stack, at
+    \\                  most your own hard limit (repeatable)
+    \\  --shm-size <size>  the size of /dev/shm: 256m (default 64m; counts against --memory)
+    \\  --sysctl <key>=<value>  a sysctl of the container's own ipc or network namespace, as
+    \\                  net.core.somaxconn=8192 (repeatable; zbx explain E0316 lists them)
     \\  --read-only     mount the root read-only, with a tmpfs at /tmp and /run
     \\  --net <mode>    none (the default: a network of its own, only lo), host (share the host's)
     \\                  or user (through pasta: apt install passt)
@@ -442,6 +448,14 @@ pub const RunArgs = struct {
     user: ?[]const u8 = null,
     /// `exec`: `--workdir` as typed (checked when the exec starts, E0005).
     workdir: ?[]const u8 = null,
+    /// `--ulimit`, parsed as each was read (a bad one, or one named twice, is E0310 there).
+    rlimits: runtime_spec.Rlimits = .{},
+    /// `--shm-size` as typed, read by `limits_of`.
+    shm_size: ?[]const u8 = null,
+    /// `--sysctl`, each checked for its form as it was read (E0315); the allowlist and the
+    /// network are checked when the run starts.
+    sysctls: [constants.sysctls_max]runtime_spec.Sysctl = undefined,
+    sysctls_count: u32 = 0,
     /// `logs`: `--follow`, `--tail` and `--stream` as typed (checked as they were read, E0219).
     follow: bool = false,
     tail: ?[]const u8 = null,
@@ -465,6 +479,11 @@ pub const RunArgs = struct {
     pub fn state_slice(run_args: *const RunArgs) []const volume.Mount {
         assert(run_args.state_count <= constants.state_volumes_max);
         return run_args.state[0..run_args.state_count];
+    }
+
+    pub fn sysctls_slice(run_args: *const RunArgs) []const runtime_spec.Sysctl {
+        assert(run_args.sysctls_count <= constants.sysctls_max);
+        return run_args.sysctls[0..run_args.sysctls_count];
     }
 
     pub fn publish_slice(run_args: *const RunArgs) []const runtime_spec.Publish {
@@ -498,9 +517,12 @@ const RunOption = enum {
     tail,
     stream,
     workdir,
+    ulimit,
+    shm_size,
+    sysctl,
 
     fn flag(option: RunOption) []const u8 {
-        assert(@backingInt(option) <= 22);
+        assert(@backingInt(option) <= 25);
         assert(@tagName(option).len > 0);
         return switch (option) {
             .rootfs => "--rootfs",
@@ -526,6 +548,9 @@ const RunOption = enum {
             .tail => "--tail",
             .stream => "--stream",
             .workdir => "--workdir",
+            .ulimit => "--ulimit",
+            .shm_size => "--shm-size",
+            .sysctl => "--sysctl",
         };
     }
 };
@@ -775,7 +800,7 @@ fn import_option_of(argument: []const u8) ?Token {
 /// `--rootfs`, `--rootfs=x` and the other value options of `run`, or null.
 fn run_option_of(argument: []const u8) ?Token {
     assert(argument.len <= constants.arg_bytes_max);
-    assert(std.enums.values(RunOption).len == 23);
+    assert(std.enums.values(RunOption).len == 26);
     inline for (comptime std.enums.values(RunOption)) |option| {
         const flag = comptime option.flag();
         if (std.mem.eql(u8, argument, flag)) return .{ .run_option_next = option };
@@ -1944,6 +1969,8 @@ fn take_run_option(
     if (option == .mount) return take_mount(diag, run_args, .mount, value);
     if (option == .device) return take_device(diag, run_args, value);
     if (option == .gpu) return take_gpu(diag, run_args, value);
+    if (option == .ulimit) return take_ulimit(diag, run_args, value);
+    if (option == .sysctl) return take_sysctl(diag, run_args, value);
     const slot = switch (option) {
         .rootfs => &run_args.rootfs,
         .name => &run_args.name,
@@ -1965,6 +1992,8 @@ fn take_run_option(
         .tail => &run_args.tail,
         .stream => &run_args.stream,
         .workdir => &run_args.workdir,
+        .shm_size => &run_args.shm_size,
+        .ulimit, .sysctl => unreachable, // Repeatable: `take_ulimit` and `take_sysctl` above.
     };
     if (slot.* != null) return unexpected_argument(diag, command, argument);
     if (option == .user) {
@@ -2179,6 +2208,48 @@ fn take_listen(
         },
     }
     assert(run_args.listen != null);
+}
+
+/// One `--ulimit`: parsed now, so that the diagnostic quotes the value that is wrong.
+fn take_ulimit(diag: *Diag, run_args: *RunArgs, value: []const u8) ParseError!void {
+    assert(diag.code == null);
+    assert(run_args.rlimits.count() <= runtime_spec.knobs.resources_count);
+    const parsed = switch (runtime_spec.knobs.parse_ulimit(value)) {
+        .ok => |ulimit| ulimit,
+        .problem => |problem| {
+            knobs_diagnose.ulimit_invalid(diag, value, problem);
+            return error.BadOptionValue;
+        },
+    };
+    if (run_args.rlimits.get(parsed.resource) != null) {
+        knobs_diagnose.ulimit_invalid(diag, value, .repeated);
+        return error.BadOptionValue;
+    }
+    run_args.rlimits.set(parsed.resource, parsed.limit);
+    assert(run_args.rlimits.get(parsed.resource) != null);
+}
+
+/// One `--sysctl`: its form now (E0315); the allowlist and the network when the run starts.
+fn take_sysctl(diag: *Diag, run_args: *RunArgs, value: []const u8) ParseError!void {
+    assert(diag.code == null);
+    assert(run_args.sysctls_count <= constants.sysctls_max);
+    const parsed = switch (runtime_spec.knobs.parse_sysctl(value)) {
+        .ok => |sysctl| sysctl,
+        .problem => |problem| {
+            const shown: runtime_spec.Sysctl = .{ .key = value, .value = "" };
+            const at: runtime_spec.knobs.ListProblem = .{
+                .malformed = .{ .index = 0, .problem = problem },
+            };
+            knobs_diagnose.sysctl_invalid(diag, &.{shown}, at);
+            return error.BadOptionValue;
+        },
+    };
+    if (run_args.sysctls_count == constants.sysctls_max) {
+        knobs_diagnose.sysctl_invalid(diag, &.{parsed}, .too_many);
+        return error.BadOptionValue;
+    }
+    run_args.sysctls[run_args.sysctls_count] = parsed;
+    run_args.sysctls_count += 1;
 }
 
 /// One `--publish`: parsed now, so that the diagnostic quotes the value that is wrong.
@@ -4000,6 +4071,8 @@ fn run_container(
         .user = prepared.user,
         .network = network_of(&given),
         .publish = given.publish_slice(),
+        .rlimits = given.rlimits,
+        .sysctls = given.sysctls_slice(),
         .listen = given.listen,
         .hosts_file = given.hosts_file orelse "",
         .state = given.state_slice(),
@@ -4501,6 +4574,12 @@ fn limits_of(given: *const RunArgs, diag: *Diag) RunError!runtime_spec.Limits {
     if (given.cpus) |text| {
         limits.cpu_millis = runtime_spec.parse_cpus(text) catch |problem| {
             diagnose.limit_invalid(diag, .cpus, text, problem);
+            return error.StartFailed;
+        };
+    }
+    if (given.shm_size) |text| {
+        limits.shm_bytes = runtime_spec.knobs.parse_size(text) orelse {
+            knobs_diagnose.shm_invalid(diag, text, .not_a_size, 0);
             return error.StartFailed;
         };
     }
