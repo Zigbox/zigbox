@@ -29,6 +29,8 @@ const assert = std.debug.assert;
 const constants = @import("../constants.zig");
 const host_mod = @import("../host.zig");
 const net = @import("../registry/net.zig");
+const cloud_env = @import("../cloud/env.zig");
+const metadata = @import("../cloud/metadata.zig");
 const ecr = @import("ecr.zig");
 const parse = @import("parse.zig");
 const sigv4 = @import("sigv4.zig");
@@ -88,51 +90,16 @@ pub const Trace = struct {
     }
 };
 
-/// The environment as the caller sees it: name and value pairs, handed in so a caller that holds
-/// different settings per workload (or none in its own process) is not bound to the process's.
-/// Only the `names` below are ever looked at.
-pub const Env = struct {
-    pairs: []const Pair,
-
-    pub const Pair = struct { name: []const u8, value: []const u8 };
-
-    /// The names `resolve` reads.
-    pub const names = [_][]const u8{
-        "AWS_ACCESS_KEY_ID",
-        "AWS_SECRET_ACCESS_KEY",
-        "AWS_SESSION_TOKEN",
-        "AWS_ROLE_ARN",
-        "AWS_WEB_IDENTITY_TOKEN_FILE",
-        "AWS_ROLE_SESSION_NAME",
-        "AWS_EC2_METADATA_DISABLED",
-    };
-
-    /// The value of `name`, whole whatever its length, or null if not set. An empty value counts
-    /// as not set, as the AWS SDKs read it (docs/decisions/2026-11-10-aws-empty-env-is-unset.md).
-    pub fn get(env: Env, name: []const u8) ?[]const u8 {
-        for (env.pairs) |pair| {
-            if (!std.mem.eql(u8, pair.name, name)) continue;
-            if (pair.value.len == 0) return null;
-            return pair.value;
-        }
-        return null;
-    }
-
-    /// The caller's view of this process, for the CLI: each name in `names` that the host has,
-    /// in `storage`, whole whatever its length (the host hands out a slice of its own memory, so
-    /// reading a long value copies nothing). A value over its bound reaches `resolve` as it is
-    /// and is refused there, not cut or dropped.
-    pub fn from_host(host: host_mod.Host, storage: *[names.len]Pair) Env {
-        var count: u32 = 0;
-        inline for (names) |name| {
-            if (host.environment(name, std.math.maxInt(u32))) |value| {
-                storage[count] = .{ .name = name, .value = value };
-                count += 1;
-            }
-        }
-        return .{ .pairs = storage[0..count] };
-    }
-};
+/// The environment as the caller sees it (`src/cloud/env.zig`): only these names are read.
+pub const Env = cloud_env.CredentialEnv(&.{
+    "AWS_ACCESS_KEY_ID",
+    "AWS_SECRET_ACCESS_KEY",
+    "AWS_SESSION_TOKEN",
+    "AWS_ROLE_ARN",
+    "AWS_WEB_IDENTITY_TOKEN_FILE",
+    "AWS_ROLE_SESSION_NAME",
+    "AWS_EC2_METADATA_DISABLED",
+});
 
 pub const Error = error{
     /// No source gave credentials; the trace says what each did.
@@ -227,7 +194,6 @@ pub const Workspace = struct {
 };
 
 const sts_service = "sts";
-const imds_host = "169.254.169.254";
 const role_path = "/latest/meta-data/iam/security-credentials/";
 
 /// Finds credentials for a call in `region` at `now_s` (seconds since the epoch; the expiry of
@@ -410,18 +376,15 @@ fn accept(
     state.* = .used;
 }
 
-/// One call to the metadata service, never through a proxy. The status, or null if the call failed.
+/// One call to the metadata service (`src/cloud/metadata.zig`). The status, or null if the call
+/// failed.
 fn imds_call(
     host: host_mod.Host,
     request: *const net.Request,
     sink: *net.BufferSink,
 ) ?u16 {
-    assert(request.proxy == .never);
-    assert(request.scheme == .http);
     var head: net.Head = .{};
-    sink.len = 0;
-    host.network().call(request, &head, sink.sink()) catch return null;
-    return head.status;
+    return metadata.call(host, request, &head, sink);
 }
 
 fn instance_metadata(
@@ -469,20 +432,14 @@ fn instance_metadata(
     fetch_role(host, session[0..sink.len], now_s, workspace, credentials, trace);
 }
 
+/// The token is the answer to the PUT; the keys are the answer to a GET: both are secret.
 fn imds_request(target: []const u8, response: []u8) net.Request {
-    return .{
-        .scheme = .http,
-        .host = imds_host,
-        .port = 80,
-        .target = target,
-        .accept = "",
-        .bearer = "",
-        .body_bytes_max = response.len,
-        .idle_timeout_ms = constants.aws_imds_timeout_ms,
-        .total_timeout_ms = constants.aws_imds_total_timeout_ms,
-        .proxy = .never,
-        .secret = true, // The token is the answer to the PUT; the keys are the answer to a GET.
-    };
+    return metadata.request(
+        target,
+        response,
+        constants.aws_imds_timeout_ms,
+        constants.aws_imds_total_timeout_ms,
+    );
 }
 
 fn fetch_role(

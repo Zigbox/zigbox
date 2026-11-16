@@ -263,6 +263,9 @@ pub const Head = struct {
     content_range: HeaderValue(constants.registry_header_bytes_max) = .{},
     /// "0-last" of an upload's 202 answer: the bytes the registry holds.
     range: HeaderValue(constants.registry_header_bytes_max) = .{},
+    /// `Google` from Google's metadata server: the answer is from GCE, not from another cloud's
+    /// service on the same link-local address (M6d).
+    metadata_flavor: HeaderValue(constants.registry_header_bytes_max) = .{},
     /// Body bytes handed to the sink.
     body_len: u64 = 0,
     /// Set by the client, never by the network: this answer came from a host the client was
