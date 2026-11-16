@@ -177,15 +177,64 @@ const WifCase = struct {
 };
 
 const wif_cases = [_]WifCase{
-    .{ .name = "subject refused", .sts = .invalid_grant, .state = .refused, .step = .exchange, .code = "invalid_grant", .status = 400 },
-    .{ .name = "audience wrong", .sts = .invalid_target, .state = .refused, .step = .exchange, .code = "invalid_target", .status = 400 },
-    .{ .name = "sts down", .sts = .unavailable, .state = .refused, .step = .exchange, .code = "server_error", .status = 503 },
+    .{
+        .name = "subject refused",
+        .sts = .invalid_grant,
+        .state = .refused,
+        .step = .exchange,
+        .code = "invalid_grant",
+        .status = 400,
+    },
+    .{
+        .name = "audience wrong",
+        .sts = .invalid_target,
+        .state = .refused,
+        .step = .exchange,
+        .code = "invalid_target",
+        .status = 400,
+    },
+    .{
+        .name = "sts down",
+        .sts = .unavailable,
+        .state = .refused,
+        .step = .exchange,
+        .code = "server_error",
+        .status = 503,
+    },
     .{ .name = "sts garbage", .sts = .malformed, .state = .malformed, .step = .exchange },
-    .{ .name = "impersonation denied", .iam = .denied, .state = .refused, .step = .impersonation, .code = "PERMISSION_DENIED", .status = 403 },
-    .{ .name = "iam down", .iam = .unavailable, .state = .refused, .step = .impersonation, .code = "UNAVAILABLE", .status = 503 },
+    .{
+        .name = "impersonation denied",
+        .iam = .denied,
+        .state = .refused,
+        .step = .impersonation,
+        .code = "PERMISSION_DENIED",
+        .status = 403,
+    },
+    .{
+        .name = "iam down",
+        .iam = .unavailable,
+        .state = .refused,
+        .step = .impersonation,
+        .code = "UNAVAILABLE",
+        .status = 503,
+    },
     .{ .name = "iam garbage", .iam = .malformed, .state = .malformed, .step = .impersonation },
-    .{ .name = "url refused", .subject = .refused, .url = true, .state = .refused, .step = .subject_token, .status = 401 },
-    .{ .name = "url down", .subject = .unavailable, .url = true, .state = .refused, .step = .subject_token, .status = 502 },
+    .{
+        .name = "url refused",
+        .subject = .refused,
+        .url = true,
+        .state = .refused,
+        .step = .subject_token,
+        .status = 401,
+    },
+    .{
+        .name = "url down",
+        .subject = .unavailable,
+        .url = true,
+        .state = .refused,
+        .step = .subject_token,
+        .status = 502,
+    },
 };
 
 test "every workload identity failure is terminal and named" {
@@ -269,9 +318,14 @@ test "the metadata server, in each of the ways it answers" {
         defer fixture.destroy();
         fixture.google.metadata = case.mode;
         const result = fixture.resolve(both);
-        if (case.state == .used) try result else try testing.expectError(error.NoCredentials, result);
+        if (case.state == .used) {
+            try result;
+        } else {
+            try testing.expectError(error.NoCredentials, result);
+        }
         try testing.expectEqual(case.state, fixture.trace.metadata);
-        try testing.expectEqual(credentials_mod.State.not_configured, fixture.trace.workload_identity);
+        const wif_state = fixture.trace.workload_identity;
+        try testing.expectEqual(credentials_mod.State.not_configured, wif_state);
         try testing.expectEqual(@as(u32, 1), fixture.wire.requests);
         const entry = fixture.wire.logged(0).?;
         try testing.expectEqual(.never, entry.proxy);

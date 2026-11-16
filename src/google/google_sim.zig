@@ -137,14 +137,14 @@ pub const GoogleSim = struct {
     }
 
     /// The Basic value the realm accepts, as a client must send it.
-    pub fn basic_text(sim: *const GoogleSim, storage: *[128]u8) []const u8 {
+    pub fn basic_text(sim: *const GoogleSim, out: *[128]u8) []const u8 {
         var plain: [96]u8 = undefined;
         const user = "oauth2accesstoken:";
         assert(user.len + sim.accepted_token.len <= plain.len);
         @memcpy(plain[0..user.len], user);
         @memcpy(plain[user.len..][0..sim.accepted_token.len], sim.accepted_token);
         const text = plain[0 .. user.len + sim.accepted_token.len];
-        return std.base64.standard.Encoder.encode(storage, text);
+        return std.base64.standard.Encoder.encode(out, text);
     }
 };
 
@@ -352,7 +352,8 @@ fn registry(sim: *GoogleSim, request: *const net.Request, served: *net_sim.Serve
     if (request.basic.len + request.authorization.len > 0) sim.leaked += 1;
     fixture_answer(sim, request, request.target, request.bearer, served);
     const storage_base = "https://" ++ storage_host ++ "/cdn/";
-    const redirected = served.status == 307 and std.mem.startsWith(u8, served.location, storage_base);
+    const to_storage = std.mem.startsWith(u8, served.location, storage_base);
+    const redirected = served.status == 307 and to_storage;
     if (!redirected or sim.blob_redirect == .storage) return;
     const digest = served.location[storage_base.len..];
     served.status = 302;

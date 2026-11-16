@@ -45,7 +45,8 @@ test "a file-sourced account with impersonation is read whole" {
     const parsed = parse.parse_credentials(file_account);
     const account = parsed.account;
     try testing.expectEqualStrings(audience, account.audience);
-    try testing.expectEqualStrings("urn:ietf:params:oauth:token-type:jwt", account.subject_token_type);
+    const jwt_type = "urn:ietf:params:oauth:token-type:jwt";
+    try testing.expectEqualStrings(jwt_type, account.subject_token_type);
     try testing.expectEqual(parse.SourceKind.file, account.source);
     try testing.expectEqualStrings("/run/zbx/oidc-token", account.location);
     try testing.expectEqualStrings("", account.json_field);
@@ -76,7 +77,8 @@ test "each unsupported credentials file is refused with its own reason" {
     // Goal: a key file, gcloud's user credentials, another type and every unsupported
     // `external_account` shape the brief lists each give their reason, so the user is told
     // what to change; a type that is not a plain name is not shown back.
-    try expect_refused("{\"type\":\"service_account\",\"private_key\":\"-----\"}", .service_account_key);
+    const key_file = "{\"type\":\"service_account\",\"private_key\":\"-----\"}";
+    try expect_refused(key_file, .service_account_key);
     try expect_refused("{\"type\":\"authorized_user\",\"refresh_token\":\"x\"}", .authorized_user);
     const other = parse.parse_credentials("{\"type\":\"impersonated_service_account\"}");
     try testing.expectEqualStrings("impersonated_service_account", other.refused.type_name);
@@ -85,21 +87,61 @@ test "each unsupported credentials file is refused with its own reason" {
     try expect_refused("{}", .malformed);
     try expect_refused("not json", .malformed);
     const cases = [_]struct { from: []const u8, to: []const u8, reason: parse.Refusal }{
-        .{ .from = "https://sts.googleapis.com/v1/token", .to = "https://sts.example.com/v1/token", .reason = .token_url },
+        .{
+            .from = "https://sts.googleapis.com/v1/token",
+            .to = "https://sts.example.com/v1/token",
+            .reason = .token_url,
+        },
         .{ .from = "\"googleapis.com\"", .to = "\"example.com\"", .reason = .universe_domain },
-        .{ .from = "iamcredentials.googleapis.com", .to = "iam.example.com", .reason = .impersonation_url },
+        .{
+            .from = "iamcredentials.googleapis.com",
+            .to = "iam.example.com",
+            .reason = .impersonation_url,
+        },
         .{ .from = ":generateAccessToken", .to = ":generateIdToken", .reason = .impersonation_url },
-        .{ .from = "projects/123456789012/locations/global/workloadIdentityPools", .to = "locations/global/workforcePools", .reason = .workforce_pool },
-        .{ .from = "\"file\": \"/run/zbx/oidc-token\"", .to = "\"executable\": {\"command\": \"x\"}", .reason = .executable },
-        .{ .from = "\"file\": \"/run/zbx/oidc-token\"", .to = "\"environment_id\": \"aws1\"", .reason = .aws },
-        .{ .from = "\"file\": \"/run/zbx/oidc-token\"", .to = "\"certificate\": {}", .reason = .certificate },
-        .{ .from = "\"file\": \"/run/zbx/oidc-token\"", .to = "\"url\": \"http://169.254.169.254/metadata/identity\"", .reason = .plain_http_url },
+        .{
+            .from = "projects/123456789012/locations/global/workloadIdentityPools",
+            .to = "locations/global/workforcePools",
+            .reason = .workforce_pool,
+        },
+        .{
+            .from = "\"file\": \"/run/zbx/oidc-token\"",
+            .to = "\"executable\": {\"command\": \"x\"}",
+            .reason = .executable,
+        },
+        .{
+            .from = "\"file\": \"/run/zbx/oidc-token\"",
+            .to = "\"environment_id\": \"aws1\"",
+            .reason = .aws,
+        },
+        .{
+            .from = "\"file\": \"/run/zbx/oidc-token\"",
+            .to = "\"certificate\": {}",
+            .reason = .certificate,
+        },
+        .{
+            .from = "\"file\": \"/run/zbx/oidc-token\"",
+            .to = "\"url\": \"http://169.254.169.254/metadata/identity\"",
+            .reason = .plain_http_url,
+        },
         .{ .from = "\"file\": \"/run/zbx/oidc-token\", ", .to = "", .reason = .no_source },
-        .{ .from = "\"file\": \"/run/zbx/oidc-token\"", .to = "\"file\": \"/a\", \"url\": \"https://x\"", .reason = .no_source },
-        .{ .from = "\"universe_domain\"", .to = "\"workforce_pool_user_project\"", .reason = .workforce_pool },
+        .{
+            .from = "\"file\": \"/run/zbx/oidc-token\"",
+            .to = "\"file\": \"/a\", \"url\": \"https://x\"",
+            .reason = .no_source,
+        },
+        .{
+            .from = "\"universe_domain\"",
+            .to = "\"workforce_pool_user_project\"",
+            .reason = .workforce_pool,
+        },
         .{ .from = "\"audience\"", .to = "\"audiences\"", .reason = .malformed },
         .{ .from = "\"type\": \"text\"", .to = "\"type\": \"xml\"", .reason = .malformed },
-        .{ .from = "\"type\": \"external_account\",", .to = "\"type\": \"external_account\", \"type\": \"x\",", .reason = .malformed },
+        .{
+            .from = "\"type\": \"external_account\",",
+            .to = "\"type\": \"external_account\", \"type\": \"x\",",
+            .reason = .malformed,
+        },
         .{ .from = "/run/zbx/oidc-token", .to = "/run/zbx/oidc\\u002dtoken", .reason = .malformed },
     };
     for (cases) |case| {
@@ -112,15 +154,16 @@ test "each unsupported credentials file is refused with its own reason" {
 test "a URL source's headers are bounded and checked" {
     // Goal: more headers than the bound, a reserved header name or a header on a file source is
     // malformed; a plain-HTTP URL is its own refusal.
-    const many = "{\"type\":\"external_account\",\"audience\":\"a\",\"subject_token_type\":\"t\"," ++
+    const head = "{\"type\":\"external_account\",\"audience\":\"a\",";
+    const many = head ++ "\"subject_token_type\":\"t\"," ++
         "\"credential_source\":{\"url\":\"https://x/t\",\"headers\":{\"a\":\"1\",\"b\":\"2\"," ++
         "\"c\":\"3\",\"d\":\"4\",\"e\":\"5\"}}}";
     comptime std.debug.assert(constants.google_source_headers_max == 4);
     try expect_refused(many, .malformed);
-    const reserved = "{\"type\":\"external_account\",\"audience\":\"a\",\"subject_token_type\":\"t\"," ++
+    const reserved = head ++ "\"subject_token_type\":\"t\"," ++
         "\"credential_source\":{\"url\":\"https://x/t\",\"headers\":{\"Host\":\"y\"}}}";
     try expect_refused(reserved, .malformed);
-    const on_file = "{\"type\":\"external_account\",\"audience\":\"a\",\"subject_token_type\":\"t\"," ++
+    const on_file = head ++ "\"subject_token_type\":\"t\"," ++
         "\"credential_source\":{\"file\":\"/t\",\"headers\":{\"a\":\"1\"}}}";
     try expect_refused(on_file, .malformed);
 }
@@ -128,10 +171,12 @@ test "a URL source's headers are bounded and checked" {
 test "subject tokens in text and JSON" {
     // Goal: a text token loses its trailing line end; a JSON token is its named member; an empty
     // or blank-holding token is refused.
-    try testing.expectEqualStrings("eyJhbGciOi.fake.sig", try parse.subject_text("eyJhbGciOi.fake.sig\n"));
+    const text_token = "eyJhbGciOi.fake.sig";
+    try testing.expectEqualStrings(text_token, try parse.subject_text(text_token ++ "\n"));
     try testing.expectError(error.Malformed, parse.subject_text("\n"));
     try testing.expectError(error.Malformed, parse.subject_text("a b"));
-    try testing.expectEqualStrings("eyJ.fake", try parse.subject_json("{\"count\":1,\"value\":\"eyJ.fake\"}", "value"));
+    const json_token = "{\"count\":1,\"value\":\"eyJ.fake\"}";
+    try testing.expectEqualStrings("eyJ.fake", try parse.subject_json(json_token, "value"));
     try testing.expectError(error.Malformed, parse.subject_json("{\"value\":1}", "value"));
     try testing.expectError(error.Malformed, parse.subject_json("{\"other\":\"x\"}", "value"));
 }
@@ -198,12 +243,14 @@ test "error codes from each of Google's shapes, and never a message" {
 
 test "impersonation URLs and emails" {
     // Goal: only the exact `generateAccessToken` URL names an account, and the email is checked.
-    try testing.expectEqualStrings(service_account, parse.impersonated_account(impersonation_url).?);
+    const named = parse.impersonated_account(impersonation_url).?;
+    try testing.expectEqualStrings(service_account, named);
     try testing.expect(parse.impersonated_account(
         "https://iamcredentials.googleapis.com/v1/projects/-/serviceAccounts/:generateAccessToken",
     ) == null);
     try testing.expect(parse.impersonated_account(
-        "https://iamcredentials.googleapis.com/v1/projects/-/serviceAccounts/a/b@c:generateAccessToken",
+        "https://iamcredentials.googleapis.com/v1/projects/-/serviceAccounts/" ++
+            "a/b@c:generateAccessToken",
     ) == null);
     try testing.expect(!parse.email_valid("a@b@c"));
     try testing.expect(!parse.email_valid("@b.c"));

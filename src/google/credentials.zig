@@ -208,7 +208,8 @@ pub const Error = error{
 
 pub const metadata_token_path = "/computeMetadata/v1/instance/service-accounts/default/token";
 const cloud_platform_scope = "https://www.googleapis.com/auth/cloud-platform";
-const impersonation_body = "{\"scope\":[\"" ++ cloud_platform_scope ++ "\"],\"lifetime\":\"3600s\"}";
+const impersonation_body = "{\"scope\":[\"" ++ cloud_platform_scope ++
+    "\"],\"lifetime\":\"3600s\"}";
 
 /// Finds an access token at `now_s` (seconds since the epoch; the expiry of what a service hands
 /// out is judged against it), from the sources `sources` names. On success `token` holds it and

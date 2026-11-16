@@ -120,6 +120,6 @@ test "Google hosts are told apart" {
 test "a region at its bound" {
     // Goal: the longest region is accepted, one byte more is not.
     const longest: [constants.google_region_bytes_max]u8 = @splat('a');
-    try testing.expectEqual(Host.artifact_registry, classify(&(longest ++ "-docker.pkg.dev")));
-    try testing.expectEqual(Host.other_google, classify(&(longest ++ "a-docker.pkg.dev")));
+    try testing.expectEqual(Host.artifact_registry, classify(&(longest ++ "-docker.pkg.dev".*)));
+    try testing.expectEqual(Host.other_google, classify(&(longest ++ "a-docker.pkg.dev".*)));
 }

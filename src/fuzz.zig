@@ -26,6 +26,7 @@ const state_fuzz = @import("fuzz_state.zig");
 const vm_fuzz = @import("fuzz_vm.zig");
 const redact_fuzz = @import("fuzz_redact.zig");
 const parse_aws_fuzz = @import("fuzz_parse_aws.zig");
+const parse_google_fuzz = @import("fuzz_parse_google.zig");
 const dbus_fuzz = @import("fuzz_dbus.zig");
 const seccomp_fuzz = @import("fuzz_seccomp.zig");
 const tree_fuzz = @import("fuzz_tree.zig");
@@ -90,6 +91,7 @@ const fuzzers = [_]Fuzzer{
     .{ .name = "vm", .run_iteration = vm_fuzz.fuzz_vm },
     .{ .name = "redact", .run_iteration = redact_fuzz.fuzz_redact },
     .{ .name = "parse_aws", .run_iteration = parse_aws_fuzz.fuzz_parse_aws },
+    .{ .name = "parse_google", .run_iteration = parse_google_fuzz.fuzz_parse_google },
     .{ .name = "dbus", .run_iteration = dbus_fuzz.fuzz_dbus },
     .{ .name = "seccomp", .run_iteration = seccomp_fuzz.fuzz_seccomp },
     .{ .name = "tree", .run_iteration = tree_fuzz.fuzz_tree },

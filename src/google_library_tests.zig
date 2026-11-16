@@ -76,5 +76,6 @@ test "a caller resolves from its own environment and clock, not the process's" {
     // The model's clock stays put; the caller's moves on, past the token's life.
     const far = caller.host.world.now + 10 * 3600;
     try testing.expectError(error.NoCredentials, caller.resolve(&pairs, far, wif));
-    try testing.expectEqual(zigbox.google_credentials.State.expired, caller.trace.workload_identity);
+    const state = caller.trace.workload_identity;
+    try testing.expectEqual(zigbox.google_credentials.State.expired, state);
 }
