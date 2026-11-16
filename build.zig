@@ -20,6 +20,9 @@ pub fn build(b: *std.Build) void {
     const manifest = @import("build.zig.zon");
     const options = b.addOptions();
     options.addOption([]const u8, "version", manifest.version);
+    // 0.5.2 ships lazy start (S2) dormant: `--lazy` is refused unless a build turns it on, which
+    // only demo-s2-lazy's zbx does (docs/decisions/2026-11-16-0.5.2-s2-dormant.md).
+    options.addOption(bool, "lazy_start", false);
 
     // LLVM in every mode, not Zig's own x86_64 backend in Debug: that backend writes each
     // `undefined` global into .data as 0xaa bytes, which made a Debug zbx 335 MB and a test
@@ -698,6 +701,8 @@ fn add_demo_step(
         if (reuse) run.addArg("--reuse-overlay");
         if (is_packages) {
             add_m8_packages(b, options, run);
+        } else if (std.mem.eql(u8, demo.step, "demo-s2-lazy")) {
+            add_release_binaries(b, lazy_start_options(b), run);
         } else {
             add_release_binaries(b, options, run);
         }
@@ -896,6 +901,16 @@ fn add_release_binaries(
         run.addArg(flag);
         run.addFileArg(exe.getEmittedBin());
     }
+}
+
+/// The options of demo-s2-lazy's zbx: a release's, with lazy start turned on. 0.5.2 ships it
+/// dormant (docs/decisions/2026-11-16-0.5.2-s2-dormant.md); 0.6.0 drops the option.
+fn lazy_start_options(b: *std.Build) *std.Build.Step.Options {
+    const manifest = @import("build.zig.zon");
+    const options = b.addOptions();
+    options.addOption([]const u8, "version", manifest.version);
+    options.addOption(bool, "lazy_start", true);
+    return options;
 }
 
 /// The upgrade test of demo-m3 to demo-m6b: the older zbx, built from a worktree of the
@@ -1185,8 +1200,8 @@ fn link_macos(module: *std.Build.Module, image: VmImage) void {
 
 /// Builds the macOS zbx, signs it ad hoc with the virtualization entitlement (good for this Mac;
 /// a Developer ID signature and notarization are the release's job) and installs it.
-/// `zig build demo-mac`: the M1 to M4 demo steps and M4b's, driven from this Mac through the macOS
-/// `zbx` it installs (src/testing/mac_demo.zig). Only where the build runs on macOS.
+/// `zig build demo-mac`: the M1 to M4, M4b, M6b and M9 demo steps, driven from this Mac through
+/// the macOS `zbx` it installs (src/testing/mac_demo.zig). Only where the build runs on macOS.
 fn add_demo_mac(b: *std.Build, vm_module: *std.Build.Module) void {
     const exe = b.addExecutable(.{
         .name = "demo_mac",
@@ -1202,7 +1217,7 @@ fn add_demo_mac(b: *std.Build, vm_module: *std.Build.Module) void {
     run.setCwd(b.path("."));
     run.addArgs(&.{ "--zbx", "zig-out/bin/zbx" });
     run.step.dependOn(b.getInstallStep());
-    const step = b.step("demo-mac", "Run the M1 to M4 and M4b demo steps from macOS");
+    const step = b.step("demo-mac", "Run the M1 to M4, M4b, M6b and M9 demo steps from macOS");
     step.dependOn(&run.step);
 }
 

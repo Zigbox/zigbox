@@ -111,7 +111,12 @@ classify() {
     # builder under them is M7's and M9's, which builds what it imports.
     src/dockerfile/* | src/import_*.zig | src/build/dockerfile_fixtures/*) want_one m9; return ;;
     src/build/* | src/build_commands.zig) want_one m7; want_one m9; return ;;
-    src/fuse/* | src/host_real_fuse.zig | src/lazy/*) want_one s2_lazy; return ;;
+    # Every zbx start sets up the lazy server (main.zig) and links the FUSE host (host_real.zig);
+    # pull parses the lazy index's anchors and pack and export import the lazy writer, so these
+    # reach the demos from m4 on as well as S2's.
+    src/fuse/lazy_server.zig | src/host_real_fuse.zig) want_all; return ;;
+    src/lazy/*) want_from m4; return ;;
+    src/fuse/*) want_one s2_lazy; return ;;
     src/trust/* | src/push/*) want_one m8; return ;;
     src/registry/* | src/pull*.zig | src/lock_*.zig) want_from m4; return ;;
     src/state/* | src/*state*.zig) want_from m6; return ;;

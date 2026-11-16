@@ -76,7 +76,7 @@ footer{border-top:1px solid var(--line);padding-block:24px;color:var(--muted);
 <p class="summary">the Dockerfile can't be read</p>
 <dl class="facts"><div><dt>Kind</dt><dd>error</dd></div><div><dt>Blame</dt><dd>user</dd></div><div><dt>Exit code</dt><dd>1</dd></div></dl>
 <h2>What it means</h2>
-<p>zbx import reads a Dockerfile (./Dockerfile, the one named, or Dockerfile in --context) and translates it into a build file. It is refused when the file is not there, cannot be read or is larger than 256 KiB, and when its text is not a Dockerfile: an unknown instruction, a line continued past the end, a heredoc with no end, a bad escape directive, or an instruction missing its arguments.</p>
+<p>zbx import reads a Dockerfile (./Dockerfile, the one named, or Dockerfile in --context) and translates it into a build file. It is refused when the file is not there, cannot be read or is larger than 256 KiB, and when its text is not a Dockerfile: an unknown instruction, a line continued past the end, a heredoc with no end, a bad escape directive, an instruction missing its arguments, or an ENV or LABEL word that is not KEY=VALUE or has no name before the `=`.</p>
 <p>The cause names the line and what was expected there. Nothing is written: an import that is refused leaves the project as it was.</p>
 <h2>Offline</h2>
 <p>The same text, without a network:</p>

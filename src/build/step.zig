@@ -49,6 +49,9 @@ const open = @import("../store/open.zig");
 const store_diagnose = @import("../store/diagnose.zig");
 const lock = @import("../store/lock.zig");
 const digest_mod = @import("../store/digest.zig");
+const trees = @import("../store/trees.zig");
+const tree = @import("../store/tree.zig");
+const manifest = @import("../registry/manifest.zig");
 const key_mod = @import("key.zig");
 const diagnose = @import("diagnose.zig");
 
@@ -132,6 +135,10 @@ pub const Workspace = struct {
     home_len: u8,
     /// How many of `mounts` the container has; a root step's commit leaves them out.
     mount_count: u32,
+    /// Set by `look_for_rosetta`: the step runs on another architecture than the machine's (on a
+    /// Mac, through Rosetta), and whether its base tree already has `<home>/.cache`.
+    foreign: bool,
+    base_has_cache: bool,
 };
 
 const Paths = struct {
@@ -190,7 +197,8 @@ pub fn run_step(request: *const Request, ws: *Workspace, result: *Result, diag: 
     // keeps its own directory.
     try store_diagnose.hold(diag, &store, .shared, "build", "running a build step");
     defer lock.release(&store);
-    try resolve_identity(request, &store, ws, diag);
+    try resolve_identity(request.spec, &store, ws, diag);
+    look_for_rosetta(request, &store, ws);
     try in_store(request, ws, .prepare, diag);
     defer cleanup(request, ws);
     const reason = try start_and_wait(request, ws, diag);
@@ -225,12 +233,11 @@ pub fn run_step(request: *const Request, ws: *Workspace, result: *Result, diag: 
 /// the base's files lack is E0817, mid-build, because a `step:` base exists only after the
 /// steps before it ran.
 fn resolve_identity(
-    request: *const Request,
+    spec: *const key_mod.Spec,
     store: *const Store,
     ws: *Workspace,
     diag: *Diag,
 ) Error!void {
-    const spec = request.spec;
     assert(diag.code == null);
     ws.user = null;
     ws.home_len = 0;
@@ -250,6 +257,199 @@ fn resolve_identity(
     @memcpy(ws.home[0..home.len], home);
     ws.home_len = @intCast(home.len);
     assert(ws.home_len > 0);
+}
+
+// ---- Rosetta's cache ----------------------------------------------------------------------------
+
+/// Rosetta, which runs a linux/amd64 step on an Apple silicon Mac, makes its cache directory,
+/// `$HOME/.cache/rosetta`, in the container of every step it runs. It is the machine's, not the
+/// step's: a root step on a foreign architecture leaves it out of its output, and `<home>/.cache`
+/// too when the step made it and it holds nothing else
+/// (docs/decisions/2026-11-15-rosetta-cache-not-in-output.md).
+const rosetta_cache = "/.cache/rosetta";
+const home_cache = "/.cache";
+const rosetta_path_bytes_max = image_user.home_bytes_max + rosetta_cache.len;
+
+/// Sets `ws.foreign` and `ws.base_has_cache`, in the parent, before the step runs.
+fn look_for_rosetta(request: *const Request, store: *const Store, ws: *Workspace) void {
+    ws.foreign = runs_foreign(request.host, request.spec);
+    ws.base_has_cache = false;
+    if (!ws.foreign) return;
+    var path: [rosetta_path_bytes_max]u8 = undefined;
+    const cache = joined(&path, step_home(ws), home_cache);
+    const found = entry_at(store, &ws.user_ws.tree, request.spec.base_tree, cache) catch null;
+    ws.base_has_cache = if (found) |entry| entry.kind == .dir else false;
+}
+
+/// Whether `spec` is a root step on another architecture than the machine's (`uname`): on a
+/// Mac, one that runs through Rosetta.
+fn runs_foreign(host: Host, spec: *const key_mod.Spec) bool {
+    if (!spec.root_output) return false;
+    const wanted = manifest.architecture_of_platform(spec.platform) orelse return false;
+    const names = host.uname() catch return false;
+    const machine = manifest.architecture_of_machine(names.machine.slice()) orelse return false;
+    return wanted != machine;
+}
+
+/// Whether `output`, a cache entry's tree for the run step `spec`, is one this machine's commit
+/// could make: on a foreign root step, Rosetta's cache as the base has it, and no empty
+/// `<home>/.cache` the base lacks (`rosetta_excludes`). An entry from a zbx before that rule is
+/// not (Mac run of PR #168, job 132951593134: m9.2 was all hits on the store an earlier run
+/// filled, and the output kept both directories); the caller drops it and runs the step. Runs in
+/// the parent, before a worker starts, with `ws` as scratch. False when a tree cannot be read
+/// or the user is not found: the step then runs, and says why if it fails.
+pub fn cached_output_holds(
+    host: Host,
+    store: *const Store,
+    ws: *Workspace,
+    spec: *const key_mod.Spec,
+    output: Digest,
+) bool {
+    if (!runs_foreign(host, spec)) return true;
+    var diag: Diag = undefined;
+    diag.reset();
+    resolve_identity(spec, store, ws, &diag) catch return false;
+    const home = step_home(ws);
+    var path: [rosetta_path_bytes_max]u8 = undefined;
+    const buffer = &ws.user_ws.tree;
+    const rosetta = joined(&path, home, rosetta_cache);
+    const base_rosetta = entry_at(store, buffer, spec.base_tree, rosetta) catch return false;
+    const output_rosetta = entry_at(store, buffer, output, rosetta) catch return false;
+    if (!Found.same(base_rosetta, output_rosetta)) return false;
+    const cache = joined(&path, home, home_cache);
+    const base_cache = entry_at(store, buffer, spec.base_tree, cache) catch return false;
+    if (base_cache) |entry| if (entry.kind == .dir) return true;
+    const output_cache = (entry_at(store, buffer, output, cache) catch return false) orelse
+        return true;
+    if (output_cache.kind != .dir) return true;
+    // The commit leaves out a `.cache` the step made that holds nothing but Rosetta's cache, and
+    // that cache is not in the output (checked above): an empty one is not the commit's.
+    return !(tree_empty(store, buffer, output_cache.subtree) catch return false);
+}
+/// The step's `HOME`: its user's home, or the fixed environment's `/root`.
+fn step_home(ws: *const Workspace) []const u8 {
+    if (ws.home_len > 0) return ws.home[0..ws.home_len];
+    const fixed = key_mod.fixed_env[0];
+    assert(std.mem.startsWith(u8, fixed, "HOME=/"));
+    return fixed["HOME=".len..];
+}
+
+/// `home` and `suffix` joined, a home of `/` giving the suffix alone.
+fn joined(out: *[rosetta_path_bytes_max]u8, home: []const u8, suffix: []const u8) []const u8 {
+    assert(home.len > 0);
+    assert(home[0] == '/');
+    assert(suffix[0] == '/');
+    const head = std.mem.trimEnd(u8, home, "/");
+    assert(head.len + suffix.len <= out.len);
+    @memcpy(out[0..head.len], head);
+    @memcpy(out[head.len..][0..suffix.len], suffix);
+    return out[0 .. head.len + suffix.len];
+}
+
+/// What `entry_at` finds: an entry's fields, copied out of the buffer the next load reuses.
+const Found = struct {
+    kind: tree.Kind,
+    mode: u16,
+    uid: u32,
+    gid: u32,
+    size: u64,
+    content: Digest,
+    subtree: Digest,
+    target: Digest,
+    xattrs: Digest,
+
+    /// Both absent, or the same entry.
+    fn same(a: ?Found, b: ?Found) bool {
+        const left = a orelse return b == null;
+        const right = b orelse return false;
+        return left.kind == right.kind and left.mode == right.mode and left.uid == right.uid and
+            left.gid == right.gid and left.size == right.size and
+            left.content.eql(right.content) and left.subtree.eql(right.subtree) and
+            left.target.eql(right.target) and left.xattrs.eql(right.xattrs);
+    }
+};
+
+const ReadError = error{Unreadable};
+
+/// The entry of the tree `root` at `path` (absolute), or null when there is none. A part of the
+/// path that is not a directory is none.
+fn entry_at(store: *const Store, buffer: []u8, root: Digest, path: []const u8) ReadError!?Found {
+    assert(path.len > 1);
+    assert(path[0] == '/');
+    var at = root;
+    var found: ?Found = null;
+    var parts = std.mem.tokenizeScalar(u8, path, '/');
+    while (parts.next()) |name| {
+        if (found) |parent| {
+            if (parent.kind != .dir) return null;
+            at = parent.subtree;
+        }
+        var errno: u16 = 0;
+        const bytes = trees.load(store, at, buffer, &errno) catch return error.Unreadable;
+        var decoder: tree.Decoder = undefined;
+        decoder.init(bytes) catch return error.Unreadable;
+        var entry: tree.Entry = undefined;
+        const match = while (decoder.next(&entry) catch return error.Unreadable) {
+            if (std.mem.eql(u8, entry.name, name)) break entry;
+        } else return null;
+        found = .{
+            .kind = match.kind,
+            .mode = match.mode,
+            .uid = match.uid,
+            .gid = match.gid,
+            .size = match.size,
+            .content = match.content,
+            .subtree = match.subtree,
+            .target = Digest.of(match.target),
+            .xattrs = Digest.of(match.xattrs),
+        };
+    }
+    return found;
+}
+
+/// Whether the tree `root` has no entries.
+fn tree_empty(store: *const Store, buffer: []u8, root: Digest) ReadError!bool {
+    var errno: u16 = 0;
+    const bytes = trees.load(store, root, buffer, &errno) catch return error.Unreadable;
+    var decoder: tree.Decoder = undefined;
+    decoder.init(bytes) catch return error.Unreadable;
+    var entry: tree.Entry = undefined;
+    return !(decoder.next(&entry) catch return error.Unreadable);
+}
+
+/// Counts the entries of a directory other than `rosetta`.
+const OtherThanRosetta = struct {
+    others: u32 = 0,
+
+    fn call(context: *anyopaque, name: []const u8) void {
+        const counter: *OtherThanRosetta = @ptrCast(@alignCast(context));
+        if (!std.mem.eql(u8, name, "rosetta")) counter.others += 1;
+    }
+};
+
+/// The paths of Rosetta's cache a foreign root step's commit leaves as the base has them: the
+/// cache, and `<home>/.cache` when the base lacks it and the layer's holds only the cache.
+fn rosetta_excludes(
+    store: *const Store,
+    ws: *const Workspace,
+    upper: []const u8,
+    storage: *[2][rosetta_path_bytes_max]u8,
+    out: *[2][]const u8,
+) []const []const u8 {
+    if (!ws.foreign) return out[0..0];
+    const home = step_home(ws);
+    out[0] = joined(&storage[0], home, rosetta_cache);
+    if (ws.base_has_cache) return out[0..1];
+    const cache = joined(&storage[1], home, home_cache);
+    var in_layer: PathBuf = undefined;
+    in_layer.set(&.{ upper, cache }) catch return out[0..1];
+    var counter: OtherThanRosetta = .{};
+    const visitor: fs_mod.Visitor = .{ .context = &counter, .call = OtherThanRosetta.call };
+    // No `.cache` in the layer, or one that cannot be read: the commit reads it as it is.
+    store.fs.read_dir(in_layer.text(), visitor) catch return out[0..1];
+    if (counter.others > 0) return out[0..1];
+    out[1] = cache;
+    return out[0..2];
 }
 
 // ---- Names and paths ----------------------------------------------------------------------------
@@ -857,24 +1057,31 @@ fn commit_output(store: *Store, job: *Job, diag: *Diag) Error!void {
         job.request.spec.name,
     }) catch unreachable; // The buffer holds the prefix and the longest name.
     const output_exclude = job.request.spec.output_exclude orelse &.{};
-    var excluded: [constants.mounts_max + constants.build_output_excludes_max][]const u8 =
+    const upper = ws.handle.image.upper.text();
+    var rosetta_storage: [2][rosetta_path_bytes_max]u8 = undefined;
+    var rosetta_paths: [2][]const u8 = undefined;
+    const rosetta = rosetta_excludes(store, ws, upper, &rosetta_storage, &rosetta_paths);
+    var excluded: [constants.mounts_max + constants.build_output_excludes_max + 2][]const u8 =
         undefined;
     assert(ws.mount_count <= constants.mounts_max);
     assert(output_exclude.len <= constants.build_output_excludes_max);
+    assert(rosetta.len <= 2);
     for (ws.mounts[0..ws.mount_count], 0..) |mount, at| excluded[at] = mount.target;
     // A pinned step's `.output_exclude` (M9 slice 3c): left as the base has it.
     for (output_exclude, ws.mount_count..) |path, at| excluded[at] = path;
+    // Rosetta's cache, on a foreign step (`rosetta_excludes`): left as the base has it.
+    const listed = ws.mount_count + output_exclude.len;
+    for (rosetta, listed..) |path, at| excluded[at] = path;
     const options: import_mod.Options = .{
         .squash_owner = job.squash_owner,
         .warn = null,
         .parent = job.request.spec.base_tree,
-        .exclude = excluded[0 .. ws.mount_count + output_exclude.len],
+        .exclude = excluded[0 .. listed + rosetta.len],
         .refuse_special = .{ .context = &refusal, .call = Refusal.call },
         .save_root = true,
         .keep_existing_root = true,
         .label = labelled,
     };
-    const upper = ws.handle.image.upper.text();
     import_mod.commit(store, &ws.import, upper, options, &ws.import_result, diag) catch
         return error.Failed;
 }

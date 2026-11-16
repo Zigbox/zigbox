@@ -105,14 +105,36 @@ const rows = [_]Row{
         .paths = &.{ "src/testing/vm/checks_m10.zig", "src/testing/vm/m10_fixture/probe.zig" },
         .true_outputs = &.{ "code", "demo_m10" },
     },
-    // The S2 lazy check: its harness file and its source areas select demo_s2_lazy alone.
+    // The S2 lazy check: its harness file and the FUSE server's files select demo_s2_lazy alone.
     .{
         .paths = &.{"src/fuse/ops.zig"},
         .true_outputs = &.{ "code", "demo_s2_lazy" },
     },
+    // What every zbx start links (the lazy server's setup, the FUSE host) selects every VM demo,
+    // and the lazy index, which pull, pack and export use, the demos from m4 on (release review
+    // of 0.5.2: a change there once ran only demo_s2_lazy).
     .{
         .paths = &.{"src/host_real_fuse.zig"},
-        .true_outputs = &.{ "code", "demo_s2_lazy" },
+        .true_outputs = &.{
+            "code",    "demo_m0",  "demo_m1",  "demo_m2",      "demo_m3", "demo_m4",
+            "demo_m5", "demo_m6",  "demo_m6b", "demo_m7",      "demo_m8", "demo_m8b",
+            "demo_m9", "demo_m10", "demo_c4",  "demo_s2_lazy",
+        },
+    },
+    .{
+        .paths = &.{"src/fuse/lazy_server.zig"},
+        .true_outputs = &.{
+            "code",    "demo_m0",  "demo_m1",  "demo_m2",      "demo_m3", "demo_m4",
+            "demo_m5", "demo_m6",  "demo_m6b", "demo_m7",      "demo_m8", "demo_m8b",
+            "demo_m9", "demo_m10", "demo_c4",  "demo_s2_lazy",
+        },
+    },
+    .{
+        .paths = &.{"src/lazy/index.zig"},
+        .true_outputs = &.{
+            "code",    "demo_m4",  "demo_m5", "demo_m6",  "demo_m6b", "demo_m7",
+            "demo_m8", "demo_m8b", "demo_m9", "demo_m10", "demo_c4",  "demo_s2_lazy",
+        },
     },
     .{
         .paths = &.{"src/testing/vm/main_s2_lazy.zig"},

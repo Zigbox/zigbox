@@ -90,11 +90,13 @@ const Caller = struct {
             .tree = result.digest,
             .settings = &caller.settings,
             .labels = null,
-            .writer_version = zigbox.push.pack.layer_writer_version,
         };
         var made: zigbox.push.Packed = undefined;
         var failure: zigbox.push.pack.Failure = undefined;
         try zigbox.push.pack.pack(&caller.store, &caller.packing, input, &made, &failure);
+        // A caller that names no writer gets the release's, writer 1 in 0.5.2 (S2 dormant).
+        try testing.expectEqual(@as(u32, 1), zigbox.push.release_writer_version);
+        try testing.expectEqual(zigbox.push.release_writer_version, made.writer_version);
         var exported: zigbox.push.Exported = undefined;
         var export_failure: zigbox.push.export_mod.Failure = undefined;
         try zigbox.push.export_layout(
@@ -130,7 +132,6 @@ test "two callers of zigbox.push, with stores of their own, make the same image"
         .tree = one.tree,
         .settings = &first.settings,
         .labels = null,
-        .writer_version = zigbox.push.pack.layer_writer_version,
     };
     var again: zigbox.push.Packed = undefined;
     var failure: zigbox.push.pack.Failure = undefined;

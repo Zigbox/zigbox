@@ -55,7 +55,7 @@ const help_text =
     \\commands that run in the machine, with the options, output, exit codes and JSON of the
     \\Linux zbx (the machine's zbx is the same program):
     \\  run, ps, stop, commit, store, state, lock, pull, bundle, logs, exec, doctor,
-    \\  key, sign, verify, trust, policy
+    \\  key, sign, verify, trust, policy, import, build
     \\  for example: zbx run alpine -- cat /etc/os-release
     \\  The command line, the working directory, the terminal (with its size), standard input,
     \\  output and error, and these signals are forwarded: INT, TERM, HUP, QUIT; key and sign

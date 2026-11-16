@@ -40,7 +40,9 @@ Ground rules for the implementer:
 
 *Figure: milestone map · 9 milestones, 3 tracks (diagram in the live doc, node 24eb2c38-a0d5; not reproduced here).*
 
-M0 to M2 make a hardened runtime; M3 and M4 add the store and real images, which unlocks networking and state (M5, M6) and hermetic builds and signing (M7, M8). M7 steps also reuse the M2 sandbox. M9 (Dockerfile import) extends M7's builder; M10 (devices) extends M1's `/dev`; neither depends on the other (owner, 2026-11-11: `docs/decisions/2026-11-11-docker-parity-scope.md`).
+M0 to M2 make a hardened runtime; M3 and M4 add the store and real images, which unlocks networking and state (M5, M6) and hermetic builds and signing (M7, M8). M7 steps also reuse the M2 sandbox. M9 (Dockerfile import) extends M7's builder; M10 (devices) extends M1's `/dev`; neither depends on the other (owner, 2026-11-11: `docs/decisions/2026-11-11-docker-parity-scope.md`). M6c and M6d (private pull from Amazon ECR and Google Artifact Registry) extend M4's client and share one credential layer; M6d ships in the next release it is ready for (0.5.3 or 0.6.1) and does not depend on S2 (owner, 2026-11-16: `docs/decisions/2026-11-16-m6d-artifact-registry.md`).
+
+M2b (workload knobs) extends M2's limits and hardening so common server workloads start without hacks; it targets 0.6.x and blocks nothing else (owner, 2026-11-16: `docs/decisions/2026-11-16-m2b-workload-knobs.md`).
 
 ## Milestones
 
@@ -102,6 +104,28 @@ M0 to M2 make a hardened runtime; M3 and M4 add the store and real images, which
 - [ ] Limits are visible in `/sys/fs/cgroup` under the user's slice while running and gone after exit.
 - [ ] Seccomp profile is a checked-in, reviewed file, not an inline list.
 - [ ] OOM, PID-limit and signal exits are distinguished in the exit report.
+
+### M2b · Workload knobs: server workloads start without hacks
+
+**Goal:** the common server workloads people run on Kubernetes (databases, search engines, JVM, Go, .NET and Node services) start under zbx with no wrapper script, no extra privilege and no host tweak zbx did not name.
+
+**Scope:** `--ulimit nofile|nproc|memlock|stack=SOFT[:HARD]`, bounded by the invoking user's hard limits and never clamped; `--shm-size`, counted against `--memory`; `mbind`, `set_mempolicy` and `set_mempolicy_home_node` in the default seccomp allowlist; `--sysctl` from a checked-in allowlist of per-namespace keys (per-netns `net.*`, and the IPC namespace's `kernel.shm*`, `kernel.msg*`, `kernel.sem` and `fs.mqueue.*`); `--require-host`, a preflight for non-namespaced host settings (`vm.max_map_count`, `fs.aio-max-nr`, `vm.overcommit_memory`, transparent huge pages), also reported by `zbx doctor`; a cgroup namespace rooted at the container's scope with a read-only cgroup2 view at `/sys/fs/cgroup`. The library takes the same knobs. Deferred: adding capabilities (an open question below).
+
+**Demo script:**
+
+1. `--ulimit nofile=4096:8192` shows in `ulimit -n` and `ulimit -Hn`; a value above the user's hard limit is refused, naming `limits.conf` and the user manager's `LimitNOFILE=`.
+2. `--shm-size 256m` shows in `df /dev/shm`; `--memory 128m --shm-size 256m` is refused.
+3. `--sysctl net.core.somaxconn=4096` reads back from `/proc/sys`; `--sysctl vm.max_map_count=…` is refused as a host setting.
+4. `--require-host 'vm.max_map_count>=262144'` on a host at 65530 is refused with the host value, the needed value and the `sysctl -w` fix; after the fix it runs.
+5. Inside `--memory 256m --cpus 1.5`, `/sys/fs/cgroup/memory.max` is `268435456`, `cpu.max` is `150000 100000`, and the view is read-only.
+6. `numactl --interleave=all true` succeeds where 0.5.x failed with `set_mempolicy: Operation not permitted`.
+
+**Acceptance criteria:**
+
+- [ ] Every knob is read back from inside the container; nothing is clamped silently; every refusal is one coded line before anything starts.
+- [ ] Without the new flags a run behaves as before, except the NUMA calls and the cgroup view.
+- [ ] The cgroup view shows only the container's scope, in every network mode.
+- [ ] The production-readiness checklist.
 
 ### M3 · Store: content-addressed file trees
 
@@ -246,6 +270,28 @@ M0 to M2 make a hardened runtime; M3 and M4 add the store and real images, which
 - [ ] Every failure is one coded line (no credentials, refused, clock skew, missing permission, missing repository, unsupported partition).
 - [ ] Public pulls, their output and the lockfile and store formats are unchanged.
 - [ ] CI pulls from a real ECR repository through GitHub OIDC, with no long-lived keys.
+
+### M6d · Private pull: Google Artifact Registry
+
+**Goal:** a host pulls and runs an image from a private Google Artifact Registry repository, or from gcr.io, with the Google credentials it already has, and no secret ever leaves the request it was made for.
+
+**Scope:** authenticated pull from `<region>-docker.pkg.dev` and from `gcr.io`, `us.gcr.io`, `eu.gcr.io` and `asia.gcr.io`, recognised by host; other Google host shapes never get credentials, and a refused pull from one is a coded line. zbx gets a Google access token itself (no credential helper or `gcloud`) from, in order, workload identity federation (`GOOGLE_APPLICATION_CREDENTIALS` naming an `external_account` file: a subject token from a file or URL, exchanged at Google's STS, optionally impersonating a service account) or the GCE metadata server (never through the proxy). The token goes as Basic `oauth2accesstoken` only to the registry's same-host token realm, and the realm's Bearer token only to the registry origin: never to a redirect target or a mirror. Public pulls from these hosts stay anonymous and unchanged. Credentials are resolved for each pull and never written to disk. The library takes credentials from its caller, as in M6c, and ECR and Artifact Registry share one credential layer. Ships in the next release it is ready for (0.5.3 or 0.6.1), and does not depend on S2. Deferred: service-account key files (refused, naming workload identity federation), gcloud user credentials, executable and AWS-sourced external accounts, `~/.docker/config.json` and credential helpers, push, the Mac. Brief: `docs/briefs/M6d-gar.md`; decision: `docs/decisions/2026-11-16-m6d-artifact-registry.md`.
+
+**Demo script:**
+
+1. With no Google credentials, off GCE, `zbx pull <region>-docker.pkg.dev/<project>/zbx-demo/hello:latest` is refused with one line naming the sources tried and the fix.
+2. With workload identity federation from GitHub Actions (no key file), the same pull succeeds; `zbx run` of it prints `hello`; `zbx.lock` holds the digest.
+3. With the same credentials, `zbx pull gcr.io/<project>/hello:latest` succeeds.
+4. Pulling from `zbx-denied`, a repository the identity may not read, is refused, naming the repository and the missing permission.
+5. The subject token, the federated token, the access token and the registry token are absent from every byte zbx wrote: output, JSON, `zbx.lock`, the store, `zbx bundle`, logs.
+
+**Acceptance criteria:**
+
+- [ ] Credentials go only where they are for: the subject token only to Google's STS, the access token only to the registry's same-host token realm, never to a redirect target or a mirror.
+- [ ] No secret on disk, in a diagnostic, an argument list, a record or a bundle; buffers zeroed after use.
+- [ ] Every failure is one coded line (no credentials, unreadable or unsupported credentials file, exchange refused, impersonation refused, missing permission, missing repository, metadata server absent, unsupported host).
+- [ ] Public pulls, their output and the lockfile and store formats are unchanged; ECR pull and `aws_credentials_resolve` are unchanged.
+- [ ] CI pulls from a real Artifact Registry repository through workload identity federation from GitHub Actions, with no key files.
 
 ### M7 · Build: hermetic and reproducible
 
@@ -392,16 +438,19 @@ From M2 on, every new command meets the two cheap rules now: its results have a 
 
 ## Non-goals
 
-These are out of scope for M0 to M10. Raise a change to this doc before building any of them.
+These are out of scope for M0 to M10 and M2b. Raise a change to this doc before building any of them.
 
 - **Native non-Linux runtimes.** Containers run only on a Linux kernel. On macOS, zbx runs a small Linux VM for the user, invisibly (milestone M4b); there is no native macOS runtime, and no Windows support.
 - **Rootful mode.** There is no `sudo zbx`. If something only works as root, it is not supported.
 - **Docker API or CLI compatibility.** Commands may resemble Docker's, but no socket API and no drop-in flag parity.
 - **Orchestration.** No Compose equivalent, no clustering, no scheduler, no restart policies beyond what a systemd user unit gives. zbx runs one container at a time; more than one service, even on one laptop, is Zigcube's job: zcube-server with its SQLite store and one agent on the same machine.
-- **Private registries.** Pull only from public registries, except authenticated pull from Amazon ECR (M6c, brought forward 2026-10-30). Push to registries, with credentials, is in M8 (owner, 2026-11-08); pull with those credentials is not.
+- **Private registries.** Pull only from public registries, except authenticated pull from Amazon ECR (M6c, brought forward 2026-10-30) and from Google Artifact Registry and gcr.io (M6d, owner, 2026-11-16). Push to registries, with credentials, is in M8 (owner, 2026-11-08); pull with those credentials is not.
 - **Dockerfile execution.** Dockerfiles are not run directly (`zbx import`, M9, translates one into a build file that `zbx build` builds; the Dockerfile itself is never executed).
 - **Live migration, checkpoint/restore.**
 - **GPU scheduling, sharing and limits.** Access to a GPU or other host device for one Zigbox container is M10; allocation, MIG, MPS, time slicing and gang scheduling are Zigcube's CS4. No Windows, no Intel Macs, no Docker socket API or drop-in flag parity (owner, 2026-11-11).
+- **io_uring.** An opt-in was considered and declined (owner, 2026-11-16): its kernel attack surface is why Docker's and containerd's default profiles and Google's production systems block it.
+- **CPU pinning, IO limits and huge pages.** No cpuset pinning, no `io.max` or `io.weight`, no hugetlb: seastar-style databases (ScyllaDB, Redpanda) are not a target (owner, 2026-11-16).
+- **Nested containers.** No `unshare` or `clone` with namespace flags, `mount` or `/dev/fuse` inside a container; no Docker-in-Docker and no rootless BuildKit inside zbx (owner, 2026-11-16).
 
 ## Technical notes, risks and open questions
 
@@ -429,6 +478,7 @@ These are out of scope for M0 to M10. Raise a change to this doc before building
 - [x] Chunking for M3, decided: whole files. Each file is one object, hashed with BLAKE3 and stored whole so it can be hardlinked into a container's lower directory. Each object also carries a list of fixed-size chunk hashes, which gives Zigcube's C2 verified fetch-by-hash from the start. Content-defined chunking can come later behind the same interface, for large files that change slightly.
 - [x] Store scope, decided: strictly per-user, under the user's data directory, written from inside the user's own namespace so ownership round-trips. A store shared across users would need privileged setup and cross-user trust rules; revisit with Zigcube's node agent.
 - [ ] Final project name and CLI name (`zigbox` / `zbx` are placeholders).
+- [ ] Adding capabilities from a short list, parked from M2b (owner, 2026-11-16): `IPC_LOCK` (Vault's `mlock`), `NET_ADMIN` and `NET_RAW` in the container's own network namespace (VPNs, service-mesh init containers) and `SYS_NICE` (ClickHouse). Until it is decided, `--device /dev/net/tun` is accepted but unusable without `NET_ADMIN`, and should be documented or refused.
 
 ## Part II · Zigcube: orchestrating Zigbox
 

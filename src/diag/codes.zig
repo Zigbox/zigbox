@@ -3766,8 +3766,9 @@ pub const registry = [_]Entry{
         \\--context) and translates it into a build file. It is refused when the file
         \\is not there, cannot be read or is larger than 256 KiB, and when its text is
         \\not a Dockerfile: an unknown instruction, a line continued past the end, a
-        \\heredoc with no end, a bad escape directive, or an instruction missing its
-        \\arguments.
+        \\heredoc with no end, a bad escape directive, an instruction missing its
+        \\arguments, or an ENV or LABEL word that is not KEY=VALUE or has no name
+        \\before the `=`.
         \\
         \\The cause names the line and what was expected there. Nothing is written: an
         \\import that is refused leaves the project as it was.
@@ -4539,15 +4540,18 @@ pub const registry = [_]Entry{
         .code = .E1013,
         .severity = .@"error",
         .blame = .user,
-        .summary = "the working directory is not shared with the virtual machine",
+        .summary = "a directory or path is not shared with the virtual machine",
         .explanation =
         \\The machine sees one directory of the Mac: your home directory, at the
         \\same path. A command runs in the directory you ran zbx in, and the
         \\machine can only enter that directory when it is inside the home. A
         \\command started anywhere else would run in a different place than you
-        \\asked for, so zbx refuses.
+        \\asked for, so zbx refuses. The paths zbx build and zbx import are
+        \\given (-f, -o, --context) are read and written in the machine, so each
+        \\must be inside the home as well.
         \\
-        \\Change into a directory below your home and run the command there.
+        \\Change into a directory below your home and run the command there, with
+        \\paths below your home.
         ,
     },
     .{
@@ -4726,6 +4730,8 @@ pub const registry = [_]Entry{
         .blame = .user,
         .summary = "the image is too large for lazy start",
         .explanation =
+        \\Lazy start arrives in 0.6.0: this zbx (0.5.2) refuses --lazy with E0004.
+        \\
         \\zbx run --lazy serves the image's files from memory it sets aside when
         \\the run starts: a table with room for a fixed number of entries (files,
         \\directories and links) and a fixed number of bytes of directory
@@ -4742,6 +4748,8 @@ pub const registry = [_]Entry{
         .blame = .user,
         .summary = "--lazy does not work with another option given",
         .explanation =
+        \\Lazy start arrives in 0.6.0: this zbx (0.5.2) refuses --lazy with E0004.
+        \\
         \\zbx run --lazy starts a container before its image is all on disk,
         \\serving the files from the store as the container reads them. The server
         \\runs in the zbx process that runs the container, so for now the run must

@@ -289,6 +289,21 @@ pub fn directory_not_shared(diag: *Diag, working: []const u8, shared: []const u8
     assert(diag.fixes.count == 1);
 }
 
+/// E1013 for a path on the command line (`-o`, `-f` or `--context` of `build` or `import`) that is
+/// outside the home: the machine could not read or write it there.
+pub fn path_not_shared(diag: *Diag, path: []const u8, shared: []const u8) void {
+    assert(diag.code == null);
+    assert(path.len > 0);
+    assert(shared.len > 0);
+    diag.raise(.E1013);
+    diag.while_("reading the paths on the command line", .{});
+    diag.cause("{s} is not shared with the virtual machine; only {s} is", .{ path, shared });
+    diag.context("path", "{s}", .{path});
+    diag.context("shared", "{s}", .{shared});
+    diag.fix(.{ .sentence = "give a path in your home, or copy the file there and use that" });
+    assert(diag.fixes.count == 1);
+}
+
 /// E1014: the guest's store disk has no room. `size_bytes` is the disk, `free_bytes` what is left.
 pub fn store_disk_full(diag: *Diag, size_bytes: u64, free_bytes: u64) void {
     assert(diag.code == null);

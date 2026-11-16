@@ -26,8 +26,20 @@ const builtin = @import("builtin");
 const Io = std.Io;
 const constants = @import("../constants.zig");
 
-/// The layer writer version a pack writes by default.
+/// The newest layer writer version the packer knows. Release 0.5.2 does not write it by
+/// default: see `release_writer_version`.
 pub const layer_writer_version = constants.layer_writer_version;
+
+/// The layer writer a pack writes when its caller names none, and the one `zbx push`, `push
+/// --dry-run` and `store export --oci` write. 0.5.2 keeps lazy start (S2) dormant, for library
+/// callers too: writer 1, 0.5.1's bytes (docs/decisions/2026-11-16-0.5.2-s2-dormant.md). 0.6.0
+/// sets this back to `layer_writer_version`.
+pub const release_writer_version: u32 = 1;
+
+comptime {
+    assert(release_writer_version >= 1);
+    assert(release_writer_version <= layer_writer_version);
+}
 const blobs_mod = @import("../registry/blobs.zig");
 const oci = @import("../registry/digest.zig");
 const result_mod = @import("../build/result.zig");
@@ -117,9 +129,9 @@ pub const Input = struct {
     settings: *const images.Settings,
     /// The labels of a build result; an image's own are not kept.
     labels: ?*const result_mod.Config,
-    /// The layer writer version to write: `constants.layer_writer_version`, or 1 (its goldens
-    /// and older registries' tests).
-    writer_version: u32,
+    /// The layer writer version to write: 1 (`release_writer_version`, the default in 0.5.2)
+    /// or `layer_writer_version`.
+    writer_version: u32 = release_writer_version,
 };
 
 const Link = struct {
