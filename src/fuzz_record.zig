@@ -14,6 +14,7 @@ const spec_mod = @import("runtime/spec.zig");
 const volume = @import("state/volume.zig");
 const mounts_mod = @import("runtime/mounts.zig");
 const devices_mod = @import("runtime/devices.zig");
+const knobs = @import("runtime/knobs.zig");
 const repeat = @import("test_util.zig").repeat;
 
 const text_bytes_max = constants.record_bytes_max;
@@ -224,10 +225,13 @@ fn check_devices_back(view: *const records.View, parsed: *const records.Parsed) 
     assert(std.mem.eql(u8, parsed.devices_text(), devices_mod.text(view.devices, &buffer)));
 }
 
-/// The record version a view is written at: 11 for a lazy run, 10 with a listener or devices,
-/// else plain.
+/// The record version a view is written at: 12 with an M2b knob, 11 for a lazy run, 10 with a
+/// listener or devices, else plain.
 fn version_of(view: *const records.View) u32 {
-    if (view.lazy != null) return constants.record_version;
+    const knobbed = view.limits.shm_bytes != null or view.rlimits.count() > 0 or
+        view.sysctls.len > 0;
+    if (knobbed) return constants.record_version;
+    if (view.lazy != null) return constants.record_version_lazy;
     if (view.listen != null or view.devices.len > 0) return constants.record_version_listen;
     return constants.record_version_plain;
 }
@@ -239,6 +243,58 @@ fn check_listen_back(view: *const records.View, parsed: *const records.Parsed) v
 }
 
 /// Version 11: any counts, including the largest; most runs are not lazy.
+/// M2b's knobs for a version 12 record: limits, some unlimited, and sysctls from the allowlist
+/// (no `net.*` key on the host's network) with printable values up to the longest.
+const Knobs = struct {
+    rlimits: spec_mod.Rlimits,
+    sysctls: [constants.sysctls_max]spec_mod.Sysctl,
+    count: u32,
+    values: [constants.sysctls_max][constants.sysctl_value_bytes_max]u8,
+};
+
+fn random_knobs(random: std.Random, out: *Knobs, isolated: bool) void {
+    out.rlimits = .{};
+    out.count = 0;
+    if (random.uintLessThan(u8, 3) != 0) return;
+    for (std.enums.values(knobs.Resource)) |resource| {
+        if (random.boolean()) continue;
+        const hard = if (random.boolean()) knobs.unlimited else random.int(u64) -| 1;
+        const soft = if (random.boolean()) hard else random.uintAtMost(u64, hard);
+        out.rlimits.set(resource, .{ .soft = soft, .hard = hard });
+    }
+    const wanted = random.uintAtMost(u32, constants.sysctls_max);
+    const start = random.uintLessThan(usize, knobs.allowlist.len);
+    for (0..knobs.allowlist.len) |step| {
+        if (out.count == wanted) break;
+        const entry = knobs.allowlist[(start + step) % knobs.allowlist.len];
+        if (entry.namespace == .net and !isolated) continue;
+        const room = &out.values[out.count];
+        const length = if (random.boolean()) room.len else random.intRangeAtMost(usize, 1, 8);
+        for (room[0..length]) |*byte| byte.* = random.intRangeAtMost(u8, 0x20, 0x7e);
+        out.sysctls[out.count] = .{ .key = entry.key, .value = room[0..length] };
+        out.count += 1;
+    }
+    assert(out.count <= wanted);
+    assert(knobs.list_problem(out.sysctls[0..out.count], isolated) == null);
+}
+
+fn random_shm(random: std.Random, memory_bytes: ?u64) ?u64 {
+    if (random.boolean()) return null;
+    const top = memory_bytes orelse std.math.maxInt(u64);
+    if (top < constants.shm_bytes_min) return null;
+    return random.intRangeAtMost(u64, constants.shm_bytes_min, top);
+}
+
+fn check_knobs_back(view: *const records.View, parsed: *const records.Parsed) void {
+    assert(std.meta.eql(parsed.rlimits, view.rlimits));
+    assert(parsed.sysctls_count == view.sysctls.len);
+    for (view.sysctls, 0..) |wanted, at| {
+        const found = parsed.sysctl_at(@intCast(at));
+        assert(std.mem.eql(u8, found.key, wanted.key));
+        assert(std.mem.eql(u8, found.value, wanted.value));
+    }
+}
+
 fn random_lazy(random: std.Random) ?records.Lazy {
     if (random.uintLessThan(u8, 3) != 0) return null;
     return .{
@@ -282,6 +338,9 @@ fn check_round_trip(random: std.Random) void {
     var mounts: [constants.state_volumes_max]volume.Mount = undefined;
     var extra: [constants.mounts_max]mounts_mod.Mount = undefined;
     var devices: [constants.run_devices_max]devices_mod.Device = undefined;
+    var knobbed: Knobs = undefined;
+    random_knobs(random, &knobbed, reach.network != .host);
+    const memory_bytes: ?u64 = if (random.boolean()) random.int(u64) else null;
     const view: records.View = .{
         .name = names[random.uintLessThan(usize, names.len)],
         .rootfs = rootfs,
@@ -294,9 +353,10 @@ fn check_round_trip(random: std.Random) void {
         .zbx_version = "0.0.0",
         .reason = random_reason(random),
         .limits = .{
-            .memory_bytes = if (random.boolean()) random.int(u64) else null,
+            .memory_bytes = memory_bytes,
             .pids = if (random.boolean()) random.int(u32) else null,
             .cpu_millis = if (random.boolean()) random.int(u32) else null,
+            .shm_bytes = random_shm(random, memory_bytes),
         },
         .scope = if (random.boolean()) "zbx-web-1.scope" else "",
         .detached = random.boolean(),
@@ -315,25 +375,33 @@ fn check_round_trip(random: std.Random) void {
         .listen = random_listen(random, reach.network),
         .lazy = random_lazy(random),
         .devices = random_devices(random, &devices),
+        .rlimits = knobbed.rlimits,
+        .sysctls = knobbed.sysctls[0..knobbed.count],
     };
     var buffer: [text_bytes_max]u8 = undefined;
     const text = records.render(&view, &buffer);
     var parsed: records.Parsed = undefined;
     records.parse(text, &parsed) catch unreachable; // A rendered record always reads back.
-    check_listen_back(&view, &parsed);
-    check_devices_back(&view, &parsed);
+    check_back(&view, &parsed);
+    check_damaged(random, text);
+}
+
+/// What a record read back holds is what the view said.
+fn check_back(view: *const records.View, parsed: *const records.Parsed) void {
+    check_listen_back(view, parsed);
+    check_knobs_back(view, parsed);
+    check_devices_back(view, parsed);
     assert(std.mem.eql(u8, parsed.name_slice(), view.name));
     assert(std.mem.eql(u8, parsed.rootfs_slice(), view.rootfs));
-    check_run_back(&view, &parsed);
+    check_run_back(view, parsed);
     const reason = if (view.reason == .none) records.reason_of(view.exit) else view.reason;
     assert(parsed.reason == reason);
     assert(std.meta.eql(parsed.limits, view.limits));
     assert(std.mem.eql(u8, parsed.scope_slice(), view.scope));
     assert(parsed.detached == view.detached);
     assert(parsed.timed_out == view.timed_out);
-    check_reach_back(&view, &parsed);
-    check_mounts_back(&view, &parsed);
-    check_damaged(random, text);
+    check_reach_back(view, parsed);
+    check_mounts_back(view, parsed);
 }
 
 fn check_reach_back(view: *const records.View, parsed: *const records.Parsed) void {
@@ -386,6 +454,10 @@ fn rerender(parsed: *const records.Parsed) void {
     }
     var words: [constants.run_env_count_max][]const u8 = undefined;
     for (0..parsed.env_names_count) |at| words[at] = parsed.env_name(@intCast(at));
+    var sysctls: [constants.sysctls_max]spec_mod.Sysctl = undefined;
+    for (sysctls[0..parsed.sysctls_count], 0..) |*sysctl, at| {
+        sysctl.* = parsed.sysctl_at(@intCast(at));
+    }
     const view: records.View = .{
         .name = parsed.name_slice(),
         .rootfs = parsed.rootfs_slice(),
@@ -406,6 +478,9 @@ fn rerender(parsed: *const records.Parsed) void {
         .listen = parsed.listen,
         .devices = devices[0..devices_count],
         .lazy = parsed.lazy,
+        .limits = parsed.limits,
+        .rlimits = parsed.rlimits,
+        .sysctls = sysctls[0..parsed.sysctls_count],
     };
     var buffer: [text_bytes_max]u8 = undefined;
     var again: records.Parsed = undefined;
@@ -414,6 +489,8 @@ fn rerender(parsed: *const records.Parsed) void {
     assert(again.mounts_count == parsed.mounts_count);
     assert(std.mem.eql(u8, again.devices_text(), parsed.devices_text()));
     assert(std.meta.eql(again.lazy, parsed.lazy));
+    assert(std.meta.eql(again.limits, parsed.limits));
+    check_knobs_back(&view, &again);
     // A record that did not say its user is written with root's, and reads as root's.
     const kept = parsed.user orelse spec_mod.User{ .uid = 0, .gid = 0 };
     assert(std.meta.eql(again.user.?, kept));

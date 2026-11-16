@@ -292,6 +292,10 @@ pub const Handle = struct {
     notes_count: u32,
     /// The limits the run was started with, for the exit report and the record.
     limits: spec_mod.Limits,
+    /// The workload knobs (`--ulimit`, `--sysctl`; they point into the `Spec`), for the exit
+    /// report and the record. `--shm-size` is `limits.shm_bytes`.
+    rlimits: spec_mod.Rlimits,
+    sysctls: []const spec_mod.Sysctl,
     /// What the container could reach, for the exit report.
     network: spec_mod.Network,
     /// The host's ports forwarded to the container's (`--publish`), for the exit report.
@@ -419,6 +423,8 @@ pub fn init_handle(
     handle.record_warned = false;
     handle.notes_count = 0;
     handle.limits = container.limits;
+    handle.rlimits = container.rlimits;
+    handle.sysctls = container.sysctls;
     handle.network = container.network;
     handle.publish_count = 0;
     handle.listen = container.listen;
@@ -1671,6 +1677,8 @@ fn save_record(handle: *Handle, exit: records.Exit, ended: ?u64, why: ?*const Di
         .user = handle.user,
         .binding = handle.binding,
         .lazy = if (handle.lazy) |*lazy| lazy.record_now() else null,
+        .rlimits = handle.rlimits,
+        .sysctls = handle.sysctls,
         .diagnostic = if (why) |found| diagnostic_json(found, &json) else "",
     };
     records.save(handle.host, &dir, &view) catch |err| {

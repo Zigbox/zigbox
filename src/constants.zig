@@ -51,7 +51,7 @@ pub const output_bytes_max: u32 = 16 * 1024;
 /// Linux PATH_MAX, without the terminating NUL.
 pub const path_bytes_max: u32 = 4095;
 /// Largest single file read through the host: bounds every /proc, /sys and /etc read.
-pub const file_bytes_max: u32 = 64 * 1024;
+pub const file_bytes_max: u32 = 80 * 1024;
 /// Consecutive EINTR results tolerated for one operation before it is reported as failed.
 pub const eintr_retries_max: u32 = 16;
 /// Upper bound on read calls for one file. Every call that is not EOF makes progress of at least
@@ -502,16 +502,20 @@ pub const sysctl_value_bytes_max: u32 = 256;
 // Run records (slice 2).
 /// Records kept; the oldest is deleted when a run would make it more.
 pub const runs_max: u32 = 32;
-/// The version `zbx` writes. A record with a higher one is skipped, not misread.
-pub const record_version: u32 = 11;
+/// The version `zbx` writes. A record with a higher one is skipped, not misread. Version 12 (M2b)
+/// adds the workload knobs (`.limit_shm`, `.ulimits`, `.sysctls`), written only for a run that
+/// set one, so a run without them leaves the bytes it did before.
+pub const record_version: u32 = 12;
 /// What a record without a listener is written as: a run that never asked for `--listen` leaves
 /// the same bytes it did before version 10 (which only added `.listen`).
 pub const record_version_plain: u32 = 9;
 /// What a record with a listener or a device, and no `.lazy`, is written as (S2 added `.lazy` in
 /// version 11, written only for a lazy run, as M10 did for `.listen`).
 pub const record_version_listen: u32 = 10;
+/// What a lazy run's record with no M2b knob is written as (S2 added `.lazy` in version 11).
+pub const record_version_lazy: u32 = 11;
 /// One record. The command is cut to `record_command_bytes_max` and says so.
-pub const record_bytes_max: u32 = 64 * 1024;
+pub const record_bytes_max: u32 = 80 * 1024;
 // Every reader of a record reads a file of at most `file_bytes_max`, so a record is never larger.
 comptime {
     assert(record_bytes_max <= file_bytes_max);
@@ -1575,7 +1579,8 @@ comptime {
     assert(state_path_bytes_max > "/zbx/runs/".len + dir_name_bytes_max + 64);
     assert(record_version >= 1);
     assert(record_version_plain + 1 == record_version_listen);
-    assert(record_version_listen + 1 == record_version);
+    assert(record_version_listen + 1 == record_version_lazy);
+    assert(record_version_lazy + 1 == record_version);
     assert(bundle_stage_bytes_max + 16 * 1024 <= bundle_gz_bytes_max);
     assert(bundle_gz_bytes_max <= write_bytes_max);
     assert(bundle_file_bytes_max * 2 < bundle_stage_bytes_max);

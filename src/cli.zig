@@ -4804,7 +4804,7 @@ fn print_started(
     const pid = fields.next() orelse "0";
     const scope = fields.next() orelse "-";
     const tree = fields.next() orelse "-";
-    var buffer: [constants.path_bytes_max * 6 + 1024]u8 = undefined;
+    var buffer: [constants.path_bytes_max * 6 + 1024 + commands.knobs_json_bytes_max]u8 = undefined;
     var writer = std.Io.Writer.fixed(&buffer);
     // Cannot fail: the fields are bounded names and a number, in 512 bytes.
     if (options.output == .json) {
@@ -4819,6 +4819,7 @@ fn print_started(
         }
         writer.writeAll(",\"detached\":true") catch unreachable; // Same.
         write_reach(&writer, container);
+        write_knobs(&writer, container.limits.shm_bytes, &container.rlimits, container.sysctls);
         writer.writeAll("}}\n") catch unreachable; // Same.
         append_ran(&writer, ran, tree);
     } else {
@@ -4851,6 +4852,21 @@ fn write_reach(writer: *std.Io.Writer, container: *const runtime_spec.Spec) void
     writer.writeAll("]") catch unreachable; // Same.
     // The mounts and the user are in the buffer the caller sized for six times a path.
     if (!write_writable(writer, container.mounts, container.user)) unreachable;
+}
+
+/// The members M2b added to a run's `container` object, each only when set: `"shm_bytes"`
+/// (`--shm-size`), `"ulimits"` and `"sysctls"` (see `commands.knobs_json`). Additive.
+fn write_knobs(
+    writer: *std.Io.Writer,
+    shm_bytes: ?u64,
+    rlimits: *const runtime_spec.Rlimits,
+    sysctls: []const runtime_spec.Sysctl,
+) void {
+    assert(sysctls.len <= constants.sysctls_max);
+    assert(writer.buffer.len - writer.end >= commands.knobs_json_bytes_max + 32);
+    // Cannot fail: the callers' buffers keep `knobs_json_bytes_max` and a number spare.
+    if (shm_bytes) |bytes| writer.print(",\"shm_bytes\":{d}", .{bytes}) catch unreachable;
+    commands.knobs_json(writer, rlimits, sysctls) catch unreachable; // Same bound.
 }
 
 /// A `bug` from a run that got as far as having a name gets a redacted bundle, and the bug
@@ -4917,7 +4933,7 @@ fn report_outcome(
 ) void {
     assert(handle.status == .stopped);
     assert(reason.code() != null);
-    var buffer: [constants.output_bytes_max]u8 = undefined;
+    var buffer: [constants.output_bytes_max + commands.knobs_json_bytes_max]u8 = undefined;
     var writer = std.Io.Writer.fixed(&buffer);
     const timed_out = runtime.timed_out(handle);
     if (options.output == .json) {
@@ -4932,6 +4948,9 @@ fn report_outcome(
         }
         writer.end -= 3;
         write_published(&writer, handle.publish_slice());
+        writer.end -= 3;
+        write_knobs(&writer, handle.limits.shm_bytes, &handle.rlimits, handle.sysctls);
+        writer.writeAll("}}\n") catch unreachable; // The knobs' room is in the buffer.
         append_writable(&writer, handle.mounts, handle.user);
         if (timed_out) {
             writer.end -= 3;

@@ -40,6 +40,22 @@ const diagnostic_object =
 /// The old `$defs` entry, kept so that a reader of the path `$defs.diagnostic` still finds it.
 const diagnostic_definition = "\"diagnostic\":" ++ diagnostic_object;
 
+/// The members M2b added to a container: `ulimits` and `sysctls`, each absent when not set.
+const knobs_properties =
+    \\"ulimits":{"type":"object","description":"M2b: each --ulimit; absent when none",
+    \\"additionalProperties":{"type":"object","required":["soft","hard"],
+    \\"properties":{"soft":{"type":["integer","string"],"description":"or \"unlimited\""},
+    \\"hard":{"type":["integer","string"],"description":"or \"unlimited\""}}}},
+    \\"sysctls":{"type":"array","description":"M2b: each --sysctl, in order; absent when none",
+    \\"items":{"type":"object","required":["key","value"],
+    \\"properties":{"key":{"type":"string"},"value":{"type":"string"}}}}
+;
+
+/// `shm_bytes`, M2b's `--shm-size`: absent when not set.
+const shm_property =
+    \\"shm_bytes":{"type":"integer","description":"M2b: --shm-size; absent when not set"}
+;
+
 /// What `container_exit` holds (the value of the member of that name).
 const container_exit_object =
     \\{"type":"object","required":["reason","code"],
@@ -59,7 +75,9 @@ const container_exit_object =
     \\"items":{"type":"object","required":["host","target"],
     \\"properties":{"host":{"type":"string"},"target":{"type":"string"}}}},
     \\"user":{"type":["object","null"],"description":"M6b: the user the command ran as",
-    \\"properties":{"uid":{"type":"integer"},"gid":{"type":"integer"}}}}}
+    \\"properties":{"uid":{"type":"integer"},"gid":{"type":"integer"}}},
+++ shm_property ++ "," ++ knobs_properties ++
+    \\}}
 ;
 
 const ran_object =
@@ -88,7 +106,9 @@ const detached_container_object =
     \\"items":{"type":"object","required":["host","target"],
     \\"properties":{"host":{"type":"string"},"target":{"type":"string"}}}},
     \\"user":{"type":["object","null"],"description":"M6b: the user the command ran as",
-    \\"properties":{"uid":{"type":"integer"},"gid":{"type":"integer"}}}}}
+    \\"properties":{"uid":{"type":"integer"},"gid":{"type":"integer"}}},
+++ shm_property ++ "," ++ knobs_properties ++
+    \\}}
 ;
 
 /// `zbx schema run`: ONE object schema with no `$ref`, which an agent can follow without a
@@ -157,7 +177,9 @@ const ps_schema =
     \\"labels":{"type":"array","items":{"type":"object","required":["key","value"],
     \\"properties":{"key":{"type":"string"},"value":{"type":"string"}}}},
     \\"limits":{"type":"object","properties":{"memory_bytes":{"type":["integer","null"]},
-    \\"pids":{"type":["integer","null"]},"cpu_millis":{"type":["integer","null"]}}},
+    \\"pids":{"type":["integer","null"]},"cpu_millis":{"type":["integer","null"]},
+++ shm_property ++
+    \\}},
     \\"network":{"enum":["none","host","user",null],
     \\"description":"M6: what the container can reach; null for a record of an older zbx"},
     \\"published":{"type":"array","description":"M6: --publish, as in zbx run",
@@ -181,6 +203,7 @@ const ps_schema =
     \\"properties":{"asked":{"type":"string","description":"as given"},
     \\"path":{"type":"string",
     \\"description":"in the container; only for a host path (a CDI name resolves at start)"}}}},
+++ knobs_properties ++ "," ++
     \\"user":{"type":["object","null"],"description":"M6b: the user the command ran as",
     \\"properties":{"uid":{"type":"integer"},"gid":{"type":"integer"}}}}}}}}
 ;
