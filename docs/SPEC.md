@@ -1,6 +1,6 @@
 # Zigbox: A First-Principles Container Runtime in Zig
 
-Snapshot of https://claude.ai/artifact/6D9js8mxSLYmfuZe3rQ26w taken 2026-11-04 (doc rev 91), Parts I to III. The live doc is authoritative; update this file when it changes. The three diagrams in the live doc are listed as figure notes, not reproduced.
+Snapshot of https://claude.ai/artifact/6D9js8mxSLYmfuZe3rQ26w taken 2026-11-16 (doc rev 126), Parts I to III. The live doc is authoritative; update this file when it changes. The three diagrams in the live doc are listed as figure notes, not reproduced.
 
 ## Purpose and design principles
 
@@ -40,9 +40,9 @@ Ground rules for the implementer:
 
 *Figure: milestone map · 9 milestones, 3 tracks (diagram in the live doc, node 24eb2c38-a0d5; not reproduced here).*
 
-M0 to M2 make a hardened runtime; M3 and M4 add the store and real images, which unlocks networking and state (M5, M6) and hermetic builds and signing (M7, M8). M7 steps also reuse the M2 sandbox. M9 (Dockerfile import) extends M7's builder; M10 (devices) extends M1's `/dev`; neither depends on the other (owner, 2026-11-11: `docs/decisions/2026-11-11-docker-parity-scope.md`).
+M0 to M2 make a hardened runtime; M3 and M4 add the store and real images, which unlocks networking and state (M5, M6) and hermetic builds and signing (M7, M8). M7 steps also reuse the M2 sandbox. M9 (Dockerfile import) extends M7's builder; M10 (devices) extends M1's `/dev`; neither depends on the other (owner, 2026-11-11: `docs/decisions/2026-11-11-docker-parity-scope.md`). M6c and M6d (private pull from Amazon ECR and Google Artifact Registry) extend M4's client and share one credential layer; M6d ships in 0.5.3, with M2b, and does not depend on S2 (owner, 2026-11-16: `docs/decisions/2026-11-16-m6d-artifact-registry.md`).
 
-M2b (workload knobs) extends M2's limits and hardening so common server workloads start without hacks; it ships in 0.5.3 with M6d and blocks nothing else (owner, 2026-11-16: `docs/decisions/2026-11-16-m2b-workload-knobs.md`).
+M2b (workload knobs) extends M2's limits and hardening so common server workloads start without hacks; it ships in 0.5.3 with M6d and blocks nothing else (owner, 2026-11-16: `docs/decisions/2026-11-16-0.5.3-scope.md` and `docs/decisions/2026-11-16-m2b-workload-knobs.md`).
 
 ## Milestones
 
@@ -271,6 +271,28 @@ M2b (workload knobs) extends M2's limits and hardening so common server workload
 - [ ] Public pulls, their output and the lockfile and store formats are unchanged.
 - [ ] CI pulls from a real ECR repository through GitHub OIDC, with no long-lived keys.
 
+### M6d · Private pull: Google Artifact Registry
+
+**Goal:** a host pulls and runs an image from a private Google Artifact Registry repository, or from gcr.io, with the Google credentials it already has, and no secret ever leaves the request it was made for.
+
+**Scope:** authenticated pull from `<region>-docker.pkg.dev` and from `gcr.io`, `us.gcr.io`, `eu.gcr.io` and `asia.gcr.io`, recognised by host; other Google host shapes never get credentials, and a refused pull from one is a coded line. zbx gets a Google access token itself (no credential helper or `gcloud`) from, in order, workload identity federation (`GOOGLE_APPLICATION_CREDENTIALS` naming an `external_account` file: a subject token from a file or URL, exchanged at Google's STS, optionally impersonating a service account) or the GCE metadata server (never through the proxy). The token goes as Basic `oauth2accesstoken` only to the registry's same-host token realm, and the realm's Bearer token only to the registry origin: never to a redirect target or a mirror. Public pulls from these hosts stay anonymous and unchanged. Credentials are resolved for each pull and never written to disk. The library takes credentials from its caller, as in M6c, and ECR and Artifact Registry share one credential layer. Ships in the next release it is ready for (0.5.3 or 0.6.1), and does not depend on S2. Deferred: service-account key files (refused, naming workload identity federation), gcloud user credentials, executable and AWS-sourced external accounts, `~/.docker/config.json` and credential helpers, push, the Mac. Brief: `docs/briefs/M6d-gar.md`; decision: `docs/decisions/2026-11-16-m6d-artifact-registry.md`.
+
+**Demo script:**
+
+1. With no Google credentials, off GCE, `zbx pull <region>-docker.pkg.dev/<project>/zbx-demo/hello:latest` is refused with one line naming the sources tried and the fix.
+2. With workload identity federation from GitHub Actions (no key file), the same pull succeeds; `zbx run` of it prints `hello`; `zbx.lock` holds the digest.
+3. With the same credentials, `zbx pull gcr.io/<project>/hello:latest` succeeds.
+4. Pulling from `zbx-denied`, a repository the identity may not read, is refused, naming the repository and the missing permission.
+5. The subject token, the federated token, the access token and the registry token are absent from every byte zbx wrote: output, JSON, `zbx.lock`, the store, `zbx bundle`, logs.
+
+**Acceptance criteria:**
+
+- [ ] Credentials go only where they are for: the subject token only to Google's STS, the access token only to the registry's same-host token realm, never to a redirect target or a mirror.
+- [ ] No secret on disk, in a diagnostic, an argument list, a record or a bundle; buffers zeroed after use.
+- [ ] Every failure is one coded line (no credentials, unreadable or unsupported credentials file, exchange refused, impersonation refused, missing permission, missing repository, metadata server absent, unsupported host).
+- [ ] Public pulls, their output and the lockfile and store formats are unchanged; ECR pull and `aws_credentials_resolve` are unchanged.
+- [ ] CI pulls from a real Artifact Registry repository through workload identity federation from GitHub Actions, with no key files.
+
 ### M7 · Build: hermetic and reproducible
 
 **Goal:** build images from a declared DAG of steps, so the same inputs always produce the same digest.
@@ -312,7 +334,7 @@ M2b (workload knobs) extends M2's limits and hardening so common server workload
 
 ### M9 · Import: a Dockerfile becomes a build file
 
-*Status: briefs `docs/briefs/M9-dockerfile-import.md` and `M9-dockerfile-flags.md`; not merged on `main` as of this sync. Targets 0.6.0. Started before the 0.5.0 tag (supervisor, 2026-11-12, `docs/decisions/2026-11-12-m9-starts-before-the-0.5.0-tag.md`).*
+*Status: briefs `docs/briefs/M9-dockerfile-import.md` and `M9-dockerfile-flags.md`; all five slices merged (slice 5 in #168) and shipped in 0.5.2 (2026-11-16). Started before the 0.5.0 tag (supervisor, 2026-11-12, `docs/decisions/2026-11-12-m9-starts-before-the-0.5.0-tag.md`).*
 
 **Goal:** `zbx import` reads a Dockerfile and writes a `zbx.build.zon` that a person reads, commits and builds with `zbx build`. A Dockerfile is translated, never executed.
 
@@ -320,7 +342,7 @@ M2b (workload knobs) extends M2's limits and hardening so common server workload
 
 **CLI:** `zbx import [<Dockerfile>] [--context <dir>] [--target <stage>] [--build-arg K=V]... [--network detect|all|none] [--hermetic] [-o <file>] [--force]`. Output `zbx.build.zon` in the context, refused if it exists (`E0816`) unless `--force`. `--hermetic` refuses (`E0814`) when any step would have the network or a cache, and writes nothing. Report on stderr; `--output json`, schema `zbx.import/1`. Library: `zigbox.dockerfile.translate`, a pure function. `zbx build` gains `--pin` (record pins for unpinned network steps; the lock is written once, on success), `--locked` (no lock additions, every pin enforced, a stale pin refused) and `--hermetic` (`--locked`, plus a refusal, `E0814`, of unpinned network steps and of cache steps). `--pin --locked` is `E0005`. A lock with pins is `.version = 2`; one without stays byte-identical version 1.
 
-**Limits (supervisor decision):** `build_steps_max` 64 to 256; `build_file_bytes_max` and `build_pool_bytes` 64 KiB to 256 KiB; new `build_step_caches_max` 4, `build_step_binds_max` 4, `build_copy_entries_max` 64, `build_exclude_lines_max` 256. (On `main` the build bounds are still 64 and 64 KiB.) Approved by the owner (2026-11-14): `build_fetch_bytes_max` 1 GiB, `build_fetch_redirects_max` 4, fetch URLs within `registry_url_bytes_max` (2048), `build_output_excludes_max` 32, `lock_pins_max` 256.
+**Limits (supervisor decision):** `build_steps_max` 64 to 256; `build_file_bytes_max` and `build_pool_bytes` 64 KiB to 256 KiB; new `build_step_caches_max` 4, `build_step_binds_max` 4, `build_copy_entries_max` 64, `build_exclude_lines_max` 256. (On `main` since slice 1.) Approved by the owner (2026-11-14): `build_fetch_bytes_max` 1 GiB, `build_fetch_redirects_max` 4, fetch URLs within `registry_url_bytes_max` (2048), `build_output_excludes_max` 32, `lock_pins_max` 256.
 
 **Diagnostics:** `E0810` cannot read or parse; `E0811` unsupported instruction, flag or form; `E0812` variable without a value; `E0813` stage problem or step-name collision; `E0814` `--hermetic` refusal; `E0815` over a builder bound; `E0816` output exists; `E0817` user or group name not in the tree; `W0802` cache-mount steps; `W0810` non-hermetic steps; `W0811` parts that did not carry over. Approved by the owner (2026-11-14), blame external, exit 3 for the errors: `E0820` a fetch could not be downloaded; `E0821` fetched bytes do not match the hash (url, expected, received); `E0822` a pinned step drifted or its pin is stale under `--locked`/`--hermetic` (step, pinned, new); `W0803` a pinned step drifted and the new output was used. A refused import exits 1 and writes nothing. The per-option disposition is in `docs/briefs/M9-dockerfile-flags.md`.
 
@@ -328,7 +350,7 @@ M2b (workload knobs) extends M2's limits and hardening so common server workload
 
 ### M10 · Devices: host devices and GPUs for one container
 
-*Status: brief `docs/briefs/M10-gpu.md` (settled by `docs/decisions/2026-11-11-m10-gpu-decisions.md`). Slice 1 (`--device /dev/<path>` and kept supplementary groups) is merged (#125); slices 2 to 4 are not. Started before the 0.5.0 tag (owner, 2026-11-12, `docs/decisions/2026-11-12-m10-starts-before-the-0.5.0-tag.md`).*
+*Status: brief `docs/briefs/M10-gpu.md` (settled by `docs/decisions/2026-11-11-m10-gpu-decisions.md`). All four slices merged (#125, #130, #135, #140); `demo-m10` passed in CI in an Ubuntu 24.04 VM with KVM (2026-11-13; `--gpu dri` not run there, as the guest has no render node). Started before the 0.5.0 tag (owner, 2026-11-12, `docs/decisions/2026-11-12-m10-starts-before-the-0.5.0-tag.md`).*
 
 **Goal:** `zbx run --gpu all <image> -- nvidia-smi` works rootless on a Linux host with an NVIDIA GPU and its driver, given the one admin step the host needs anyway (generating a CDI spec). AMD and Intel work through render nodes. A run without `--gpu` or `--device` changes by no byte.
 
@@ -338,7 +360,7 @@ M2b (workload knobs) extends M2's limits and hardening so common server workload
 
 **Limits:** `run_devices_max` 16; `device_path_bytes_max` 48 (`/dev/dri/renderD*`, `/dev/nvidia*`, `/dev/fuse`, `/dev/kvm`, `/dev/net/tun`, `/dev/bus/usb/NNN/NNN` fit; raising it or allowing `:` is a new decision); `plan_paths_bytes_max` 96 to 104 KiB; `sim_mounts_max` 32 to 64; `sim_nodes_max` 160 to 192. A run record is version 10 only for a run with a listener or devices; otherwise version 9, byte for byte.
 
-**Diagnostics:** registered on `main`: `E0225` a host device is refused (missing, not a character device, outside `/dev`, or the user cannot open it, with the node's mode and group); `W0209` groups show as `nogroup` inside (once per run, after the node checks pass). Planned: `E0226` unusable CDI spec; `E0227` CDI edit not applied; `E0228` `--gpu` found nothing; `E0229` devices unavailable on this platform; `E0230` unknown CDI device name; `W0208` image has no `ldconfig`.
+**Diagnostics:** all registered on `main`: `E0225` a host device is refused (missing, not a character device, outside `/dev`, or the user cannot open it, with the node's mode and group); `W0209` groups show as `nogroup` inside (once per run, after the node checks pass); `E0226` unusable CDI spec; `E0227` CDI edit not applied; `E0228` `--gpu` found nothing; `E0229` devices unavailable on this platform; `E0230` unknown CDI device name; `W0208` image has no `ldconfig`.
 
 **Demo:** `zig build demo-m10` proves the plumbing with a fake vendor device, driver directory and CDI spec made in the guest (no GPU on CI). The real-GPU run (an AWS `g4dn.xlarge`, NVIDIA T4) is recorded in `docs/demos/m10.md`, not part of the demo. Details in the brief.
 
@@ -422,7 +444,7 @@ These are out of scope for M0 to M10 and M2b. Raise a change to this doc before 
 - **Rootful mode.** There is no `sudo zbx`. If something only works as root, it is not supported.
 - **Docker API or CLI compatibility.** Commands may resemble Docker's, but no socket API and no drop-in flag parity.
 - **Orchestration.** No Compose equivalent, no clustering, no scheduler, no restart policies beyond what a systemd user unit gives. zbx runs one container at a time; more than one service, even on one laptop, is Zigcube's job: zcube-server with its SQLite store and one agent on the same machine.
-- **Private registries.** Pull only from public registries, except authenticated pull from Amazon ECR (M6c, brought forward 2026-10-30). Push to registries, with credentials, is in M8 (owner, 2026-11-08); pull with those credentials is not.
+- **Private registries.** Pull only from public registries, except authenticated pull from Amazon ECR (M6c, brought forward 2026-10-30) and from Google Artifact Registry and gcr.io (M6d, owner, 2026-11-16). Push to registries, with credentials, is in M8 (owner, 2026-11-08); pull with those credentials is not.
 - **Dockerfile execution.** Dockerfiles are not run directly (`zbx import`, M9, translates one into a build file that `zbx build` builds; the Dockerfile itself is never executed).
 - **Live migration, checkpoint/restore.**
 - **GPU scheduling, sharing and limits.** Access to a GPU or other host device for one Zigbox container is M10; allocation, MIG, MPS, time slicing and gang scheduling are Zigcube's CS4. No Windows, no Intel Macs, no Docker socket API or drop-in flag parity (owner, 2026-11-11).
@@ -460,7 +482,7 @@ These are out of scope for M0 to M10 and M2b. Raise a change to this doc before 
 
 ## Part II · Zigcube: orchestrating Zigbox
 
-Zigcube runs Zigbox workloads across a fleet of machines. It keeps the one idea Kubernetes got right, declared desired state reconciled by controllers against a watchable store, and rebuilds everything around it to exploit Zigbox's content-addressed images, signatures and explicit grants. Its control plane starts in parallel with Zigbox, against a fake runtime (see When Zigcube starts, below), and keeps the same demo-first contract: every C-milestone ends in a live demo on a small VM cluster. Zigcube is also how a developer runs more than one service on one machine (zbx has no Compose equivalent): zcube-server on the SQLite store with one agent on the same laptop, and services reaching each other by name. C1 starts that local mode with one command; reaching services by name, a single-node form of C4's DNS and grants without WireGuard, comes with C4.
+Zigcube runs Zigbox workloads across a fleet of machines. It keeps the one idea Kubernetes got right, declared desired state reconciled by controllers against a watchable store, and rebuilds everything around it to exploit Zigbox's content-addressed images, signatures and explicit grants. Its control plane starts in parallel with Zigbox, against a fake runtime (see When Zigcube starts, below), and keeps the same demo-first contract: every C-milestone ends in a live demo on a small VM cluster. Zigcube is also how a developer runs more than one service on one machine (zbx has no Compose equivalent): zcube-server on the SQLite store with one agent on the same laptop, and services reaching each other by name. C1 starts that local mode with one command; reaching services by name, a single-node form of C4's service names and grants, comes with C4.
 
 Principles it adds on top of Part I:
 
@@ -579,7 +601,7 @@ The demo environment is a set of three to five QEMU VMs on one host, created by 
 
 **Goal:** services find each other by name, talk over authenticated encrypted links, and only along declared grants.
 
-**Scope:** WireGuard tunnels between nodes; cluster DNS for service names; per-workload identity issued by the control plane and bound to service name, image digest and placement epoch (the epoch is carried in every identity from C4 and enforced for stateful services from C7, so C7 needs no change to the identity format); mutual TLS between workloads (or WireGuard-level identity, decided at C4 start); grants such as `web → db:5432` compiled into per-node rules. Default deny. Local mode gains the single-node form, moved here from C1 (owner, 2026-10-30): services on one machine reach each other by name where the service file grants it, without WireGuard; the demo applies an app and postgres with the app granted `db:5432`, and without the grant the connection is refused and `zcube why` names the missing grant.
+**Scope:** mutual TLS on every connection between the supervisors at each end, with no WireGuard (owner, 2026-11-13); service names resolved through a per-container `/etc/hosts`, rewritten in place by its supervisor, that maps every service to a stable `127.77.x.y` address, with no DNS responder; per-workload identity issued by the control plane and bound to service name, image digest and placement epoch (the epoch is carried in every identity from C4 and enforced for stateful services from C7, so C7 needs no change to the identity format); workload certificates from the cluster CA live 1 hour and are renewed at half-life with a fresh key, and a replica whose renewal fails leaves the mesh but keeps running; TCP health checks (HTTP checks are out of C4); grants, declared on the destination service (`.allow`) so that whoever owns the data decides who reaches it, such as `web → db:5432` compiled into per-node rules. Default deny. Local mode gains the single-node form, moved here from C1 (owner, 2026-10-30): services on one machine reach each other by name where the service file grants it, without WireGuard; the demo applies an app and postgres with the app granted `db:5432`, and without the grant the connection is refused and `zcube why` names the missing grant. Local mode's mesh runs with the Zigbox runtime, on Linux and on macOS inside the zbx Linux VM where the agent already runs; the fake runtime has no network isolation, so it cannot show grants and refuses them with one line saying why. C3's deferred "zero errors under real traffic" is measured here: a loadgen service at 20 requests per second, one connection per request, across a rolling update, sees zero failed requests (refused, reset, or no 200 within 2 s) and completes at least 90% of the expected count (long-lived connections across a rollout are not claimed).
 
 **Demo script:**
 
@@ -590,7 +612,7 @@ The demo environment is a set of three to five QEMU VMs on one host, created by 
 
 **Acceptance criteria:**
 
-- [ ] Grants change within seconds, cluster-wide, without restarts.
+- [ ] Grants change within seconds, cluster-wide, without restarts; revoking a grant closes its connections within 1 s (`mesh_revoke_ms` 1000).
 - [ ] A workload's identity changes when its digest changes, so a grant can be scoped to signed versions.
 - [ ] Every identity carries the placement epoch of the replica it was issued to; grants ignore it until C7 enforces it for stateful services.
 
@@ -697,7 +719,7 @@ The demo environment is a set of three to five QEMU VMs on one host, created by 
 - [ ] Control-plane store, decided: Postgres, with OrioleDB (`USING orioledb`) for the hot, update-heavy observed-state tables and plain heap for the rest. FoundationDB rejected as too hard to operate. Open: fall back to all-heap if OrioleDB is still alpha or lacks a needed feature when C0 starts.
 - [ ] Is the control plane also written in Zig, or in a language with a richer server ecosystem, keeping Zig for the agent and runtime?
 - [ ] Service config format: same as the M7 build file, so one language describes build and run?
-- [ ] Workload identity at C4: mTLS per connection, or identity carried at the WireGuard layer?
+- [ ] Workload identity at C4, decided: mTLS per connection between supervisors, no WireGuard (owner, 2026-11-13). WireGuard would need root or `CAP_NET_ADMIN` on every node, or a new userspace crypto implementation, and would still not say which workload is calling.
 
 ## Part III · The ecosystem: how Zigbox wins people, not just benchmarks
 
