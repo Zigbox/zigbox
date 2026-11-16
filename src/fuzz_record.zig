@@ -224,15 +224,30 @@ fn check_devices_back(view: *const records.View, parsed: *const records.Parsed) 
     assert(std.mem.eql(u8, parsed.devices_text(), devices_mod.text(view.devices, &buffer)));
 }
 
-/// The record version a view is written at: plain unless it has a listener or devices.
+/// The record version a view is written at: 11 for a lazy run, 10 with a listener or devices,
+/// else plain.
 fn version_of(view: *const records.View) u32 {
-    if (view.listen != null or view.devices.len > 0) return constants.record_version;
+    if (view.lazy != null) return constants.record_version;
+    if (view.listen != null or view.devices.len > 0) return constants.record_version_listen;
     return constants.record_version_plain;
 }
 
 fn check_listen_back(view: *const records.View, parsed: *const records.Parsed) void {
     assert(parsed.version == version_of(view));
     assert(std.meta.eql(parsed.listen, view.listen));
+    assert(std.meta.eql(parsed.lazy, view.lazy));
+}
+
+/// Version 11: any counts, including the largest; most runs are not lazy.
+fn random_lazy(random: std.Random) ?records.Lazy {
+    if (random.uintLessThan(u8, 3) != 0) return null;
+    return .{
+        .sources = random.uintAtMost(u32, constants.lazy_sources_max),
+        .demand_bytes = random.int(u64),
+        .fill_bytes = random.int(u64),
+        .errors = random.int(u64),
+        .local_percent = random.uintAtMost(u8, 100),
+    };
 }
 
 fn check_mounts_back(view: *const records.View, parsed: *const records.Parsed) void {
@@ -298,6 +313,7 @@ fn check_round_trip(random: std.Random) void {
             else => .{ .uid = 0, .gid = 0 },
         },
         .listen = random_listen(random, reach.network),
+        .lazy = random_lazy(random),
         .devices = random_devices(random, &devices),
     };
     var buffer: [text_bytes_max]u8 = undefined;
@@ -315,6 +331,12 @@ fn check_round_trip(random: std.Random) void {
     assert(std.mem.eql(u8, parsed.scope_slice(), view.scope));
     assert(parsed.detached == view.detached);
     assert(parsed.timed_out == view.timed_out);
+    check_reach_back(&view, &parsed);
+    check_mounts_back(&view, &parsed);
+    check_damaged(random, text);
+}
+
+fn check_reach_back(view: *const records.View, parsed: *const records.Parsed) void {
     assert(parsed.network.? == view.network);
     assert(parsed.publish_count == view.publish.len);
     for (view.publish, parsed.publish_slice()) |wanted, found| assert(std.meta.eql(wanted, found));
@@ -322,8 +344,6 @@ fn check_round_trip(random: std.Random) void {
     for (view.env_names, 0..) |wanted, at| {
         assert(std.mem.eql(u8, wanted, parsed.env_name(@intCast(at))));
     }
-    check_mounts_back(&view, &parsed);
-    check_damaged(random, text);
 }
 
 fn check_damaged(random: std.Random, text: []const u8) void {
@@ -385,6 +405,7 @@ fn rerender(parsed: *const records.Parsed) void {
         .user = parsed.user,
         .listen = parsed.listen,
         .devices = devices[0..devices_count],
+        .lazy = parsed.lazy,
     };
     var buffer: [text_bytes_max]u8 = undefined;
     var again: records.Parsed = undefined;
@@ -392,6 +413,7 @@ fn rerender(parsed: *const records.Parsed) void {
     assert(again.state_count == parsed.state_count);
     assert(again.mounts_count == parsed.mounts_count);
     assert(std.mem.eql(u8, again.devices_text(), parsed.devices_text()));
+    assert(std.meta.eql(again.lazy, parsed.lazy));
     // A record that did not say its user is written with root's, and reads as root's.
     const kept = parsed.user orelse spec_mod.User{ .uid = 0, .gid = 0 };
     assert(std.meta.eql(again.user.?, kept));

@@ -151,6 +151,7 @@ pub const Server = struct {
             .target = target,
             .bearer = token,
             .range_from = range_start(header_value(text, "range")),
+            .range_last = range_last(header_value(text, "range")),
         };
         server.fixture.answer(query, &answer);
         server.respond(client, &answer);
@@ -252,13 +253,38 @@ fn write_chunked(client: i32, body: []const u8, complete: bool) void {
     if (complete) write_all(client, "0\r\n\r\n");
 }
 
-/// The offset of a `Range: bytes=N-` header; zero for none or for anything else.
+/// The offset of a `Range: bytes=N-` or `bytes=N-M` header; zero for none or for anything else.
 fn range_start(value: ?[]const u8) u64 {
     const text = value orelse return 0;
     const prefix = "bytes=";
     if (!std.mem.startsWith(u8, text, prefix)) return 0;
-    const rest = std.mem.trimEnd(u8, text[prefix.len..], "- ");
-    return std.fmt.parseInt(u64, rest, 10) catch 0;
+    const rest = text[prefix.len..];
+    const dash = std.mem.indexOfScalar(u8, rest, '-') orelse return 0;
+    return std.fmt.parseInt(u64, std.mem.trim(u8, rest[0..dash], " "), 10) catch 0;
+}
+
+/// The last byte of a closed `Range: bytes=N-M` header; null for an open range, none, or
+/// anything else.
+fn range_last(value: ?[]const u8) ?u64 {
+    const text = value orelse return null;
+    const prefix = "bytes=";
+    if (!std.mem.startsWith(u8, text, prefix)) return null;
+    const rest = text[prefix.len..];
+    const dash = std.mem.indexOfScalar(u8, rest, '-') orelse return null;
+    const last = std.mem.trim(u8, rest[dash + 1 ..], " ");
+    if (last.len == 0) return null;
+    _ = std.fmt.parseInt(u64, std.mem.trim(u8, rest[0..dash], " "), 10) catch return null;
+    return std.fmt.parseInt(u64, last, 10) catch null;
+}
+
+test "range headers, open and closed" {
+    try std.testing.expectEqual(@as(u64, 0), range_start(null));
+    try std.testing.expectEqual(@as(u64, 512), range_start("bytes=512-"));
+    try std.testing.expectEqual(@as(?u64, null), range_last("bytes=512-"));
+    try std.testing.expectEqual(@as(u64, 0), range_start("bytes=0-99"));
+    try std.testing.expectEqual(@as(?u64, 99), range_last("bytes=0-99"));
+    try std.testing.expectEqual(@as(?u64, null), range_last("bytes=x-99"));
+    try std.testing.expectEqual(@as(?u64, null), range_last("items=0-99"));
 }
 
 fn status_only(status: u16) []const u8 {

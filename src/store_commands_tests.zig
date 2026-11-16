@@ -621,7 +621,7 @@ test "verify of a whole store says so, in text and in JSON" {
     try testing.expect(object.get("ok").?.bool);
     const keys = [_][]const u8{
         "schema", "ok",    "objects",         "object_bytes", "chunk_lists",
-        "trees",  "roots", "paths_truncated", "things",
+        "trees",  "roots", "paths_truncated", "things",       "partial_images",
     };
     try json_object_has(object, schemas.of("store-verify").?, &keys);
     try testing.expectEqual(@as(usize, 0), object.get("things").?.array.items.len);
@@ -1022,6 +1022,28 @@ test "push --dry-run prints the digest an export prints, and refuses without --d
     try testing.expect(std.mem.indexOf(u8, sim.stderr(), "needs the build result") != null);
     try testing.expectEqual(@as(u8, 1), try command(&.{ "push", "--dry-run", "nope" }));
     try testing.expect(std.mem.indexOf(u8, sim.stderr(), "ZBX-E0550") != null);
+}
+
+test "export and push --dry-run write layer writer 1, with no lazy index (0.5.2)" {
+    // Goal: 0.5.2 keeps lazy start dormant, so an image packed for export or push has 0.5.1's
+    // bytes (docs/decisions/2026-11-16-0.5.2-s2-dormant.md). Method: export a tree and read
+    // the manifest blob: it names writer 1 and has no lazy-index annotation; push --dry-run
+    // prints the same digest, so it packs the same bytes.
+    start();
+    try testing.expectEqual(@as(u8, 0), try command(&.{ "store", "import", "/src" }));
+    var buffer: [80]u8 = undefined;
+    const tree = term(&buffer, try printed_digest());
+    try testing.expectEqual(@as(u8, 0), try export_to(&.{ tree, "/export-a" }));
+    var manifest: [constants.oci_digest_text_bytes]u8 = undefined;
+    @memcpy(&manifest, try printed_oci_digest());
+    var path: [128]u8 = undefined;
+    const blob = try std.fmt.bufPrint(&path, "/export-a/blobs/sha256/{s}", .{manifest[7..]});
+    const text = files.content_of(blob).?;
+    const writer_1 = "\"" ++ constants.pack_annotation_writer ++ "\":\"1\"";
+    try testing.expect(std.mem.indexOf(u8, text, writer_1) != null);
+    try testing.expect(std.mem.indexOf(u8, text, constants.pack_annotation_lazy_index) == null);
+    try testing.expectEqual(@as(u8, 0), try command(&.{ "push", "--dry-run", tree }));
+    try testing.expectEqualStrings(&manifest, try printed_oci_digest());
 }
 
 test "push --dry-run takes name@sha256:<digest>, as sign does (#111)" {

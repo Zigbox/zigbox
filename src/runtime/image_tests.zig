@@ -6,6 +6,7 @@
 const std = @import("std");
 const constants = @import("../constants.zig");
 const codes = @import("../diag/codes.zig");
+const lazy_mod = @import("../lazy/lazy.zig");
 const Diag = @import("../diag/diag.zig").Diag;
 const host_sim = @import("../host_sim.zig");
 const digest_mod = @import("../store/digest.zig");
@@ -437,6 +438,52 @@ test "a lazy run refused: by its server, by the kernel's FUSE, or by a serve tha
         );
         try testing.expectEqual(@as(u32, 1), fake.served);
         try testing.expect(!sim.world.listener_leaked);
+        try testing.expectEqual(@as(u32, 0), sim.open_count());
+    }
+}
+
+/// A peer source that is never asked: the runs below are refused before any fetch.
+fn never_fetch(
+    _: *anyopaque,
+    _: *const lazy_mod.Request,
+    _: []u8,
+) lazy_mod.FetchError!lazy_mod.Fetched {
+    unreachable; // The refusals come first.
+}
+
+fn never_lied(_: *anyopaque, _: *const lazy_mod.Request, _: lazy_mod.PeerToken) void {
+    unreachable; // As `never_fetch`.
+}
+
+test "E1208: peer sources a lazy run cannot take are refused at start, never asserted" {
+    // Goal: the review's SHOULD 7 for S2 slice 5: a library caller's `lazy_sources` given to a
+    // lazy server with no peers hook, or to a run that is not lazy, is a coded refusal with
+    // nothing made, not an assertion in `prepare_lazy`. Method: both through `start`; the
+    // server is never prepared and nothing is left open.
+    var diag: Diag = undefined;
+    var fake: FakeLazy = .{};
+    const source: lazy_mod.Source = .{
+        .context = &fake,
+        .name = "swarm",
+        .fetch = never_fetch,
+        .lied = never_lied,
+    };
+    const sources = [_]lazy_mod.Source{source};
+    const digest = try setup(44);
+    world_dirs("lazy-6");
+    const text = digest.text();
+    const spec = spec_for(&text, "lazy-6", false);
+    const cases = [_]lib.StartOptions{
+        .{ .image_workspace = &image_ws, .lazy = fake.lazy(), .lazy_sources = &sources },
+        .{ .image_workspace = &image_ws, .lazy_sources = &sources },
+    };
+    for (cases) |options| {
+        diag.reset();
+        const started = lib.start(sim.interface(), &spec, options, &handle, &diag);
+        try testing.expectError(error.StartFailed, started);
+        try testing.expectEqual(@as(?codes.Code, .E1208), diag.code);
+        try testing.expect(std.mem.indexOf(u8, diag.last_cause().?, "1 peer sources") != null);
+        try testing.expectEqual(@as(u32, 0), fake.prepared);
         try testing.expectEqual(@as(u32, 0), sim.open_count());
     }
 }

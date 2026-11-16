@@ -339,6 +339,8 @@ pub const all = [_]Fixture{
     build(.{ .name = "kernel_newer_major_lower_minor", .kernel = "6.0.1" }),
     // The default host without pasta: the net check warns and says how to install it.
     build(.{ .name = "pasta_missing" }),
+    // S2: no /dev/fuse: `zbx run --lazy` would refuse (E1201), so the fuse check warns (W1203).
+    build(.{ .name = "fuse_missing", .probes = .{ .fuse = .no_device } }),
     // A pasta from before 2024_02_16: the run would refuse it, so the net check warns.
     build(.{
         .name = "pasta_old",

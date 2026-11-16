@@ -87,7 +87,7 @@ pub const user_name_bytes_max: u32 = 256;
 pub const controller_name_bytes_max: u32 = 32;
 pub const controllers_count_max: u32 = 32;
 pub const kernel_number_digits_max: u32 = 9;
-pub const doctor_checks_count: u32 = 7;
+pub const doctor_checks_count: u32 = 8;
 pub const detail_bytes_max: u32 = 240;
 pub const binary_candidates_count: u32 = 3;
 /// The doctor's look for `pasta` (M5): directories of PATH tried, the longest path kept, and the
@@ -488,10 +488,13 @@ pub const limit_text_bytes_max: u32 = 24;
 /// Records kept; the oldest is deleted when a run would make it more.
 pub const runs_max: u32 = 32;
 /// The version `zbx` writes. A record with a higher one is skipped, not misread.
-pub const record_version: u32 = 10;
+pub const record_version: u32 = 11;
 /// What a record without a listener is written as: a run that never asked for `--listen` leaves
 /// the same bytes it did before version 10 (which only added `.listen`).
 pub const record_version_plain: u32 = 9;
+/// What a record with a listener or a device, and no `.lazy`, is written as (S2 added `.lazy` in
+/// version 11, written only for a lazy run, as M10 did for `.listen`).
+pub const record_version_listen: u32 = 10;
 /// One record. The command is cut to `record_command_bytes_max` and says so.
 pub const record_bytes_max: u32 = 64 * 1024;
 // Every reader of a record reads a file of at most `file_bytes_max`, so a record is never larger.
@@ -590,7 +593,7 @@ pub const secret_value_bytes_min: u32 = 4;
 pub const secret_value_bytes_max: u32 = 256;
 /// The diagnostic kept in a run record, as the JSON line zbx printed. Bigger is replaced by a
 /// short object that names the code.
-pub const diag_json_bytes_max: u32 = 3072;
+pub const diag_json_bytes_max: u32 = 3056;
 /// A diagnostic carried through a pipe from the store's worker to its caller (`Diag.encode`).
 pub const diag_carry_bytes_max: u32 = 6 * 1024;
 /// "[redacted:private-key]" and its siblings fit this.
@@ -1594,7 +1597,8 @@ comptime {
     assert(container_name_bytes_max + record_suffix.len <= dir_name_bytes_max);
     assert(state_path_bytes_max > "/zbx/runs/".len + dir_name_bytes_max + 64);
     assert(record_version >= 1);
-    assert(record_version_plain + 1 == record_version);
+    assert(record_version_plain + 1 == record_version_listen);
+    assert(record_version_listen + 1 == record_version);
     assert(bundle_stage_bytes_max + 16 * 1024 <= bundle_gz_bytes_max);
     assert(bundle_gz_bytes_max <= write_bytes_max);
     assert(bundle_file_bytes_max * 2 < bundle_stage_bytes_max);
@@ -2204,6 +2208,9 @@ pub const lazy_store_free_bytes_min: u64 = 1024 * 1024 * 1024;
 pub const lazy_sources_max: u32 = 8;
 /// The readers that may wait on the resolver at once: the FUSE server's threads.
 pub const lazy_fuse_threads: u32 = 4;
+/// Coded lines a lazy run shows for its resolver's events (W1202, E1203, E1206) before one line
+/// counts the rest (approved by the owner 2026-11-14).
+pub const lazy_errors_shown_max: u32 = 16;
 /// The chunks one request may carry: a range of `lazy_range_bytes_max` holds this many chunks
 /// that compress at all. Stored incompressible, each chunk carries a header and 7 fit; the
 /// job takes what the range holds, so the bound is never passed.
@@ -2216,6 +2223,8 @@ pub const lazy_pending_max: u32 = lazy_slots * lazy_job_chunks_max +
     lazy_fuse_threads * (1 + lazy_readahead_chunks);
 
 comptime {
+    assert(lazy_errors_shown_max > 0);
+    assert(lazy_errors_shown_max <= lazy_pending_max);
     assert(lazy_attempt_timeout_ms < lazy_read_deadline_ms);
     assert(lazy_down_fail_ms < lazy_attempt_timeout_ms);
     assert(lazy_down_fail_ms < lazy_down_probe_ms);

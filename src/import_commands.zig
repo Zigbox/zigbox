@@ -22,6 +22,7 @@ const manifest = @import("registry/manifest.zig");
 const pull_commands = @import("pull_commands.zig");
 const pull_lib = @import("pull.zig");
 const reference_mod = @import("registry/reference.zig");
+const registry_diagnose = @import("registry/diagnose.zig");
 const render_diag = @import("diag/render.zig");
 const report_mod = @import("dockerfile/report.zig");
 const store_diagnose = @import("store/diagnose.zig");
@@ -434,6 +435,14 @@ fn resolve(context: *anyopaque, reference: []const u8) error{Unresolved}!transla
 
 fn settings_of(pinning: *Pinning, reference: []const u8) error{Failed}!*const images.Settings {
     const lock = &pinning.pulling.locking.lock;
+    // The Dockerfile sets the reference's length, and `find` asserts it is a length an argument
+    // can have: a reference longer than any the lock can hold is refused (E0501) before it.
+    if (reference.len > constants.reference_bytes_max) {
+        const shown = reference[0..@min(reference.len, constants.arg_bytes_max)];
+        registry_diagnose.bad_reference(pinning.diag, shown, error.TooLong);
+        return error.Failed;
+    }
+    assert(reference.len <= constants.arg_bytes_max);
     if (lock.find(reference)) |at| {
         const entry = &lock.entries[at];
         var errno: u16 = 0;

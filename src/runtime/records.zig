@@ -127,6 +127,26 @@ pub const View = struct {
     listen: ?spec_mod.Listen = null,
     /// Version 10: the host devices the run asked for (`--device`), as it asked.
     devices: []const devices_mod.Device = &.{},
+    /// Version 11: what a lazy run (`zbx run --lazy`, S2) fetched; null for any other run, which
+    /// then writes no line.
+    lazy: ?Lazy = null,
+};
+
+/// A lazy run's fetching, as its record keeps it (`.lazy`) and `ps`/`inspect` JSON shows it.
+pub const Lazy = struct {
+    /// The sources the resolver had (the store's peers, the registry).
+    sources: u32,
+    /// Chunk bytes fetched for readers that waited for them, and by the background fill.
+    demand_bytes: u64,
+    fill_bytes: u64,
+    /// Reads that ended in an error (`EIO`).
+    errors: u64,
+    /// How much of the image was local when the run's record was last written.
+    local_percent: u8,
+
+    pub fn fetched_bytes(lazy: *const Lazy) u64 {
+        return lazy.demand_bytes +| lazy.fill_bytes; // A record is read as found: never overflows.
+    }
 };
 
 pub const Binding = spec_mod.Binding;
@@ -177,7 +197,9 @@ pub fn render(view: *const View, buffer: *[constants.record_bytes_max]u8) []cons
     // A record without a listener stays at the plain version, byte for byte as before M8b.
     const plain = constants.record_version_plain;
     const has_new = view.listen != null or view.devices.len > 0;
-    const version = if (has_new) constants.record_version else plain;
+    const version = if (view.lazy != null)
+        constants.record_version
+    else if (has_new) constants.record_version_listen else plain;
     write_format(&writer, "    .version = {d},\n", .{version});
     write_bytes(&writer, "    .name = ");
     write_string(&writer, view.name);
@@ -262,6 +284,22 @@ fn write_network_fields(writer: *std.Io.Writer, view: *const View) void {
     write_binding(writer, view.binding);
     write_listen(writer, view.listen);
     write_devices(writer, view.devices);
+    write_lazy(writer, view.lazy);
+}
+
+const lazy_format = "    .lazy = .{{ .sources = {d}, .demand_bytes = {d}, .fill_bytes = {d}, " ++
+    ".errors = {d}, .local_percent = {d} }},\n";
+
+/// `.lazy = .{ .sources = 2, ... },` for a lazy run; no line for any other.
+fn write_lazy(writer: *std.Io.Writer, lazy: ?Lazy) void {
+    assert(writer.end <= writer.buffer.len);
+    const found = lazy orelse return;
+    assert(found.local_percent <= 100);
+    assert(found.sources <= constants.lazy_sources_max);
+    write_format(writer, lazy_format, .{
+        found.sources, found.demand_bytes,  found.fill_bytes,
+        found.errors,  found.local_percent,
+    });
 }
 
 /// `.devices = "/dev/dri/renderD128 /dev/kfd",` for a run with devices; no line for one without,
@@ -440,8 +478,13 @@ comptime {
     const listen = 48;
     // `.devices = "...",`: the paths hold no byte that is escaped (`devices.path_problem`).
     const devices = devices_mod.text_bytes_max + 32;
+    // Version 11: `.lazy = .{ ... },`: the fixed text and five numbers at their widest.
+    const lazy = std.fmt.count(lazy_format, .{
+        constants.lazy_sources_max, std.math.maxInt(u64), std.math.maxInt(u64),
+        std.math.maxInt(u64),       100,
+    });
     const total = strings + command + labels + diagnostic + scope + store + network + state +
-        mounts + user + binding + listen + devices + 512;
+        mounts + user + binding + listen + devices + lazy + 512;
     assert(total <= constants.record_bytes_max);
 }
 
@@ -512,6 +555,8 @@ pub const Parsed = struct {
     /// Version 10: the paths of the run's `--device`s, space-separated; empty for none.
     devices: [devices_mod.text_bytes_max]u8,
     devices_len: u16,
+    /// Version 11: what a lazy run fetched; null for any other run or an older record.
+    lazy: ?Lazy,
 
     /// The `--device` paths the run asked for, as one string.
     pub fn devices_text(parsed: *const Parsed) []const u8 {
@@ -725,6 +770,7 @@ pub fn parse(text: []const u8, out: *Parsed) ParseError!void {
     out.binding = null;
     out.listen = null;
     out.devices_len = 0;
+    out.lazy = null;
     var has_reason = false;
     var have_start = false;
     var opened = false;
@@ -884,6 +930,7 @@ fn parse_scope_field(key: []const u8, value: []const u8, out: *Parsed) ?bool {
     if (std.mem.eql(u8, key, "binding")) return parse_binding(value, out);
     if (std.mem.eql(u8, key, "listen")) return parse_listen_field(value, out);
     if (std.mem.eql(u8, key, "devices")) return parse_devices(value, out);
+    if (std.mem.eql(u8, key, "lazy")) return parse_lazy(value, out);
     if (std.mem.eql(u8, key, "command")) return parse_command(value, out);
     if (std.mem.eql(u8, key, "labels")) return parse_labels(value, out);
     return parse_limit_field(key, value, out);
@@ -1050,6 +1097,46 @@ fn parse_binding(value: []const u8, out: *Parsed) bool {
         return false;
     }
     return true;
+}
+
+/// `.{ .sources = 2, .demand_bytes = 1, .fill_bytes = 0, .errors = 0, .local_percent = 38 }`,
+/// exactly as `write_lazy` writes it: every field, in order.
+fn parse_lazy(value: []const u8, out: *Parsed) bool {
+    assert(value.len > 0);
+    const inner = strip_affixes(value, ".{ ", " }") orelse return false;
+    const keys = [_][]const u8{
+        "sources", "demand_bytes", "fill_bytes", "errors", "local_percent",
+    };
+    var numbers: [keys.len]u64 = undefined;
+    var fields = std.mem.splitSequence(u8, inner, ", ");
+    for (keys, 0..) |name, at| {
+        const field = fields.next() orelse return false;
+        const rest = strip_affixes(field, ".", "") orelse return false;
+        const digits = strip_affixes(rest, name, "") orelse return false;
+        const number = strip_affixes(digits, " = ", "") orelse return false;
+        if (number.len == 0 or number.len > 20) return false;
+        if (number.len > 1 and number[0] == '0') return false;
+        for (number) |byte| {
+            if (byte < '0' or byte > '9') return false;
+        }
+        numbers[at] = std.fmt.parseInt(u64, number, 10) catch return false;
+    }
+    if (fields.next() != null) return false;
+    if (numbers[0] > constants.lazy_sources_max or numbers[4] > 100) return false;
+    out.lazy = .{
+        .sources = @intCast(numbers[0]),
+        .demand_bytes = numbers[1],
+        .fill_bytes = numbers[2],
+        .errors = numbers[3],
+        .local_percent = @intCast(numbers[4]),
+    };
+    return true;
+}
+
+fn strip_affixes(text: []const u8, prefix: []const u8, suffix: []const u8) ?[]const u8 {
+    if (!std.mem.startsWith(u8, text, prefix)) return null;
+    if (!std.mem.endsWith(u8, text[prefix.len..], suffix)) return null;
+    return text[prefix.len .. text.len - suffix.len];
 }
 
 /// `"UID:GID"`: two numbers in one spelling each (no sign, no leading zero), as `render` writes.
@@ -1630,7 +1717,7 @@ test "older, newer and damaged records: the reader accepts, skips or refuses exa
     try parse(twice, &parsed);
     try testing.expectEqual(@as(u8, 2), parsed.command_words);
     try testing.expectEqualStrings("c", parsed.command_word(1));
-    const newer = ".{\n    .version = 11,\n    .name = \"x\",\n    .started = 5,\n}\n";
+    const newer = ".{\n    .version = 12,\n    .name = \"x\",\n    .started = 5,\n}\n";
     try testing.expectError(error.Newer, parse(newer, &parsed));
     const bad = [_][]const u8{
         "",
@@ -1735,7 +1822,7 @@ test "pruning keeps the newest runs_max, deletes the oldest first, and counts wh
     }
     const prefix = "/home/alice/.local/state/zbx/runs/";
     const legacy = ".{\n    .name = \"legacy\",\n    .started = 500,\n}\n";
-    const future = ".{\n    .version = 11,\n    .name = \"future\",\n    .started = 600,\n}\n";
+    const future = ".{\n    .version = 12,\n    .name = \"future\",\n    .started = 600,\n}\n";
     try testing.expect(sim.world.write_file(prefix ++ "legacy.zon", legacy) == null);
     try testing.expect(sim.world.write_file(prefix ++ "damaged.zon", "not a record") == null);
     try testing.expect(sim.world.write_file(prefix ++ "future.zon", future) == null);

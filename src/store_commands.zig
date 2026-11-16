@@ -402,9 +402,12 @@ fn put_tags_json(job: *const Job, image: *const images.Image, diag: *Diag) Error
 }
 
 /// The image records, after the roots: text as a second table when there are any, JSON as the
-/// members of "images". Each shows every tag it was pulled as and the tree it became.
+/// members of "images". Each shows every tag it was pulled as and the tree it became, and a
+/// lazily started image how much of it is local (`partial 38%`; S2).
 const LsImages = struct {
     job: *const Job,
+    store: *const Store,
+    memory: usage.Memory,
     diag: *Diag,
     json: bool,
     count: u32 = 0,
@@ -416,28 +419,49 @@ const LsImages = struct {
         if (self.failed) return;
         const first = self.count == 0;
         self.count += 1;
-        const done = if (self.json) self.put_json(image, first) else self.put_text(image, first);
+        const local = self.local_percent(image);
+        const done = if (self.json)
+            self.put_json(image, local, first)
+        else
+            self.put_text(image, local, first);
         done catch {
             self.failed = true;
         };
     }
 
-    fn put_json(self: *LsImages, image: *const images.Image, first: bool) Error!void {
+    /// Null for a whole image, and for a partial one whose tree cannot be walked (shown as
+    /// partial without a percent: `ls` shows rather than refuses).
+    fn local_percent(self: *LsImages, image: *const images.Image) ?u8 {
+        if (!image.partial) return null;
+        var failure: usage.Failure = undefined;
+        return usage.tree_local_percent(self.store, &self.memory, image.tree, &failure) catch null;
+    }
+
+    fn put_json(self: *LsImages, image: *const images.Image, local: ?u8, first: bool) Error!void {
         assert(self.json);
         assert(self.count > 0);
         try put(self.job, if (first) "{" else ",{", self.diag);
         try put_tags_json(self.job, image, self.diag);
         var buffer: [512]u8 = undefined;
         const fields = ",\"manifest\":\"{s}\",\"platform\":\"{s}\",\"tree\":\"{s}\"," ++
-            "\"time\":{d}}}";
+            "\"time\":{d}";
         // Cannot fail: a manifest, a platform, a tree and a time are under 200 bytes.
         const text = std.fmt.bufPrint(&buffer, fields, .{
             &image.manifest.text(), image.platform_text(), image.tree.text(), image.time,
         }) catch unreachable; // Same bound.
         try put(self.job, text, self.diag);
+        if (image.partial) {
+            try put(self.job, ",\"partial\":true", self.diag);
+            if (local) |percent| {
+                // Cannot fail: a number of at most 3 digits.
+                const more = std.fmt.bufPrint(&buffer, ",\"local_percent\":{d}", .{percent});
+                try put(self.job, more catch unreachable, self.diag); // Same bound.
+            }
+        }
+        try put(self.job, "}", self.diag);
     }
 
-    fn put_text(self: *LsImages, image: *const images.Image, first: bool) Error!void {
+    fn put_text(self: *LsImages, image: *const images.Image, local: ?u8, first: bool) Error!void {
         assert(!self.json);
         assert(self.count > 0);
         var buffer: [constants.output_bytes_max]u8 = undefined;
@@ -457,6 +481,15 @@ const LsImages = struct {
             commands.clock_text(image.time, &when),
             image.tree.text(),
         }) catch unreachable; // Same bound.
+        if (image.partial) {
+            writer.undo(1); // The row's newline: the state goes at its end.
+            // Cannot fail: the row is at most 8.5 KiB of the 16 KiB buffer.
+            if (local) |percent| {
+                writer.print("  partial {d}%\n", .{percent}) catch unreachable; // Bound above.
+            } else {
+                writer.writeAll("  partial\n") catch unreachable; // Same bound.
+            }
+        }
         try put(self.job, writer.buffered(), self.diag);
     }
 };
@@ -471,7 +504,13 @@ fn images_unreadable(diag: *Diag, store: *const Store) Error {
 
 fn ls_images(job: *Job, store: *const Store, json: bool, diag: *Diag) Error!void {
     assert(diag.code == null);
-    var visitor: LsImages = .{ .job = job, .diag = diag, .json = json };
+    var visitor: LsImages = .{
+        .job = job,
+        .store = store,
+        .memory = usage_memory(job),
+        .diag = diag,
+        .json = json,
+    };
     image_find.scan(store, &job.workspace.image_memory, &job.workspace.image, &visitor) catch {
         return images_unreadable(diag, store);
     };
@@ -1452,18 +1491,45 @@ fn do_verify(job: *Job, diag: *Diag) Error!void {
         };
     }
     for (0..ws.damage_count) |index| report_damage(job, &store, @intCast(index));
+    const partial = if (exists) try count_partial(job, &store, diag) else 0;
     if (job.output.json) try verify_json(
         job,
         &totals,
+        partial,
         diag,
-    ) else try verify_text(job, &totals, diag);
+    ) else try verify_text(job, &totals, partial, diag);
     if (totals.damaged == 0) return;
     const checked = totals.objects + totals.trees + totals.roots;
     diagnose.verify_failed(diag, totals.damaged, ws.damage_count, checked);
     return error.Failed;
 }
 
-fn verify_text(job: *const Job, totals: *const verify.Totals, diag: *Diag) Error!void {
+/// Counts the image records of lazily started images (S2): partial, not damaged. Their trees are
+/// rooted by their records alone, never under `roots/`, so `verify` does not walk them.
+const PartialCount = struct {
+    count: u32 = 0,
+
+    pub fn visit(self: *PartialCount, image: *const images.Image) void {
+        assert(self.count < constants.images_max);
+        if (image.partial) self.count += 1;
+    }
+};
+
+fn count_partial(job: *Job, store: *const Store, diag: *Diag) Error!u32 {
+    assert(diag.code == null);
+    var visitor: PartialCount = .{};
+    image_find.scan(store, &job.workspace.image_memory, &job.workspace.image, &visitor) catch {
+        return images_unreadable(diag, store);
+    };
+    return visitor.count;
+}
+
+fn verify_text(
+    job: *const Job,
+    totals: *const verify.Totals,
+    partial: u32,
+    diag: *Diag,
+) Error!void {
     assert(totals.orphan_lists <= totals.chunk_lists);
     assert(diag.code == null);
     var buffer: [constants.output_bytes_max]u8 = undefined;
@@ -1485,10 +1551,20 @@ fn verify_text(job: *const Job, totals: *const verify.Totals, diag: *Diag) Error
         writer.print("{d} chunk lists have no object (an interrupted import or gc left them; " ++
             "the next gc moves them away)\n", .{totals.orphan_lists}) catch unreachable; // Same.
     }
+    if (partial > 0) {
+        const noun = if (partial == 1) "image is" else "images are";
+        writer.print("{d} {s} partial (started with --lazy, not every file fetched; " ++
+            "zbx pull completes one)\n", .{ partial, noun }) catch unreachable; // Same bound.
+    }
     try put(job, writer.buffered(), diag);
 }
 
-fn verify_json(job: *const Job, totals: *const verify.Totals, diag: *Diag) Error!void {
+fn verify_json(
+    job: *const Job,
+    totals: *const verify.Totals,
+    partial: u32,
+    diag: *Diag,
+) Error!void {
     assert(job.output.json);
     assert(diag.code == null);
     const ws = &job.workspace.verify;
@@ -1498,7 +1574,7 @@ fn verify_json(job: *const Job, totals: *const verify.Totals, diag: *Diag) Error
     writer.print("{{\"schema\":\"zbx.store.verify/1\",\"ok\":{},\"objects\":{d}," ++
         "\"object_bytes\":{d}," ++
         "\"chunk_lists\":{d},\"orphan_lists\":{d},\"trees\":{d},\"roots\":{d},\"damaged\":{d}," ++
-        "\"paths_truncated\":{},\"things\":[", .{
+        "\"paths_truncated\":{},\"partial_images\":{d},\"things\":[", .{
         totals.damaged == 0,
         totals.objects,
         totals.object_bytes,
@@ -1508,6 +1584,7 @@ fn verify_json(job: *const Job, totals: *const verify.Totals, diag: *Diag) Error
         totals.roots,
         totals.damaged,
         totals.paths_truncated,
+        partial,
     }) catch unreachable; // Same bound.
     try put_big(job, writer.buffered(), diag);
     for (0..ws.damage_count) |index| try damage_json(job, @intCast(index), diag);

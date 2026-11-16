@@ -194,6 +194,9 @@ pub const Request = struct {
     /// A resumed download: ask for the bytes from this offset on (`Range: bytes=N-`). Zero asks
     /// for the whole body and sends no header.
     range_from: u64 = 0,
+    /// With `range_from`, a closed range: ask for the bytes from `range_from` to this one, both
+    /// included (`Range: bytes=N-M`), sent even when `range_from` is zero. Null for none.
+    range_last: ?u64 = null,
     method: Method = .get,
     /// The upload's bytes; null for none. Set exactly when `method.has_body()`.
     body: ?Body = null,

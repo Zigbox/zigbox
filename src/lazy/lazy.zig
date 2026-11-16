@@ -4,11 +4,11 @@
 //! looks in the local store first (the object whole, or the chunk held in
 //! `partial/<id>/<index>`), then asks the sources in order (the peers a library caller supplies,
 //! then the registry by `Range` on a layer writer 2 blob), hashes every chunk it is given against
-//! the chunk's listed hash, keeps it in the store with `chunks.put_chunk`, and only then reads
-//! it back (checked again) into the caller's buffer. It owns the deadlines, the concurrency
-//! limit, readahead, range coalescing, the background fill and each source's health. It knows
-//! nothing of FUSE: the FUSE server (slice 4) calls `Resolver.read`, and a later VM front end
-//! reuses it unchanged.
+//! the chunk's listed hash and its chaining value, keeps it in the store with `chunks.put_chunk`,
+//! and only then reads it back (checked again) into the caller's buffer. It owns the deadlines,
+//! the concurrency limit, readahead, range coalescing, the background fill and each source's
+//! health. It knows nothing of FUSE: the FUSE server (slice 4) calls `Resolver.read`, and a
+//! later VM front end reuses it unchanged.
 //!
 //! What this file fixes, for the FUSE server, the run integration and Zigcube's agent:
 //!
@@ -125,6 +125,13 @@ pub const Object = struct {
     /// One per chunk (`wanted.hashes.len` of them), or empty when no registry holds the object
     /// (a test, or a catalog made from the store alone).
     locations: []const Location,
+    /// Each chunk's BLAKE3 chaining value at its place (`chaining.run_value`), one per chunk,
+    /// for an object of two chunks or more: what ties a chunk's bytes to the content hash, so
+    /// to the signed tree. A plain chunk hash alone is not tied to it (an index can list any),
+    /// so every chunk of such an object is checked against this too before it is kept or
+    /// served. Empty for an object of fewer than two chunks (its one chunk's hash is its
+    /// content), and in a catalog that anchors nothing (a test's, whose sources are trusted).
+    chaining: []const Digest,
 };
 
 /// Every object the tree names, each once (a file's hard links share one), in the order the
@@ -159,6 +166,9 @@ pub const Event = struct {
     };
     kind: Kind,
     object: ObjectIndex,
+    /// The object's id (`Catalog.objects[object].wanted.id`): the line names it, as the catalog
+    /// has no path.
+    id: Digest,
     chunk: u32,
     /// The source the event is about (`lied`), else "".
     source: []const u8,
@@ -167,6 +177,8 @@ pub const Event = struct {
     /// "registry: timed out; peer 10.0.0.3: not found".
     outcomes: [constants.lazy_sources_max]Outcome,
     sources_count: u8,
+    /// The sources' names, indexed as `outcomes`: `sources_count` of them are set.
+    names: *const [constants.lazy_sources_max][]const u8,
 };
 
 /// What one source did for a chunk, for the `unavailable` event's reason.
@@ -220,6 +232,10 @@ pub const Report = struct {
     /// found whole by the fill). Never goes down: a gc that removes one later is not seen.
     objects_local: u32,
     objects_total: u32,
+    /// The sizes of the objects counted in `objects_local`, and of every object of the catalog
+    /// (an object with a hard link counts once): "image 38% local" and "3.0 GiB not yet local".
+    bytes_local: u64,
+    bytes_total: u64,
     /// Events the resolver had no room for (its ring holds `lazy_pending_max`): the caller
     /// shows the count, so a dropped line is never silent.
     events_dropped: u64,
@@ -239,4 +255,6 @@ test {
     _ = @import("resolver.zig");
     _ = @import("sim.zig");
     _ = @import("resolver_test.zig");
+    _ = @import("registry_range.zig");
+    _ = @import("registry_range_test.zig");
 }

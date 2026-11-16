@@ -50,6 +50,10 @@ var network_memory: host_real_net.Memory = undefined;
 /// threads' buffers, about 100 MiB, static so it is in bss and costs nothing until a lazy run.
 var lazy_server: lazy_server_mod.Server = undefined;
 
+/// A lazy start from a registry (S2): the index and its checking room, about 160 MiB, static for
+/// the same reason.
+var lazy_workspace: @import("lazy_start.zig").Workspace = undefined;
+
 pub fn main(init: std.process.Init.Minimal) u8 {
     if (guest_command(init)) |code| return code;
     network_memory.init();
@@ -58,6 +62,8 @@ pub fn main(init: std.process.Init.Minimal) u8 {
     storage.gc_tables = &gc_tables;
     lazy_server.init(real.interface());
     cli.lazy_server = &lazy_server;
+    cli.lazy_workspace = &lazy_workspace;
+    cli.free_bytes = host_real.free_bytes;
     const code = cli.run_with(real.interface(), &iterator, &storage);
     assert(real.open_count == 0); // Every file the CLI opened was closed.
     return code;
@@ -166,6 +172,7 @@ test {
     _ = @import("fuse/serve.zig");
     _ = @import("fuse/kernel_tests.zig");
     _ = @import("fuse/lazy_server_tests.zig");
+    _ = @import("fuse/resolver_tests.zig");
     _ = @import("host_real_fuse.zig");
 }
 
@@ -253,6 +260,7 @@ test {
     _ = @import("image_diagnose.zig");
     _ = @import("store/image_find.zig");
     _ = @import("lazy/lazy.zig");
+    _ = @import("lazy_lines.zig");
     _ = @import("testing/vm/checks_m4.zig");
 }
 

@@ -24,6 +24,10 @@ const render = @import("diag/render.zig");
 const diagnose = @import("runtime/diagnose.zig");
 const image_mod = @import("runtime/image.zig");
 const lazy_server_mod = @import("fuse/lazy_server.zig");
+const lazy_lines = @import("lazy_lines.zig");
+const lazy_start = @import("lazy_start.zig");
+const lazy_mod = @import("lazy/lazy.zig");
+const store_diagnose = @import("store/diagnose.zig");
 const lazy_diagnose = @import("fuse/diagnose.zig");
 const reference_mod = @import("registry/reference.zig");
 const layout = @import("store/layout.zig");
@@ -1061,7 +1065,8 @@ pub fn parse(
                 p.run.command = args[index + 1 ..];
                 break;
             },
-            .detach, .read_only, .lazy => try take_run_flag(diag, &p.run, given, argument),
+            .detach, .read_only => try take_run_flag(diag, &p.run, given, argument),
+            .lazy => try take_lazy(diag, &p.run, given, argument),
             .last, .no_redact => try take_bundle_flag(diag, &p.bundle, given, argument),
             .provenance => try take_provenance(diag, &invocation.provenance, given, argument),
             .resolve_only => try take_pull_option(diag, &p.pull, given, argument),
@@ -3154,6 +3159,33 @@ fn unknown_option(diag: *Diag, argument: []const u8) ParseError {
     return error.UnknownOption;
 }
 
+/// `--lazy`: a run flag in a build with lazy start, refused in one without it (0.5.2).
+fn take_lazy(
+    diag: *Diag,
+    run_args: *RunArgs,
+    operands: []const []const u8,
+    argument: []const u8,
+) ParseError!void {
+    assert(classify(argument) == .lazy);
+    if (!build_options.lazy_start) return lazy_not_yet(diag, argument);
+    try take_run_flag(diag, run_args, operands, argument);
+}
+
+/// `--lazy` in a build without lazy start (`-Dlazy-start`, off in a release): 0.5.2 ships S2's
+/// code dormant (docs/decisions/2026-11-16-0.5.2-s2-dormant.md), so the flag is refused as an
+/// option this zbx does not take yet. 0.6.0 removes this refusal.
+fn lazy_not_yet(diag: *Diag, argument: []const u8) ParseError {
+    assert(diag.code == null);
+    assert(std.mem.eql(u8, argument, "--lazy"));
+    diag.raise(.E0004);
+    diag.while_("reading the command line", .{});
+    diag.cause("lazy start arrives in 0.6.0", .{});
+    diag.context("arg", "{s}", .{argument});
+    diag.fix(.{ .sentence = "leave out --lazy" });
+    assert(diag.code.? == .E0004);
+    return error.UnknownOption;
+}
+
 fn check_output_value(diag: *Diag, value: []const u8) ParseError!void {
     assert(diag.code == null);
     assert(value.len <= constants.arg_bytes_max);
@@ -3266,6 +3298,8 @@ pub const Storage = struct {
     /// The room gc keeps its sets in (`gc.Workspace.tables`): the caller's, at least
     /// `gc.tables_bytes_min`. `zbx` gives it a static region of `store_gc_tables_bytes`.
     gc_tables: []align(8) u8,
+    /// A lazy run of an image the store lacks: its lines and where its free bytes are read.
+    lazy_remote: LazyRemote,
 };
 
 /// The memory `zbx verify` works in: the build workspace's, which no verify uses. Each `Storage`
@@ -3873,6 +3907,7 @@ fn prepare_image(
             .json = false,
         },
         .warn = .{ .context = &reporter, .call = report_warning },
+        .lazy = lazy_workspace_of(invocation),
     };
     run_image.prepare(
         &services,
@@ -3933,6 +3968,10 @@ fn run_container(
     try check_user_flag(invocation, diag);
     // A `--mount` outside the project is refused before an image is pulled for the run.
     const spec_mounts = try resolve_writable(host, &given, storage, diag);
+    // Before the image is looked for: a lazy start from a registry fetches its index.
+    if (given.lazy) try check_lazy(&given, invocation, diag);
+    // A lazy start from a registry holds its token for the run: wiped on every way out of it.
+    defer if (given.lazy) lazy_start.wipe(&storage.pull, lazy_workspace);
     var prepared: run_image.Prepared = .{
         .tree = invocation.operand orelse "",
         .command = given.command,
@@ -3970,9 +4009,9 @@ fn run_container(
         .binding = binding_of(subject.binding),
     };
     const ran = ran_of(invocation, &prepared);
-    if (given.lazy) try check_lazy(&given, invocation, diag);
     if (given.detach) return run_detached(host, invocation, &container, times, storage, &ran, diag);
-    return run_foreground(host, invocation, &container, times, storage, &ran, diag);
+    const lazy: Lazy = if (!given.lazy) .none else if (prepared.remote) .remote else .local;
+    return run_foreground(host, invocation, &container, times, storage, &ran, lazy, diag);
 }
 
 /// The binding as the run record keeps it (the runtime does not know the trust module).
@@ -4094,10 +4133,12 @@ fn run_foreground(
     times: Times,
     storage: *Storage,
     ran: *const Ran,
+    lazy: Lazy,
     diag: *Diag,
 ) RunError!u8 {
     assert(diag.code == null);
     assert(!invocation.run.detach);
+    assert(invocation.run.lazy == (lazy != .none));
     assert(container.command.len > 0);
     var reporter: Reporter = .{ .host = host, .options = invocation.options };
     var refusing: RefusingLazy = .{ .host = host };
@@ -4112,8 +4153,9 @@ fn run_foreground(
     };
     const handle = &storage.handle;
     if (container.listen != null) try check_listen_send(host, invocation, diag);
+    if (lazy == .remote) try attach_remote(host, invocation, storage, diag);
     // The serving threads end with the container's mount namespace: joined after the run.
-    defer if (invocation.run.lazy) lazy_finish();
+    defer if (lazy != .none) lazy_finish(storage);
     runtime.start(host, container, options, handle, diag) catch {
         keep_bundle_of_bug(host, &storage.workspace, handle, diag);
         return error.StartFailed;
@@ -4142,11 +4184,98 @@ fn lazy_of(refusing: *RefusingLazy) runtime.Lazy {
     return server.lazy();
 }
 
-fn lazy_finish() void {
+/// After a lazy run: the summary line when the resolver served it, then the server's teardown,
+/// and the registry client's token wiped when the image came from one.
+fn lazy_finish(storage: *Storage) void {
     if (comptime builtin.os.tag != .linux) return; // As in `lazy_of`: no real server there.
     const server = lazy_server orelse return;
+    if (server.report()) |report| {
+        storage.lazy_remote.lines.summary(&report, server.source_names());
+    }
+    const remote = server.remote != null;
     server.finish();
+    if (remote) lazy_start.finish(&storage.pull, lazy_workspace);
     assert(server.fd == -1);
+    assert(server.remote == null);
+}
+
+/// The memory of a lazy start from a registry (`lazy_start.Workspace`, about 160 MiB): `zbx`'s
+/// `main` sets it with `lazy_server`. Null (the tests, a library) leaves `--lazy` to images the
+/// store holds, and pulls any other whole.
+pub var lazy_workspace: ?*lazy_start.Workspace = null;
+
+/// The free bytes of the file system holding a path (`host_real.free_bytes`): `main` sets it.
+/// Null, or a path it cannot read, counts the store's disk as never full.
+pub var free_bytes: ?*const fn (path: [:0]const u8) ?u64 = null;
+
+/// `Services.lazy` of a run: only `run --lazy` in the foreground with the real server fetches.
+fn lazy_workspace_of(invocation: *const Invocation) ?*lazy_start.Workspace {
+    if (invocation.command != .run) return null;
+    if (!invocation.run.lazy or invocation.run.detach) return null;
+    if (lazy_server == null) return null;
+    return lazy_workspace;
+}
+
+/// How a run serves its tree: whole from the store, lazily from the store's own objects, or
+/// lazily from a registry for an image the store lacks.
+const Lazy = enum { none, local, remote };
+
+/// A lazy run of an image the store lacks: the server's `Remote` and what it calls back.
+const LazyRemote = struct {
+    lines: lazy_lines.Lines,
+    /// The store's directory, for its free bytes.
+    root: [@sizeOf(@FieldType(layout.Store, "root"))]u8,
+    root_len: u32,
+    index_fetched: u64,
+
+    fn free(context: *anyopaque) u64 {
+        const remote: *const LazyRemote = @ptrCast(@alignCast(context));
+        assert(remote.root_len > 0);
+        assert(remote.root[remote.root_len] == 0);
+        const query = free_bytes orelse return std.math.maxInt(u64);
+        return query(remote.root[0..remote.root_len :0]) orelse std.math.maxInt(u64);
+    }
+
+    fn started(context: *anyopaque, report: *const lazy_mod.Report) void {
+        const remote: *const LazyRemote = @ptrCast(@alignCast(context));
+        remote.lines.progress(remote.index_fetched, report);
+    }
+};
+
+/// Gives the server the verified index of an image the store lacks and its registry, before
+/// the run prepares the tree (`prepare_image` started it from the registry).
+fn attach_remote(
+    host: Host,
+    invocation: *const Invocation,
+    storage: *Storage,
+    diag: *Diag,
+) RunError!void {
+    assert(diag.code == null);
+    assert(invocation.run.lazy);
+    const server = lazy_server.?; // `lazy_workspace_of` gave a workspace only with a server.
+    const ws = lazy_workspace.?;
+    const remote = &storage.lazy_remote;
+    var store: layout.Store = undefined;
+    if (!store.locate(host)) {
+        lazy_start.finish(&storage.pull, lazy_workspace);
+        store_diagnose.no_data_directory(diag);
+        return error.StartFailed;
+    }
+    assert(store.root_len < remote.root.len);
+    @memcpy(remote.root[0 .. store.root_len + 1], store.root[0 .. store.root_len + 1]);
+    remote.root_len = store.root_len;
+    remote.index_fetched = ws.index_fetched;
+    const mode = invocation.options.mode();
+    remote.lines = .init(host, mode, mode != .json and host.color_enabled(.stderr));
+    const reference = &storage.pull.library.reference;
+    ws.range.init(&ws.client, reference, ws.layer, server.threaded.io());
+    server.attach(.{
+        .index = ws.index,
+        .registry = ws.range.source(),
+        .log = remote.lines.log(),
+        .free = .{ .context = remote, .query = LazyRemote.free },
+        .started = .{ .context = remote, .call = LazyRemote.started },
+    });
 }
 
 /// The server of a lazy run without `main`'s: it builds no table and refuses the descriptor,
@@ -5242,6 +5371,56 @@ test "parse: every usage error has its code, at the exact boundary" {
     }
 }
 
+test "--lazy is refused at parse time with E0004 in a build without lazy start (0.5.2)" {
+    // Goal: 0.5.2 ships S2 dormant, so `run --lazy` is refused before anything runs, with one
+    // line saying lazy start arrives in 0.6.0. Method: parse it, then run it and read stderr.
+    if (build_options.lazy_start) return error.SkipZigTest;
+    var invocation: Invocation = undefined;
+    const args = [_][]const u8{ "run", "--lazy", "alpine", "--", "/bin/sh" };
+    try testing.expectEqual(@as(?codes.Code, .E0004), try parse_case(&args, &invocation));
+    var sim: HostSim = undefined;
+    const argv = [_][:0]const u8{ "zbx", "run", "--lazy", "alpine", "--", "/bin/sh" };
+    try testing.expectEqual(@as(u8, 125), try run_case(&sim, &argv));
+    try testing.expect(std.mem.indexOf(u8, sim.stderr(), "lazy start arrives in 0.6.0") != null);
+    try testing.expect(std.mem.indexOf(u8, sim.stderr(), "leave out --lazy") != null);
+    try testing.expectEqual(@as(usize, 0), sim.stdout().len);
+}
+
+test "a lazy run wipes the registry token on an early exit as well as at its end" {
+    // Goal: the supervisor's ruling for S2 slice 5b: no exit from a lazy run, the ones between
+    // the start and the run's own teardown included, leaves a registry token in memory. Method:
+    // a token-shaped marker in the run's client workspace, then a lazy run of a pulled image
+    // that a bad `--memory` ends after the image is prepared; the marker is gone. A plain run
+    // ended the same way keeps it, so the check is not vacuous. The run is parsed without
+    // `--lazy` and then marked lazy, so its code runs past the parse-time gate in every build.
+    const pull_tests = @import("pull_tests.zig");
+    const reference = @import("registry/test_registry.zig").TestRegistry.reference(.open);
+    var world: pull_tests.World = undefined;
+    pull_tests.project_world(&world, 41, "web-1");
+    const pulled = pull_tests.run_text(&world, &.{ "zbx", "pull", reference });
+    try testing.expectEqual(@as(u8, 0), pulled);
+    const storage = &pull_tests.wipe_storage;
+    storage.gc_tables = &pull_tests.wipe_tables;
+    const client = &storage.pull.library.client;
+    const marker = "FAKEtoken-wipe";
+    const host = world.sim.interface();
+    for ([_]bool{ false, true }) |lazy| {
+        @memcpy(client.token[0..marker.len], marker);
+        world.sim.stderr_len = 0;
+        var diag: Diag = undefined;
+        diag.reset();
+        var invocation: Invocation = undefined;
+        try parse(&.{ "run", "--memory", "lots", reference }, &invocation, &diag);
+        invocation.run.lazy = lazy;
+        const ran = dispatch(host, &invocation, storage, &diag);
+        try testing.expect(std.meta.isError(ran));
+        try testing.expect(fail(host, &diag, invocation.options) != 0);
+        try testing.expect(std.mem.indexOf(u8, world.sim.stderr(), "--memory") != null);
+        const kept = std.mem.eql(u8, client.token[0..marker.len], marker);
+        try testing.expectEqual(!lazy, kept);
+    }
+}
+
 test "snapshot: the usage errors exit 1 with one diagnostic on stderr and nothing on stdout" {
     // Goal: every usage error is a user-blamed diagnostic (exit 1, not the old 2), rendered on
     // stderr only. The full text of each is in the golden files (diag_golden.zig).
@@ -5432,7 +5611,7 @@ test "doctor --output json: every check with its status, a code for a failure or
         try testing.expect(document.get("ok").?.bool);
         const checks = document.get("checks").?.array.items;
         const ids = [_][]const u8{ "kernel", "userns", "cgroup", "overlay", "subid", "seccomp" } ++
-            [_][]const u8{"net"};
+            [_][]const u8{ "fuse", "net" };
         try testing.expectEqual(ids.len, checks.len);
         for (checks, ids) |check, id| {
             try testing.expectEqualStrings(id, check.object.get("id").?.string);
