@@ -19,7 +19,7 @@ const testing = std.testing;
 const HostSim = host_sim.HostSim;
 
 /// One host, one test registry and the wire between them, set up as the tests need.
-const World = struct {
+pub const World = struct {
     sim: HostSim,
     registry: test_registry.TestRegistry,
     wire: net_sim.SimNet,
@@ -200,7 +200,7 @@ fn pull_world(world: *World, seed: u64) void {
     world.sim.store_fs = &store_files;
 }
 
-fn run_text(world: *World, args: []const [:0]const u8) u8 {
+pub fn run_text(world: *World, args: []const [:0]const u8) u8 {
     world.sim.stdout_len = 0;
     world.sim.stderr_len = 0;
     return world.run(args);
@@ -425,7 +425,7 @@ const lock_path = project ++ "/zbx.lock";
 const containers = "/home/alice/.local/state/zbx/containers";
 
 /// A project directory to work in, with the host's /sys and a container root for `name`.
-fn project_world(world: *World, seed: u64, name: []const u8) void {
+pub fn project_world(world: *World, seed: u64, name: []const u8) void {
     pull_world(world, seed);
     store_files.put_dir(project, 0o755);
     _ = world.sim.world.processes[0].cwd.set(project);
@@ -1090,4 +1090,86 @@ test "run --output json says what ran: the image as typed, its manifest and tree
     try testing.expectEqualStrings("tree", ran_tree.get("kind").?.string);
     try testing.expectEqualStrings(tree, ran_tree.get("tree").?.string);
     try testing.expect(ran_tree.get("reference") == null);
+}
+
+/// The storage of a run below the CLI (`cli.zig`'s token-wipe test) and of `lazy_start_of`.
+pub var wipe_storage: cli.Storage = undefined;
+pub var wipe_tables: [8 * 1024 * 1024]u8 align(8) = @splat(0);
+
+const lazy_start = @import("lazy_start.zig");
+const images_mod = @import("store/images.zig");
+const store_open = @import("store/open.zig");
+const Diag = @import("diag/diag.zig").Diag;
+const Store = @import("store/layout.zig").Store;
+
+/// A lazy start's room (about 160 MiB), static so it is in bss, as `main.zig` keeps it.
+var start_workspace: lazy_start.Workspace = undefined;
+var start_image: images_mod.Image = undefined;
+
+/// The warnings a lazy start gave: their codes, in order.
+const Warned = struct {
+    codes: [4]?codes.Code = @splat(null),
+    count: u32 = 0,
+    text: [512]u8 = undefined,
+    text_len: u32 = 0,
+
+    fn call(context: *anyopaque, diag: *const Diag) void {
+        const warned: *Warned = @ptrCast(@alignCast(context));
+        assert(warned.count < warned.codes.len);
+        warned.codes[warned.count] = diag.code;
+        warned.count += 1;
+        const cause = diag.last_cause() orelse "";
+        const size = @min(cause.len, warned.text.len);
+        @memcpy(warned.text[0..size], cause[0..size]);
+        warned.text_len = @intCast(size);
+    }
+};
+
+/// `lazy_start.start` of the fixture's tag against the world's store, as `zbx run --lazy` calls
+/// it once the store is open.
+fn lazy_start_of(world: *World, warned: *Warned) !lazy_start.Outcome {
+    const host = world.sim.interface();
+    var store: Store = undefined;
+    try testing.expect(store.locate(host));
+    var diag: Diag = undefined;
+    diag.reset();
+    _ = try store_open.check(&store, .create, &diag);
+    wipe_storage.gc_tables = &wipe_tables;
+    const warn: @import("store/namespace.zig").Warn = .{ .context = warned, .call = Warned.call };
+    const reference = test_registry.TestRegistry.reference(.open);
+    const pull = &wipe_storage.pull;
+    const ws = &start_workspace;
+    return lazy_start.start(host, pull, ws, &store, reference, warn, &start_image, &diag);
+}
+
+test "a lazy start of a tag already pulled whole runs it from the store and keeps its record" {
+    // Goal: the review's MUST 3 for S2 slice 5: `--lazy` of a tag whose image the store holds
+    // whole never rewrites its record as partial. Method: pull the fixture, then a lazy start of
+    // the same tag: it says `local`, warns nothing, the image it loaded is whole, and
+    // `zbx store ls` still lists the image whole.
+    var world: World = undefined;
+    project_world(&world, 43, "web-1");
+    const reference = test_registry.TestRegistry.reference(.open);
+    try testing.expectEqual(@as(u8, 0), run_text(&world, &.{ "zbx", "pull", reference }));
+    var warned: Warned = .{};
+    try testing.expectEqual(lazy_start.Outcome.local, try lazy_start_of(&world, &warned));
+    try testing.expectEqual(@as(u32, 0), warned.count);
+    try testing.expect(!start_image.partial);
+    try testing.expectEqual(@as(u8, 0), run_text(&world, &.{ "zbx", "store", "ls" }));
+    try testing.expect(std.mem.indexOf(u8, world.sim.stdout(), "partial") == null);
+}
+
+test "a lazy start of an image of two layers pulls it whole, with a W1201 that says why" {
+    // Goal: the review's SHOULD 6 for S2 slice 5: a lazy index covers one layer, so an image of
+    // more than one is never started lazily from its first layer alone. Method: the fixture's
+    // image has two layers and is not in the store; a lazy start of it says `whole` and warns
+    // W1201 naming the two layers.
+    var world: World = undefined;
+    project_world(&world, 44, "web-1");
+    var warned: Warned = .{};
+    try testing.expectEqual(lazy_start.Outcome.whole, try lazy_start_of(&world, &warned));
+    try testing.expectEqual(@as(u32, 1), warned.count);
+    try testing.expectEqual(codes.Code.W1201, warned.codes[0].?);
+    const cause = warned.text[0..warned.text_len];
+    try testing.expect(std.mem.indexOf(u8, cause, "it has 2 layers") != null);
 }

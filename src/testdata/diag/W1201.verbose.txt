@@ -1,0 +1,7 @@
+warning[ZBX-W1201]: the image has no lazy index: pulling it whole
+  while  starting registry.example/team/app:1 lazily
+  cause  its manifest has no lazy index: no zbx with layer writer 2 pushed it
+  image  registry.example/team/app:1
+  fix    nothing to do: the image is pulled whole, then run
+  more   zbx explain W1201
+  docs   https://zigbox.github.io/zigbox/errors/W1201.html

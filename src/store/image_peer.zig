@@ -417,6 +417,9 @@ pub fn import_record(
     try check_complete(store, memory, tree, options.entries_max, &counted, failure);
     const exists = try load_existing(store, memory, failure);
     merge(memory, exists, store.host.time_now(), options.tags);
+    // `check_complete` found every object here: the image is whole on this node, whatever the
+    // peer's record said.
+    memory.image.partial = false;
     // The image record first: it alone keeps the tree for gc, so a failure of the root that
     // follows leaves a tree that is kept, never a root with nothing behind it.
     var written: fs_mod.Failure = undefined;

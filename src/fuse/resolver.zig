@@ -15,6 +15,10 @@ const xattrs = @import("../store/xattrs.zig");
 const nodes = @import("nodes.zig");
 const ops = @import("ops.zig");
 const cache_mod = @import("cache.zig");
+const lazy = @import("../lazy/lazy.zig");
+const index_mod = @import("../lazy/index.zig");
+const chaining = @import("../lazy/chaining.zig");
+const object_mod = @import("../store/object.zig");
 
 const Digest = digest_mod.Digest;
 const Store = layout.Store;
@@ -79,6 +83,130 @@ pub const StoreChunks = struct {
         return @intCast(length); // At most a chunk, and a chunk's size is a u32.
     }
 };
+
+/// The chunks of an image that is not all local: every read goes through the chunk resolver
+/// (`lazy.Resolver.read`), which serves from the store or fetches, verifies and lands the chunk
+/// first. The resolver is shared by every serving thread (it takes its own lock); this adapter
+/// keeps only the thread's last refusal, for its tests.
+pub const ResolverChunks = struct {
+    resolver: *lazy.Resolver,
+    chunk_bytes: u32,
+    /// The last refusal, for the caller's tests (the resolver logged the coded event itself).
+    last: ?lazy.ReadError,
+
+    pub fn init(resolver: *lazy.Resolver, chunk_bytes: u32) ResolverChunks {
+        assert(chunk_bytes > 0);
+        assert(chunk_bytes <= constants.store_chunk_bytes);
+        return .{ .resolver = resolver, .chunk_bytes = chunk_bytes, .last = null };
+    }
+
+    pub fn chunks(resolver_chunks: *ResolverChunks) ops.Chunks {
+        assert(resolver_chunks.chunk_bytes > 0);
+        return .{ .context = resolver_chunks, .read = read };
+    }
+
+    fn read(context: *anyopaque, wanted: ops.Object, index: u32, out: []u8) ops.ChunkError!u32 {
+        const s: *ResolverChunks = @ptrCast(@alignCast(context));
+        assert(out.len >= s.chunk_bytes);
+        assert(index < constants.store_chunks_max);
+        const objects = s.resolver.options.catalog.objects;
+        // `check_objects` matched every file node's ordinal to the catalog before serving.
+        assert(wanted.ordinal < objects.len);
+        assert(objects[wanted.ordinal].wanted.id.eql(wanted.id));
+        const length = s.resolver.read(wanted.ordinal, index, out) catch |err| {
+            s.last = err;
+            return error.Unavailable;
+        };
+        assert(length > 0); // A chunk of a file is never empty.
+        assert(length <= s.chunk_bytes);
+        assert(length <= out.len);
+        return @intCast(length); // At most a chunk, and a chunk's size is a u32.
+    }
+};
+
+/// Where `catalog_of` builds the catalog: one object per index object, one hash, one chaining
+/// value and one location per index chunk. The caller's, sized from the verified index's header.
+pub const CatalogMemory = struct {
+    objects: []lazy.Object,
+    hashes: []Digest,
+    chaining: []Digest,
+    locations: []lazy.Location,
+};
+
+/// The resolver's catalog of a verified index (`verify.verify`), in the index's object order,
+/// with each object's attributes taken from its file node in `table` (built from the same
+/// trees). An object id that the attributes and content do not give is refused as malformed:
+/// the index and the trees disagree, and no read may trust an ordinal of either.
+pub fn catalog_of(
+    table: *const nodes.Table,
+    index: *const index_mod.Index,
+    memory: CatalogMemory,
+) error{Malformed}!lazy.Catalog {
+    const header = index.header;
+    assert(memory.objects.len == header.objects);
+    assert(memory.hashes.len == header.chunks);
+    assert(memory.chaining.len == header.chunks);
+    assert(memory.locations.len == header.chunks);
+    if (table.object_count != header.objects) return error.Malformed;
+    for (0..header.chunks) |at| {
+        const record = index.chunk(@intCast(at));
+        memory.hashes[at] = record.hash;
+        memory.chaining[at] = record.chaining;
+        memory.locations[at] = .{ .offset = record.offset, .length = record.length };
+    }
+    var filled: u32 = 0;
+    var nodeid: u64 = 1;
+    while (nodeid <= table.node_count) : (nodeid += 1) {
+        const found = table.node(nodeid).?;
+        if (found.kind != .file) continue;
+        const ordinal = table.ordinal(found);
+        assert(ordinal < header.objects);
+        const record = index.object(ordinal);
+        if (!record.id.eql(found.digest)) return error.Malformed;
+        if (record.size != found.size) return error.Malformed;
+        const first = record.first_chunk;
+        assert(@as(u64, first) + record.chunk_count <= header.chunks); // `parse` checked it.
+        const attrs: object_mod.Attrs = .{
+            .mode = found.mode & 0o7777,
+            .uid = found.uid,
+            .gid = found.gid,
+            .xattrs = table.attributes(found),
+        };
+        const content = content_of(index, &record);
+        if (!object_mod.object_id(content, attrs).eql(record.id)) return error.Malformed;
+        memory.objects[ordinal] = .{
+            .wanted = .{
+                .id = record.id,
+                .attrs = attrs,
+                .size = record.size,
+                .content = content,
+                .hashes = memory.hashes[first..][0..record.chunk_count],
+            },
+            .locations = memory.locations[first..][0..record.chunk_count],
+            // A one-chunk object's chunk hash is its content; a longer one's chunks are tied to
+            // its content only through these (`land.anchored`), which `content_of` joined.
+            .chaining = if (record.chunk_count < 2)
+                &.{}
+            else
+                memory.chaining[first..][0..record.chunk_count],
+        };
+        filled += 1;
+    }
+    // One file node per object: hard links share a node.
+    if (filled != header.objects) return error.Malformed;
+    return .{ .objects = memory.objects };
+}
+
+/// An object's content hash from its chunks, as `verify` anchored them: the empty hash, the one
+/// chunk's hash, or the chunks' chaining values joined.
+fn content_of(index: *const index_mod.Index, record: *const index_mod.Object) Digest {
+    if (record.chunk_count == 0) return Digest.of("");
+    if (record.chunk_count == 1) return index.chunk(record.first_chunk).hash;
+    var joiner = chaining.Joiner.init();
+    const last = record.first_chunk + record.chunk_count - 1;
+    for (record.first_chunk..last) |ordinal| joiner.add(&index.chunk(@intCast(ordinal)).chaining);
+    return joiner.root(&index.chunk(last).chaining);
+}
 
 /// Checks the index's object list against the table before any read: one object per file node,
 /// at the node's ordinal, with the node's id and size. An index whose object order disagrees with

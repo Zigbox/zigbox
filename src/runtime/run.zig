@@ -57,6 +57,8 @@ const netfiles = @import("netfiles.zig");
 const pasta_mod = @import("pasta.zig");
 const plan_mod = @import("plan.zig");
 const records = @import("records.zig");
+const lazy_mod = @import("../lazy/lazy.zig");
+const lazy_diagnose = @import("../fuse/diagnose.zig");
 const scope_mod = @import("scope.zig");
 const scope_text = @import("scope_text.zig");
 const session_mod = @import("session.zig");
@@ -210,6 +212,10 @@ pub const StartOptions = struct {
     stream_prefix: []const u8 = "",
     /// Serve the tree lazily (`Lazy`); only a run of a tree from the store (`Spec.image`).
     lazy: ?Lazy = null,
+    /// A lazy run's peer sources (Zigcube's swarm fetch, `zigbox.lazy.Source`), asked for a
+    /// chunk after the local store and before the registry, in this order. Only with `lazy`; at
+    /// most `lazy_sources_max - 1`, leaving room for the registry. `zbx` passes none.
+    lazy_sources: []const lazy_mod.Source = &.{},
 };
 
 /// A run whose tree is served lazily (`zbx run --lazy`, S2): the caller's FUSE server. The tree
@@ -222,6 +228,24 @@ pub const Lazy = struct {
     /// spawned. A refusal says why in `diag` and ends the start.
     prepare: *const fn (context: *anyopaque, tree: Digest, diag: *Diag) bool,
     serve: *const fn (context: *anyopaque, device: host_mod.Handle) host_mod.Error!void,
+    /// What the run has fetched so far, for its record (`.lazy`, version 11): asked each time
+    /// the record is written. Null, or a null answer (the server never started), writes a lazy
+    /// run's record with zero counts.
+    record: ?*const fn (context: *anyopaque) ?records.Lazy = null,
+    /// Given `StartOptions.lazy_sources` before `prepare`, when there are any.
+    peers: ?*const fn (context: *anyopaque, sources: []const lazy_mod.Source) void = null,
+
+    fn record_now(lazy: *const Lazy) records.Lazy {
+        const none: records.Lazy = .{
+            .sources = 0,
+            .demand_bytes = 0,
+            .fill_bytes = 0,
+            .errors = 0,
+            .local_percent = 0,
+        };
+        const ask = lazy.record orelse return none;
+        return ask(lazy.context) orelse none;
+    }
 };
 
 /// The longest `StartOptions.stream_prefix`: a build step's name and ` | `.
@@ -274,6 +298,8 @@ pub const Handle = struct {
     publish_count: u32,
     /// The listener `--listen` asked for, for the record and `zbx ps`; never a descriptor.
     listen: ?spec_mod.Listen,
+    /// A lazy run's server, asked for the record's `.lazy`; null for any other run.
+    lazy: ?Lazy,
     /// For `--net user`: where pasta is, and the file its output goes to (empty: none).
     pasta_path: text_util.Bounded(constants.pasta_path_bytes_max),
     pasta_log: text_util.Bounded(constants.state_path_bytes_max + 80),
@@ -395,6 +421,7 @@ pub fn init_handle(
     handle.network = container.network;
     handle.publish_count = 0;
     handle.listen = container.listen;
+    handle.lazy = options.lazy;
     handle.pasta_path = .{};
     handle.pasta_log = .{};
     handle.end_reason = .none;
@@ -437,6 +464,7 @@ pub fn start(
     try check_listen(container, diag);
     try check_hosts_file(host, container, diag);
     try check_network(host, container, handle, diag);
+    try check_lazy_sources(options, diag);
     try resolve_mounts(host, container, handle, diag);
     try resolve_devices(host, container, handle, &cdi_storage, diag);
 
@@ -445,13 +473,9 @@ pub fn start(
     // with a limit and no way to enforce it is refused here, with nothing to clean up.
     const scope_input = try prepare_scope(handle, container.limits, options.build_step, diag);
     if (options.lazy != null) assert(container.image != null);
+    if (options.lazy == null) assert(options.lazy_sources.len == 0);
     if (container.image) |image| try prepare_image(handle, container, image, options, diag);
-    if (options.lazy) |lazy| {
-        if (!lazy.prepare(lazy.context, handle.image.digest, diag)) {
-            assert(diag.code != null);
-            return error.StartFailed;
-        }
-    }
+    if (options.lazy) |lazy| try prepare_lazy(handle, lazy, options.lazy_sources, diag);
     // The volumes last, so that nothing above can fail with them held; from here every way out
     // of `start` that is not a running container lets them go.
     volumes_mod.take(host, container.state, handle.name_slice(), &handle.volumes, diag) catch
@@ -486,6 +510,41 @@ pub fn start(
     handle.pid = handle.session.container_pid;
     // Again, now that the container's pid is known: this is what a later process finds it by.
     save_record(handle, .running, null, null);
+}
+
+/// A library caller's peer sources need a lazy run whose server takes them, and room for the
+/// registry: refused (E1208) before anything is created, never asserted.
+fn check_lazy_sources(options: StartOptions, diag: *Diag) Error!void {
+    assert(diag.code == null);
+    const count = options.lazy_sources.len;
+    if (count == 0) return;
+    const problem: lazy_diagnose.SourcesProblem = if (options.lazy == null)
+        .no_lazy
+    else if (options.lazy.?.peers == null)
+        .no_peers_hook
+    else if (count >= constants.lazy_sources_max)
+        .too_many
+    else
+        return;
+    lazy_diagnose.sources_refused(diag, problem, count);
+    assert(diag.code.? == .E1208);
+    return error.StartFailed;
+}
+
+/// Hands the library caller's peers to the lazy server, then readies it for the image's tree.
+fn prepare_lazy(
+    handle: *const Handle,
+    lazy: Lazy,
+    sources: []const lazy_mod.Source,
+    diag: *Diag,
+) Error!void {
+    assert(diag.code == null);
+    assert(sources.len < constants.lazy_sources_max);
+    if (sources.len > 0) lazy.peers.?(lazy.context, sources);
+    if (!lazy.prepare(lazy.context, handle.image.digest, diag)) {
+        assert(diag.code != null);
+        return error.StartFailed;
+    }
 }
 
 /// Holds the mounts to their rules and looks at them on the host (`mounts.resolve`): the handle
@@ -1592,6 +1651,7 @@ fn save_record(handle: *Handle, exit: records.Exit, ended: ?u64, why: ?*const Di
         .devices = handle.devices,
         .user = handle.user,
         .binding = handle.binding,
+        .lazy = if (handle.lazy) |*lazy| lazy.record_now() else null,
         .diagnostic = if (why) |found| diagnostic_json(found, &json) else "",
     };
     records.save(handle.host, &dir, &view) catch |err| {
@@ -1649,4 +1709,52 @@ test "threads_in_status reads the Threads line and nothing else" {
     try testing.expectEqual(@as(?u32, null), threads_in_status(""));
     try testing.expectEqual(@as(?u32, 2), threads_in_status("Threads: 2"));
     try testing.expectEqual(@as(?u32, null), threads_in_status("xThreads: 2\n"));
+}
+
+test "a diagnostic line of diag_json_bytes_max bytes is kept whole, and one byte more is cut" {
+    // Goal: the record keeps the JSON line exactly up to its bound (3056, the lazy record's
+    // room, docs/decisions/2026-11-15-diag-json-bytes-3056.md); past it, the short object that
+    // names the code. Method: fill the whiles and the context, then add causes, growing the last
+    // one a byte at a time (the one before it full or shortened, to step over a new field's
+    // overhead) until the line is the bound, then one byte longer.
+    const max = constants.diag_json_bytes_max;
+    var diag: Diag = undefined;
+    var big: [constants.output_bytes_max]u8 = undefined;
+    var buffer: [max]u8 = undefined;
+    for ([_]usize{ max, max + 1 }) |target| {
+        const line = find: for (1..constants.diag_causes_count_max) |causes| {
+            for ([_]usize{ 0, 16 }) |shorter| {
+                for (1..constants.diag_field_bytes_max + 1) |length| {
+                    fill_diag(&diag, causes, shorter, length);
+                    const json = render.render(&diag, .json, false, &big);
+                    const rendered = std.mem.trimEnd(u8, json, "\n");
+                    if (rendered.len == target) break :find rendered;
+                }
+            }
+        } else return error.TestUnexpectedResult; // The fields no longer reach the bound.
+        const kept = diagnostic_json(&diag, &buffer);
+        if (target == max) {
+            try testing.expectEqualStrings(line, kept);
+        } else {
+            try testing.expectEqualStrings("{\"code\":\"ZBX-E0201\",\"truncated\":true}", kept);
+        }
+    }
+}
+
+/// Every while and context pair full, `causes` causes: the last `length` bytes long, the one
+/// before it `shorter` bytes short of full.
+fn fill_diag(diag: *Diag, causes: usize, shorter: usize, length: usize) void {
+    assert(causes >= 1);
+    const filler = @import("../test_util.zig").repeat('a', constants.diag_field_bytes_max);
+    diag.reset();
+    diag.raise(.E0201);
+    for (0..constants.diag_whiles_count_max) |_| diag.while_("{s}", .{filler});
+    const keys = [_][]const u8{ "ka", "kb", "kc", "kd", "ke", "kf" };
+    comptime assert(keys.len == constants.diag_context_count_max);
+    inline for (keys) |key| diag.context(key, "{s}", .{filler});
+    for (1..causes) |at| {
+        const cut = if (at + 1 == causes) shorter else 0;
+        diag.cause("{s}", .{filler[cut..]});
+    }
+    diag.cause("{s}", .{filler[0..length]});
 }

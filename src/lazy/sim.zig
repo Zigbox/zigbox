@@ -17,6 +17,11 @@
 //!      the fill makes every object whole.
 //!   5. A source that sent wrong bytes is named in a `lied` event, and a peer is told; a
 //!      source is named only for an object it sent wrong bytes of.
+//!
+//! A forged catalog (`Scenario.forged`) lists, for one chunk of a many-chunk object, the plain
+//! hash of other bytes, which every source serves: bytes that match the listed hash but not
+//! the chunk's chaining value, so not the tree. Property 1 and 3 then say no reader and no
+//! store file ever holds them.
 
 const std = @import("std");
 const assert = std.debug.assert;
@@ -32,13 +37,15 @@ const resolver_mod = @import("resolver.zig");
 const Schedule = @import("schedule.zig").Schedule;
 const land = @import("land.zig");
 const chunks_mod = @import("../store/chunks.zig");
+const chaining_mod = @import("chaining.zig");
 
 const Digest = lazy.Digest;
 const Resolver = resolver_mod.Resolver;
 const Prng = std.Random.DefaultPrng;
 
 const root_path = "/data/store";
-const chunk_bytes: u32 = 64;
+/// BLAKE3's piece, the smallest run a chaining value is defined for (`chaining.Subtree`).
+const chunk_bytes: u32 = chaining_mod.piece_bytes;
 const objects_max = 12;
 const chunks_per_object_max = 6;
 const content_bytes_max = objects_max * chunks_per_object_max * chunk_bytes;
@@ -85,6 +92,9 @@ pub const Scenario = struct {
     damage_per_mille: u16 = 0,
     /// Every source honest and in time, room on disk: property 4 applies.
     honest: bool,
+    /// The catalog lists a forged hash for one chunk of a many-chunk object, and every source
+    /// serves the bytes it names (the module doc). Never with `honest`.
+    forged: bool = false,
 };
 
 const SimSource = struct {
@@ -134,6 +144,10 @@ pub const Sim = struct {
     content: [content_bytes_max]u8,
     content_len: u32,
     hashes: [objects_max * chunks_per_object_max]Digest,
+    chaining: [objects_max * chunks_per_object_max]Digest,
+    /// The forged chunk (`Scenario.forged`), when the run has one, and the bytes served for it.
+    forged: ?struct { object: lazy.ObjectIndex, chunk: u32 },
+    forged_bytes: [chunk_bytes]u8,
     objects: [objects_max]lazy.Object,
     starts: [objects_max]u32,
     locations: [objects_max * chunks_per_object_max]lazy.Location,
@@ -199,10 +213,55 @@ fn make_objects(sim: *Sim) void {
             location.* = append_block(sim, bytes, @intCast(chunk));
         }
         const served: []const lazy.Location = if (sim.scenario.registry) locations else &.{};
-        sim.objects[at] = .{ .wanted = wanted, .locations = served };
+        const values = sim.chaining[hashes_used..][0..count];
+        for (values, 0..) |*value, chunk| {
+            value.* = chaining_mod.run_value(chunk_bytes_in(bytes, chunk), chunk, chunk_bytes);
+        }
+        sim.objects[at] = .{
+            .wanted = wanted,
+            .locations = served,
+            .chaining = if (count < 2) &.{} else values,
+        };
         hashes_used += count;
     }
     assert(sim.content_len <= content_bytes_max);
+    sim.forged = null;
+    if (sim.scenario.forged) forge(sim);
+}
+
+fn chunk_bytes_in(bytes: []const u8, chunk: usize) []const u8 {
+    const start = chunk * chunk_bytes;
+    assert(start < bytes.len);
+    return bytes[start..@min(bytes.len, start + chunk_bytes)];
+}
+
+/// Lists the hash of other bytes for one chunk of the first many-chunk object: what an index
+/// whose chaining values are true but whose plain hashes are forged gives the resolver.
+fn forge(sim: *Sim) void {
+    assert(sim.scenario.forged);
+    assert(!sim.scenario.honest);
+    for (sim.objects[0..sim.objects_count], 0..) |*object, at| {
+        if (object.chaining.len < 2) continue;
+        const chunk: u32 = sim.prng.random().uintLessThan(u32, @intCast(object.chaining.len));
+        const truth = chunk_bytes_of(sim, @intCast(at), chunk);
+        const forged = sim.forged_bytes[0..truth.len];
+        @memcpy(forged, truth);
+        forged[forged.len - 1] ^= 0x5a;
+        // The hashes are the sim's own array; the catalog's slice points into it.
+        const first = (@intFromPtr(object.wanted.hashes.ptr) - @intFromPtr(&sim.hashes)) /
+            @sizeOf(Digest);
+        sim.hashes[first + chunk] = Digest.of(forged);
+        sim.forged = .{ .object = @intCast(at), .chunk = chunk };
+        return;
+    }
+}
+
+/// The forged bytes, if `object`'s chunk `chunk` is the forged one.
+fn forged_of(sim: *const Sim, object: lazy.ObjectIndex, chunk: u32) ?[]const u8 {
+    const forged = sim.forged orelse return null;
+    if (forged.object != object) return null;
+    if (forged.chunk != chunk) return null;
+    return sim.forged_bytes[0..chunk_bytes_of(sim, object, chunk).len];
 }
 
 fn append_block(sim: *Sim, bytes: []const u8, chunk: u32) lazy.Location {
@@ -337,11 +396,19 @@ fn peer_fetch(
     const random = sim.prng.random();
     if (per_mille(random, source.behaviour.not_found_per_mille)) return error.NotFound;
     const object = find_object(sim, request.object) orelse return error.NotFound;
+    const peer = peer_token(source);
+    if (forged_of(sim, object, request.index)) |forged| {
+        // Bytes that match the listed (forged) hash: a lie only the chaining value shows.
+        assert(Digest.of(forged).eql(request.chunk));
+        @memcpy(out, forged);
+        sim.lies_sent[source.index] += 1;
+        sim.lied_objects[source.index] |= @as(u16, 1) << @intCast(object);
+        return .{ .length = @intCast(out.len), .peer = peer };
+    }
     const truth = chunk_bytes_of(sim, object, request.index);
     assert(out.len == truth.len);
     assert(Digest.of(truth).eql(request.chunk));
     @memcpy(out, truth);
-    const peer = peer_token(source);
     if (per_mille(random, source.behaviour.short_per_mille)) {
         return .{ .length = random.uintLessThan(u32, @intCast(out.len)), .peer = peer };
     }
@@ -403,6 +470,7 @@ fn registry_fetch(
     }
     var length = @min(out.len, sim.blob_len - from);
     @memcpy(out[0..length], sim.blob[from..][0..length]);
+    if (overlay_forged(sim, from, out[0..length])) sim.lies_sent[source.index] += 1;
     if (lying) {
         sim.lies_sent[source.index] += 1;
         if (random.boolean()) flip(random, out[0..length]);
@@ -412,6 +480,21 @@ fn registry_fetch(
     }
     note_wrong_segments(sim, offset, out[0..length]);
     return length;
+}
+
+/// Writes the forged bytes over the forged chunk's stored block, when the answer from `from`
+/// holds all of it: the registry serves what the forged index names. True if it did.
+fn overlay_forged(sim: *const Sim, from: usize, answer: []u8) bool {
+    const forged = sim.forged orelse return false;
+    if (!sim.scenario.registry) return false;
+    const location = sim.objects[forged.object].locations[forged.chunk];
+    if (location.offset < from) return false;
+    const start: usize = @intCast(location.offset - from);
+    if (start + location.length > answer.len) return false;
+    const bytes = forged_of(sim, forged.object, forged.chunk).?;
+    assert(location.length == stored_header_bytes + bytes.len);
+    @memcpy(answer[start + stored_header_bytes ..][0..bytes.len], bytes);
+    return true;
 }
 
 /// The objects a registry answer holds a wrong segment of: the only ones it may be named for.
@@ -769,7 +852,8 @@ fn check_chunks(sim: *Sim) void {
     for (sim.objects[0..sim.objects_count], 0..) |*object, at| {
         for (0..object.wanted.hashes.len) |chunk| {
             const index: u32 = @intCast(chunk);
-            const read = land.read_local(&sim.store, &object.wanted, index, &out, null);
+            const chaining = object.chaining;
+            const read = land.read_local(&sim.store, &object.wanted, chaining, index, &out, null);
             const length = read catch |err| switch (err) {
                 error.NotLocal => continue,
                 error.Damaged, error.ObjectDamaged, error.Unreadable => {
@@ -843,6 +927,7 @@ pub fn random_scenario(random: std.Random) Scenario {
         },
         else => {},
     }
+    scenario.forged = random.uintLessThan(u8, 6) == 0;
     return scenario;
 }
 
@@ -1060,6 +1145,34 @@ test "schedule: a sequential run of quarter-chunk reads starts readahead on the 
     fuse_read(schedule, object, offset, quarter);
     try std.testing.expectEqual(@as(u8, 2), schedule.objects[object].streak);
     try std.testing.expect(queued_count(schedule) > 0);
+}
+
+test "sim: a forged chunk hash with a true chaining value never reaches a reader or the store" {
+    // Goal: an index whose plain chunk hash is forged (its chaining values true, so the tree
+    // checks pass) cannot get the bytes the forged hash names served or kept. Method: every
+    // source serves the forged bytes for the forged chunk, and with peers and the registry,
+    // with and without the fill, the run's properties hold: no read returns them (property 1)
+    // and no store file holds them (3); each source is named a liar. Without the chaining
+    // check in `keep` and `land`, the first read of that chunk returns the forged bytes.
+    var forged_runs: u32 = 0;
+    for ([_]u8{ 0, 1, 2 }) |peers| {
+        for ([_]bool{ false, true }) |fill| {
+            var scenario = honest_scenario(peers, true, fill);
+            scenario.honest = false;
+            scenario.forged = true;
+            setup(&sim_state, 101 + peers, scenario);
+            const has_forged = sim_state.forged != null;
+            run(&sim_state);
+            teardown(&sim_state);
+            if (!has_forged) continue;
+            forged_runs += 1;
+            // The fill asks for every chunk, so some source served the forged bytes.
+            var lies: u32 = 0;
+            for (sim_state.lies_sent) |sent| lies += sent;
+            if (fill) try std.testing.expect(lies > 0);
+        }
+    }
+    try std.testing.expect(forged_runs > 0);
 }
 
 test "sim: seeds" {

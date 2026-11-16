@@ -257,6 +257,10 @@ fn entry_json(writer: *std.Io.Writer, entry: *const lifecycle.Entry) std.Io.Writ
         var storage: [spec_mod.listen_text_bytes_max]u8 = undefined;
         try writer.print(",\"listen\":\"{s}\"", .{listen.text(&storage)});
     }
+    if (record.lazy) |lazy| {
+        const format = ",\"lazy\":{{\"local_percent\":{d},\"fetched_bytes\":{d},\"errors\":{d}}}";
+        try writer.print(format, .{ lazy.local_percent, lazy.fetched_bytes(), lazy.errors });
+    }
     try devices_json(writer, record);
     try writer.writeAll("}");
 }

@@ -24,7 +24,7 @@ pub const Blame = enum { user, environment, external, internal };
 
 /// Every code, in registry order: `registry[i].code` is the i-th tag. The tag is the part of the
 /// code after "ZBX-": a kind letter (E error, W warning, B bug) and four digits.
-pub const Code = enum(u8) {
+pub const Code = enum(u16) {
     E0001,
     E0002,
     E0003,
@@ -278,8 +278,15 @@ pub const Code = enum(u8) {
     E1016,
     E1017,
     W1003,
+    W1201,
+    E1201,
+    E1202,
+    W1202,
+    E1203,
+    E1206,
     E1207,
     E1208,
+    W1203,
     B0001,
 };
 
@@ -4628,6 +4635,96 @@ pub const registry = [_]Entry{
         ,
     },
     .{
+        .code = .W1201,
+        .severity = .warning,
+        .blame = .external,
+        .summary = "the image has no lazy index: pulling it whole",
+        .explanation =
+        \\zbx run --lazy starts a container from an image's lazy index: the list of
+        \\its files and the chunks they are made of, which a zbx with layer writer 2
+        \\puts in the image when it pushes it. This image has none: it was pushed
+        \\by another tool, or by an older zbx. Or it has more than one layer: an
+        \\index covers one layer, so for now such an image is not started lazily.
+        \\
+        \\The run goes on as without --lazy: the whole image is pulled, then run.
+        ,
+    },
+    .{
+        .code = .E1201,
+        .severity = .@"error",
+        .blame = .environment,
+        .summary = "lazy start is not possible on this host",
+        .explanation =
+        \\zbx run --lazy serves the image's files through FUSE from the zbx
+        \\process while the container runs, and fetches the chunks it has not got
+        \\yet as they are read. That needs /dev/fuse, a kernel that lets a user
+        \\namespace mount FUSE, and memory for the server's tables and chunk
+        \\buffers. The cause says which of these this host lacks.
+        \\
+        \\The container was not started. Run it without --lazy: the whole image is
+        \\then read before the container starts.
+        ,
+    },
+    .{
+        .code = .E1202,
+        .severity = .@"error",
+        .blame = .external,
+        .summary = "the image's lazy index was refused",
+        .explanation =
+        \\An image pushed by zbx carries a lazy index: the list of the image's
+        \\files and the chunks they are made of, hashed in the image's manifest.
+        \\zbx run --lazy checks the index before it uses any of it: its bytes must
+        \\hash to the manifest's value, stay within zbx's bounds, and describe
+        \\exactly the image's tree. This one did not: the registry, or whoever
+        \\pushed the image, sent an index that does not belong to it.
+        \\
+        \\Nothing was started and nothing was written. Run it without --lazy: a
+        \\whole pull checks every layer against the manifest instead.
+        ,
+    },
+    .{
+        .code = .W1202,
+        .severity = .warning,
+        .blame = .external,
+        .summary = "a source sent a chunk that does not match its hash",
+        .explanation =
+        \\zbx run --lazy fetches the chunks of the image's files as they are read,
+        \\and checks each against its hash in the image's lazy index before any of
+        \\it is used. This source sent bytes that do not match: none were used, the
+        \\next source was asked, and this one is not asked for that file again.
+        \\
+        \\The source, or the network on the way, is at fault. Tell its owner.
+        ,
+    },
+    .{
+        .code = .E1203,
+        .severity = .@"error",
+        .blame = .external,
+        .summary = "a chunk could not be fetched in time: the read got EIO",
+        .explanation =
+        \\zbx run --lazy fetches the chunks of the image's files as they are read.
+        \\No source gave this chunk within the read's deadline, so the process that
+        \\read it got an input/output error (EIO). The cause says what each source
+        \\did. The container goes on; reading the file again tries again.
+        \\
+        \\Check the network and the registry. Run the image without --lazy to
+        \\read it all before the container starts.
+        ,
+    },
+    .{
+        .code = .E1206,
+        .severity = .@"error",
+        .blame = .environment,
+        .summary = "the store's disk is too full to keep fetched chunks",
+        .explanation =
+        \\zbx run --lazy keeps each chunk it fetches in the store, so the next read
+        \\is local. The disk that holds the store has too little free space left
+        \\to keep one more: the read that needed it got an input/output error (EIO).
+        \\
+        \\Free space on that disk, then read the file again.
+        ,
+    },
+    .{
         .code = .E1207,
         .severity = .@"error",
         .blame = .user,
@@ -4660,7 +4757,25 @@ pub const registry = [_]Entry{
         \\an image (not --rootfs, which runs a directory as it is).
         \\
         \\The cause names the option. Nothing was started. Leave out --lazy, or
-        \\the other option.
+        \\the other option. A program that uses zigbox as a library sees this code
+        \\too when it gives peer sources to a run that cannot take them.
+        ,
+    },
+    .{
+        .code = .W1203,
+        .severity = .warning,
+        .blame = .environment,
+        .summary = "lazy start (--lazy) is not possible on this host",
+        .explanation =
+        \\zbx run --lazy serves the image's files through FUSE from the zbx
+        \\process while the container runs. That needs /dev/fuse and a kernel that
+        \\lets a user namespace mount FUSE, and the fuse check of zbx doctor found
+        \\this host lacks one of them: the cause says which. Nothing else depends on
+        \\it, so this is a warning and "zbx doctor" still exits 0.
+        \\
+        \\Load the fuse module (sudo modprobe fuse), or run without --lazy: the
+        \\whole image is then read before the container starts. A run that asks for
+        \\--lazy on this host is refused as ZBX-E1201 before anything starts.
         ,
     },
     .{
@@ -4695,7 +4810,7 @@ comptime {
     // One entry per tag, in tag order: this is what makes a duplicate or a missing entry a
     // build error, and lets `entry` index the table directly.
     assert(registry.len == fields.len);
-    assert(fields.len <= std.math.maxInt(u8));
+    assert(fields.len <= std.math.maxInt(u16));
     @setEvalBranchQuota(600_000);
     for (registry, fields, 0..) |item, name, index| {
         assert(@backingInt(item.code) == index);
@@ -4828,6 +4943,7 @@ pub fn can_end_run(code: Code) bool {
         .E0822, .W0803 => false,
         .E0901, .E0902, .E0908, .E0909, .E0910, .E0911, .W0901, .W0902, .W0903 => false,
         .E1006, .E1007 => false,
+        .E1203, .E1206 => false,
         .E0220, .E0221, .E0222, .E0223, .E0224, .E0225, .E0226, .E0227 => false,
         .E0228, .E0229, .E0230 => false,
         .W0207, .W0208, .W0209 => false,

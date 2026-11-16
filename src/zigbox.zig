@@ -582,3 +582,27 @@ test "the pure trust surface imports only std and its own pure files" {
         }
     }
 }
+
+test "the lazy surface Zigcube's agent plugs its swarm into" {
+    // Goal: S2's interface for a peer source (docs/briefs/S2-lazy-start.md, section 5) changes
+    // only by decision. Method: `zigbox.lazy` declares exactly these names, a `Source` has
+    // exactly these fields with these types, and a start takes a list of them.
+    try expect_exactly(lazy, &.{
+        "Digest",    "Wanted",    "ObjectIndex", "FetchError", "Request",
+        "PeerToken", "Fetched",   "Source",      "Range",      "Location",
+        "Object",    "Catalog",   "ReadError",   "Event",      "Outcome",
+        "Log",       "FreeBytes", "Report",      "Resolver",   "Options",
+    });
+    const Source = lazy.Source;
+    const fields = std.meta.fieldNames(Source);
+    try std.testing.expectEqual(@as(usize, 4), fields.len);
+    try std.testing.expect(@FieldType(Source, "context") == *anyopaque);
+    try std.testing.expect(@FieldType(Source, "name") == []const u8);
+    const Fetch = *const fn (*anyopaque, *const lazy.Request, []u8) lazy.FetchError!lazy.Fetched;
+    try std.testing.expect(@FieldType(Source, "fetch") == Fetch);
+    const Lied = *const fn (*anyopaque, *const lazy.Request, lazy.PeerToken) void;
+    try std.testing.expect(@FieldType(Source, "lied") == Lied);
+    try std.testing.expect(@FieldType(StartOptions, "lazy_sources") == []const lazy.Source);
+    const none: StartOptions = .{};
+    try std.testing.expectEqual(@as(usize, 0), none.lazy_sources.len);
+}

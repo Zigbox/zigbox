@@ -1,0 +1,8 @@
+warning[ZBX-W1202]: a source sent a chunk that does not match its hash
+  while  fetching a chunk of a lazily started image
+  cause  registry sent bytes that do not match chunk 3's hash; none were used
+  object b3:5555555555555555555555555555555555555555555555555555555555555555
+  source registry
+  fix    nothing to do here: the next source is asked; tell its owner
+  more   zbx explain W1202
+  docs   https://zigbox.github.io/zigbox/errors/W1202.html

@@ -1,0 +1,8 @@
+error[ZBX-E1206]: the store's disk is too full to keep fetched chunks
+  while  keeping a fetched chunk of a lazily started image
+  cause  the store's disk has less than 256 MiB free; chunk 3 was not kept, the
+         read got EIO
+  object b3:5555555555555555555555555555555555555555555555555555555555555555
+  fix    free space on the disk that holds the store, then read it again
+  more   zbx explain E1206
+  docs   https://zigbox.github.io/zigbox/errors/E1206.html

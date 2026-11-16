@@ -166,7 +166,13 @@ test "a whole store verifies clean, and counts what it holds" {
 }
 
 fn object_path(path: []const u8, buffer: *[constants.sim_fs_path_bytes_max]u8) []const u8 {
-    // The object a source file became: found by its content and mode.
+    const hex = object_id_of(path).hex();
+    return std.fmt.bufPrint(buffer, root_path ++ "/objects/{s}/{s}", .{ hex[0..2], hex[2..] }) catch
+        unreachable; // Short.
+}
+
+/// The object a source file became: found by its content and mode.
+fn object_id_of(path: []const u8) Digest {
     const content = files.content_of(path).?;
     const stat = files.stat_of(path).?;
     const object = @import("object.zig");
@@ -176,10 +182,7 @@ fn object_path(path: []const u8, buffer: *[constants.sim_fs_path_bytes_max]u8) [
         .gid = stat.gid,
         .xattrs = files.xattrs_of(path) orelse &@import("xattrs.zig").empty,
     };
-    const id = object.object_id(Digest.of(content), attrs);
-    const hex = id.hex();
-    return std.fmt.bufPrint(buffer, root_path ++ "/objects/{s}/{s}", .{ hex[0..2], hex[2..] }) catch
-        unreachable; // Short.
+    return object.object_id(Digest.of(content), attrs);
 }
 
 fn only_damage() verify.Damage {
@@ -801,7 +804,7 @@ fn put_blob(text: []const u8) Sha256 {
 }
 
 /// An image record for `tree` that names `config` and `layer`.
-fn record_image(tree: Digest, config: Sha256, layer: Sha256) void {
+fn record_image(tree: Digest, config: Sha256, layer: Sha256, partial: bool) void {
     var image: images.Image = undefined;
     image.tag_count = 0;
     image.add_tag("docker.io/library/fixture:1");
@@ -815,6 +818,7 @@ fn record_image(tree: Digest, config: Sha256, layer: Sha256) void {
     image.layers[0] = layer;
     image.settings.clear();
     image.labels.clear();
+    image.partial = partial;
     var failure: @import("fs.zig").Failure = undefined;
     images.save(&store, &image, &failure) catch unreachable; // The simulated store writes.
 }
@@ -827,7 +831,7 @@ test "blobs no image names are planned, trashed and restored; the others and cut
     const layer = put_blob("layer bytes");
     const orphan = put_blob("an abandoned layer");
     files.put_file(root_path ++ "/blobs/partial/cut", 0o644, "half");
-    record_image(trees_[0], config, layer);
+    record_image(trees_[0], config, layer, false);
     const planned = try make_plan(&.{});
     try testing.expectEqual(@as(u64, 1), planned.counts.blobs);
     try testing.expectEqual(@as(u64, 1), planned.counts.total());
@@ -858,9 +862,26 @@ test "an image record keeps its tree and blobs when its root is gone" {
     const without = try make_plan(&.{});
     try testing.expect(without.counts.objects + without.counts.trees > 0);
     try testing.expectEqual(@as(u64, 2), without.counts.blobs);
-    record_image(trees_[1], config, layer);
+    record_image(trees_[1], config, layer, false);
     const with = try make_plan(&.{});
     try testing.expectEqual(@as(u64, 0), with.counts.total());
+}
+
+test "a partial image's record keeps its tree and the objects fetched so far" {
+    // Goal: gc keeps what a lazy run fetched (S2 slice 5). Method: the tree's root is gone, as
+    // after `run --lazy`, and one of its files was never fetched; the partial record still
+    // keeps every object present, and gc plans nothing.
+    const trees_ = two_trees();
+    const config = put_blob("config bytes");
+    const layer = put_blob("layer bytes");
+    drop_root(trees_[1]);
+    var buffer: [constants.sim_fs_path_bytes_max]u8 = undefined;
+    files.remove_path(object_path("/src/bin/tool", &buffer));
+    record_image(trees_[1], config, layer, true);
+    const planned = try make_plan(&.{});
+    try testing.expectEqual(@as(u64, 0), planned.counts.total());
+    var kept: [constants.sim_fs_path_bytes_max]u8 = undefined;
+    try testing.expect(files.kind_of(object_path("/src/etc/extra", &kept)) != null);
 }
 
 test "the sets are sized to the store, and a store beyond the room is refused with the limit" {
@@ -1005,4 +1026,55 @@ test "abandoned cut downloads are planned, trashed and restored; recent ones sta
     // It is old again, so it is planned again.
     try testing.expectEqual(@as(u64, 1), (try make_plan(&.{})).counts.partials);
     try support.check_whole(&files, root_path, store.chunk_bytes);
+}
+
+/// A partly fetched object's chunk directory, `partial/<id>/0`, last written at `mtime`.
+fn put_chunk_dir(id: Digest, chunk: []const u8, mtime: u64, buffer: *[160]u8) []const u8 {
+    if (files.kind_of(root_path ++ "/partial") == null) {
+        files.put_dir(root_path ++ "/partial", 0o755);
+    }
+    const hex = id.hex();
+    const where = std.fmt.bufPrint(buffer, root_path ++ "/partial/{s}", .{&hex}) catch
+        unreachable; // Short.
+    files.put_dir(where, 0o755);
+    var file_buffer: [200]u8 = undefined;
+    const file = std.fmt.bufPrint(&file_buffer, "{s}/0", .{where}) catch unreachable; // Short.
+    files.put_file(file, 0o644, chunk);
+    files.set_mtime_of(file, mtime);
+    files.set_mtime_of(where, mtime);
+    return where;
+}
+
+test "an old partly fetched object no root holds is swept; a live or recent one stays" {
+    // Goal: the review's SHOULD 8 for S2 slice 5: the chunks a lazy run fetched of an object
+    // no image holds any more are gc's, as old cut downloads are, and are removed, not trashed;
+    // the chunks of an object a root holds, or of one a lazy start may be writing, stay.
+    // Method: three chunk directories, an old unheld one, a recent unheld one and an old one of
+    // a live object; plan, apply, and a restore of that gc.
+    _ = two_trees();
+    const now = sim.world.now;
+    const two_days = 2 * constants.store_partial_seconds;
+    var old_buffer: [160]u8 = undefined;
+    var recent_buffer: [160]u8 = undefined;
+    var live_buffer: [160]u8 = undefined;
+    const gone = Digest.of("an object no image holds");
+    const old = put_chunk_dir(gone, "old chunk", now - two_days, &old_buffer);
+    const recent_id = Digest.of("an object a start is writing");
+    const recent = put_chunk_dir(recent_id, "new chunk", now - 60, &recent_buffer);
+    const live_id = object_id_of("/src/etc/long");
+    const live = put_chunk_dir(live_id, "live chunk", now - two_days, &live_buffer);
+    const planned = try make_plan(&.{});
+    try testing.expectEqual(@as(u64, 1), planned.counts.partials);
+    try testing.expectEqual(@as(u64, 1), planned.counts.chunk_dirs);
+    try testing.expectEqual(@as(u64, "old chunk".len), planned.counts.bytes);
+    const applied = try do_apply(planned.hash);
+    try testing.expectEqual(@as(u64, 1), applied.counts.chunk_dirs);
+    try testing.expect(files.kind_of(old) == null);
+    try testing.expect(files.kind_of(recent) != null);
+    try testing.expect(files.kind_of(live) != null);
+    try testing.expectEqual(@as(u64, 0), (try make_plan(&.{})).counts.total());
+    // Nothing of it was trashed, so the restore has nothing to put back and is not incomplete.
+    const restored = try do_restore(applied.gc);
+    try testing.expectEqual(@as(u64, 0), restored.counts.partials);
+    try testing.expect(files.kind_of(old) == null);
 }

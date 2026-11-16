@@ -1,0 +1,5 @@
+warning[ZBX-W1202]: a source sent a chunk that does not match its hash
+  cause  registry sent bytes that do not match chunk 3's hash; none were used
+  fix    nothing to do here: the next source is asked; tell its owner
+  more   zbx explain W1202 · rerun with --verbose for the full cause chain
+  docs   https://zigbox.github.io/zigbox/errors/W1202.html

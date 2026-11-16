@@ -186,6 +186,7 @@ pub const Schedule = struct {
             .no_registry = false,
         });
         schedule.report.objects_total = @intCast(catalog.objects.len);
+        for (catalog.objects) |*object| schedule.report.bytes_total += object.wanted.size;
     }
 
     /// Joins the entry for this chunk, or makes one. Null when the table is full: for a reader,
@@ -364,10 +365,12 @@ pub const Schedule = struct {
         schedule.events[at] = .{
             .kind = kind,
             .object = object,
+            .id = schedule.catalog.objects[object].wanted.id,
             .chunk = chunk,
             .source = source,
             .outcomes = outcomes.*,
             .sources_count = schedule.sources_count,
+            .names = &schedule.names,
         };
         schedule.events_count += 1;
     }
@@ -827,7 +830,9 @@ pub const Schedule = struct {
         if (schedule.objects[object].whole) return;
         schedule.objects[object].whole = true;
         schedule.report.objects_local += 1;
+        schedule.report.bytes_local += schedule.catalog.objects[object].wanted.size;
         assert(schedule.report.objects_local <= schedule.report.objects_total);
+        assert(schedule.report.bytes_local <= schedule.report.bytes_total);
     }
 
     /// Whether a reader holding `ticket` has something to look at (its entry landed or failed).

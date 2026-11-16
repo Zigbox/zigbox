@@ -254,6 +254,7 @@ fn fill_image(random: std.Random) void {
     _ = image.settings.set(.workdir, if (random.boolean()) "" else "/srv/app");
     _ = image.settings.set(.user, if (random.boolean()) "" else "app:staff");
     fill_labels(random);
+    image.partial = random.uintLessThan(u32, 4) == 0;
 }
 
 /// Labels: none, some in any order (the record keeps them sorted), or unknown.
@@ -333,11 +334,13 @@ fn fuzz_record_text(random: std.Random) void {
     assert(back.layer_count == image.layer_count);
     assert(back.tree.eql(image.tree));
     assert(same_tags(&image, &back));
+    assert(back.partial == image.partial);
     // 2. A fixed point.
     var rewritten: [constants.image_record_bytes_max]u8 = undefined;
     assert(std.mem.eql(u8, written, images.render(&back, &rewritten)));
     // 5. M4's version 1 reads as the one tag, and is written as version 2.
-    if (image.tag_count == 1 and image.labels.known and image.labels.count() == 0) {
+    const plain = !image.partial and image.labels.known and image.labels.count() == 0;
+    if (image.tag_count == 1 and plain) {
         const old = as_version_one(written, &record_damaged);
         assert(images.parse(old, &back) == .ok);
         assert(same_tags(&image, &back));

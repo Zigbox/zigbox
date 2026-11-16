@@ -1,0 +1,7 @@
+error[ZBX-E1201]: lazy start is not possible on this host
+  while  setting up the chunk fetcher for the lazy run
+  cause  this host has too little free memory for its chunk buffers and tables
+  tree   b3:7777777777777777777777777777777777777777777777777777777777777777
+  fix    run it without --lazy, which reads the whole image first
+  more   zbx explain E1201
+  docs   https://zigbox.github.io/zigbox/errors/E1201.html
