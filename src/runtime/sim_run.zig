@@ -221,13 +221,45 @@ pub fn sample_plan_listen(
     mounts: []const plan_mod.MountInput,
     listen: ?u16,
 ) void {
-    const mapping: plan_mod.Mapping = if (full) .{ .full = .{
-        .newuidmap = "/usr/bin/newuidmap",
-        .newgidmap = "/usr/bin/newgidmap",
-        .uid_start = 100000,
-        .gid_start = 100000,
-    } } else .single;
-    plan.build(&.{
+    const mapping: plan_mod.Mapping = if (full) sample_mapping else .single;
+    const input = sample_input(mapping, scoped, read_only, image, network, mounts, listen);
+    plan.build(&input);
+}
+
+/// The index of the first step of `kind` in the plan of a run with `--ulimit nofile=...` and
+/// `--sysctl net.core.somaxconn=...`, for a full id mapping (M2b).
+pub fn step_index_knobs(kind: plan_mod.Kind) u32 {
+    assert(kind == .set_rlimit or kind == .write_sysctl);
+    var plan: plan_mod.Plan = undefined;
+    var input = sample_input(sample_mapping, true, false, false, .none, &.{}, null);
+    input.rlimits.set(.nofile, .{ .soft = 1024, .hard = 4096 });
+    input.sysctls = &.{.{ .key = "net.core.somaxconn", .value = "8192" }};
+    plan.build(&input);
+    for (plan.steps[0..plan.count], 0..) |step, index| {
+        if (step.kind == kind) return @intCast(index);
+    }
+    unreachable; // Each kind asked for is in a plan with a limit and a sysctl.
+}
+
+const sample_mapping: plan_mod.Mapping = .{ .full = .{
+    .newuidmap = "/usr/bin/newuidmap",
+    .newgidmap = "/usr/bin/newgidmap",
+    .uid_start = 100000,
+    .gid_start = 100000,
+} };
+
+fn sample_input(
+    mapping: plan_mod.Mapping,
+    scoped: bool,
+    read_only: bool,
+    image: bool,
+    network: spec_mod.Network,
+    mounts: []const plan_mod.MountInput,
+    listen: ?u16,
+) plan_mod.Input {
+    assert(mapping == .single or mapping.full.uid_start > 0);
+    assert(mounts.len <= constants.sim_mounts_max);
+    return .{
         .rootfs = rootfs_path,
         .name = "oracle",
         .command = &.{"/bin/sh"},
@@ -252,7 +284,7 @@ pub fn sample_plan_listen(
             .work = if (read_only) null else "/state/work",
             .empty = if (read_only) "/state/empty" else null,
         } else null,
-    });
+    };
 }
 
 /// The index of the first step of `kind` in a read-only plan for a full id mapping.

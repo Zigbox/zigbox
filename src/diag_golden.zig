@@ -129,6 +129,28 @@ fn prepare_container(sim: *HostSim) void {
     sim_run.init(sim, 1);
 }
 
+/// A run with a limit and a sysctl (M2b): the plan of `sim_run.step_index_knobs`.
+const knob_args = [_][:0]const u8{
+    "run",      "--rootfs",                "/srv/alpine", "--ulimit", "nofile=1024:4096",
+    "--sysctl", "net.core.somaxconn=8192", "--",          "/bin/sh",
+};
+
+fn prepare_rlimit_refused(sim: *HostSim) void {
+    prepare_step_refused(sim, sim_run.step_index_knobs(.set_rlimit), 1);
+}
+
+fn prepare_sysctl_refused(sim: *HostSim) void {
+    sim_run.init(sim, 1);
+    sim.world.sysctl_refused = true;
+}
+
+fn knob_case(code: codes.Code, comptime knob: []const [:0]const u8) Case {
+    const head = [_][:0]const u8{ "run", "--rootfs", "/srv/alpine" };
+    const tail = [_][:0]const u8{ "--", "/bin/sh" };
+    const args = head ++ knob[0..knob.len].* ++ tail;
+    return .{ .code = code, .args = &args, .prepare = prepare_container, .exit = 125 };
+}
+
 const cdi_args = [_][:0]const u8{
     "run", "--rootfs", "/srv/alpine", "--device", "vendor.example/gpu=0", "--", "sh",
 };
@@ -1704,6 +1726,15 @@ const base_cases = [_]Case{
         .prepare = prepare_cgroup_refuses,
         .exit = 125,
     },
+    knob_case(.E0310, &.{ "--ulimit", "nofile=4096:1024" }),
+    knob_case(.E0311, &.{ "--ulimit", "nofile=1024:1048576" }),
+    .{ .code = .E0312, .args = &knob_args, .prepare = prepare_rlimit_refused, .exit = 125 },
+    knob_case(.E0313, &.{ "--shm-size", "256q" }),
+    knob_case(.E0314, &.{ "--memory", "128m", "--shm-size", "256m" }),
+    knob_case(.E0315, &.{ "--sysctl", "net.core.somaxconn" }),
+    knob_case(.E0316, &.{ "--sysctl", "vm.max_map_count=262144" }),
+    knob_case(.E0317, &.{ "--net", "host", "--sysctl", "net.core.somaxconn=8192" }),
+    .{ .code = .E0318, .args = &knob_args, .prepare = prepare_sysctl_refused, .exit = 125 },
     .{
         .code = .W0301,
         .args = &.{ "run", "--rootfs", "/srv/alpine", "--name", "web-1", "--", "/bin/sh" },
@@ -2995,5 +3026,20 @@ test "every registered code has a case or is the panic" {
             if (case.code == item.code) break true;
         } else vm_golden.covers(item.code);
         try testing.expect(covered);
+    }
+}
+
+test "TMP dump knob goldens" {
+    var sim: HostSim = undefined;
+    inline for (cases) |case| {
+        const name = @tagName(case.code);
+        if (comptime std.mem.startsWith(u8, name, "E031") and name[4] != '0' or
+            comptime std.mem.eql(u8, name, "E0310"))
+        {
+            for (std.enums.values(Style)) |style| {
+                _ = try run_style(&sim, &case, style);
+                std.debug.print("<<<{s} {s}>>>\n{s}<<<END>>>\n", .{ name, @tagName(style), sim.stderr() });
+            }
+        }
     }
 }

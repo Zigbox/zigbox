@@ -81,8 +81,7 @@ const help_text =
     \\commands:
     \\  run             run a command in a container whose root is a tree or a directory (see below)
     \\  bundle          collect a redacted diagnostic bundle for a run (see below)
-    \\  doctor          check that this host can run zbx (a diagnostic per failing check;
-    \\                  --output json: the report as a document, see zbx schema doctor)
+    \\  doctor          check that this host can run zbx (--output json: zbx schema doctor)
     \\  ps              list the containers (--all: the ones that ended too)
     \\  stop <name>     stop a container: SIGTERM, then SIGKILL after --grace
     \\  logs <name>     show what a container wrote to its output and error (see below)
@@ -105,8 +104,7 @@ const help_text =
     \\  import          write a zbx.build.zon from a Dockerfile, running nothing (see below)
     \\  inspect <id>    print a build result: its tree and the config it runs with
     \\  schema <cmd>    print the JSON schema of a command's output
-    \\  explain <code>  explain a diagnostic code offline, for example E0001 (--output json: a
-    \\                  document, see zbx schema explain)
+    \\  explain <code>  explain a diagnostic code offline, as E0001 (zbx schema explain)
     \\  help            show this text
     \\  --version       print the version
     \\
@@ -125,18 +123,16 @@ const help_text =
     \\  --memory <size> memory limit: 128m, 1g (needs the systemd user manager)
     \\  --pids <n>      limit on processes and threads
     \\  --cpus <n>      CPU limit, in CPUs: 0.5 is half of one
-    \\  --ulimit <name>=<soft>[:<hard>]  a resource limit: nofile, nproc, memlock or stack, at
-    \\                  most your own hard limit (repeatable)
-    \\  --shm-size <size>  the size of /dev/shm: 256m (default 64m; counts against --memory)
-    \\  --sysctl <key>=<value>  a sysctl of the container's own ipc or network namespace, as
-    \\                  net.core.somaxconn=8192 (repeatable; zbx explain E0316 lists them)
+    \\  --ulimit <r>=<n>[:<n>]  limit nofile, nproc, memlock or stack (repeatable)
+    \\  --shm-size <size>  /dev/shm's size (default 64m)
+    \\  --sysctl <k>=<v>  set an allowed sysctl (repeatable; zbx explain E0316)
     \\  --read-only     mount the root read-only, with a tmpfs at /tmp and /run
     \\  --net <mode>    none (the default: a network of its own, only lo), host (share the host's)
     \\                  or user (through pasta: apt install passt)
     \\  --publish <h:c> forward TCP port h here to port c inside (repeatable; --net user)
     \\  --listen <addr:port>  a TCP listener on the container's loopback (127.0.0.1, --net none),
     \\                  handed to the caller over --listen-send
-    \\  --listen-send <fd>  the inherited Unix socket the listener goes over (SCM_RIGHTS)
+    \\  --listen-send <fd>  the inherited Unix socket the listener goes over
     \\  --hosts-file <path>  this file, read-only, as /etc/hosts (--net none only)
     \\  -e <name>[=<value>]  set a variable in the container, over the image's (repeatable): with
     \\                  =<value> that value, without it zbx's own (an error if unset there).
@@ -325,8 +321,8 @@ const help_text =
     \\  --output json   write each failure to stderr as one JSON object per line
     \\
     \\exit codes: 0 ok, 1 usage error, 2 this host cannot run zbx, 3 an external service, 70 a bug
-    \\run and exec exit with the command's own exit code, or 128 plus the signal that killed it, and
-    \\keeps its own failures out of that range: 125 zbx failed before the command started,
+    \\run and exec exit with the command's code (128 plus a killing signal); zbx's own failures:
+    \\125 zbx failed before the command started,
     \\126 the command could not be run, 127 the command was not found
     \\
 ;
@@ -6542,6 +6538,71 @@ test "parse: --publish at its bound of sixteen, and one past it" {
     args[over + 1] = "sh";
     const refused = try parse_case(args[0 .. over + 2], &invocation);
     try testing.expectEqual(@as(?codes.Code, .E0600), refused);
+}
+
+test "parse: --ulimit, --shm-size and --sysctl, each refusal its code, and not for exec" {
+    // Goal: M2b's flags on the command line. Method: a run with each parses into the spec; a bad
+    // form is refused as it is read (E0310, E0313, E0315), a resource or a seventeenth sysctl
+    // past the bound too; exec takes none of them (E0004).
+    var invocation: Invocation = undefined;
+    const good = [_][]const u8{ "run", "--rootfs", "r", "--ulimit", "nofile=1024:65536" } ++
+        [_][]const u8{ "--ulimit=stack=unlimited", "--shm-size", "256m" } ++
+        [_][]const u8{ "--sysctl", "net.core.somaxconn=8192", "--", "sh" };
+    try testing.expect(try parse_case(&good, &invocation) == null);
+    const nofile = invocation.run.rlimits.get(.nofile).?;
+    try testing.expectEqual(runtime_spec.knobs.Rlimit{ .soft = 1024, .hard = 65536 }, nofile);
+    try testing.expect(invocation.run.rlimits.get(.stack) != null);
+    try testing.expect(invocation.run.rlimits.get(.nproc) == null);
+    try testing.expectEqualStrings("256m", invocation.run.shm_size.?);
+    try testing.expectEqual(@as(usize, 1), invocation.run.sysctls_slice().len);
+    try testing.expectEqualStrings("8192", invocation.run.sysctls_slice()[0].value);
+    const refused = [_]struct { args: []const []const u8, code: codes.Code }{
+        .{ .args = &.{ "--ulimit", "nofile" }, .code = .E0310 },
+        .{ .args = &.{ "--ulimit", "core=1" }, .code = .E0310 },
+        .{ .args = &.{ "--ulimit", "nofile=x" }, .code = .E0310 },
+        .{ .args = &.{ "--ulimit", "nofile=2:1" }, .code = .E0310 },
+        .{ .args = &.{ "--ulimit", "nofile=1", "--ulimit", "nofile=2" }, .code = .E0310 },
+        .{ .args = &.{ "--sysctl", "net.core.somaxconn" }, .code = .E0315 },
+        .{ .args = &.{ "--sysctl", "=1" }, .code = .E0315 },
+        .{ .args = &.{ "--sysctl", "kernel.sem=" }, .code = .E0315 },
+        .{ .args = &.{ "--shm-size", "256m", "--shm-size", "1g" }, .code = .E0003 },
+    };
+    for (refused) |case| {
+        var args: [10][]const u8 = undefined;
+        args[0] = "run";
+        args[1] = "--rootfs";
+        args[2] = "r";
+        @memcpy(args[3..][0..case.args.len], case.args);
+        args[3 + case.args.len] = "--";
+        args[4 + case.args.len] = "sh";
+        const found = try parse_case(args[0 .. 5 + case.args.len], &invocation);
+        testing.expectEqual(case.code, found.?) catch |err| {
+            std.debug.print("refused: {s}\n", .{case.args[1]});
+            return err;
+        };
+    }
+    var many: [3 + 2 * (constants.sysctls_max + 1) + 2][]const u8 = undefined;
+    many[0] = "run";
+    many[1] = "--rootfs";
+    many[2] = "r";
+    for (0..constants.sysctls_max + 1) |index| {
+        many[3 + 2 * index] = "--sysctl";
+        many[4 + 2 * index] = "net.core.somaxconn=1";
+    }
+    const full = 3 + 2 * constants.sysctls_max;
+    many[full] = "--";
+    many[full + 1] = "sh";
+    try testing.expect(try parse_case(many[0 .. full + 2], &invocation) == null);
+    try testing.expectEqual(@as(u32, constants.sysctls_max), invocation.run.sysctls_count);
+    many[full] = "--sysctl";
+    many[full + 1] = "net.core.somaxconn=1";
+    many[many.len - 2] = "--";
+    many[many.len - 1] = "sh";
+    try testing.expectEqual(@as(?codes.Code, .E0315), try parse_case(&many, &invocation));
+    for ([_][]const u8{ "--ulimit", "--shm-size", "--sysctl" }) |flag_text| {
+        const args = [_][]const u8{ "exec", "web", flag_text, "nofile=1", "--", "sh" };
+        try testing.expectEqual(@as(?codes.Code, .E0004), try parse_case(&args, &invocation));
+    }
 }
 
 test "a --user value is held to its bound, and to USER or USER:GROUP" {
