@@ -1712,6 +1712,9 @@ comptime {
     assert(google_subject_token_bytes_max * 3 + google_field_bytes_max * 3 * 2 + 512 <=
         google_request_body_bytes_max);
     assert(google_access_token_bytes_max <= net_header_value_bytes_max);
+    // The realm's `Basic` value: base64 of `oauth2accesstoken:` and an access token at its bound.
+    assert(std.base64.standard.Encoder.calcSize("oauth2accesstoken:".len +
+        google_access_token_bytes_max) + "Basic ".len <= net_header_value_bytes_max);
     assert(google_access_token_bytes_max * 2 <= google_response_bytes_max);
     assert(google_subject_token_bytes_max <= google_response_bytes_max);
     assert(google_response_bytes_max <= registry_token_response_bytes_max);

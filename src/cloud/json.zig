@@ -157,7 +157,13 @@ pub const Member = struct { name: []const u8, value: Value };
 
 /// The members of one JSON object, in order. `init` takes the object's whole text (blanks around
 /// it allowed); `next` gives each member, then null once the object is closed and nothing but
-/// blanks follows it. Anything else is `Malformed`.
+/// blanks follows it. Anything else is `Malformed`. `next` does not check names for repeats
+/// (`member` does, and so must any caller that reads a member by name).
+///
+/// A nested object or array is only skipped: its brackets must match and its strings close, but
+/// what lies between them is not checked (`[1 2 ,,]` passes). A caller that wants a nested value
+/// reads it again with `Members.init` or `first_element`, which check that level; nothing may
+/// rely on a skipped value having been validated.
 pub const Members = struct {
     text: []const u8,
     at: u32,
@@ -346,6 +352,10 @@ fn number_valid(token: []const u8) bool {
     const integer_start = at;
     while (at < token.len and std.ascii.isDigit(token[at])) at += 1;
     if (at == integer_start) return false;
+    // JSON writes no leading zero: `0` and `0.5`, never `01`.
+    if (token[integer_start] == '0') {
+        if (at - integer_start > 1) return false;
+    }
     if (at < token.len and token[at] == '.') {
         at += 1;
         const fraction_start = at;
@@ -401,7 +411,7 @@ test "the member reader tells a top-level member from a nested one" {
 
 test "the member reader refuses what is not one object" {
     // Goal: a duplicate member, an escaped name, trailing bytes, unbalanced brackets, a bare word,
-    // a control byte in a string and nesting past the bound are each `Malformed`.
+    // a control byte in a string, a leading zero and nesting past the bound are each `Malformed`.
     const bad = [_][]const u8{
         "",
         "[]",
@@ -413,6 +423,8 @@ test "the member reader refuses what is not one object" {
         "{\"a\":nope}",
         "{\"a\":\"x\ny\"}",
         "{\"a\":01x}",
+        "{\"a\":01}",
+        "{\"a\":-00.5}",
         "{\"a\" 1}",
         "{\"a\":1",
         "{\"a\":[[[[[[[[[[[[[[[[[1]]]]]]]]]]]]]]]]]}",
@@ -422,6 +434,12 @@ test "the member reader refuses what is not one object" {
     }
     try testing.expect(try member("{}", "a") == null);
     try testing.expect(try first_element("[]") == null);
+    // A lone zero, with or without a sign or a fraction, is a number.
+    for ([_][]const u8{ "0", "-0", "0.5", "0e1", "10" }) |number| {
+        var buffer: [16]u8 = undefined;
+        const text = try std.fmt.bufPrint(&buffer, "{{\"a\":{s}}}", .{number});
+        try testing.expectEqualStrings(number, (try member(text, "a")).?.text);
+    }
 }
 
 test "whole seconds are digits within the limit" {

@@ -5,6 +5,7 @@
 //! secret call is marked, and every secret buffer is zero afterwards. Every token is a fixed fake.
 
 const std = @import("std");
+const assert = std.debug.assert;
 const testing = std.testing;
 const constants = @import("../constants.zig");
 const credentials_mod = @import("credentials.zig");
@@ -49,6 +50,9 @@ const Fixture = struct {
         fixture.wire.received = &fixture.received;
         fixture.host.wire = &fixture.wire;
         fixture.token = .{};
+        // Not zero to start, so a buffer `resolve` forgot to wipe fails `expect_wiped`.
+        @memset(std.mem.asBytes(&fixture.workspace), 0xAA);
+        @memset(&fixture.token.bytes, 0xAA);
         return fixture;
     }
 
@@ -105,6 +109,10 @@ const Fixture = struct {
         try fixture.expect_wiped();
         const used = fixture.trace.workload_identity == .used or fixture.trace.metadata == .used;
         try testing.expectEqual(used, fixture.token.len > 0);
+        // Past its length the token holds nothing: no old token's tail survives a shorter one.
+        for (fixture.token.bytes[fixture.token.len..]) |byte| {
+            try testing.expectEqual(@as(u8, 0), byte);
+        }
     }
 };
 
@@ -341,14 +349,29 @@ test "the metadata server, in each of the ways it answers" {
 }
 
 test "a source not named in the mask is not asked" {
-    // Goal: the caller decides: no metadata call unless asked for, no file read unless asked for.
-    const fixture = try Fixture.create(50, &.{ credentials_file, subject_file }, &wif_env);
-    defer fixture.destroy();
-    try testing.expectError(error.NoCredentials, fixture.resolve(.{ .metadata = false }));
-    try testing.expectEqual(@as(u32, 0), fixture.wire.requests);
-    try testing.expectEqual(credentials_mod.State.not_configured, fixture.trace.workload_identity);
-    try testing.expectEqual(credentials_mod.MetadataState.not_asked, fixture.trace.metadata);
-    try fixture.expect_rules();
+    // Goal: the caller decides: no metadata call unless asked for, no file read unless asked for;
+    // and a set variable stays terminal when the mask leaves workload identity out, so the
+    // metadata server is not asked even when the mask names it.
+    const masks = [_]credentials_mod.Sources{ .{ .metadata = false }, .{ .metadata = true } };
+    for (masks, 0..) |mask, index| {
+        const files = &.{ credentials_file, subject_file };
+        const fixture = try Fixture.create(50 + index, files, &wif_env);
+        defer fixture.destroy();
+        try testing.expectError(error.NoCredentials, fixture.resolve(mask));
+        try testing.expectEqual(@as(u32, 0), fixture.wire.requests);
+        const wif_state = fixture.trace.workload_identity;
+        try testing.expectEqual(credentials_mod.State.not_asked, wif_state);
+        try testing.expectEqual(credentials_mod.MetadataState.not_asked, fixture.trace.metadata);
+        try testing.expectEqual(@as(u32, 0), fixture.google.metadata_calls);
+        try fixture.expect_rules();
+    }
+    // With no variable, a mask without workload identity goes straight to the metadata server.
+    const gce = try Fixture.create(53, &.{}, &.{});
+    defer gce.destroy();
+    try gce.resolve(.{ .metadata = true });
+    try testing.expectEqual(credentials_mod.State.not_configured, gce.trace.workload_identity);
+    try testing.expectEqual(credentials_mod.MetadataState.used, gce.trace.metadata);
+    try gce.expect_rules();
 }
 
 test "a token that is already, or about to be, out of date is refused" {
@@ -365,6 +388,129 @@ test "a token that is already, or about to be, out of date is refused" {
     try testing.expectError(error.NoCredentials, gce.resolve(both));
     try testing.expectEqual(credentials_mod.MetadataState.expired, gce.trace.metadata);
     try gce.expect_rules();
+}
+
+test "an expireTime past the lifetime bound is malformed" {
+    // Goal: IAM Credentials states an absolute time; one more than the bound ahead is refused as
+    // the relative `expires_in` is, and one at the bound is used.
+    const extras = [_]u64{ 0, 1 };
+    for (extras, 0..) |extra, index| {
+        const files = &.{ credentials_file, subject_file };
+        const fixture = try Fixture.create(54 + index, files, &wif_env);
+        defer fixture.destroy();
+        fixture.google.lifetime_s = constants.google_token_lifetime_max_s;
+        fixture.google.iam_extra_s = extra;
+        const result = fixture.resolve(both);
+        if (extra == 0) {
+            try result;
+            try testing.expectEqual(credentials_mod.State.used, fixture.trace.workload_identity);
+        } else {
+            try testing.expectError(error.NoCredentials, result);
+            const state = fixture.trace.workload_identity;
+            try testing.expectEqual(credentials_mod.State.malformed, state);
+            try testing.expectEqual(credentials_mod.Step.impersonation, fixture.trace.step);
+        }
+        try fixture.expect_rules();
+    }
+}
+
+/// `head`, then blanks to `total` bytes, then `tail`.
+fn padded_text(head: []const u8, total: usize, tail: []const u8) ![]u8 {
+    assert(tail.len > 0);
+    assert(head.len + tail.len <= total);
+    const text = try testing.allocator.alloc(u8, total);
+    @memcpy(text[0..head.len], head);
+    @memset(text[head.len .. total - tail.len], ' ');
+    @memcpy(text[total - tail.len ..], tail);
+    return text;
+}
+
+test "the credentials file and the subject token, at their bounds and one past" {
+    // Goal: a credentials file of exactly its bound is read and one byte more is unreadable,
+    // with no network call; a subject token of exactly its bound reaches STS and one byte more
+    // is unreadable, with no network call.
+    const file_max = constants.google_credentials_file_bytes_max;
+    const account = parse_tests.file_account;
+    for ([_]usize{ file_max, file_max + 1 }, 0..) |size, index| {
+        const text = try padded_text(account[0 .. account.len - 1], size, "}");
+        defer testing.allocator.free(text);
+        const file: host_sim.File = .{ .path = credentials_path, .content = text };
+        const fixture = try Fixture.create(60 + index, &.{ file, subject_file }, &wif_env);
+        defer fixture.destroy();
+        const result = fixture.resolve(both);
+        if (size == file_max) {
+            try result;
+        } else {
+            try testing.expectError(error.NoCredentials, result);
+        }
+        const expected: credentials_mod.State = if (size == file_max) .used else .unreadable;
+        try testing.expectEqual(expected, fixture.trace.workload_identity);
+        if (size > file_max) try testing.expectEqual(@as(u32, 0), fixture.wire.requests);
+        try fixture.expect_rules();
+    }
+    const subject_max = constants.google_subject_token_bytes_max;
+    for ([_]usize{ subject_max, subject_max + 1 }, 0..) |size, index| {
+        const token = try testing.allocator.alloc(u8, size);
+        defer testing.allocator.free(token);
+        @memset(token, 'j');
+        const subject: host_sim.File = .{ .path = subject_path, .content = token };
+        const fixture = try Fixture.create(62 + index, &.{ credentials_file, subject }, &wif_env);
+        defer fixture.destroy();
+        try testing.expectError(error.NoCredentials, fixture.resolve(both));
+        if (size == subject_max) {
+            // Not the token STS knows, so it is refused there: it was sent whole.
+            try testing.expectEqual(credentials_mod.Step.exchange, fixture.trace.step);
+            try testing.expectEqual(@as(u32, 1), fixture.google.sts_calls);
+        } else {
+            const state = fixture.trace.workload_identity;
+            try testing.expectEqual(credentials_mod.State.subject_unreadable, state);
+            try testing.expectEqual(@as(u32, 0), fixture.wire.requests);
+        }
+        try fixture.expect_rules();
+    }
+}
+
+test "an answer and an access token, at their bounds and one past" {
+    // Goal: an STS answer of exactly the response bound is read and one byte more is refused
+    // before IAM Credentials is called; a metadata token of exactly the token bound is used and
+    // one byte more is malformed.
+    const answer_max = constants.google_response_bytes_max;
+    for ([_]u32{ answer_max, answer_max + 1 }, 0..) |size, index| {
+        const files = &.{ credentials_file, subject_file };
+        const fixture = try Fixture.create(64 + index, files, &wif_env);
+        defer fixture.destroy();
+        fixture.google.sts_answer_bytes = size;
+        const result = fixture.resolve(both);
+        if (size == answer_max) {
+            try result;
+        } else {
+            try testing.expectError(error.NoCredentials, result);
+        }
+        const expected_calls: u32 = if (size == answer_max) 1 else 0;
+        try testing.expectEqual(expected_calls, fixture.google.iam_calls);
+        try testing.expectEqual(@as(u32, 1), fixture.google.sts_calls);
+        try fixture.expect_rules();
+    }
+    const token_max = constants.google_access_token_bytes_max;
+    for ([_]usize{ token_max, token_max + 1 }, 0..) |size, index| {
+        const token = try testing.allocator.alloc(u8, size);
+        defer testing.allocator.free(token);
+        @memcpy(token[0..5], "ya29.");
+        @memset(token[5..], 'm');
+        const fixture = try Fixture.create(66 + index, &.{}, &.{});
+        defer fixture.destroy();
+        fixture.google.metadata_token_text = token;
+        const result = fixture.resolve(both);
+        if (size == token_max) {
+            try result;
+            try testing.expectEqualStrings(token, fixture.token.text());
+        } else {
+            try testing.expectError(error.NoCredentials, result);
+            const state = fixture.trace.metadata;
+            try testing.expectEqual(credentials_mod.MetadataState.malformed, state);
+        }
+        try fixture.expect_rules();
+    }
 }
 
 test "seeded network faults never leak a secret or leave one in memory" {

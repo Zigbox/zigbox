@@ -23,14 +23,17 @@ const net = @import("registry/net.zig");
 
 const input_bytes_max = 4096;
 
+const key_file = "{\"type\":\"service_account\",\"private_key\":\"FAKE\"}";
+const user_file = "{\"type\":\"authorized_user\",\"refresh_token\":\"FAKE\"}";
+
 const samples = [_][]const u8{
     parse_tests.file_account,
     parse_tests.url_account,
     parse_tests.sts_answer,
     parse_tests.iam_answer,
     parse_tests.metadata_answer,
-    "{\"type\":\"service_account\",\"private_key\":\"FAKE\"}",
-    "{\"type\":\"authorized_user\",\"refresh_token\":\"FAKE\"}",
+    key_file,
+    user_file,
     "{\"error\":\"invalid_grant\",\"error_description\":\"x\"}",
     "{\"error\":{\"code\":403,\"message\":\"x\",\"status\":\"PERMISSION_DENIED\"}}",
     "{\"errors\":[{\"code\":\"DENIED\",\"message\":\"x\"}]}",
@@ -97,6 +100,10 @@ fn inside(outer: []const u8, inner: []const u8) bool {
 }
 
 fn check_account(input: []const u8, account: *const parse.ExternalAccount) void {
+    // Checked here without the parser's own helpers: an accepted file names its type, and does
+    // not open as a key file or gcloud's credentials.
+    assert(std.mem.indexOf(u8, input, "\"external_account\"") != null);
+    check_opening(input);
     assert(inside(input, account.audience));
     assert(inside(input, account.subject_token_type));
     assert(inside(input, account.location));
@@ -121,7 +128,44 @@ fn check_account(input: []const u8, account: *const parse.ExternalAccount) void 
         const named = parse.impersonated_account(account.impersonation_url).?;
         assert(std.mem.eql(u8, named, account.service_account));
         assert(parse.email_valid(account.service_account));
+        check_impersonation(account.impersonation_url, account.service_account);
     }
+}
+
+/// The impersonation URL and its email, checked without the parser's helpers: the fixed prefix,
+/// the email, the fixed suffix, and one `@` with text on both sides.
+fn check_impersonation(url: []const u8, email: []const u8) void {
+    const prefix = "https://iamcredentials.googleapis.com/v1/projects/-/serviceAccounts/";
+    const suffix = ":generateAccessToken";
+    assert(url.len == prefix.len + email.len + suffix.len);
+    assert(std.mem.eql(u8, url[0..prefix.len], prefix));
+    assert(std.mem.eql(u8, url[prefix.len..][0..email.len], email));
+    assert(std.mem.eql(u8, url[prefix.len + email.len ..], suffix));
+    const at = std.mem.indexOfScalar(u8, email, '@').?;
+    assert(at > 0);
+    assert(at + 1 < email.len);
+    assert(std.mem.indexOfScalarPos(u8, email, at + 1, '@') == null);
+}
+
+/// A file that opens with a key file's or gcloud's type is refused with that reason, or as
+/// malformed when an edit later on broke the JSON; never as anything else, never accepted.
+fn check_refusal(input: []const u8, refused: parse.Refused) void {
+    assert(refused.type_name.len <= constants.google_type_name_bytes_max);
+    const key_head = "{\"type\":\"service_account\",";
+    const user_head = "{\"type\":\"authorized_user\",";
+    if (std.mem.startsWith(u8, input, key_head)) {
+        const named = refused.reason == .service_account_key or refused.reason == .malformed;
+        assert(named);
+    }
+    if (std.mem.startsWith(u8, input, user_head)) {
+        const named = refused.reason == .authorized_user or refused.reason == .malformed;
+        assert(named);
+    }
+}
+
+fn check_opening(input: []const u8) void {
+    assert(!std.mem.startsWith(u8, input, "{\"type\":\"service_account\","));
+    assert(!std.mem.startsWith(u8, input, "{\"type\":\"authorized_user\","));
 }
 
 fn check_token(input: []const u8, token: parse.AccessToken) void {
@@ -169,9 +213,7 @@ pub fn fuzz_parse_google(seed: u64) void {
     const input = buffer[0..build(random, &buffer)];
     switch (parse.parse_credentials(input)) {
         .account => |account| check_account(input, &account),
-        .refused => |refused| {
-            assert(refused.type_name.len <= constants.google_type_name_bytes_max);
-        },
+        .refused => |refused| check_refusal(input, refused),
     }
     if (parse.subject_text(input)) |token| {
         assert(inside(input, token));

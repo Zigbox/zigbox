@@ -8,17 +8,21 @@
 //! - The metadata server answers only a request with `Metadata-Flavor: Google`, and marks its
 //!   answers with the same header; in its `ec2` mode it answers as EC2's does, without it.
 //! - The registry's realm takes Basic `oauth2accesstoken:<access token>`, as Artifact Registry
-//!   does, and answers as it was seen to on 2026-11-16: `403 DENIED` for a repository the caller
-//!   may not read (anonymously, a missing one answers the same), `401 UNAUTHORIZED` for a token it
-//!   does not accept.
+//!   does, and answers as it was seen to on 2026-11-16: `403 DENIED` anonymously for a private or
+//!   a missing repository, `401 UNAUTHORIZED` for a token it does not accept. Where a credentialed
+//!   caller is refused a repository it may not read, or one that does not exist, was not checked
+//!   (`docs/decisions/2026-11-16-m6d-missing-repo-unverified.md`), so each candidate is a fault:
+//!   `403 DENIED` at the realm, or a realm that grants and a manifest that answers `403 DENIED` or
+//!   `404 NAME_UNKNOWN`.
 //! - Layer blobs redirect either to a relative path on the registry host, as Artifact Registry
 //!   does today, or to the storage host, which fails any request carrying `Authorization`.
 //!
 //! Every credential that reaches a host that must not get it is counted in `leaked`: a subject
-//! token anywhere but STS, a federated token anywhere but IAM Credentials, any `Authorization` at
-//! STS, the metadata server or storage, a metadata call that may use a proxy. Connection failures
-//! are the net simulator's own faults; the metadata server's absence and slowness are modelled
-//! here, since they are what it is (`Served.fail`).
+//! token anywhere but STS, a federated token anywhere but IAM Credentials, an access token sent
+//! anywhere as itself (it only ever travels inside the realm's Basic value), any `Authorization`
+//! at STS, the metadata server or storage, a metadata call that may use a proxy. Connection
+//! failures are the net simulator's own faults; the metadata server's absence and slowness are
+//! modelled here, since they are what it is (`Served.fail`).
 
 const std = @import("std");
 const assert = std.debug.assert;
@@ -26,6 +30,7 @@ const fixture_mod = @import("../testing/vm/registry_fixture.zig");
 const net = @import("../registry/net.zig");
 const net_sim = @import("../registry/net_sim.zig");
 const sigv4 = @import("../aws/sigv4.zig");
+const constants = @import("../constants.zig");
 const parse = @import("parse.zig");
 
 pub const registry_host = "us-docker.pkg.dev";
@@ -89,8 +94,15 @@ pub const RegistryFault = enum {
     none,
     /// The realm answers 403 `DENIED` to every credential.
     denied,
-    /// As `denied`: a missing repository looks the same at the realm (checked anonymously).
+    /// As `denied`: anonymously, a missing repository looks the same at the realm. Whether it does
+    /// with valid credentials is unverified; `denied_at_manifest` and `missing_at_manifest` are
+    /// the other candidates.
     missing_repo,
+    /// The realm grants a token; the manifest answers 403 `DENIED` (the permission is missing,
+    /// or the repository is: Google's message says "or it may not exist").
+    denied_at_manifest,
+    /// The realm grants a token; the manifest answers 404 `NAME_UNKNOWN`.
+    missing_at_manifest,
     /// The realm answers 401 `UNAUTHORIZED` to every credential.
     bad_token,
     unavailable,
@@ -102,6 +114,8 @@ pub const GoogleSim = struct {
     /// The time the model believes it is, seconds since the epoch.
     now_s: u64 = 0,
     lifetime_s: u64 = 3600,
+    /// Added to the lifetime IAM Credentials states as its `expireTime` (a test of the cap).
+    iam_extra_s: u64 = 0,
     sts: StsMode = .ok,
     iam: IamMode = .ok,
     metadata: MetadataMode = .ok,
@@ -110,6 +124,11 @@ pub const GoogleSim = struct {
     blob_redirect: BlobRedirect = .same_host,
     /// The access token the realm accepts.
     accepted_token: []const u8 = access_token,
+    /// The token the metadata server hands out (a test at the token's bound sets a long one).
+    metadata_token_text: []const u8 = metadata_token,
+    /// When not zero, STS's answer is padded with blanks to exactly this many bytes (a test at
+    /// the response bound).
+    sts_answer_bytes: u32 = 0,
     fixture: fixture_mod.Fixture,
     sts_calls: u32 = 0,
     iam_calls: u32 = 0,
@@ -123,6 +142,9 @@ pub const GoogleSim = struct {
     /// Requests that carried a credential to a host that must not get it.
     leaked: u32 = 0,
     scratch: [512]u8 = undefined,
+    padded: [constants.google_response_bytes_max + 1]u8 = undefined,
+    /// The metadata answer, with room for a token one past its bound.
+    metadata_scratch: [constants.google_access_token_bytes_max + 128]u8 = undefined,
     location: [256]u8 = undefined,
 
     pub fn init(sim: *GoogleSim) void {
@@ -176,6 +198,9 @@ fn answer(
     if (subject_sent and !std.mem.eql(u8, request.host, parse.sts_host)) sim.leaked += 1;
     const federated_sent = std.mem.eql(u8, request.bearer, federated_token);
     if (federated_sent and !std.mem.eql(u8, request.host, parse.iam_host)) sim.leaked += 1;
+    // An access token travels only inside the realm's Basic value, never as itself.
+    if (sends(request, received, access_token)) sim.leaked += 1;
+    if (sends(request, received, metadata_token)) sim.leaked += 1;
     if (std.mem.eql(u8, request.host, metadata_host)) return metadata(sim, request, served);
     if (std.mem.eql(u8, request.host, parse.sts_host)) return sts(sim, request, received, served);
     if (std.mem.eql(u8, request.host, parse.iam_host)) return iam(sim, request, received, served);
@@ -184,6 +209,19 @@ fn answer(
     if (std.mem.eql(u8, request.host, storage_host)) return storage(sim, request, served);
     sim.stray += 1;
     if (carries_credential(request)) sim.leaked += 1;
+}
+
+/// Whether `secret` is anywhere in what the request sent: a credential, a header or the body.
+fn sends(request: *const net.Request, received: []const u8, secret: []const u8) bool {
+    assert(secret.len > 0);
+    if (std.mem.indexOf(u8, received, secret) != null) return true;
+    if (std.mem.indexOf(u8, request.bearer, secret) != null) return true;
+    if (std.mem.indexOf(u8, request.authorization, secret) != null) return true;
+    if (std.mem.indexOf(u8, request.target, secret) != null) return true;
+    for (request.extra_headers) |header| {
+        if (std.mem.indexOf(u8, header.value, secret) != null) return true;
+    }
+    return false;
 }
 
 fn oauth_error(comptime code: []const u8) []const u8 {
@@ -227,7 +265,7 @@ fn sts(
     switch (sim.sts) {
         .unavailable => served.* = .{ .status = 503, .body = oauth_error("server_error") },
         .malformed => served.* = .{ .status = 200, .body = "{\"access_token\":7}" },
-        .ok => served.* = .{ .status = 200, .body = sts_answer(sim) },
+        .ok => served.* = .{ .status = 200, .body = padded(sim, sts_answer(sim)) },
         .invalid_grant, .invalid_target => unreachable, // Answered above.
     }
 }
@@ -237,6 +275,20 @@ fn sts_answer(sim: *GoogleSim) []const u8 {
         "\"urn:ietf:params:oauth:token-type:access_token\",\"token_type\":\"Bearer\"," ++
         // Cannot fail: scratch fits.
         "\"expires_in\":{d}}}", .{ federated_token, sim.lifetime_s }) catch unreachable;
+}
+
+/// `body` with blanks before its closing brace, to `sts_answer_bytes` when that is set.
+fn padded(sim: *GoogleSim, body: []const u8) []const u8 {
+    assert(body.len > 0);
+    assert(body[body.len - 1] == '}');
+    const total = sim.sts_answer_bytes;
+    if (total == 0) return body;
+    assert(total > body.len);
+    assert(total <= sim.padded.len);
+    @memcpy(sim.padded[0 .. body.len - 1], body[0 .. body.len - 1]);
+    @memset(sim.padded[body.len - 1 .. total - 1], ' ');
+    sim.padded[total - 1] = '}';
+    return sim.padded[0..total];
 }
 
 fn format_time(buffer: *[20]u8, seconds: u64) []const u8 {
@@ -270,7 +322,7 @@ fn iam(
         .malformed => served.* = .{ .status = 200, .body = "{\"accessToken\":\"" },
         .ok => {
             var stamp: [20]u8 = undefined;
-            const expires = format_time(&stamp, sim.now_s + sim.lifetime_s);
+            const expires = format_time(&stamp, sim.now_s + sim.lifetime_s + sim.iam_extra_s);
             const text = std.fmt.bufPrint(&sim.scratch, "{{\"accessToken\":\"{s}\"," ++
                 // Cannot fail: scratch fits.
                 "\"expireTime\":\"{s}\"}}", .{ access_token, expires }) catch unreachable;
@@ -330,9 +382,13 @@ fn metadata(sim: *GoogleSim, request: *const net.Request, served: *net_sim.Serve
 }
 
 fn metadata_answer(sim: *GoogleSim) []const u8 {
-    return std.fmt.bufPrint(&sim.scratch, "{{\"access_token\":\"{s}\",\"expires_in\":{d}," ++
-        // Cannot fail: scratch fits.
-        "\"token_type\":\"Bearer\"}}", .{ metadata_token, sim.lifetime_s }) catch unreachable;
+    assert(sim.metadata_token_text.len <= constants.google_access_token_bytes_max + 1);
+    return std.fmt.bufPrint(&sim.metadata_scratch, "{{\"access_token\":\"{s}\"," ++
+        // Cannot fail: the scratch holds a token one past its bound and the rest.
+        "\"expires_in\":{d},\"token_type\":\"Bearer\"}}", .{
+        sim.metadata_token_text,
+        sim.lifetime_s,
+    }) catch unreachable;
 }
 
 const downloads_prefix = "/artifacts-downloads/namespaces/fixture/downloads/";
@@ -353,6 +409,10 @@ fn registry(sim: *GoogleSim, request: *const net.Request, served: *net_sim.Serve
         return fixture_answer(sim, request, target, "", served);
     }
     if (request.basic.len + request.authorization.len > 0) sim.leaked += 1;
+    if (manifest_refusal(sim, request)) |refusal| {
+        served.* = refusal;
+        return;
+    }
     fixture_answer(sim, request, request.target, request.bearer, served);
     const storage_base = "https://" ++ storage_host ++ "/cdn/";
     const to_storage = std.mem.startsWith(u8, served.location, storage_base);
@@ -362,6 +422,18 @@ fn registry(sim: *GoogleSim, request: *const net.Request, served: *net_sim.Serve
     served.status = 302;
     served.location = std.fmt.bufPrint(&sim.location, downloads_prefix ++ "{s}", .{digest}) catch
         unreachable; // A digest is 71 bytes.
+}
+
+/// A credentialed manifest request refused at the origin, when the fault says so.
+fn manifest_refusal(sim: *const GoogleSim, request: *const net.Request) ?net_sim.Served {
+    assert(request.target.len > 0);
+    if (request.bearer.len == 0) return null;
+    if (std.mem.indexOf(u8, request.target, "/manifests/") == null) return null;
+    return switch (sim.registry_fault) {
+        .denied_at_manifest => .{ .status = 403, .body = registry_error("DENIED") },
+        .missing_at_manifest => .{ .status = 404, .body = registry_error("NAME_UNKNOWN") },
+        .none, .denied, .missing_repo, .bad_token, .unavailable => null,
+    };
 }
 
 fn realm(sim: *GoogleSim, request: *const net.Request, served: *net_sim.Served) void {
@@ -431,4 +503,54 @@ fn fixture_answer(
         .body = out.body,
         .deliver = out.deliver,
     };
+}
+
+/// A GET at the registry host, with `bearer` or `basic` (base64) as its credential.
+fn registry_get(target: []const u8, bearer: []const u8, basic: []const u8) net.Request {
+    assert(target.len > 0);
+    assert(bearer.len == 0 or basic.len == 0);
+    return .{
+        .scheme = .https,
+        .host = registry_host,
+        .port = 443,
+        .target = target,
+        .accept = "application/json",
+        .bearer = bearer,
+        .basic = basic,
+        .body_bytes_max = 4096,
+        .idle_timeout_ms = 1000,
+        .total_timeout_ms = 1000,
+    };
+}
+
+test "a manifest fault grants at the realm and refuses at the manifest" {
+    // Goal: the two unverified candidates for a missing repository: the realm grants a token to
+    // valid credentials, and only a credentialed manifest request is refused, with Google's code;
+    // an anonymous one, and every other fault, reach the registry as before.
+    const sim = try std.heap.page_allocator.create(GoogleSim);
+    defer std.heap.page_allocator.destroy(sim);
+    const Case = struct { fault: RegistryFault, status: u16, code: []const u8 };
+    const cases = [_]Case{
+        .{ .fault = .denied_at_manifest, .status = 403, .code = "\"DENIED\"" },
+        .{ .fault = .missing_at_manifest, .status = 404, .code = "\"NAME_UNKNOWN\"" },
+    };
+    const manifest = "/v2/zbx-demo/zbx/demo/manifests/latest";
+    for (cases) |case| {
+        sim.init();
+        sim.registry_fault = case.fault;
+        var basic_buffer: [128]u8 = undefined;
+        const basic = sim.basic_text(&basic_buffer);
+        var served: net_sim.Served = .{};
+        const token_request = registry_get("/token?scope=x", "", basic);
+        answer(sim, &token_request, "", &served);
+        try std.testing.expectEqual(@as(u16, 200), served.status);
+        const credentialed = registry_get(manifest, "registry-token", "");
+        answer(sim, &credentialed, "", &served);
+        try std.testing.expectEqual(case.status, served.status);
+        try std.testing.expect(std.mem.indexOf(u8, served.body, case.code) != null);
+        const anonymous = registry_get(manifest, "", "");
+        answer(sim, &anonymous, "", &served);
+        try std.testing.expect(served.status != case.status);
+        try std.testing.expectEqual(@as(u32, 0), sim.leaked);
+    }
 }

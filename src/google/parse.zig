@@ -10,8 +10,8 @@
 //! optionally impersonating a service account at `iamcredentials.googleapis.com`, is accepted;
 //! each other shape is refused with its own reason (`Refusal`), so the user is told which field
 //! zbx does not support. A value that is escaped is refused: none of the values zbx reads ever
-//! needs an escape, and Go's encoder writes `&` as `&`, so a URL with a query that a Go tool
-//! wrote is refused rather than half-read (recorded in the slice's handoff).
+//! needs an escape, and Go's encoder writes `&` as `\u0026`, so a URL with a query that a Go
+//! tool wrote is refused rather than half-read (recorded in the slice's handoff).
 
 const std = @import("std");
 const assert = std.debug.assert;
@@ -263,6 +263,10 @@ fn read_headers(object: []const u8, account: *ExternalAccount) Error!void {
     while (try members.next()) |header| {
         if (account.headers_count == account.headers.len) return error.Malformed;
         if (!header_name_valid(header.name)) return error.Malformed;
+        // Two spellings of one header would send it twice, and the server would pick one.
+        for (account.source_headers()) |earlier| {
+            if (std.ascii.eqlIgnoreCase(earlier.name, header.name)) return error.Malformed;
+        }
         const value = header.value.plain() orelse return error.Malformed;
         if (value.len == 0 or value.len > constants.net_header_value_bytes_max) {
             return error.Malformed;

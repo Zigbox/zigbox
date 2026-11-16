@@ -38,7 +38,9 @@ pub const Env = cloud_env.CredentialEnv(&.{"GOOGLE_APPLICATION_CREDENTIALS"});
 pub const credentials_variable = "GOOGLE_APPLICATION_CREDENTIALS";
 
 /// Which sources `resolve` may ask. The CLI asks for workload identity up front and for the
-/// metadata server only after an anonymous refusal; a library caller chooses.
+/// metadata server only after an anonymous refusal; a library caller chooses. The mask never
+/// overrides the terminal rule: when `GOOGLE_APPLICATION_CREDENTIALS` is set, the metadata server
+/// is asked by no mask, and a mask without `workload_identity` finds nothing (`not_asked`).
 pub const Sources = struct {
     workload_identity: bool = false,
     metadata: bool = false,
@@ -48,8 +50,12 @@ pub const Source = enum { none, workload_identity, metadata };
 
 /// What workload identity federation did. `used` is the only success.
 pub const State = enum {
-    /// Not asked, or `GOOGLE_APPLICATION_CREDENTIALS` is not set.
+    /// `GOOGLE_APPLICATION_CREDENTIALS` is not set.
     not_configured,
+    /// `GOOGLE_APPLICATION_CREDENTIALS` is set, but the caller's `Sources` leaves workload
+    /// identity out. The metadata server is not asked either: the user named an identity, and
+    /// another must not stand in for it unannounced.
+    not_asked,
     /// The credentials file could not be read, or is larger than its bound.
     unreadable,
     /// The file is not one zbx uses; `Trace.unsupported` says why.
@@ -232,7 +238,12 @@ pub fn resolve(
         if (trace.workload_identity == .used) return;
         // Once the variable is set, its answer is the answer.
         if (trace.workload_identity != .not_configured) return error.NoCredentials;
+    } else if (env.get(credentials_variable) != null) {
+        // The variable names the identity to use, whatever the mask says: never fall through.
+        trace.workload_identity = .not_asked;
+        return error.NoCredentials;
     }
+    assert(trace.workload_identity == .not_configured);
     if (sources.metadata) {
         metadata_server(host, now_s, workspace, token, trace);
         if (trace.metadata == .used) return;
@@ -283,9 +294,18 @@ fn workload_identity(
     accept(now_s, impersonated, token, &trace.workload_identity);
 }
 
-/// Takes a token unless it is out of date.
+/// Takes a token unless it is out of date, or claims a life past `google_token_lifetime_max_s`
+/// from now. An `expireTime` is held to the same bound `parse` holds `expires_in` to, so no
+/// answer is trusted for longer than Google issues a token.
 fn accept(now_s: u64, answer: parse.AccessToken, token: *Token, state: *State) void {
     assert(parse.access_token_valid(answer.token));
+    if (answer.relative) assert(answer.expires <= constants.google_token_lifetime_max_s);
+    if (!answer.relative) {
+        if (answer.expires > now_s + constants.google_token_lifetime_max_s) {
+            state.* = .malformed;
+            return;
+        }
+    }
     const expiration_s = if (answer.relative) now_s + answer.expires else answer.expires;
     token.set(.workload_identity, answer.token, expiration_s);
     if (token.expired(now_s)) {

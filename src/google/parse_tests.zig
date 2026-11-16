@@ -259,3 +259,42 @@ test "impersonation URLs and emails" {
     try testing.expect(!parse.email_valid("a@b@c"));
     try testing.expect(!parse.email_valid("@b.c"));
 }
+
+test "each parse bound holds at its value and refuses one past it" {
+    // Goal: an access token, a subject token and a credentials-file field are each accepted at
+    // exactly their bound and refused one byte past it.
+    const access_max = constants.google_access_token_bytes_max;
+    var access: [access_max + 1]u8 = undefined;
+    @memset(&access, 'a');
+    try testing.expect(parse.access_token_valid(access[0..access_max]));
+    try testing.expect(!parse.access_token_valid(access[0 .. access_max + 1]));
+    const subject_max = constants.google_subject_token_bytes_max;
+    var subject: [subject_max + 1]u8 = undefined;
+    @memset(&subject, 's');
+    const at_bound = try parse.subject_text(subject[0..subject_max]);
+    try testing.expectEqual(subject_max, at_bound.len);
+    try testing.expectError(error.Malformed, parse.subject_text(subject[0 .. subject_max + 1]));
+    const field_max = constants.google_field_bytes_max;
+    var field: [field_max + 1]u8 = undefined;
+    @memset(&field, 'f');
+    const long_at = try swapped(audience, field[0..field_max]);
+    defer testing.allocator.free(long_at);
+    try testing.expectEqual(field_max, parse.parse_credentials(long_at).account.audience.len);
+    const long_past = try swapped(audience, field[0 .. field_max + 1]);
+    defer testing.allocator.free(long_past);
+    try expect_refused(long_past, .malformed);
+}
+
+test "a source header named twice, in any case, is refused" {
+    // Goal: `Authorization` and `authorization` are one header; sending both would let the
+    // server pick one, so the file is malformed.
+    const twice = "{\"type\":\"external_account\",\"audience\":\"a\"," ++
+        "\"subject_token_type\":\"t\",\"credential_source\":{\"url\":\"https://x/t\"," ++
+        "\"headers\":{\"Authorization\":\"Bearer a\",\"authorization\":\"Bearer b\"}}}";
+    try expect_refused(twice, .malformed);
+    const once = "{\"type\":\"external_account\",\"audience\":\"a\"," ++
+        "\"subject_token_type\":\"t\",\"credential_source\":{\"url\":\"https://x/t\"," ++
+        "\"headers\":{\"Authorization\":\"Bearer a\",\"X-Other\":\"b\"}}}";
+    const account = parse.parse_credentials(once).account;
+    try testing.expectEqual(@as(usize, 2), account.source_headers().len);
+}
