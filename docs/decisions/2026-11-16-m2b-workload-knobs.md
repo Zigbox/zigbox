@@ -27,8 +27,12 @@ M2b extends M2 so that the common server workloads people run on Kubernetes star
 
 ## Supervisor defaults
 
-- **Codes:** `E0575`–`E0589`, the next free block of at most 15 after `E0574` (the end of M6d's reservation). The registry's numbering puts limits in `03xx`. This block is in `05xx` (registry and pull) because the supervisor said "after E0574". The brief raises this for the owner to confirm.
-- **Defaults:** nothing changes by default except the seccomp NUMA addition. The cgroup view (item 7) has no flag. Every scoped run gets it, because that is the point of the item. The brief lists it for the owner to confirm as a change in what a container sees.
+- **Codes:** `E0310`–`E0324`, the next free block in `03xx`, the registry's limits range (after M2's `E0309`). Fourteen are allocated and one is spare. The first default, `E0575`–`E0589` after M6d's `E0574`, was swapped before anything was registered.
+- **Defaults:** nothing changes by default except the seccomp NUMA addition and the cgroup view.
+- **The cgroup view (item 7):** on for every scoped run, with no flag. podman and Docker on cgroup v2 do the same with a private cgroup namespace. It also closes today's `--net host` exposure, where the container sees the host's whole cgroup tree read-only.
+- **New bounds:** `--sysctl` at most 16 per run, values at most 256 bytes; `--shm-size` refused above `MemTotal` when there is no `--memory`; a single `--ulimit` value sets both soft and hard (Docker's meaning).
+- **`/dev/net/tun`:** documented only. Refusing it is deferred until parked item 6 is decided.
+- **`/proc/sys` masking:** deferred as later hardening; not in M2b.
 - **Release:** M2b targets 0.6.x. It does not block 0.5.2, M6d or S2.
 - **Library:** the `zigbox` module exposes the same knobs on `Spec` (field names in the brief), so Zigcube can pass them later and use the host settings for placement.
 - **Ask first:** an implementer stops and asks before anything that alters a user-visible bound, limit or default beyond the above.

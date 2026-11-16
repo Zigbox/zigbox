@@ -57,7 +57,7 @@ Acceptance criteria:
 - The library takes the same knobs on `Spec` (below).
 - The production-readiness checklist:
   - **Upgrade test.** The new binary reads run records written by the previous tagged release, and `demo-m2` still passes unchanged.
-  - **Stable diagnostics.** Every new failure path has a registered code in `E0575`–`E0589`, with a fix, a golden and an error page. No existing code changes its meaning.
+  - **Stable diagnostics.** Every new failure path has a registered code in `E0310`–`E0324`, with a fix, a golden and an error page. No existing code changes its meaning.
   - **Documented failure modes.** `docs/demos/m2b.md` lists them (slice 3).
   - **Agent test.** A scripted agent runs steps 1 to 5 using only `--output json` and `zbx explain`. It reads the refused value, the host value and the fix command from the diagnostic's fields, never from prose.
 
@@ -178,7 +178,7 @@ Acceptance criteria:
     - With `--net host`, it goes on top of the bound host tree, so the host's hierarchy is hidden. Check that mounting over the locked recursive bind works in a user namespace. If it does not, bind only the parts of host `/sys` that are not `fs/cgroup`, and record how.
   - Inside, `/proc/self/cgroup` is `0::/`, `mountinfo` lists cgroup2 at `/sys/fs/cgroup` with root `/`, and `memory.max`, `cpu.max` and `pids.max` are the scope's.
 - **Only with a scope.** A run without a scope (no limits and no user bus: `W0301`) gets no cgroup namespace and no view, as today: unsharing there would expose the user's session cgroup.
-- **No flag.** The view is on for every scoped run; that is the point of the item. This is a change in what a container sees. The owner confirms it in the decision above; the demo document says so.
+- **No flag.** The view is on for every scoped run; that is the point of the item. This is a change in what a container sees. The supervisor accepted it as a default (decision above): podman and Docker on cgroup v2 do the same with a private cgroup namespace. It also closes the `--net host` exposure of the host's cgroup tree. The demo document says so.
 - **Seccomp unchanged.** `clone` with `CLONE_NEWCGROUP` and `unshare` stay denied inside, because the unshare happens before seccomp is installed.
 - **Known detail.** The scope holds the container and zbx's keeper process, so `pids.max` inside reads `--pids` plus one (`TasksMax`). Document it; do not hide it.
 - **Doctor.** No new check. A kernel without cgroup namespaces is below the baseline already, but the unshare failing is still a coded line.
@@ -201,36 +201,36 @@ The run record takes the next version: S2's PR #169 takes v11, so check `main` w
 
 ### Diagnostics
 
-`E0575`–`E0589` are reserved for M2b: the next free block after M6d's `E0574`, by the supervisor's default. Take codes in order. Ask before going outside the block, or before using a `W` code. A first allocation:
+`E0310`–`E0324` are reserved for M2b: the next free block in `03xx`, the limits range (supervisor, 2026-11-16). Take codes in order. Ask before going outside the block, or before using a `W` code. A first allocation:
 
 | Code | What | Blame |
 | --- | --- | --- |
-| E0575 | `--ulimit`: unknown name, unparsable value, or soft above hard | user |
-| E0576 | `--ulimit` above the invoking user's hard limit (the `limits.conf` and `LimitNOFILE=` fix) | environment |
-| E0577 | `setrlimit` failed in the child (names the step) | environment |
-| E0578 | `--shm-size`: unparsable, below a page, or above `MemTotal` | user |
-| E0579 | `--shm-size` larger than `--memory` | user |
-| E0580 | `--sysctl`: malformed, too many, or value too long | user |
-| E0581 | `--sysctl` key is a host setting (not on the allowlist) | user |
-| E0582 | `--sysctl net.*` with `--net host` | user |
-| E0583 | the kernel refused a sysctl value, or the write failed | user |
-| E0584 | `--require-host`: setting below the requirement (`sysctl -w` fix); also the doctor line | environment |
-| E0585 | `--require-host`: unknown setting or malformed requirement | user |
-| E0586 | `--require-host`: setting not exposed or unreadable on this host | environment |
-| E0587 | `unshare(CLONE_NEWCGROUP)` failed | environment |
-| E0588 | mounting the read-only cgroup2 view failed | environment |
+| E0310 | `--ulimit`: unknown name, unparsable value, or soft above hard | user |
+| E0311 | `--ulimit` above the invoking user's hard limit (the `limits.conf` and `LimitNOFILE=` fix) | environment |
+| E0312 | `setrlimit` failed in the child (names the step) | environment |
+| E0313 | `--shm-size`: unparsable, below a page, or above `MemTotal` | user |
+| E0314 | `--shm-size` larger than `--memory` | user |
+| E0315 | `--sysctl`: malformed, too many, or value too long | user |
+| E0316 | `--sysctl` key is a host setting (not on the allowlist) | user |
+| E0317 | `--sysctl net.*` with `--net host` | user |
+| E0318 | the kernel refused a sysctl value, or the write failed | user |
+| E0319 | `--require-host`: setting below the requirement (`sysctl -w` fix); also the doctor line | environment |
+| E0320 | `--require-host`: unknown setting or malformed requirement | user |
+| E0321 | `--require-host`: setting not exposed or unreadable on this host | environment |
+| E0322 | `unshare(CLONE_NEWCGROUP)` failed | environment |
+| E0323 | mounting the read-only cgroup2 view failed | environment |
 
-`E0589` is spare. Every code has a cause, a fix (command separate from sentence), a golden and an error page. Under the decided exit codes, each is exit 125 for `zbx run`.
+`E0324` is spare. Every code has a cause, a fix (command separate from sentence), a golden and an error page. Under the decided exit codes, each is exit 125 for `zbx run`.
 
 **Trap: the code enum is full.** `Code` in `src/diag/codes.zig` is `enum(u8)` and already has 255 tags. M6d and S2 (#169) also add codes, so whichever lands first must widen it to `u16`. Check `main`. If it is still `u8`, widen it in its own commit (mechanical) and check that nothing stores the tag as a byte, such as bundles, JSON or records.
 
-**For the owner to confirm:** the registry's numbering puts limits in `03xx`, where the next free code is `E0310`. This block is in `05xx` (registry and pull) only because the default said "after E0574". If the owner prefers `E0310`–`E0324`, swap before slice 1 registers anything.
+**Numbering.** M2b's codes are limits, so they go in `03xx` (the registry's numbering), after M2's `E0309`. They do not touch `05xx`, where M6c and M6d take theirs.
 
 ## Not in M2b (record in `docs/demos/m2b.md`)
 
-- **Adding capabilities (parked).** `IPC_LOCK` (Vault's `mlock`), `NET_ADMIN` and `NET_RAW` in the container's own netns (VPNs, mesh init containers), and `SYS_NICE` (ClickHouse). This is an open question in the spec. Until it is decided, `--device /dev/net/tun` is accepted but unusable without `NET_ADMIN`. Slice 3 documents that in `docs/demos/m2b.md` and in the M10 device notes. Refusing it would change a behaviour that works today, so ask first.
+- **Adding capabilities (parked).** `IPC_LOCK` (Vault's `mlock`), `NET_ADMIN` and `NET_RAW` in the container's own netns (VPNs, mesh init containers), and `SYS_NICE` (ClickHouse). This is an open question in the spec. Until it is decided, `--device /dev/net/tun` is accepted but unusable without `NET_ADMIN`. Slice 3 documents that in `docs/demos/m2b.md` and in the M10 device notes. Refusing it is deferred until the parked item is decided (supervisor, 2026-11-16).
 - **Non-goals** (spec): io_uring; cpuset pinning, `io.max`/`io.weight` and hugetlb; nested containers (`unshare`, namespace `clone` flags, `mount`, `/dev/fuse` inside, Docker-in-Docker, rootless BuildKit inside zbx).
-- Masking `/proc/sys` or other `/proc` paths read-only. That is a hardening change, not a knob. Note it as a failure mode and leave it for a later decision.
+- Masking `/proc/sys` or other `/proc` paths read-only: later hardening, not a knob (supervisor, 2026-11-16). Note it as a failure mode.
 - Setting any host value. `--require-host` only checks.
 - rlimits other than the four. `core`, `rtprio` and the rest are not asked for.
 - Mac: the forwarded `zbx run` passes the new flags to the guest unchanged. `--require-host` there checks the guest's kernel; say so. Do not add Mac-specific work.
@@ -241,13 +241,13 @@ The run record takes the next version: S2's PR #169 takes v11, so check `main` w
    - The runtime measurement and the NUMA `strace` check, each recorded in its decision file, before code.
    - `--ulimit`, `--shm-size` with `shm_bytes_default`, the seccomp NUMA entries with their BPF tests, `--sysctl` with `sysctls.zon` and its per-key VM verification.
    - The plan steps, faulted by the `run` fuzzer.
-   - The `Spec` and `Limits` fields, the codes `E0575`–`E0583` with goldens and pages, the `--plan` lines, and the run JSON and its schema.
+   - The `Spec` and `Limits` fields, the codes `E0310`–`E0318` with goldens and pages, the `--plan` lines, and the run JSON and its schema.
    - The run record version with its upgrade test.
    - VM checks: `vm/m2-…` (`demo-m2` unchanged and green), plus a scratch run of steps 1, 2, 3 and 6 by hand, recorded in the report.
 2. **The cgroup view and host preflight.**
    - The cgroup namespace and the read-only cgroup2 mount in all three network modes, faulted by the `run` fuzzer.
    - `--require-host` with its pure core and the `host_settings` fuzzer, `host_settings_read` and `host_requirements_check` in the library, and the doctor line and `--require-host` on doctor.
-   - The codes `E0584`–`E0588`.
+   - The codes `E0319`–`E0323`.
    - VM checks: `demo-m0` (doctor expectations) and `demo-m2`, and the runtime table measured again under the new binary.
 3. **VM, CI and docs.**
    - `zig build demo-m2b` with the six steps exactly. Every assertion is a unit-tested pure function.
@@ -273,7 +273,7 @@ The slices run one after another, in order.
 - the `vm.yml` picker entry, the CI job boilerplate and the `ci-changes.sh` demo list;
 - the README and site status (supervisor).
 
-## Defaults and limits this brief sets (owner, ask before changing)
+## Defaults and limits this brief sets (supervisor defaults, 2026-11-16; ask before changing)
 
 - No default changes except:
   - the three NUMA syscalls;
