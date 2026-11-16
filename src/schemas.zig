@@ -1153,7 +1153,9 @@ test "run and doctor are one object schema without a $ref, as an agent can follo
 test "the doctor schema's id enum is every check the doctor runs, in its order" {
     // Goal: a new doctor check cannot ship with a schema that refuses its id (S2's fuse check
     // did, and the M5 agent demo caught it in the VM). Method: the enum read from the parsed
-    // schema against `doctor.CheckId`, member by member.
+    // schema against `doctor.CheckId`, member by member. Linux only: importing `doctor.zig` pulls
+    // its tests, which reach Linux-only code, into the macOS test root; the Linux roots cover it.
+    if (comptime @import("builtin").os.tag != .linux) return error.SkipZigTest;
     const doctor = @import("doctor.zig");
     var parsed = try std.json.parseFromSlice(std.json.Value, testing.allocator, doctor_schema, .{});
     defer parsed.deinit();
