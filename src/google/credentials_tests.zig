@@ -291,7 +291,8 @@ test "a missing or unusable credentials file is terminal, with no network call" 
     defer fixture.destroy();
     try testing.expectError(error.NoCredentials, fixture.resolve(both));
     try testing.expectEqual(parse.Refusal.service_account_key, fixture.trace.unsupported);
-    try testing.expectEqualStrings("service_account", fixture.trace.file_type());
+    // The reason names a key file, so the type is not copied as well.
+    try testing.expectEqualStrings("", fixture.trace.file_type());
 }
 
 const MetadataCase = struct {
