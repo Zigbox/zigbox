@@ -1,6 +1,6 @@
 # Zigbox: A First-Principles Container Runtime in Zig
 
-Snapshot of https://claude.ai/artifact/6D9js8mxSLYmfuZe3rQ26w taken 2026-11-16 (doc rev 125), Parts I to III. The live doc is authoritative; update this file when it changes. The three diagrams in the live doc are listed as figure notes, not reproduced.
+Snapshot of https://claude.ai/artifact/6D9js8mxSLYmfuZe3rQ26w taken 2026-11-16 (doc rev 126), Parts I to III. The live doc is authoritative; update this file when it changes. The three diagrams in the live doc are listed as figure notes, not reproduced.
 
 ## Purpose and design principles
 
@@ -334,7 +334,7 @@ M2b (workload knobs) extends M2's limits and hardening so common server workload
 
 ### M9 · Import: a Dockerfile becomes a build file
 
-*Status: briefs `docs/briefs/M9-dockerfile-import.md` and `M9-dockerfile-flags.md`; slices 1 and 2 merged (#122, #134), slice 3 in progress, slices 4 and 5 not started (2026-11-13). Targets 0.6.0. Started before the 0.5.0 tag (supervisor, 2026-11-12, `docs/decisions/2026-11-12-m9-starts-before-the-0.5.0-tag.md`).*
+*Status: briefs `docs/briefs/M9-dockerfile-import.md` and `M9-dockerfile-flags.md`; all five slices merged (slice 5 in #168) and shipped in 0.5.2 (2026-11-16). Started before the 0.5.0 tag (supervisor, 2026-11-12, `docs/decisions/2026-11-12-m9-starts-before-the-0.5.0-tag.md`).*
 
 **Goal:** `zbx import` reads a Dockerfile and writes a `zbx.build.zon` that a person reads, commits and builds with `zbx build`. A Dockerfile is translated, never executed.
 
