@@ -51,12 +51,15 @@ pub const output_bytes_max: u32 = 16 * 1024;
 /// Linux PATH_MAX, without the terminating NUL.
 pub const path_bytes_max: u32 = 4095;
 /// Largest single file read through the host: bounds every /proc, /sys and /etc read.
-pub const file_bytes_max: u32 = 80 * 1024;
+pub const file_bytes_max: u32 = 64 * 1024;
+/// Largest run record read through the host (`Host.read_record`, M2b): only run records, whose
+/// worst case with every knob set passes `file_bytes_max`, take a buffer this large.
+pub const record_file_bytes_max: u32 = 80 * 1024;
 /// Consecutive EINTR results tolerated for one operation before it is reported as failed.
 pub const eintr_retries_max: u32 = 16;
 /// Upper bound on read calls for one file. Every call that is not EOF makes progress of at least
 /// one byte, so this covers the worst case of one-byte short reads plus the final EOF probe.
-pub const read_calls_max: u32 = file_bytes_max + 1;
+pub const read_calls_max: u32 = record_file_bytes_max + 1;
 /// Upper bound on write calls for one message, by the same argument.
 pub const write_calls_max: u32 = output_bytes_max + 1;
 /// Size of a utsname field in the kernel ABI, including the terminating NUL.
@@ -516,9 +519,10 @@ pub const record_version_listen: u32 = 10;
 pub const record_version_lazy: u32 = 11;
 /// One record. The command is cut to `record_command_bytes_max` and says so.
 pub const record_bytes_max: u32 = 80 * 1024;
-// Every reader of a record reads a file of at most `file_bytes_max`, so a record is never larger.
+// Every reader of a run record reads it through `Host.read_record`, so a record is never larger.
 comptime {
-    assert(record_bytes_max <= file_bytes_max);
+    assert(record_bytes_max <= record_file_bytes_max);
+    assert(file_bytes_max < record_file_bytes_max);
 }
 pub const record_command_bytes_max: u32 = 2048;
 pub const labels_count_max: u32 = 8;
@@ -1380,6 +1384,7 @@ comptime {
     assert(cdi_spec_bytes_max < file_bytes_max);
     assert(file_bytes_max <= std.math.maxInt(u32) / 2); // Offsets and lengths fit in u32.
     assert(read_calls_max > file_bytes_max);
+    assert(read_calls_max > record_file_bytes_max);
     assert(write_calls_max > output_bytes_max);
     assert(eintr_retries_max > 0);
     assert(uname_field_bytes <= std.math.maxInt(u8));

@@ -228,7 +228,7 @@ pub const HostReal = struct {
         // Descriptor 0 is standard input (`--password-stdin`), which no open_read produced.
         if (handle != 0) assert(self.opened_now() > 0);
         assert(buffer.len > 0);
-        assert(buffer.len <= constants.file_bytes_max);
+        assert(buffer.len <= constants.record_file_bytes_max); // A run record is the largest read.
         const descriptor: i32 = @intCast(handle);
         const result = linux.read(descriptor, buffer.ptr, buffer.len);
         try check(result);

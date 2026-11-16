@@ -719,6 +719,21 @@ pub const Host = struct {
     pub fn read_file(host: Host, path: []const u8, buffer: []u8) Error![]u8 {
         assert(buffer.len > 0);
         assert(buffer.len <= constants.file_bytes_max);
+        return host.read_whole(path, buffer);
+    }
+
+    /// Reads a whole run record, as `read_file` does, into a buffer of up to
+    /// `record_file_bytes_max` (M2b): a record with every knob set is larger than any other file
+    /// the host reads, and only records get the larger buffer.
+    pub fn read_record(host: Host, path: []const u8, buffer: []u8) Error![]u8 {
+        assert(buffer.len > constants.file_bytes_max);
+        assert(buffer.len <= constants.record_file_bytes_max);
+        return host.read_whole(path, buffer);
+    }
+
+    fn read_whole(host: Host, path: []const u8, buffer: []u8) Error![]u8 {
+        assert(buffer.len > 0);
+        assert(buffer.len <= constants.record_file_bytes_max);
         var path_z: PathZ = undefined;
         const path_sentinel = try path_z.init(path);
 
