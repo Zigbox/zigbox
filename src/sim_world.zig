@@ -2271,7 +2271,7 @@ pub const World = struct {
         }
         if (request.kind == .overlay) {
             if (world.overlay_refused) return errno_perm;
-        } else if (request.kind == .user_tmpfs) {
+        } else if (request.kind == .user_tmpfs or request.kind == .shm_tmpfs) {
             // The source is the mount data, not a path.
             assert(std.mem.startsWith(u8, request.source.?, "mode="));
         } else if (request.source) |source| {

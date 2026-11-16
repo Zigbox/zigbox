@@ -11,6 +11,7 @@ const constants = @import("../constants.zig");
 const host_mod = @import("../host.zig");
 const capabilities = @import("capabilities.zig");
 const plan_mod = @import("plan.zig");
+const knobs = @import("knobs.zig");
 const seccomp = @import("seccomp.zig");
 const sync = @import("sync.zig");
 const cdi_steps = @import("cdi_steps.zig");
@@ -146,7 +147,7 @@ fn run_step(child: *const Context, step: *const Step, state: *State) Error!void 
         .mount_overlay => try mount(host, .overlay, target, plan.text(step.source)),
         .mount_proc => try mount(host, .proc, target, null),
         .mount_dev => try mount(host, .dev_tmpfs, target, null),
-        .mount_shm => try mount(host, .shm_tmpfs, target, null),
+        .mount_shm => try mount(host, .shm_tmpfs, target, plan.text(step.source)),
         .mount_pts => try mount(host, .devpts, target, null),
         .bind_device => try mount(host, .bind_file, target, plan.text(step.source)),
         .make_proc_dir, .make_dev_dir, .make_tmp_dir => try make_dir(host, target),
@@ -185,6 +186,8 @@ fn run_step(child: *const Context, step: *const Step, state: *State) Error!void 
         .pivot_root => try host.pivot_root(target, plan.text(step.source)),
         .detach_old_root => try host.unmount_detach(target),
         .seal_descriptors => try host.seal_descriptors(),
+        .write_sysctl => try host.write_sysctl(target, plan.text(step.source)),
+        .set_rlimit => try set_rlimit(host, plan, step.index),
         .exec => try exec(child, state),
         // Handled by `run_state_step` and `run_mount_step` above.
         .make_state_data, .make_state_stage, .bind_state, .remount_state => unreachable,
@@ -339,9 +342,19 @@ fn mount(
     assert(target.len > 0);
     assert(target[0] != 0);
     const has_source = kind == .bind_tree or kind == .bind_file or kind == .overlay or
-        kind == .move or kind == .user_tmpfs;
+        kind == .move or kind == .user_tmpfs or kind == .shm_tmpfs;
     assert((source != null) == has_source);
     try host.mount(.{ .kind = kind, .target = target, .source = source });
+}
+
+/// Sets one resource limit of `--ulimit`. The parent checked the hard value against its own
+/// (ZBX-E0311), so the kernel refusing it here is a host that changed between the two.
+fn set_rlimit(host: Host, plan: *const Plan, index: u8) Error!void {
+    assert(index < knobs.resources_count);
+    const resource: knobs.Resource = @fromBackingInt(@intCast(index));
+    const limit = plan.rlimits.get(resource).?; // The plan has a step only for one that is set.
+    assert(limit.soft <= limit.hard);
+    try host.set_rlimit(resource, limit);
 }
 
 /// The change of user cleared the request to die with zbx: it is made again, and then, since zbx

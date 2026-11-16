@@ -237,6 +237,11 @@ pub const key_bytes_max: u32 = longest: {
 };
 pub const proc_path_prefix = "/proc/sys/";
 pub const proc_path_bytes_max: u32 = proc_path_prefix.len + key_bytes_max;
+comptime {
+    // `constants.zig` sizes the plan's text for a sysctl path below 64 bytes.
+    assert(proc_path_bytes_max < 64);
+    assert(key_bytes_max > 0);
+}
 
 /// The host settings `--require-host` checks (slice 2): a key among them is pointed there when
 /// `--sysctl` refuses it.

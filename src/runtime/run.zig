@@ -731,6 +731,9 @@ fn build_plan(
         .keep_groups = handle.effective.len > 0,
         .hostname = container.hostname,
         .umask = container.umask,
+        .shm_bytes = container.limits.shm_bytes orelse constants.shm_bytes_default,
+        .rlimits = container.rlimits,
+        .sysctls = container.sysctls,
     };
     handle.plan.build(&input);
     assert(handle.plan.count == handle.plan.steps_expected());

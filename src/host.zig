@@ -288,7 +288,8 @@ pub const MountKind = enum {
     proc,
     /// The container's `/dev`: tmpfs, mode 0755, nosuid.
     dev_tmpfs,
-    /// `/dev/shm`: tmpfs, mode 1777, nosuid, nodev, noexec.
+    /// `/dev/shm`: tmpfs, nosuid, nodev, noexec; `source` is the mount data, its mode (1777)
+    /// and its size (`--shm-size`, M2b).
     shm_tmpfs,
     /// `/dev/pts`: a private devpts instance whose ptmx is mode 0666.
     devpts,
@@ -1036,7 +1037,9 @@ pub const Host = struct {
         assert(request.target.len > 0);
         assert(request.target[request.target.len] == 0);
         switch (request.kind) {
-            .bind_tree, .bind_file, .overlay, .move, .user_tmpfs => assert(request.source != null),
+            .bind_tree, .bind_file, .overlay, .move, .user_tmpfs, .shm_tmpfs => {
+                assert(request.source != null);
+            },
             else => assert(request.source == null),
         }
         try host.vtable.mount(host.context, request);

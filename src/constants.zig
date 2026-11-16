@@ -309,7 +309,7 @@ pub const etc_stage_hosts = ".zbx-hosts";
 pub const etc_stage_resolv = ".zbx-resolv";
 pub const etc_stage_hostname = ".zbx-hostname";
 /// Steps in a plan. The plan's own comptime check proves the count it builds is below this.
-pub const plan_steps_max: u32 = 232;
+pub const plan_steps_max: u32 = 252;
 
 // User-mode networking through pasta (M5 slice 3; docs/demos/m5.md settles each fact below
 // against the pasta that Ubuntu 24.04 ships, 0.0~git20240220.1e6f92b).
@@ -1508,7 +1508,10 @@ comptime {
         state_volume_path_bytes_max + rootfs_bytes_max + 2 * 20 + 6);
     // Each device: its path below the rootfs and its host path, with their NULs.
     const device_paths = run_devices_max * (rootfs_bytes_max + 2 * device_path_bytes_max + 8);
-    assert(paths_needed + state_paths + device_paths <= plan_paths_bytes_max);
+    // Each sysctl: its path below /proc/sys (`knobs.proc_path_bytes_max`, under 64) and its
+    // value, with their NULs; and the `/dev/shm` mount data.
+    const knob_paths = sysctls_max * (64 + sysctl_value_bytes_max + 2) + 40;
+    assert(paths_needed + state_paths + device_paths + knob_paths <= plan_paths_bytes_max);
     assert(plan_steps_max <= std.math.maxInt(u8)); // The failure record names a step in a byte.
     assert(id_map_line_bytes_max >= "0 4294967295 1\n".len);
     assert(sync_record_bytes == 4);
@@ -1624,7 +1627,9 @@ comptime {
     assert(state_holders_max > 0);
     // A plan with every volume: each has seven steps, eight when read-only; and every other
     // mount, at most six, and the CDI devices at most four (`plan.cdi_steps_count_max`).
-    assert(80 + state_volumes_max * 8 + mounts_max * 6 + 2 * run_devices_max + 4 <= plan_steps_max);
+    // The knobs (M2b) add a step per sysctl and per resource limit, of which there are four.
+    assert(80 + state_volumes_max * 8 + mounts_max * 6 + 2 * run_devices_max + 4 +
+        sysctls_max + 4 <= plan_steps_max);
     assert(plan_steps_max <= std.math.maxInt(u8));
     // The stage names end in one digit; a mount's value and options fit their buffers.
     assert(mounts_max <= 10);

@@ -602,6 +602,15 @@ pub const HostReal = struct {
                 linux.MS.NOSUID | linux.MS.NODEV | linux.MS.NOEXEC,
                 @intFromPtr(bind_source.?), // The mount data; `Host.mount` asserted it is set.
             ),
+            // `/dev/shm`: the plan's data gives the mode and the size (`--shm-size`, by default
+            // `constants.shm_bytes_default`).
+            .shm_tmpfs => linux.mount(
+                "tmpfs",
+                target,
+                "tmpfs",
+                linux.MS.NOSUID | linux.MS.NODEV | linux.MS.NOEXEC,
+                @intFromPtr(bind_source.?), // The mount data; `Host.mount` asserted it is set.
+            ),
             .overlay => linux.mount(
                 "overlay",
                 target,
@@ -609,7 +618,7 @@ pub const HostReal = struct {
                 0,
                 @intFromPtr(bind_source.?), // The mount data; `Host.mount` asserted it is set.
             ),
-            .proc, .sysfs, .dev_tmpfs, .shm_tmpfs, .devpts, .tmp_tmpfs, .run_tmpfs => blk: {
+            .proc, .sysfs, .dev_tmpfs, .devpts, .tmp_tmpfs, .run_tmpfs => blk: {
                 const fresh = fresh_filesystem(request.kind);
                 const data = @intFromPtr(fresh.data.ptr);
                 break :blk linux.mount(fresh.source, target, fresh.type, fresh.flags, data);
@@ -1898,12 +1907,6 @@ fn fresh_filesystem(kind: host.MountKind) Fresh {
             .type = "tmpfs",
             .flags = ms.NOSUID | ms.STRICTATIME,
             .data = "mode=755,size=65536k",
-        },
-        .shm_tmpfs => .{
-            .source = "tmpfs",
-            .type = "tmpfs",
-            .flags = ms.NOSUID | ms.NODEV | ms.NOEXEC,
-            .data = "mode=1777,size=65536k",
         },
         .tmp_tmpfs => .{
             .source = "tmpfs",
