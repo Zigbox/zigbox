@@ -40,6 +40,7 @@
 const std = @import("std");
 
 const run = @import("runtime/run.zig");
+const exec_file = @import("runtime/exec.zig");
 const start_gate = @import("trust/start_gate.zig");
 
 pub const Spec = run.Spec;
@@ -63,7 +64,7 @@ comptime {
     std.debug.assert(@TypeOf(start) == @TypeOf(start_gate.start));
     std.debug.assert(@TypeOf(exec_start) == @TypeOf(start_gate.exec_start));
     std.debug.assert(@TypeOf(start) != @TypeOf(run.start));
-    std.debug.assert(@TypeOf(exec_start) != @TypeOf(exec.start));
+    std.debug.assert(@TypeOf(exec_start) != @TypeOf(exec_file.start));
 }
 pub const wait = run.wait;
 pub const signal = run.signal;
@@ -122,7 +123,20 @@ pub const open_log = logs.open_log;
 /// `exec_start(host, spec, options, handle, gate, diag)` first meets the node's trust policy as
 /// `zbx exec` does (`trust/start_gate.zig`): a refusal is `StartFailed` with E0903 to E0905 and
 /// nothing started. `gate` is a `GateWorkspace`, one start or exec at a time.
-pub const exec = @import("runtime/exec.zig");
+///
+/// `exec` names the types and the calls on a started command, and not `runtime/exec.zig`
+/// itself: that file's `start` runs the command with no gate (release review A for 0.5.2).
+pub const exec = struct {
+    pub const Spec = exec_file.Spec;
+    pub const Options = exec_file.Options;
+    pub const Handle = exec_file.Handle;
+    pub const Exit = exec_file.Exit;
+    pub const Error = exec_file.Error;
+    pub const Label = exec_file.Label;
+    pub const Phase = exec_file.Phase;
+    pub const wait = exec_file.wait;
+    pub const signal = exec_file.signal;
+};
 pub const ExecSpec = exec.Spec;
 pub const ExecOptions = exec.Options;
 pub const ExecHandle = exec.Handle;
@@ -198,6 +212,9 @@ pub const push = struct {
     pub const source = @import("push/source.zig");
     pub const Workspace = pack.Workspace;
     pub const Input = pack.Input;
+    /// Writer 1 in 0.5.2, the default of `Input.writer_version`: lazy start (S2) is dormant in
+    /// this release, so a library pack writes 0.5.1's bytes unless its caller asks for writer 2.
+    pub const release_writer_version = pack.release_writer_version;
     pub const Packed = pack.Packed;
     pub const Exported = export_mod.Exported;
     pub const export_layout = export_mod.export_layout;
@@ -360,6 +377,85 @@ test "the module's surface is what the contract names" {
     _ = lazy.Resolver;
     try std.testing.expect(std.meta.fieldNames(ExecExit).len == 3);
     try std.testing.expect(std.meta.fieldNames(Status).len == 3);
+}
+
+test "no export reachable from the module starts a process but the gated two" {
+    // Goal: the promise in the module doc, "no export starts a container or a command ungated",
+    // holds for every name a caller can reach, not only the top level (`zigbox.exec.start` once
+    // reached `runtime/exec.zig`'s ungated start, release review A for 0.5.2). Method: walk every
+    // public declaration of the module and of each namespace it reaches, with an explicit queue,
+    // and compare each function with the starts that skip the gate and the commands built on
+    // them. The gated `start` and `exec_start` must be found, so the walk is known to look.
+    const step_file = @import("build/step.zig");
+    const ungated = .{
+        run.start,
+        exec_file.start,
+        step_file.run_step,
+        @import("build/compose.zig").run_steps,
+        @import("build_commands.zig").run,
+        @import("exec_commands.zig").run_exec,
+        @import("cli.zig").run,
+        @import("cli.zig").run_from_iterator,
+    };
+    const found = comptime reachable_starts(ungated);
+    try std.testing.expectEqual(@as(u32, 0), found.ungated);
+    try std.testing.expect(found.gated_start);
+    try std.testing.expect(found.gated_exec);
+}
+
+const Starts = struct { ungated: u32, gated_start: bool, gated_exec: bool };
+
+fn reachable_starts(comptime ungated: anytype) Starts {
+    @setEvalBranchQuota(10_000_000);
+    const namespaces_max = 4096;
+    var queue: [namespaces_max]type = undefined;
+    queue[0] = @This();
+    var count: u32 = 1;
+    var found: Starts = .{ .ungated = 0, .gated_start = false, .gated_exec = false };
+    var at: u32 = 0;
+    while (at < count) : (at += 1) {
+        const namespace = queue[at];
+        for (std.meta.declarations(namespace)) |name| {
+            // The type first: a `pub var` has no value at compile time, and is no namespace or
+            // function either.
+            const Value = @TypeOf(@field(namespace, name));
+            if (Value == type) {
+                const value = @field(namespace, name);
+                if (!is_namespace(value)) continue;
+                const seen = for (queue[0..count]) |known| {
+                    if (known == value) break true;
+                } else false;
+                if (seen) continue;
+                std.debug.assert(count < namespaces_max);
+                queue[count] = value;
+                count += 1;
+            } else if (@typeInfo(Value) == .@"fn") {
+                const value = @field(namespace, name);
+                if (same_fn(value, start_gate.start)) found.gated_start = true;
+                if (same_fn(value, start_gate.exec_start)) found.gated_exec = true;
+                inline for (ungated) |forbidden| {
+                    if (same_fn(value, forbidden)) {
+                        @compileLog("an ungated start is exported", namespace, name);
+                        found.ungated += 1;
+                    }
+                }
+            }
+        }
+    }
+    std.debug.assert(count > 1);
+    return found;
+}
+
+fn is_namespace(comptime value: type) bool {
+    return switch (@typeInfo(value)) {
+        .@"struct", .@"union", .@"enum", .@"opaque" => true,
+        else => false,
+    };
+}
+
+fn same_fn(comptime value: anytype, comptime other: anytype) bool {
+    if (@TypeOf(value) != @TypeOf(other)) return false;
+    return value == other;
 }
 
 /// Fails unless `namespace` declares exactly `names`, in any order: a public name added to the

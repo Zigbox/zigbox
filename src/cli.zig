@@ -1061,7 +1061,8 @@ pub fn parse(
                 p.run.command = args[index + 1 ..];
                 break;
             },
-            .detach, .read_only, .lazy => try take_run_flag(diag, &p.run, given, argument),
+            .detach, .read_only => try take_run_flag(diag, &p.run, given, argument),
+            .lazy => try take_lazy(diag, &p.run, given, argument),
             .last, .no_redact => try take_bundle_flag(diag, &p.bundle, given, argument),
             .provenance => try take_provenance(diag, &invocation.provenance, given, argument),
             .resolve_only => try take_pull_option(diag, &p.pull, given, argument),
@@ -3154,6 +3155,33 @@ fn unknown_option(diag: *Diag, argument: []const u8) ParseError {
     return error.UnknownOption;
 }
 
+/// `--lazy`: a run flag in a build with lazy start, refused in one without it (0.5.2).
+fn take_lazy(
+    diag: *Diag,
+    run_args: *RunArgs,
+    operands: []const []const u8,
+    argument: []const u8,
+) ParseError!void {
+    assert(classify(argument) == .lazy);
+    if (!build_options.lazy_start) return lazy_not_yet(diag, argument);
+    try take_run_flag(diag, run_args, operands, argument);
+}
+
+/// `--lazy` in a build without lazy start (`-Dlazy-start`, off in a release): 0.5.2 ships S2's
+/// code dormant (docs/decisions/2026-11-16-0.5.2-s2-dormant.md), so the flag is refused as an
+/// option this zbx does not take yet. 0.6.0 removes this refusal.
+fn lazy_not_yet(diag: *Diag, argument: []const u8) ParseError {
+    assert(diag.code == null);
+    assert(std.mem.eql(u8, argument, "--lazy"));
+    diag.raise(.E0004);
+    diag.while_("reading the command line", .{});
+    diag.cause("lazy start arrives in 0.6.0", .{});
+    diag.context("arg", "{s}", .{argument});
+    diag.fix(.{ .sentence = "leave out --lazy" });
+    assert(diag.code.? == .E0004);
+    return error.UnknownOption;
+}
+
 fn check_output_value(diag: *Diag, value: []const u8) ParseError!void {
     assert(diag.code == null);
     assert(value.len <= constants.arg_bytes_max);
@@ -5240,6 +5268,21 @@ test "parse: every usage error has its code, at the exact boundary" {
         const found = try parse_case(case.args, &invocation);
         try testing.expectEqual(@as(?codes.Code, case.code), found);
     }
+}
+
+test "--lazy is refused at parse time with E0004 in a build without lazy start (0.5.2)" {
+    // Goal: 0.5.2 ships S2 dormant, so `run --lazy` is refused before anything runs, with one
+    // line saying lazy start arrives in 0.6.0. Method: parse it, then run it and read stderr.
+    if (build_options.lazy_start) return error.SkipZigTest;
+    var invocation: Invocation = undefined;
+    const args = [_][]const u8{ "run", "--lazy", "alpine", "--", "/bin/sh" };
+    try testing.expectEqual(@as(?codes.Code, .E0004), try parse_case(&args, &invocation));
+    var sim: HostSim = undefined;
+    const argv = [_][:0]const u8{ "zbx", "run", "--lazy", "alpine", "--", "/bin/sh" };
+    try testing.expectEqual(@as(u8, 125), try run_case(&sim, &argv));
+    try testing.expect(std.mem.indexOf(u8, sim.stderr(), "lazy start arrives in 0.6.0") != null);
+    try testing.expect(std.mem.indexOf(u8, sim.stderr(), "leave out --lazy") != null);
+    try testing.expectEqual(@as(usize, 0), sim.stdout().len);
 }
 
 test "snapshot: the usage errors exit 1 with one diagnostic on stderr and nothing on stdout" {
