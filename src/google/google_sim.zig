@@ -235,6 +235,7 @@ fn sts(
 fn sts_answer(sim: *GoogleSim) []const u8 {
     return std.fmt.bufPrint(&sim.scratch, "{{\"access_token\":\"{s}\",\"issued_token_type\":" ++
         "\"urn:ietf:params:oauth:token-type:access_token\",\"token_type\":\"Bearer\"," ++
+        // Cannot fail: scratch fits.
         "\"expires_in\":{d}}}", .{ federated_token, sim.lifetime_s }) catch unreachable;
 }
 
@@ -271,6 +272,7 @@ fn iam(
             var stamp: [20]u8 = undefined;
             const expires = format_time(&stamp, sim.now_s + sim.lifetime_s);
             const text = std.fmt.bufPrint(&sim.scratch, "{{\"accessToken\":\"{s}\"," ++
+                // Cannot fail: scratch fits.
                 "\"expireTime\":\"{s}\"}}", .{ access_token, expires }) catch unreachable;
             served.* = .{ .status = 200, .body = text };
         },
@@ -329,6 +331,7 @@ fn metadata(sim: *GoogleSim, request: *const net.Request, served: *net_sim.Serve
 
 fn metadata_answer(sim: *GoogleSim) []const u8 {
     return std.fmt.bufPrint(&sim.scratch, "{{\"access_token\":\"{s}\",\"expires_in\":{d}," ++
+        // Cannot fail: scratch fits.
         "\"token_type\":\"Bearer\"}}", .{ metadata_token, sim.lifetime_s }) catch unreachable;
 }
 

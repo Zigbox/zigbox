@@ -186,7 +186,10 @@ pub fn fuzz_parse_google(seed: u64) void {
     if (parse.error_code(input)) |code| {
         assert(code.len > 0);
         assert(code.len <= constants.google_error_code_bytes_max);
-        for (code) |byte| assert(std.ascii.isAlphanumeric(byte) or byte == '_');
+        for (code) |byte| {
+            const allowed = std.ascii.isAlphanumeric(byte) or byte == '_';
+            assert(allowed);
+        }
     }
     check_members(input);
     check_host(input);

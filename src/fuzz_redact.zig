@@ -123,7 +123,8 @@ fn add_context(random: std.Random, builder: *Builder, planted: *Planted) void {
     const choice = random.uintLessThan(u8, 17);
     const name = pick_name(random);
     // A token shape is only recognised from its real length up (a GitHub token is 40).
-    const secret = plant(random, planted, choice == 5 or choice == 11, if (choice == 9 or choice == 16) 20 else 8);
+    const long = choice == 9 or choice == 16;
+    const secret = plant(random, planted, choice == 5 or choice == 11, if (long) 20 else 8);
     const text = switch (choice) {
         0 => std.fmt.bufPrint(&scratch, "{s}={s}", .{ name, secret }),
         1 => std.fmt.bufPrint(&scratch, "--{s} {s}", .{ name, secret }),

@@ -73,6 +73,68 @@ fn swapped(from: []const u8, to: []const u8) ![]u8 {
     return std.mem.replaceOwned(u8, testing.allocator, file_account, from, to);
 }
 
+const RefusalCase = struct { from: []const u8, to: []const u8, reason: parse.Refusal };
+
+/// Each swap turns the good file into one the brief refuses, for the reason named.
+const refusal_cases = [_]RefusalCase{
+    .{
+        .from = "https://sts.googleapis.com/v1/token",
+        .to = "https://sts.example.com/v1/token",
+        .reason = .token_url,
+    },
+    .{ .from = "\"googleapis.com\"", .to = "\"example.com\"", .reason = .universe_domain },
+    .{
+        .from = "iamcredentials.googleapis.com",
+        .to = "iam.example.com",
+        .reason = .impersonation_url,
+    },
+    .{ .from = ":generateAccessToken", .to = ":generateIdToken", .reason = .impersonation_url },
+    .{
+        .from = "projects/123456789012/locations/global/workloadIdentityPools",
+        .to = "locations/global/workforcePools",
+        .reason = .workforce_pool,
+    },
+    .{
+        .from = "\"file\": \"/run/zbx/oidc-token\"",
+        .to = "\"executable\": {\"command\": \"x\"}",
+        .reason = .executable,
+    },
+    .{
+        .from = "\"file\": \"/run/zbx/oidc-token\"",
+        .to = "\"environment_id\": \"aws1\"",
+        .reason = .aws,
+    },
+    .{
+        .from = "\"file\": \"/run/zbx/oidc-token\"",
+        .to = "\"certificate\": {}",
+        .reason = .certificate,
+    },
+    .{
+        .from = "\"file\": \"/run/zbx/oidc-token\"",
+        .to = "\"url\": \"http://169.254.169.254/metadata/identity\"",
+        .reason = .plain_http_url,
+    },
+    .{ .from = "\"file\": \"/run/zbx/oidc-token\", ", .to = "", .reason = .no_source },
+    .{
+        .from = "\"file\": \"/run/zbx/oidc-token\"",
+        .to = "\"file\": \"/a\", \"url\": \"https://x\"",
+        .reason = .no_source,
+    },
+    .{
+        .from = "\"universe_domain\"",
+        .to = "\"workforce_pool_user_project\"",
+        .reason = .workforce_pool,
+    },
+    .{ .from = "\"audience\"", .to = "\"audiences\"", .reason = .malformed },
+    .{ .from = "\"type\": \"text\"", .to = "\"type\": \"xml\"", .reason = .malformed },
+    .{
+        .from = "\"type\": \"external_account\",",
+        .to = "\"type\": \"external_account\", \"type\": \"x\",",
+        .reason = .malformed,
+    },
+    .{ .from = "/run/zbx/oidc-token", .to = "/run/zbx/oidc\\u002dtoken", .reason = .malformed },
+};
+
 test "each unsupported credentials file is refused with its own reason" {
     // Goal: a key file, gcloud's user credentials, another type and every unsupported
     // `external_account` shape the brief lists each give their reason, so the user is told
@@ -86,65 +148,7 @@ test "each unsupported credentials file is refused with its own reason" {
     try testing.expectEqualStrings("", odd.refused.type_name);
     try expect_refused("{}", .malformed);
     try expect_refused("not json", .malformed);
-    const cases = [_]struct { from: []const u8, to: []const u8, reason: parse.Refusal }{
-        .{
-            .from = "https://sts.googleapis.com/v1/token",
-            .to = "https://sts.example.com/v1/token",
-            .reason = .token_url,
-        },
-        .{ .from = "\"googleapis.com\"", .to = "\"example.com\"", .reason = .universe_domain },
-        .{
-            .from = "iamcredentials.googleapis.com",
-            .to = "iam.example.com",
-            .reason = .impersonation_url,
-        },
-        .{ .from = ":generateAccessToken", .to = ":generateIdToken", .reason = .impersonation_url },
-        .{
-            .from = "projects/123456789012/locations/global/workloadIdentityPools",
-            .to = "locations/global/workforcePools",
-            .reason = .workforce_pool,
-        },
-        .{
-            .from = "\"file\": \"/run/zbx/oidc-token\"",
-            .to = "\"executable\": {\"command\": \"x\"}",
-            .reason = .executable,
-        },
-        .{
-            .from = "\"file\": \"/run/zbx/oidc-token\"",
-            .to = "\"environment_id\": \"aws1\"",
-            .reason = .aws,
-        },
-        .{
-            .from = "\"file\": \"/run/zbx/oidc-token\"",
-            .to = "\"certificate\": {}",
-            .reason = .certificate,
-        },
-        .{
-            .from = "\"file\": \"/run/zbx/oidc-token\"",
-            .to = "\"url\": \"http://169.254.169.254/metadata/identity\"",
-            .reason = .plain_http_url,
-        },
-        .{ .from = "\"file\": \"/run/zbx/oidc-token\", ", .to = "", .reason = .no_source },
-        .{
-            .from = "\"file\": \"/run/zbx/oidc-token\"",
-            .to = "\"file\": \"/a\", \"url\": \"https://x\"",
-            .reason = .no_source,
-        },
-        .{
-            .from = "\"universe_domain\"",
-            .to = "\"workforce_pool_user_project\"",
-            .reason = .workforce_pool,
-        },
-        .{ .from = "\"audience\"", .to = "\"audiences\"", .reason = .malformed },
-        .{ .from = "\"type\": \"text\"", .to = "\"type\": \"xml\"", .reason = .malformed },
-        .{
-            .from = "\"type\": \"external_account\",",
-            .to = "\"type\": \"external_account\", \"type\": \"x\",",
-            .reason = .malformed,
-        },
-        .{ .from = "/run/zbx/oidc-token", .to = "/run/zbx/oidc\\u002dtoken", .reason = .malformed },
-    };
-    for (cases) |case| {
+    for (refusal_cases) |case| {
         const changed = try swapped(case.from, case.to);
         defer testing.allocator.free(changed);
         try expect_refused(changed, case.reason);

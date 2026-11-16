@@ -160,13 +160,14 @@ pub const Member = struct { name: []const u8, value: Value };
 /// blanks follows it. Anything else is `Malformed`.
 pub const Members = struct {
     text: []const u8,
-    at: usize,
+    at: u32,
     done: bool = false,
 
     pub fn init(text: []const u8) Error!Members {
         const at = skip_blank(text, 0);
         if (at == text.len or text[at] != '{') return error.Malformed;
-        return .{ .text = text, .at = at + 1 };
+        assert(text.len <= std.math.maxInt(u32));
+        return .{ .text = text, .at = @intCast(at + 1) };
     }
 
     pub fn next(members: *Members) Error!?Member {
@@ -194,7 +195,7 @@ pub const Members = struct {
             return error.Malformed;
         }
         assert(at > members.at);
-        members.at = at;
+        members.at = @intCast(at);
         return .{ .name = name, .value = value.value };
     }
 
@@ -202,7 +203,7 @@ pub const Members = struct {
         assert(members.text[at] == '}');
         if (skip_blank(members.text, at + 1) != members.text.len) return error.Malformed;
         members.done = true;
-        members.at = members.text.len;
+        members.at = @intCast(members.text.len);
         return null;
     }
 };
@@ -304,7 +305,8 @@ fn scan_value(text: []const u8, at: usize) Error!Scanned {
 /// brackets (no recursion), at most `cloud_json_depth_max` deep. It checks that brackets match
 /// and strings close; what lies between them is left to the reader that asks for it.
 fn scan_nested(text: []const u8, start: usize) Error!usize {
-    assert(text[start] == '{' or text[start] == '[');
+    const opening = text[start];
+    assert(std.mem.indexOfScalar(u8, "{[", opening) != null);
     var stack: [constants.cloud_json_depth_max]u8 = undefined;
     var depth: u32 = 0;
     var at = start;
