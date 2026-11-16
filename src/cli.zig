@@ -5386,6 +5386,41 @@ test "--lazy is refused at parse time with E0004 in a build without lazy start (
     try testing.expectEqual(@as(usize, 0), sim.stdout().len);
 }
 
+test "a lazy run wipes the registry token on an early exit as well as at its end" {
+    // Goal: the supervisor's ruling for S2 slice 5b: no exit from a lazy run, the ones between
+    // the start and the run's own teardown included, leaves a registry token in memory. Method:
+    // a token-shaped marker in the run's client workspace, then a lazy run of a pulled image
+    // that a bad `--memory` ends after the image is prepared; the marker is gone. A plain run
+    // ended the same way keeps it, so the check is not vacuous. The run is parsed without
+    // `--lazy` and then marked lazy, so its code runs past the parse-time gate in every build.
+    const pull_tests = @import("pull_tests.zig");
+    const reference = @import("registry/test_registry.zig").TestRegistry.reference(.open);
+    var world: pull_tests.World = undefined;
+    pull_tests.project_world(&world, 41, "web-1");
+    const pulled = pull_tests.run_text(&world, &.{ "zbx", "pull", reference });
+    try testing.expectEqual(@as(u8, 0), pulled);
+    const storage = &pull_tests.wipe_storage;
+    storage.gc_tables = &pull_tests.wipe_tables;
+    const client = &storage.pull.library.client;
+    const marker = "FAKEtoken-wipe";
+    const host = world.sim.interface();
+    for ([_]bool{ false, true }) |lazy| {
+        @memcpy(client.token[0..marker.len], marker);
+        world.sim.stderr_len = 0;
+        var diag: Diag = undefined;
+        diag.reset();
+        var invocation: Invocation = undefined;
+        try parse(&.{ "run", "--memory", "lots", reference }, &invocation, &diag);
+        invocation.run.lazy = lazy;
+        const ran = dispatch(host, &invocation, storage, &diag);
+        try testing.expect(std.meta.isError(ran));
+        try testing.expect(fail(host, &diag, invocation.options) != 0);
+        try testing.expect(std.mem.indexOf(u8, world.sim.stderr(), "--memory") != null);
+        const kept = std.mem.eql(u8, client.token[0..marker.len], marker);
+        try testing.expectEqual(!lazy, kept);
+    }
+}
+
 test "snapshot: the usage errors exit 1 with one diagnostic on stderr and nothing on stdout" {
     // Goal: every usage error is a user-blamed diagnostic (exit 1, not the old 2), rendered on
     // stderr only. The full text of each is in the golden files (diag_golden.zig).

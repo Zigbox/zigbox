@@ -19,7 +19,7 @@ const testing = std.testing;
 const HostSim = host_sim.HostSim;
 
 /// One host, one test registry and the wire between them, set up as the tests need.
-const World = struct {
+pub const World = struct {
     sim: HostSim,
     registry: test_registry.TestRegistry,
     wire: net_sim.SimNet,
@@ -200,7 +200,7 @@ fn pull_world(world: *World, seed: u64) void {
     world.sim.store_fs = &store_files;
 }
 
-fn run_text(world: *World, args: []const [:0]const u8) u8 {
+pub fn run_text(world: *World, args: []const [:0]const u8) u8 {
     world.sim.stdout_len = 0;
     world.sim.stderr_len = 0;
     return world.run(args);
@@ -425,7 +425,7 @@ const lock_path = project ++ "/zbx.lock";
 const containers = "/home/alice/.local/state/zbx/containers";
 
 /// A project directory to work in, with the host's /sys and a container root for `name`.
-fn project_world(world: *World, seed: u64, name: []const u8) void {
+pub fn project_world(world: *World, seed: u64, name: []const u8) void {
     pull_world(world, seed);
     store_files.put_dir(project, 0o755);
     _ = world.sim.world.processes[0].cwd.set(project);
@@ -1092,37 +1092,9 @@ test "run --output json says what ran: the image as typed, its manifest and tree
     try testing.expect(ran_tree.get("reference") == null);
 }
 
-var wipe_storage: cli.Storage = undefined;
-var wipe_tables: [8 * 1024 * 1024]u8 align(8) = @splat(0);
-
-test "a lazy run wipes the registry token on an early exit as well as at its end" {
-    // Goal: the supervisor's ruling for S2 slice 5b: no exit from a lazy run, the ones between
-    // the start and the run's own teardown included, leaves a registry token in memory. Method:
-    // a token-shaped marker in the run's client workspace, then a lazy run of a pulled image
-    // that a bad `--memory` ends after the image is prepared; the marker is gone. A plain run
-    // ended the same way keeps it, so the check is not vacuous.
-    var world: World = undefined;
-    project_world(&world, 41, "web-1");
-    const reference = test_registry.TestRegistry.reference(.open);
-    try testing.expectEqual(@as(u8, 0), run_text(&world, &.{ "zbx", "pull", reference }));
-    wipe_storage.gc_tables = &wipe_tables;
-    const client = &wipe_storage.pull.library.client;
-    const marker = "FAKEtoken-wipe";
-    const runs = [_]struct { args: []const [:0]const u8, wiped: bool }{
-        .{ .args = &.{ "zbx", "run", "--memory", "lots", reference }, .wiped = false },
-        .{ .args = &.{ "zbx", "run", "--lazy", "--memory", "lots", reference }, .wiped = true },
-    };
-    for (runs) |case| {
-        @memcpy(client.token[0..marker.len], marker);
-        world.sim.stderr_len = 0;
-        var iterator: sim_run.SliceIterator = .{ .items = case.args };
-        const code = cli.run_with(world.sim.interface(), &iterator, &wipe_storage);
-        try testing.expect(code != 0);
-        try testing.expect(std.mem.indexOf(u8, world.sim.stderr(), "--memory") != null);
-        const kept = std.mem.eql(u8, client.token[0..marker.len], marker);
-        try testing.expectEqual(!case.wiped, kept);
-    }
-}
+/// The storage of a run below the CLI (`cli.zig`'s token-wipe test) and of `lazy_start_of`.
+pub var wipe_storage: cli.Storage = undefined;
+pub var wipe_tables: [8 * 1024 * 1024]u8 align(8) = @splat(0);
 
 const lazy_start = @import("lazy_start.zig");
 const images_mod = @import("store/images.zig");
