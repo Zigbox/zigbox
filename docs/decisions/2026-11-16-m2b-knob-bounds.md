@@ -20,8 +20,9 @@ defaults and limits; this file records the choices it left to the slice. The con
   length bound is needed beyond the longest listed key. A key given twice is ZBX-E0315, not a
   last-one-wins. ZBX-E0316 names `--require-host` for the host settings the brief lists
   (`vm.max_map_count`, `fs.aio-max-nr`, `vm.overcommit_memory`); that flag is slice 2's.
-- **The allowlist** is the 28 ipc and net keys in `sysctls.zon`. Each must still pass the check
-  that file's header describes on the VM's kernel before the slice is called done.
+- **The allowlist** is the 28 ipc and net keys in `sysctls.zon`. Each passed the check that
+  file's header describes on the VM's kernel ([2026-11-16-m2b-sysctl-keys.md](2026-11-16-m2b-sysctl-keys.md),
+  VM run 43931483466), so none drops out.
 - **The demo** uses `net.core.somaxconn=8192`, not 4096 (4096 is the 6.8 default, so a write of
   it proves nothing). The brief's `--plan` lines are cut: `zbx run --plan` does not exist.
 - **Known gap:** a process started by `zbx exec` does not get the container's `--ulimit` values;

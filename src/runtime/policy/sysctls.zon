@@ -3,11 +3,12 @@
 // changes the container's value and never the host's. Any key not named here is a host setting
 // and is refused (ZBX-E0316); `--require-host` checks a host setting instead of setting it.
 //
-// The references are Kubernetes' safe set and its "unsafe but namespaced" set. Every key must
-// pass a check on the VM's kernel (Ubuntu 24.04, 6.8) from an unprivileged user namespace: the
-// write succeeds inside a fresh ipc or net namespace, reads back, and leaves the host's value
-// alone (docs/decisions/2026-11-16-m2b-knob-bounds.md). A key that fails it does not belong
-// here. No key outside the ipc and net namespaces is ever added.
+// The references are Kubernetes' safe set and its "unsafe but namespaced" set. Every key here
+// passed a check on the VM's kernel (Ubuntu 24.04, 6.8.0-147) from an unprivileged user
+// namespace: the write succeeded inside a fresh ipc or net namespace, read back, and left the
+// host's value alone, and pasta kept every net value. All 28 passed
+// (docs/decisions/2026-11-16-m2b-sysctl-keys.md, VM run 43931483466). A key that fails that
+// check does not belong here. No key outside the ipc and net namespaces is ever added.
 //
 // `namespace` is the namespace the key belongs to: `ipc` keys are the container's own on every
 // run (it always has an ipc namespace), `net` keys only when it has its own network namespace,
