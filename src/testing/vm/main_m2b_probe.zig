@@ -31,6 +31,14 @@ const H = harness;
 
 /// The probe's longest part: apt, the 500 MiB ClickHouse binary, and `apk add` of the runtimes.
 const part_timeout_s: u32 = 1200;
+/// What each part gives itself, in seconds: less than `part_timeout_s`, so a part that hangs
+/// is stopped in the guest and its output up to then still reaches the log.
+const part_inner_timeout = "1100";
+comptime {
+    std.debug.assert(std.fmt.parseInt(u32, part_inner_timeout, 10) catch 0 > 0);
+    std.debug.assert((std.fmt.parseInt(u32, part_inner_timeout, 10) catch 0) + 60 <
+        part_timeout_s);
+}
 
 pub fn main(init: std.process.Init) !u8 {
     harness.demo_name = "demo-m2b-probe";
@@ -96,13 +104,12 @@ fn demo(init: std.process.Init, out: *Io.Writer, options: H.Options) !void {
     try H.provision(&session, out, &timer, options.reuse_overlay);
     try H.install_binary(&session, out, &timer);
     try fetch_scripts(&session, out);
-    try part(&session, out, &timer, "numa", "sh /tmp/m2b/numa.sh");
-    try part(&session, out, &timer, "sysctl", "runuser -u demo -- sh /tmp/m2b/sysctl.sh");
-    try part(&session, out, &timer, "runtimes: provisioning", "sh /tmp/m2b/runtimes.sh setup");
-    try part(&session, out, &timer, "runtimes: default network", "sh /tmp/m2b/runtimes.sh none");
-    try part(&session, out, &timer, "runtimes: --net host", "sh /tmp/m2b/runtimes.sh host");
-    try part(&session, out, &timer, "knobs by hand", "sh /tmp/m2b/knobs.sh");
+    // Every part measures something of its own, so a failed part does not skip the rest.
+    var failed: u32 = 0;
+    inline for (parts) |p| failed += try part(&session, out, &timer, p[0], p[1]);
+    assert(failed <= parts_count);
     try session.shutdown();
+    if (failed > 0) return error.PartFailed;
 }
 
 fn fetch_scripts(session: *Session, out: *Io.Writer) !void {
@@ -124,21 +131,35 @@ fn fetch_scripts(session: *Session, out: *Io.Writer) !void {
     }
 }
 
-/// Runs one part and prints what it said. A part that exits non-zero fails the probe: its
-/// output is then incomplete evidence.
+/// Runs one part and prints what it said; returns 1 when it exited non-zero, 0 otherwise. A
+/// failed part fails the probe at the end: its output is then incomplete evidence.
 fn part(
     session: *Session,
     out: *Io.Writer,
     timer: *H.Timer,
     comptime name: []const u8,
     comptime command: []const u8,
-) !void {
+) !u32 {
     comptime assert(command.len < limits.command_bytes_max);
-    const result = try session.run(command ++ " 2>&1", part_timeout_s);
+    // The harness shows output only once a command exits, so the part stops itself first.
+    const bounded = "timeout -k 20 " ++ part_inner_timeout ++ " " ++ command ++ " </dev/null";
+    const result = try session.run(bounded ++ " 2>&1", part_timeout_s);
     try H.show(out, name, result);
     try timer.lap(out, name);
-    if (result.status != 0) return error.PartFailed;
+    if (result.status == 0) return 0;
+    try out.print("demo-m2b-probe: part \"{s}\" exited {d}\n", .{ name, result.status });
+    return 1;
 }
+
+const parts = [_][2][]const u8{
+    .{ "numa", "sh /tmp/m2b/numa.sh" },
+    .{ "sysctl", "runuser -u demo -- sh /tmp/m2b/sysctl.sh" },
+    .{ "runtimes: provisioning", "sh /tmp/m2b/runtimes.sh setup" },
+    .{ "runtimes: default network", "sh /tmp/m2b/runtimes.sh none" },
+    .{ "runtimes: --net host", "sh /tmp/m2b/runtimes.sh host" },
+    .{ "knobs by hand", "sh /tmp/m2b/knobs.sh" },
+};
+const parts_count: u32 = parts.len;
 
 /// Part 1, as root on the VM host: the memory-policy calls three NUMA-aware servers make while
 /// they start. Each server runs for a fixed time under `strace -f` and is then stopped.
@@ -147,6 +168,7 @@ const numa_script =
     \\T=mbind,set_mempolicy,set_mempolicy_home_node,get_mempolicy,move_pages,migrate_pages
     \\export DEBIAN_FRONTEND=noninteractive
     \\echo "probe: kernel: $(uname -r)"
+    \\echo "probe: [$(date +%T)] apt"
     \\apt-get update -qq >/tmp/apt.log 2>&1
     \\apt-get install -y -qq strace numactl mariadb-server >>/tmp/apt.log 2>&1 ||
     \\  { tail -5 /tmp/apt.log | sed 's/^/probe: apt: /'; }
@@ -162,14 +184,16 @@ const numa_script =
     \\rm -rf /tmp/mdb && mkdir -p /tmp/mdb
     \\mariadb-install-db --no-defaults --datadir=/tmp/mdb --user=root >/tmp/mdbi.log 2>&1 ||
     \\  tail -3 /tmp/mdbi.log | sed 's/^/probe: mariadb-install-db: /'
-    \\timeout -s INT 30 strace -f -qq -o /tmp/mariadb.trace -e trace=$T mariadbd --no-defaults \
+    \\echo "probe: [$(date +%T)] mariadbd"
+    \\strace -f -qq -o /tmp/mariadb.trace -e trace=$T timeout -k 5 30 mariadbd --no-defaults \
     \\  --datadir=/tmp/mdb --user=root --skip-networking --socket=/tmp/mdb.sock \
     \\  --innodb-numa-interleave=1 >/tmp/mariadbd.log 2>&1
     \\grep -iE 'numa|interleave|error' /tmp/mariadbd.log | head -5 |
     \\  sed 's/^/probe: mariadbd log: /'
     \\summary mariadbd /tmp/mariadb.trace
     \\M=https://fastdl.mongodb.org/linux/mongodb-linux-x86_64-ubuntu2404-8.0.12.tgz
-    \\curl -fsSL -o /tmp/mongo.tgz $M && tar -xzf /tmp/mongo.tgz -C /tmp &&
+    \\echo "probe: [$(date +%T)] mongod download"
+    \\curl -fsSL --max-time 300 -o /tmp/mongo.tgz $M && tar -xzf /tmp/mongo.tgz -C /tmp &&
     \\  ln -sf /tmp/mongodb-linux-*/bin/mongod /tmp/mongod || echo "probe: mongod: download FAILED"
     \\echo "probe: mongod: $(/tmp/mongod --version 2>&1 | head -1)"
     \\strace -f -qq -o /tmp/mongov.trace -e trace=$T \
@@ -177,21 +201,24 @@ const numa_script =
     \\  >/dev/null 2>&1
     \\summary "numactl --interleave=all mongod --version" /tmp/mongov.trace
     \\rm -rf /tmp/mongodata && mkdir -p /tmp/mongodata
-    \\timeout -s INT 30 strace -f -qq -o /tmp/mongod.trace -e trace=$T numactl --interleave=all \
+    \\echo "probe: [$(date +%T)] mongod"
+    \\strace -f -qq -o /tmp/mongod.trace -e trace=$T timeout -k 5 30 numactl --interleave=all \
     \\  /tmp/mongod --dbpath /tmp/mongodata --port 27999 --bind_ip 127.0.0.1 >/tmp/mongod.log 2>&1
     \\grep -io 'numa[^"]*' /tmp/mongod.log | head -3 | sed 's/^/probe: mongod log: /'
     \\summary "numactl --interleave=all mongod (30 s)" /tmp/mongod.trace
     \\C=https://builds.clickhouse.com/master/amd64/clickhouse
-    \\curl -fsSL -o /tmp/clickhouse $C && chmod 755 /tmp/clickhouse ||
+    \\echo "probe: [$(date +%T)] clickhouse download"
+    \\curl -fsSL --max-time 400 -o /tmp/clickhouse $C && chmod 755 /tmp/clickhouse ||
     \\  echo "probe: clickhouse: download FAILED"
     \\echo "probe: clickhouse: $(/tmp/clickhouse local --version 2>&1 | head -1)"
     \\rm -rf /tmp/ch && mkdir -p /tmp/ch && cd /tmp/ch
-    \\timeout -s INT 40 strace -f -qq -o /tmp/ch.trace -e trace=$T /tmp/clickhouse server -- \
+    \\echo "probe: [$(date +%T)] clickhouse"
+    \\strace -f -qq -o /tmp/ch.trace -e trace=$T timeout -k 5 40 /tmp/clickhouse server -- \
     \\  --path=/tmp/ch/ --tcp_port=19000 --http_port=18123 >/tmp/ch.log 2>&1
     \\grep -i 'numa' /tmp/ch.log | head -3 | sed 's/^/probe: clickhouse log: /'
     \\summary "clickhouse server (40 s)" /tmp/ch.trace
     \\rm -f /tmp/clickhouse /tmp/mongo.tgz; rm -rf /tmp/ch /tmp/mongodata /tmp/mdb
-    \\echo "probe: numa: done"
+    \\echo "probe: [$(date +%T)] numa: done"
     \\
 ;
 
@@ -283,7 +310,7 @@ const runtimes_script =
     \\  mkdir -p $R/m2b && cp /tmp/m2b/measure.sh $R/m2b/ && chown -R demo:demo $R/m2b
     \\  $Z run --net host --rootfs $R -- apk add --no-cache -q openjdk21-jre-headless nodejs \
     \\    dotnet8-sdk strace numactl-tools 2>&1 | tail -3 | sed 's/^/probe: apk: /'
-    \\  curl -fsSL -o /tmp/go.tgz https://go.dev/dl/go1.25.0.linux-amd64.tar.gz &&
+    \\  curl -fsSL --max-time 300 -o /tmp/go.tgz https://go.dev/dl/go1.25.0.linux-amd64.tar.gz &&
     \\    tar -C /tmp -xzf /tmp/go.tgz || echo "probe: go: download FAILED"
     \\  mkdir -p /tmp/gp && cd /tmp/gp && printf '%s\n' 'package main' \
     \\    'import ("fmt"; "runtime"; "runtime/debug")' \
