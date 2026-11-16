@@ -288,7 +288,7 @@ The slices run one after another, in order.
 
 ## Release
 
-M2b targets 0.6.x. It does not block 0.5.2, M6d or S2. Merge order with them only matters for the code enum width, the run record version and `ci-changes.sh`; check `main` at the start of each slice.
+M2b ships in 0.5.3, with M6d (owner, 2026-11-16: docs/decisions/2026-11-16-0.5.3-scope.md). It does not block 0.5.2, M6d or S2. Merge order with them only matters for the code enum width, the run record version and `ci-changes.sh`; check `main` at the start of each slice.
 
 ## Done means
 

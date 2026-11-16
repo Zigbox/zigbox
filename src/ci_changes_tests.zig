@@ -53,6 +53,11 @@ const rows = [_]Row{
         },
         .true_outputs = &.{"code"},
     },
+    // The M2b probe (M2b slice 1) runs only on a vm/m2bprobe-* branch: no CI demo.
+    .{
+        .paths = &.{"src/testing/vm/main_m2b_probe.zig"},
+        .true_outputs = &.{"code"},
+    },
     // The release workflow, its own actions and its signing script run after a push to main and
     // in their own test jobs: no demo.
     .{

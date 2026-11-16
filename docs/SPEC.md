@@ -42,7 +42,7 @@ Ground rules for the implementer:
 
 M0 to M2 make a hardened runtime; M3 and M4 add the store and real images, which unlocks networking and state (M5, M6) and hermetic builds and signing (M7, M8). M7 steps also reuse the M2 sandbox. M9 (Dockerfile import) extends M7's builder; M10 (devices) extends M1's `/dev`; neither depends on the other (owner, 2026-11-11: `docs/decisions/2026-11-11-docker-parity-scope.md`).
 
-M2b (workload knobs) extends M2's limits and hardening so common server workloads start without hacks; it targets 0.6.x and blocks nothing else (owner, 2026-11-16: `docs/decisions/2026-11-16-m2b-workload-knobs.md`).
+M2b (workload knobs) extends M2's limits and hardening so common server workloads start without hacks; it ships in 0.5.3 with M6d and blocks nothing else (owner, 2026-11-16: `docs/decisions/2026-11-16-m2b-workload-knobs.md`).
 
 ## Milestones
 
