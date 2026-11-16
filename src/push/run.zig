@@ -29,11 +29,9 @@ pub const Workspace = struct {
     upload: upload.Workspace,
 };
 
-/// The layer writer that push, `push --dry-run` and export use. 0.5.2 keeps lazy start (S2)
-/// dormant: it writes writer 1, 0.5.1's bytes, though the packer knows writer 2
-/// (docs/decisions/2026-11-16-0.5.2-s2-dormant.md). 0.6.0 sets this back to
-/// `constants.layer_writer_version`.
-pub const release_writer_version: u32 = 1;
+/// The layer writer that push, `push --dry-run` and export use: the packer's release writer,
+/// writer 1 in 0.5.2 (docs/decisions/2026-11-16-0.5.2-s2-dormant.md).
+pub const release_writer_version = pack.release_writer_version;
 
 comptime {
     assert(release_writer_version >= 1);
