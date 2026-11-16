@@ -484,6 +484,19 @@ pub const limit_cpu_millis_max: u32 = 1_024_000;
 /// The longest value of a limit flag.
 pub const limit_text_bytes_max: u32 = 24;
 
+// The workload knobs (M2b, docs/briefs/M2b-workload-knobs.md; bounds by the supervisor,
+// 2026-11-16, recorded in docs/decisions/2026-11-16-m2b-knob-bounds.md).
+/// The size of the container's `/dev/shm` without `--shm-size`: 64 MiB, as before M2b and as
+/// Docker's default.
+pub const shm_bytes_default: u64 = 64 << 20;
+/// The smallest `--shm-size`: one page of the smaller page size of the two targets (4 KiB). The
+/// largest is `--memory`, or without it the host's `MemTotal`, checked at the run.
+pub const shm_bytes_min: u64 = 4 << 10;
+/// `--sysctl` given at most this many times.
+pub const sysctls_max: u32 = 16;
+/// The longest value of one `--sysctl`: printable ASCII, written to `/proc/sys` in one write.
+pub const sysctl_value_bytes_max: u32 = 256;
+
 // Run records (slice 2).
 /// Records kept; the oldest is deleted when a run would make it more.
 pub const runs_max: u32 = 32;
@@ -1334,6 +1347,10 @@ comptime {
     assert(dbus_call_timeout_ms < dbus_job_timeout_ms);
     assert(scope_prefix.len + container_name_bytes_max + scope_suffix.len == scope_name_bytes_max);
     assert(limit_memory_bytes_min < limit_memory_bytes_max);
+    assert(shm_bytes_min <= shm_bytes_default);
+    assert(shm_bytes_default <= limit_memory_bytes_max);
+    assert(shm_bytes_default % (1 << 10) == 0); // Whole KiB: the mount option says size=<n>k.
+    assert(sysctl_value_bytes_max < arg_bytes_max);
     assert(limit_pids_min < limit_pids_max);
     assert(limit_pids_max + scope_keeper_tasks > limit_pids_max); // Cannot overflow a u32.
     assert(scope_keeper_tasks == 1);
