@@ -534,14 +534,14 @@ test "a manifest fault grants at the realm and refuses at the manifest" {
         .{ .fault = .denied_at_manifest, .status = 403, .code = "\"DENIED\"" },
         .{ .fault = .missing_at_manifest, .status = 404, .code = "\"NAME_UNKNOWN\"" },
     };
-    const manifest = "/v2/zbx-demo/zbx/demo/manifests/latest";
+    const manifest = "/v2/fixture/bearer/manifests/latest";
     for (cases) |case| {
         sim.init();
         sim.registry_fault = case.fault;
         var basic_buffer: [128]u8 = undefined;
         const basic = sim.basic_text(&basic_buffer);
         var served: net_sim.Served = .{};
-        const token_request = registry_get("/token?scope=x", "", basic);
+        const token_request = registry_get("/token?scope=repository:fixture/bearer:pull", "", basic);
         answer(sim, &token_request, "", &served);
         try std.testing.expectEqual(@as(u16, 200), served.status);
         const credentialed = registry_get(manifest, "registry-token", "");

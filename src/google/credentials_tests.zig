@@ -34,7 +34,7 @@ const Fixture = struct {
     workspace: Workspace,
     token: Token,
     trace: Trace,
-    received: [1024]u8,
+    received: [constants.google_request_body_bytes_max]u8,
 
     fn create(
         seed: u64,
