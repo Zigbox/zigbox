@@ -24,7 +24,7 @@ pub const Blame = enum { user, environment, external, internal };
 
 /// Every code, in registry order: `registry[i].code` is the i-th tag. The tag is the part of the
 /// code after "ZBX-": a kind letter (E error, W warning, B bug) and four digits.
-pub const Code = enum(u8) {
+pub const Code = enum(u16) {
     E0001,
     E0002,
     E0003,
