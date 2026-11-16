@@ -34,11 +34,17 @@ references are still common in manifests and Dockerfiles. M6c built the shape (c
 the caller, resolved per pull, never written, coded failures), so M6d adds a second provider on
 it rather than a second design.
 
-## Left to the owner
+## Supervisor defaults, 2026-11-16, the owner may override
 
-The brief lists the open questions: the diagnostic code range (`E0560`–`E0574` proposed, or the
-unused part of M6c's reservation), a plain access-token source, workforce pools, plain-HTTP URL
-subject tokens (Azure), and whether the metadata server is asked only after an anonymous refusal.
+The supervisor set these on review of the brief, so it has no open questions:
+- **Codes:** a new range, `E0560`–`E0574`. M6c's unused `E0536`–`E0549` reservation is left alone.
+  The slice 2 implementer registers the codes; none are registered now.
+- **No plain access-token source** (no environment variable holding a token).
+- **Workforce pools are refused** with a coded line.
+- **A plain-HTTP `credential_source.url` is refused** (this includes Azure's managed identity endpoint).
+- **The metadata server is asked only after an anonymous refusal**, so public pulls are unchanged.
+
+The owner may revisit the plain access-token source and workforce pools.
 
 Links: `docs/briefs/M6d-gar.md`, `docs/briefs/M6c-ecr.md`,
 `docs/decisions/2026-11-09-m6c-slice1-credentials.md`,
