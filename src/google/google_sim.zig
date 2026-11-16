@@ -383,12 +383,10 @@ fn metadata(sim: *GoogleSim, request: *const net.Request, served: *net_sim.Serve
 
 fn metadata_answer(sim: *GoogleSim) []const u8 {
     assert(sim.metadata_token_text.len <= constants.google_access_token_bytes_max + 1);
-    return std.fmt.bufPrint(&sim.metadata_scratch, "{{\"access_token\":\"{s}\"," ++
-        // Cannot fail: the scratch holds a token one past its bound and the rest.
-        "\"expires_in\":{d},\"token_type\":\"Bearer\"}}", .{
-        sim.metadata_token_text,
-        sim.lifetime_s,
-    }) catch unreachable;
+    const format = "{{\"access_token\":\"{s}\",\"expires_in\":{d},\"token_type\":\"Bearer\"}}";
+    const arguments = .{ sim.metadata_token_text, sim.lifetime_s };
+    // Cannot fail: the scratch holds a token one past its bound and the rest.
+    return std.fmt.bufPrint(&sim.metadata_scratch, format, arguments) catch unreachable;
 }
 
 const downloads_prefix = "/artifacts-downloads/namespaces/fixture/downloads/";
@@ -508,7 +506,8 @@ fn fixture_answer(
 /// A GET at the registry host, with `bearer` or `basic` (base64) as its credential.
 fn registry_get(target: []const u8, bearer: []const u8, basic: []const u8) net.Request {
     assert(target.len > 0);
-    assert(bearer.len == 0 or basic.len == 0);
+    const one_credential = bearer.len == 0 or basic.len == 0;
+    assert(one_credential);
     return .{
         .scheme = .https,
         .host = registry_host,
@@ -541,7 +540,8 @@ test "a manifest fault grants at the realm and refuses at the manifest" {
         var basic_buffer: [128]u8 = undefined;
         const basic = sim.basic_text(&basic_buffer);
         var served: net_sim.Served = .{};
-        const token_request = registry_get("/token?scope=repository:fixture/bearer:pull", "", basic);
+        const scope = "/token?scope=repository:fixture/bearer:pull";
+        const token_request = registry_get(scope, "", basic);
         answer(sim, &token_request, "", &served);
         try std.testing.expectEqual(@as(u16, 200), served.status);
         const credentialed = registry_get(manifest, "registry-token", "");
