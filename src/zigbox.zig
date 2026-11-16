@@ -180,6 +180,20 @@ pub const AwsCredentials = aws_credentials.Credentials;
 pub const AwsWorkspace = aws_credentials.Workspace;
 pub const AwsTrace = aws_credentials.Trace;
 
+/// Google credentials (M6d): `google_credentials_resolve(host, env, now_s, sources, workspace,
+/// token, trace)` finds an access token from the sources the caller's `sources` names: workload
+/// identity federation through the `external_account` file a `GoogleEnv` view names (never the
+/// process's own environment), then the GCE metadata server. It knows nothing of pulls. The
+/// caller owns the `GoogleWorkspace` (about 124 KiB) and the `GoogleToken`, wipes both when done,
+/// and reads the `GoogleTrace` to say why nothing was found. Nothing is cached or written.
+pub const google_credentials = @import("google/credentials.zig");
+pub const google_credentials_resolve = google_credentials.resolve;
+pub const GoogleEnv = google_credentials.Env;
+pub const GoogleSources = google_credentials.Sources;
+pub const GoogleToken = google_credentials.Token;
+pub const GoogleWorkspace = google_credentials.Workspace;
+pub const GoogleTrace = google_credentials.Trace;
+
 /// Push (M8, lane U): the packing a registry upload and an OCI layout share. `push.pack` makes
 /// the one deterministic gzip layer of a tree, its config and manifest (the caller's
 /// `push.Workspace`, about 8 MiB: static storage or the heap) and leaves them in the store's blob
@@ -345,6 +359,7 @@ test "the module's surface is what the contract names" {
     _ = pull.pull;
     _ = pull.Workspace;
     _ = aws_credentials_resolve;
+    _ = google_credentials_resolve;
     _ = push.pack.pack;
     _ = push.export_layout;
     _ = push.send;

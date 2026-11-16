@@ -206,6 +206,15 @@ test {
     _ = @import("aws/sigv4_tests.zig");
     _ = @import("aws/ecr.zig");
     _ = @import("aws/parse.zig");
+    _ = @import("cloud/json.zig");
+    _ = @import("cloud/env.zig");
+    _ = @import("cloud/metadata.zig");
+    _ = @import("google/hosts.zig");
+    _ = @import("google/parse.zig");
+    _ = @import("google/parse_tests.zig");
+    _ = @import("google/credentials.zig");
+    _ = @import("google/google_sim.zig");
+    _ = @import("google/credentials_tests.zig");
     _ = @import("aws/aws_sim.zig");
     _ = @import("aws/credentials.zig");
     _ = @import("aws/credentials_tests.zig");
@@ -215,6 +224,7 @@ test {
     _ = @import("registry/ecr_login.zig");
     _ = @import("pull_aws.zig");
     _ = @import("aws_library_tests.zig");
+    _ = @import("google_library_tests.zig");
     _ = @import("registry/net_sim.zig");
     _ = @import("registry/auth.zig");
     _ = @import("registry/manifest.zig");

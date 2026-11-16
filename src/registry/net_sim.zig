@@ -27,9 +27,14 @@ pub const Served = struct {
     content_range: []const u8 = "",
     /// The `Range` of an upload session ("0-N"); empty for none.
     range: []const u8 = "",
+    /// `Metadata-Flavor`, as Google's metadata server sends it; empty for none.
+    metadata_flavor: []const u8 = "",
     body: []const u8 = "",
     /// How many body bytes arrive before the connection drops; null means all of them.
     deliver: ?u64 = null,
+    /// The call fails with this instead of answering: nothing listens at the host, or it does
+    /// not answer in time (a metadata address off the cloud). Null answers.
+    fail: ?net.Error = null,
 };
 
 pub const Responder = struct {
@@ -240,6 +245,7 @@ pub const SimNet = struct {
         const received = try sim.drain(request);
         var served: Served = .{};
         sim.responder.answer(sim.responder.context, request, received, &served);
+        if (served.fail) |err| return err;
         assert(served.status >= 100);
         assert(served.status <= 599);
         fill_head(head, &served);
@@ -288,6 +294,7 @@ fn fill_head(head: *net.Head, served: *const Served) void {
     if (served.location.len > 0) head.location.set(served.location);
     if (served.content_range.len > 0) head.content_range.set(served.content_range);
     if (served.range.len > 0) head.range.set(served.range);
+    if (served.metadata_flavor.len > 0) head.metadata_flavor.set(served.metadata_flavor);
 }
 
 // ---- Tests ---------------------------------------------------------------------------------
