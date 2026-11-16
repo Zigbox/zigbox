@@ -13,6 +13,7 @@ const sim_world = @import("../sim_world.zig");
 const capabilities = @import("capabilities.zig");
 const plan_mod = @import("plan.zig");
 const spec_mod = @import("spec.zig");
+const knobs = @import("knobs.zig");
 
 const cli = @import("../cli.zig");
 const records = @import("records.zig");
@@ -208,6 +209,27 @@ pub fn sample_plan_mounts(
     mounts: []const plan_mod.MountInput,
 ) void {
     sample_plan_listen(plan, full, scoped, read_only, image, network, mounts, null);
+}
+
+/// Like `sample_plan_mounts`, with the M2b knobs: the limits and sysctls the child sets.
+pub fn sample_plan_knobs(
+    plan: *plan_mod.Plan,
+    full: bool,
+    scoped: bool,
+    read_only: bool,
+    image: bool,
+    network: spec_mod.Network,
+    mounts: []const plan_mod.MountInput,
+    rlimits: knobs.Rlimits,
+    sysctls: []const knobs.Sysctl,
+) void {
+    assert(rlimits.problem() == null);
+    assert(knobs.list_problem(sysctls, network.isolated()) == null);
+    const mapping: plan_mod.Mapping = if (full) sample_mapping else .single;
+    var input = sample_input(mapping, scoped, read_only, image, network, mounts, null);
+    input.rlimits = rlimits;
+    input.sysctls = sysctls;
+    plan.build(&input);
 }
 
 /// Like `sample_plan_mounts`, for a run that hands a listener on (`listen`, a port) or not.
