@@ -1,0 +1,7 @@
+error[ZBX-E0567]: the registry refused the Google access token
+  cause  us-docker.pkg.dev refused the Google access token
+  host   us-docker.pkg.dev
+  fix    get a new access token, then run the command again
+         check that this machine's clock is right
+  more   zbx explain E0567
+  docs   https://zigbox.github.io/zigbox/errors/E0567.html

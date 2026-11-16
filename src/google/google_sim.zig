@@ -130,6 +130,8 @@ pub const GoogleSim = struct {
     /// the response bound).
     sts_answer_bytes: u32 = 0,
     fixture: fixture_mod.Fixture,
+    /// The registry's host: Artifact Registry's unless `init_at` names a gcr.io one.
+    registry_name: []const u8 = registry_host,
     sts_calls: u32 = 0,
     iam_calls: u32 = 0,
     metadata_calls: u32 = 0,
@@ -148,8 +150,13 @@ pub const GoogleSim = struct {
     location: [256]u8 = undefined,
 
     pub fn init(sim: *GoogleSim) void {
-        sim.* = .{ .fixture = undefined };
-        sim.fixture.init("https://" ++ registry_host, "https://" ++ storage_host);
+        sim.init_at(registry_host);
+    }
+
+    /// As `init`, with the registry at `host` (a gcr.io host, say).
+    pub fn init_at(sim: *GoogleSim, comptime host: []const u8) void {
+        sim.* = .{ .fixture = undefined, .registry_name = host };
+        sim.fixture.init("https://" ++ host, "https://" ++ storage_host);
         assert(sim.fixture.oci.index.len > 0);
         assert(sim.leaked == 0);
     }
@@ -205,7 +212,7 @@ fn answer(
     if (std.mem.eql(u8, request.host, parse.sts_host)) return sts(sim, request, received, served);
     if (std.mem.eql(u8, request.host, parse.iam_host)) return iam(sim, request, received, served);
     if (std.mem.eql(u8, request.host, subject_host)) return subject(sim, request, served);
-    if (std.mem.eql(u8, request.host, registry_host)) return registry(sim, request, served);
+    if (std.mem.eql(u8, request.host, sim.registry_name)) return registry(sim, request, served);
     if (std.mem.eql(u8, request.host, storage_host)) return storage(sim, request, served);
     sim.stray += 1;
     if (carries_credential(request)) sim.leaked += 1;
@@ -397,8 +404,10 @@ fn registry(sim: *GoogleSim, request: *const net.Request, served: *net_sim.Serve
     assert(request.target.len > 0);
     if (std.mem.startsWith(u8, request.target, "/token")) return realm(sim, request, served);
     if (std.mem.startsWith(u8, request.target, downloads_prefix)) {
-        // Served without auth, as Artifact Registry serves its downloads path.
-        if (carries_credential(request)) sim.leaked += 1;
+        // Served without auth, as Artifact Registry serves its downloads path. It is the
+        // registry's own origin, so the realm's Bearer may follow the redirect (the client's
+        // same-origin rule); the realm's Basic or any other `Authorization` may not.
+        if (request.basic.len + request.authorization.len > 0) sim.leaked += 1;
         const digest = request.target[downloads_prefix.len..];
         const target = std.fmt.bufPrint(&sim.scratch, "/cdn/{s}", .{digest}) catch {
             served.* = .{ .status = 404 };

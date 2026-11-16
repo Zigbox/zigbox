@@ -1,0 +1,8 @@
+error[ZBX-E0561]: the Google credentials file cannot be read
+  cause  GOOGLE_APPLICATION_CREDENTIALS (/home/ci/gcp.json) can't be read, or is
+         larger than 16384 bytes
+  var    GOOGLE_APPLICATION_CREDENTIALS
+  max    16384 bytes
+  fix    check that the file exists and is readable by this user
+  more   zbx explain E0561
+  docs   https://zigbox.github.io/zigbox/errors/E0561.html

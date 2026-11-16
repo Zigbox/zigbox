@@ -1,0 +1,6 @@
+error[ZBX-E0560]: there are no Google credentials to pull from this registry
+  cause  no Google credentials were found to pull from us-docker.pkg.dev
+  fix    point GOOGLE_APPLICATION_CREDENTIALS at a workload identity federation file
+         or pull on Google Compute Engine with a service account
+  more   zbx explain E0560 · rerun with --verbose for the full cause chain
+  docs   https://zigbox.github.io/zigbox/errors/E0560.html

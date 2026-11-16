@@ -85,12 +85,15 @@ pub fn start(
     errdefer client_mod.Workspace.wipe(&library.client);
     {
         defer pull.aws.wipe();
+        defer pull.google.wipe();
         const request = pull_commands.request_of(host, text, pull, diag) catch {
             return error.Failed;
         };
         pull_lib.resolve_with(host, &request, library, &ws.client, diag) catch {
             return error.Failed;
         };
+        // The fallback's storage is wiped here; the ranges re-ask with what the client holds.
+        ws.client.realm_fallback = null;
     }
     const resolved = &library.resolved;
     if (held_whole(store, resolved.manifest_digest, image)) {
@@ -138,6 +141,8 @@ pub fn wipe(pull: *pull_commands.Workspace, lazy: ?*Workspace) void {
     const ws = lazy orelse return;
     ws.client.token_len = 0;
     ws.client.basic_len = 0;
+    ws.client.credential = .none;
+    ws.client.realm_fallback = null;
     assert(ws.client.basic_len == 0);
 }
 

@@ -1,0 +1,11 @@
+error[ZBX-E0568]: the identity may not read the repository, or it does not exist
+  cause  us-docker.pkg.dev denied the pull of zbx-demo/zbx-denied/hello: the
+         identity lacks artifactregistry.repositories.downloadArtifacts, or the
+         repository does not exist
+  host   us-docker.pkg.dev
+  repo   zbx-demo/zbx-denied/hello
+  perm   artifactregistry.repositories.downloadArtifacts
+  fix    grant roles/artifactregistry.reader on the repository to the identity
+         and check the repository's name and region
+  more   zbx explain E0568
+  docs   https://zigbox.github.io/zigbox/errors/E0568.html

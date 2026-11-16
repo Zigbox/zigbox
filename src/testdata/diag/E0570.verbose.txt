@@ -1,0 +1,8 @@
+error[ZBX-E0570]: the Google registry host is not one zbx authenticates to
+  cause  k8s.gcr.io refused an anonymous pull, and zbx sends Google credentials
+         only to the supported hosts
+  host   k8s.gcr.io
+  hosts  <region>-docker.pkg.dev, gcr.io, us.gcr.io, eu.gcr.io, asia.gcr.io
+  fix    pull from one of <region>-docker.pkg.dev, gcr.io, us.gcr.io, eu.gcr.io, asia.gcr.io
+  more   zbx explain E0570
+  docs   https://zigbox.github.io/zigbox/errors/E0570.html

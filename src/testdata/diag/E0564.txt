@@ -1,0 +1,7 @@
+error[ZBX-E0564]: the subject token for workload identity cannot be read
+  cause  the subject token from the credential_source file can't be read, or is
+         empty, or is larger than 16384 bytes
+  fix    check that the token is there and current: an OIDC token lasts minutes
+         in GitHub Actions the job needs 'permissions: id-token: write'
+  more   zbx explain E0564 · rerun with --verbose for the full cause chain
+  docs   https://zigbox.github.io/zigbox/errors/E0564.html

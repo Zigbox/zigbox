@@ -180,6 +180,19 @@ pub const Code = enum(u16) {
     E0556,
     E0557,
     E0558,
+    E0560,
+    E0561,
+    E0562,
+    E0563,
+    E0564,
+    E0565,
+    E0566,
+    E0567,
+    E0568,
+    E0569,
+    E0570,
+    E0571,
+    E0572,
     W0501,
     W0502,
     W0503,
@@ -2886,6 +2899,190 @@ pub const registry = [_]Entry{
         ,
     },
     .{
+        .code = .E0560,
+        .severity = .@"error",
+        .blame = .environment,
+        .summary = "there are no Google credentials to pull from this registry",
+        .explanation =
+        \\zbx pulls from Artifact Registry (<region>-docker.pkg.dev) and the four
+        \\gcr.io hosts anonymously first, as from any registry. When the registry
+        \\refuses that, zbx looks for Google credentials: workload identity
+        \\federation, when GOOGLE_APPLICATION_CREDENTIALS names an external_account
+        \\file, and otherwise the metadata server of a Google Compute Engine
+        \\instance, asked once. Neither gave an access token. The message says what
+        \\each source did.
+        \\
+        \\On GitHub Actions or GKE, set up workload identity federation and point
+        \\GOOGLE_APPLICATION_CREDENTIALS at its file. On Compute Engine, attach a
+        \\service account that may read the repository to the instance.
+        \\
+        \\A library caller reads no environment: it resolves a token with
+        \\google_credentials_resolve and passes it to the pull. When
+        \\GOOGLE_APPLICATION_CREDENTIALS is set and the caller did not ask for
+        \\workload identity, nothing else is tried in its place.
+        ,
+    },
+    .{
+        .code = .E0561,
+        .severity = .@"error",
+        .blame = .environment,
+        .summary = "the Google credentials file cannot be read",
+        .explanation =
+        \\GOOGLE_APPLICATION_CREDENTIALS names a credentials file, and zbx could not
+        \\read it: it is missing, not readable by this user, not a regular file, or
+        \\larger than 16384 bytes, the bound zbx reads. Once the variable is set,
+        \\its file is the answer: the metadata server is not tried instead.
+        \\
+        \\Check the path the variable names, or unset the variable.
+        ,
+    },
+    .{
+        .code = .E0562,
+        .severity = .@"error",
+        .blame = .user,
+        .summary = "service account key files are not supported",
+        .explanation =
+        \\GOOGLE_APPLICATION_CREDENTIALS names a service account key file. zbx does
+        \\not use key files: a key is a long-lived secret on disk, and anyone who
+        \\has it is the service account. Use workload identity federation instead,
+        \\whose external_account file holds no secret, and delete the key.
+        ,
+    },
+    .{
+        .code = .E0563,
+        .severity = .@"error",
+        .blame = .user,
+        .summary = "the Google credentials file is not one zbx supports",
+        .explanation =
+        \\GOOGLE_APPLICATION_CREDENTIALS names a file zbx does not use. zbx reads an
+        \\external_account file (workload identity federation) whose subject token
+        \\comes from a file or an HTTPS url, exchanged at sts.googleapis.com, and
+        \\optionally impersonating a service account through
+        \\iamcredentials.googleapis.com. It does not use gcloud's user credentials
+        \\(authorized_user), executable, AWS or certificate sources, a plain-HTTP
+        \\url, another token_url or universe_domain, or a value written with JSON
+        \\escapes. The message names what the file has.
+        ,
+    },
+    .{
+        .code = .E0564,
+        .severity = .@"error",
+        .blame = .environment,
+        .summary = "the subject token for workload identity cannot be read",
+        .explanation =
+        \\The external_account file names where its subject token (an OIDC token
+        \\from GitHub Actions, GKE or another provider) is: a file or a url. zbx
+        \\could not read it there, it is empty, or it is larger than 16384 bytes,
+        \\the bound zbx reads. The token itself is never shown.
+        \\
+        \\In GitHub Actions the job needs 'permissions: id-token: write', and an
+        \\OIDC token lasts minutes: fetch it in the job that pulls.
+        ,
+    },
+    .{
+        .code = .E0565,
+        .severity = .@"error",
+        .blame = .external,
+        .summary = "Google refused the workload identity token exchange",
+        .explanation =
+        \\zbx sent the subject token to sts.googleapis.com to exchange it for a
+        \\Google token, and STS refused. The message shows Google's error code
+        \\(invalid_grant, invalid_target, ...) and never its text. Check that the
+        \\file's audience names the pool's provider, and that the provider's issuer
+        \\and attribute condition admit the subject token.
+        ,
+    },
+    .{
+        .code = .E0566,
+        .severity = .@"error",
+        .blame = .user,
+        .summary = "Google refused to impersonate the service account",
+        .explanation =
+        \\The external_account file impersonates a service account, and
+        \\iamcredentials.googleapis.com refused: the federated identity lacks
+        \\iam.serviceAccounts.getAccessToken on it. Grant the pool's principal (or
+        \\principal set) roles/iam.workloadIdentityUser on the service account.
+        ,
+    },
+    .{
+        .code = .E0567,
+        .severity = .@"error",
+        .blame = .external,
+        .summary = "the registry refused the Google access token",
+        .explanation =
+        \\zbx sent its Google access token to the registry's token service, as the
+        \\password of the user oauth2accesstoken, and was refused (401), or the
+        \\token handed to the pull had already expired, in which case nothing was
+        \\sent. Access tokens last about an hour. Get a new one and check that this
+        \\machine's clock is right.
+        ,
+    },
+    .{
+        .code = .E0568,
+        .severity = .@"error",
+        .blame = .user,
+        .summary = "the identity may not read the repository, or it does not exist",
+        .explanation =
+        \\The registry denied the pull. Artifact Registry answers a repository the
+        \\identity may not read and one that does not exist alike. The identity
+        \\needs artifactregistry.repositories.downloadArtifacts on the repository,
+        \\which roles/artifactregistry.reader grants. Check the repository's
+        \\project, name and region too.
+        ,
+    },
+    .{
+        .code = .E0569,
+        .severity = .@"error",
+        .blame = .user,
+        .summary = "the repository does not exist",
+        .explanation =
+        \\The registry says the repository named does not exist (NAME_UNKNOWN).
+        \\Check the project, the repository and the region in the reference. The
+        \\gcr.io hosts are served by an Artifact Registry repository named gcr.io
+        \\in the project, in the host's location: the project needs one.
+        ,
+    },
+    .{
+        .code = .E0570,
+        .severity = .@"error",
+        .blame = .user,
+        .summary = "the Google registry host is not one zbx authenticates to",
+        .explanation =
+        \\The host is a Google registry of a shape zbx sends no credentials to:
+        \\any *.pkg.dev host but <region>-docker.pkg.dev, or any *.gcr.io host but
+        \\gcr.io, us.gcr.io, eu.gcr.io and asia.gcr.io (mirror.gcr.io is Docker
+        \\Hub's public mirror). zbx pulls from it anonymously, and it refused. Pull
+        \\the image from a supported host.
+        ,
+    },
+    .{
+        .code = .E0571,
+        .severity = .@"error",
+        .blame = .user,
+        .summary = "workforce pools are not supported",
+        .explanation =
+        \\The external_account file's audience is a workforce identity pool (for
+        \\people signing in through an identity provider). zbx supports workload
+        \\identity pools, for machines and CI. Use a workload identity pool's
+        \\provider.
+        ,
+    },
+    .{
+        .code = .E0572,
+        .severity = .@"error",
+        .blame = .external,
+        .summary = "a Google credential service failed",
+        .explanation =
+        \\One step of getting a Google access token failed without a refusal zbx
+        \\can explain: the subject token url, sts.googleapis.com,
+        \\iamcredentials.googleapis.com or the metadata server did not answer,
+        \\refused with no error code, or answered with no usable token or one
+        \\already out of date. The message names the step. Run the command again;
+        \\if it repeats, the service or a proxy on the way is at fault. A token out
+        \\of date can also be this machine's clock.
+        ,
+    },
+    .{
         .code = .W0501,
         .severity = .warning,
         .blame = .external,
@@ -4811,7 +5008,7 @@ comptime {
     // build error, and lets `entry` index the table directly.
     assert(registry.len == fields.len);
     assert(fields.len <= std.math.maxInt(u16));
-    @setEvalBranchQuota(600_000);
+    @setEvalBranchQuota(800_000);
     for (registry, fields, 0..) |item, name, index| {
         assert(@backingInt(item.code) == index);
         assert(std.mem.eql(u8, @tagName(item.code), name));
@@ -4937,6 +5134,8 @@ pub fn can_end_run(code: Code) bool {
         .E0508, .E0509, .E0510, .E0511, .E0512, .E0513, .E0514 => false,
         .E0515, .E0516, .E0517, .W0501, .W0502, .E0526, .W0551, .W0552 => false,
         .E0527, .E0528, .E0529, .E0530, .E0531, .E0532, .E0533, .E0534, .E0535 => false,
+        .E0560, .E0561, .E0562, .E0563, .E0564, .E0565, .E0566, .E0567, .E0568 => false,
+        .E0569, .E0570, .E0571, .E0572 => false,
         .E0801, .E0802, .E0803, .E0804, .E0805, .E0806, .E0807, .W0801 => false,
         .E0808, .E0817, .E0818, .E0820, .E0821, .W0802 => false,
         .E0810, .E0811, .E0812, .E0813, .E0814, .E0815, .E0816, .W0810, .W0811 => false,

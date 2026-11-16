@@ -2379,6 +2379,19 @@ const image_cases = [_]Case{
     .{ .code = .E0533, .args = &.{}, .direct = aws_web_file, .exit = 2 },
     .{ .code = .E0534, .args = &.{}, .direct = aws_unsupported, .exit = 1 },
     .{ .code = .E0535, .args = &.{}, .direct = ecr_rejected, .exit = 3 },
+    .{ .code = .E0560, .args = &.{}, .direct = google_none, .exit = 2 },
+    .{ .code = .E0561, .args = &.{}, .direct = google_file_unreadable, .exit = 2 },
+    .{ .code = .E0562, .args = &.{}, .direct = google_key_file, .exit = 1 },
+    .{ .code = .E0563, .args = &.{}, .direct = google_unsupported_file, .exit = 1 },
+    .{ .code = .E0564, .args = &.{}, .direct = google_subject, .exit = 2 },
+    .{ .code = .E0565, .args = &.{}, .direct = google_exchange, .exit = 3 },
+    .{ .code = .E0566, .args = &.{}, .direct = google_impersonation, .exit = 1 },
+    .{ .code = .E0567, .args = &.{}, .direct = google_token_refused, .exit = 3 },
+    .{ .code = .E0568, .args = &.{}, .direct = google_denied, .exit = 1 },
+    .{ .code = .E0569, .args = &.{}, .direct = google_missing, .exit = 1 },
+    .{ .code = .E0570, .args = &.{}, .direct = google_unsupported_host, .exit = 1 },
+    .{ .code = .E0571, .args = &.{}, .direct = google_workforce, .exit = 1 },
+    .{ .code = .E0572, .args = &.{}, .direct = google_service, .exit = 3 },
     .{
         .code = .E0550,
         .args = &.{ "store", "export", "--oci", "no-such-image", "/out" },
@@ -2821,6 +2834,82 @@ fn ecr_denied(diag: *Diag) void {
 
 fn ecr_missing(diag: *Diag) void {
     @import("registry/diagnose.zig").ecr_repository_missing(diag, ecr_host_golden, "fixture/cdn");
+}
+
+/// E0560 to E0572 come from a Google pull; `google/pull_tests.zig` runs them end to end, and these
+/// are the diagnostics as `google/diagnose.zig` builds them.
+const google_diagnose = @import("google/diagnose.zig");
+const GoogleTrace = @import("google/credentials.zig").Trace;
+const google_host_golden = "us-docker.pkg.dev";
+const google_file_golden = "/home/ci/gcp.json";
+
+fn google_none(diag: *Diag) void {
+    var trace: GoogleTrace = .{};
+    trace.metadata = .absent;
+    google_diagnose.no_credentials(diag, google_host_golden, &trace);
+}
+
+fn google_file_unreadable(diag: *Diag) void {
+    google_diagnose.file_unreadable(diag, google_file_golden);
+}
+
+fn google_key_file(diag: *Diag) void {
+    google_diagnose.key_file(diag, google_file_golden);
+}
+
+fn google_unsupported_file(diag: *Diag) void {
+    var trace: GoogleTrace = .{};
+    trace.workload_identity = .unsupported;
+    trace.unsupported = .authorized_user;
+    const name = "authorized_user";
+    @memcpy(trace.type_name[0..name.len], name);
+    trace.type_name_len = name.len;
+    google_diagnose.unsupported_file(diag, google_file_golden, &trace);
+}
+
+fn google_subject(diag: *Diag) void {
+    google_diagnose.subject_unreadable(diag, .file, 0);
+}
+
+fn google_exchange(diag: *Diag) void {
+    google_diagnose.exchange_refused(diag, 400, "invalid_grant");
+}
+
+fn google_impersonation(diag: *Diag) void {
+    var trace: GoogleTrace = .{};
+    trace.step = .impersonation;
+    trace.status = 403;
+    const account = "zbx-pull@zbx-demo.iam.gserviceaccount.com";
+    @memcpy(trace.service_account[0..account.len], account);
+    trace.service_account_len = account.len;
+    const code = "PERMISSION_DENIED";
+    @memcpy(trace.error_code[0..code.len], code);
+    trace.error_code_len = code.len;
+    google_diagnose.impersonation_refused(diag, &trace);
+}
+
+fn google_token_refused(diag: *Diag) void {
+    google_diagnose.token_refused(diag, google_host_golden, false);
+}
+
+fn google_denied(diag: *Diag) void {
+    google_diagnose.repository_denied(diag, google_host_golden, "zbx-demo/zbx-denied/hello");
+}
+
+fn google_missing(diag: *Diag) void {
+    google_diagnose.repository_missing(diag, google_host_golden, "zbx-demo/zbx-demo/nope", false);
+}
+
+fn google_unsupported_host(diag: *Diag) void {
+    google_diagnose.unsupported_host(diag, "k8s.gcr.io");
+}
+
+fn google_workforce(diag: *Diag) void {
+    google_diagnose.workforce_pool(diag, google_file_golden);
+}
+
+fn google_service(diag: *Diag) void {
+    google_diagnose.service_failed(diag, .metadata, .refused, 500);
 }
 
 fn aws_web_file(diag: *Diag) void {

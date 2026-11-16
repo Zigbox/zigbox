@@ -141,6 +141,7 @@ pub fn run(
         .changed = false,
     };
     defer pulls.pulling.aws.wipe();
+    defer pulls.pulling.google.wipe();
     const options: translate.Options = .{
         .dockerfile = dockerfile,
         .dockerfile_name = dockerfile_name,

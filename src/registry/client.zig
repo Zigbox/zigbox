@@ -23,6 +23,8 @@ const digest_mod = @import("digest.zig");
 const manifest = @import("manifest.zig");
 const net = @import("net.zig");
 const reference_mod = @import("reference.zig");
+const google_diagnose = @import("../google/diagnose.zig");
+const google_hosts = @import("../google/hosts.zig");
 const Diag = @import("../diag/diag.zig").Diag;
 
 const Sha256 = digest_mod.Sha256;
@@ -36,9 +38,10 @@ pub const Workspace = struct {
     arena: [constants.registry_json_arena_bytes]u8,
     token: [constants.registry_token_bytes_max]u8,
     token_body: [constants.registry_token_response_bytes_max]u8,
-    /// The ECR authorization token (base64 of `AWS:<password>`), sent as `Basic` to the registry's
-    /// own origin. Secret: `Workspace.wipe` zeroes it.
-    basic: [constants.aws_ecr_token_bytes_max]u8,
+    /// The `Basic` value of `Client.credential`: the ECR authorization token (base64 of
+    /// `AWS:<password>`), or the base64 of `user:secret` for a realm. Secret: `Workspace.wipe`
+    /// zeroes it.
+    basic: [constants.registry_basic_bytes_max]u8,
 
     /// Zeroes every secret in it: the bearer token, the token service's answer (which also holds
     /// the ECR API's answer) and the ECR authorization token.
@@ -53,6 +56,26 @@ pub const Workspace = struct {
 
 /// The failure is in the `Diag`.
 pub const Error = error{Failed};
+
+/// The one credential a pull holds, in `Workspace.basic`, chosen by the registry's host:
+/// - `ecr_basic`: ECR's authorization token, `Basic` on the registry origin from the first
+///   request (M6c).
+/// - `realm_basic`: a user and a secret (Google's `oauth2accesstoken` and an access token),
+///   `Basic` to the registry's same-host token realm only, after its challenge; the realm's
+///   Bearer token then goes to the registry origin. Never both on one request.
+pub const Credential = enum { none, ecr_basic, realm_basic };
+
+/// Asked at most once per pull, when a Google registry's realm refuses an anonymous token
+/// request and the pull holds no credential: the access token to send to the realm as
+/// `oauth2accesstoken`, in the caller's storage, or null with the refusal in `diag`. The CLI asks
+/// the metadata server here (`pull_google.zig`).
+pub const RealmFallback = struct {
+    context: *anyopaque,
+    call: *const fn (context: *anyopaque, registry: []const u8, diag: *Diag) ?[]const u8,
+};
+
+/// The longest `user:secret` a realm credential holds: what `Workspace.basic` encodes.
+const realm_joined_bytes_max = constants.registry_basic_bytes_max / 4 * 3;
 
 pub const Origin = struct {
     scheme: net.Scheme,
@@ -78,8 +101,13 @@ pub const Client = struct {
     fallback: ?manifest.Architecture,
     machine: []const u8,
     token_len: u32,
-    /// The bytes of `workspace.basic` in use; 0 for a registry that is not ECR.
+    /// The bytes of `workspace.basic` in use; 0 for `credential` `none`.
     basic_len: u32,
+    credential: Credential,
+    /// The host's class when it is Google's; `not_google` otherwise. Set by `resolve`.
+    google: google_hosts.Host,
+    /// For a Google registry with no credential: see `RealmFallback`. Null for none.
+    realm_fallback: ?RealmFallback,
     /// The mirrors for docker.io, comma separated (`ZBX_REGISTRY_MIRRORS`); empty for none.
     mirrors: []const u8,
     /// The places the last resolve could ask, for the blobs.
@@ -102,6 +130,9 @@ pub const Client = struct {
             .machine = machine,
             .token_len = 0,
             .basic_len = 0,
+            .credential = .none,
+            .google = .not_google,
+            .realm_fallback = null,
             .mirrors = "",
             .places = undefined,
             .winner = 0,
@@ -109,9 +140,32 @@ pub const Client = struct {
     }
 
     fn basic(client: *const Client) []const u8 {
-        assert(client.basic_len <= constants.aws_ecr_token_bytes_max);
-        assert(client.workspace.basic.len == constants.aws_ecr_token_bytes_max);
+        assert(client.basic_len <= constants.registry_basic_bytes_max);
+        assert(client.workspace.basic.len == constants.registry_basic_bytes_max);
+        if (client.credential == .none) assert(client.basic_len == 0);
         return client.workspace.basic[0..client.basic_len];
+    }
+
+    /// Holds `user:secret` as the realm credential, base64 in `workspace.basic`; the caller's
+    /// copy of the secret is the caller's to wipe.
+    pub fn use_realm_basic(client: *Client, user: []const u8, secret: []const u8) void {
+        assert(user.len > 0);
+        assert(secret.len > 0);
+        assert(client.credential != .ecr_basic);
+        const joined_len = user.len + 1 + secret.len;
+        var joined: [realm_joined_bytes_max]u8 = undefined;
+        assert(joined_len <= joined.len);
+        defer std.crypto.secureZero(u8, &joined);
+        @memcpy(joined[0..user.len], user);
+        joined[user.len] = ':';
+        @memcpy(joined[user.len + 1 .. joined_len], secret);
+        const encoded = std.base64.standard.Encoder.encode(
+            &client.workspace.basic,
+            joined[0..joined_len],
+        );
+        client.basic_len = @intCast(encoded.len);
+        client.credential = .realm_basic;
+        assert(client.basic_len > 0);
     }
 
     fn token(client: *const Client) []const u8 {
@@ -198,6 +252,7 @@ pub fn resolve(
     assert(diag.code == null);
     assert(client.workspace.body.len == constants.registry_manifest_bytes_max);
     const list = &client.places;
+    client.google = google_hosts.classify(reference.registry());
     try candidates(client, reference, list, diag);
     var shown_storage: reference_mod.Formatted = undefined;
     const shown = reference.format(&shown_storage);
@@ -367,7 +422,7 @@ fn fetch_manifest(
         .{ reference.repository(), name },
     ) catch unreachable; // The storage holds the longest repository and name.
     var sink: net.BufferSink = .{ .buffer = &client.workspace.body };
-    const had_token = client.token_len > 0 or client.basic_len > 0;
+    const had_token = client.token_len > 0 or client.credential == .ecr_basic;
     const receiver = Receiver.of_buffer(&sink, constants.net_request_timeout_ms);
     try request_following(client, origin, target, manifest.accept, true, receiver, head, diag);
     if (head.status == 401 and !had_token) {
@@ -375,7 +430,7 @@ fn fetch_manifest(
         try authenticate(client, reference, origin, head, constants.net_request_timeout_ms, diag);
         try request_following(client, origin, target, manifest.accept, true, receiver, head, diag);
     }
-    const seen: Seen = .{ .basic = client.basic_len > 0, .body = sink.bytes() };
+    const seen = Seen.of(client, sink.bytes());
     try check_status(reference, origin, target, head, seen, diag);
     assert(head.status == 200);
     return verify_manifest(reference, name, head, sink.bytes(), diag);
@@ -418,7 +473,21 @@ fn verify_manifest(
 /// error code and never kept.
 const Seen = struct {
     basic: bool = false,
+    /// The pull held a Google realm credential: a refusal is the identity's.
+    google: bool = false,
+    gcr: bool = false,
     body: []const u8 = "",
+
+    fn of(client: *const Client, body: []const u8) Seen {
+        assert(body.len <= constants.registry_manifest_bytes_max);
+        assert(client.basic_len <= constants.registry_basic_bytes_max);
+        return .{
+            .basic = client.credential == .ecr_basic,
+            .google = client.credential == .realm_basic and client.google.credentialed(),
+            .gcr = client.google == .gcr,
+            .body = body,
+        };
+    }
 };
 
 /// Whether the registry's error body names `NAME_UNKNOWN`: the repository does not exist.
@@ -449,6 +518,9 @@ fn check_status(
         diagnose.http_error(diag, head.status, url, "the host it redirects to refused the request");
         return error.Failed;
     }
+    if (seen.google and !head.elsewhere) {
+        if (google_status(diag, registry, repository, head.status, seen)) return error.Failed;
+    }
     switch (head.status) {
         200 => return,
         401 => if (basic) {
@@ -468,6 +540,30 @@ fn check_status(
         else => diagnose.http_error(diag, head.status, url, null),
     }
     return error.Failed;
+}
+
+/// A Google registry's answer to a pull that held a realm credential: 401 is the access token
+/// refused, 403 the repository denied (or missing: the registry answers both alike), 404
+/// `NAME_UNKNOWN` the repository missing. Whether it raised one of them.
+fn google_status(
+    diag: *Diag,
+    registry: []const u8,
+    repository: []const u8,
+    status: u16,
+    seen: Seen,
+) bool {
+    assert(seen.google);
+    assert(diag.code == null);
+    switch (status) {
+        401 => google_diagnose.token_refused(diag, registry, false),
+        403 => google_diagnose.repository_denied(diag, registry, repository),
+        404 => if (names_unknown(seen.body)) {
+            google_diagnose.repository_missing(diag, registry, repository, seen.gcr);
+        } else return false,
+        else => return false,
+    }
+    assert(diag.code != null);
+    return true;
 }
 
 /// Reads the challenge of a 401 and gets a token for it; `client.token` holds it on success.
@@ -512,7 +608,7 @@ fn authenticate(
         diagnose.auth_refused(diag, .bad_realm, registry, repository);
         return error.Failed;
     }
-    try fetch_token(client, reference, parsed, timeout_ms, diag);
+    try fetch_token(client, reference, origin, parsed, timeout_ms, diag);
     assert(client.token_len > 0);
     assert(diag.code == null);
 }
@@ -520,28 +616,35 @@ fn authenticate(
 fn fetch_token(
     client: *Client,
     reference: *const Reference,
+    origin: Origin,
     url: net.Url,
     timeout_ms: u32,
     diag: *Diag,
 ) Error!void {
     assert(url.target[0] == '/');
     assert(client.token_len == 0);
-    const origin: Origin = .{ .scheme = url.scheme, .host = url.host, .port = url.port };
     var head: net.Head = .{};
     var sink: net.BufferSink = .{ .buffer = &client.workspace.token_body };
-    const target = url.target;
-    const receiver = Receiver.of_buffer(&sink, timeout_ms);
-    try request_following(client, origin, target, "application/json", false, receiver, &head, diag);
+    try token_request(client, reference, origin, url, timeout_ms, &sink, &head, diag);
+    const refused = head.status == 401 or head.status == 403;
+    const ask = client.credential == .none and client.google.credentialed();
+    if (refused and ask) {
+        if (client.realm_fallback) |fallback| {
+            // The one fallback, once: the anonymous answer was the registry's no.
+            const secret = fallback.call(fallback.context, reference.registry(), diag) orelse {
+                assert(diag.code != null);
+                return error.Failed;
+            };
+            client.use_realm_basic(constants.google_realm_user, secret);
+            try token_request(client, reference, origin, url, timeout_ms, &sink, &head, diag);
+        }
+    }
     var url_storage: [constants.registry_url_bytes_max]u8 = undefined;
-    const shown = url_of(&url_storage, origin, url.target);
-    const registry = reference.registry();
-    const repository = reference.repository();
+    const token_origin: Origin = .{ .scheme = url.scheme, .host = url.host, .port = url.port };
+    const shown = url_of(&url_storage, token_origin, url.target);
     switch (head.status) {
         200 => {},
-        401, 403 => {
-            diagnose.auth_refused(diag, .token_refused, registry, repository);
-            return error.Failed;
-        },
+        401, 403 => return token_refused(client, reference, head.status, diag),
         429 => {
             diagnose.rate_limited(diag, shown, head.retry_after.slice());
             return error.Failed;
@@ -552,13 +655,80 @@ fn fetch_token(
         },
     }
     var arena = std.heap.FixedBufferAllocator.init(&client.workspace.arena);
-    const body = sink.bytes();
-    const found = auth.parse_token(body, arena.allocator(), &client.workspace.token) orelse {
-        diagnose.auth_refused(diag, .token_unusable, registry, repository);
+    const found = auth.parse_token(sink.bytes(), arena.allocator(), &client.workspace.token);
+    const usable = found orelse {
+        const registry = reference.registry();
+        diagnose.auth_refused(diag, .token_unusable, registry, reference.repository());
         return error.Failed;
     };
-    client.token_len = @intCast(found.len);
+    client.token_len = @intCast(usable.len);
     assert(client.token_len > 0);
+}
+
+/// Asks the realm `url` for a token into `sink`: anonymously (following redirects, as any
+/// registry's realm), or with the realm credential, which goes in one request with no redirect
+/// and only to a realm `auth.realm_allowed` passes for the registry's origin.
+fn token_request(
+    client: *Client,
+    reference: *const Reference,
+    origin: Origin,
+    url: net.Url,
+    timeout_ms: u32,
+    sink: *net.BufferSink,
+    head: *net.Head,
+    diag: *Diag,
+) Error!void {
+    assert(url.target[0] == '/');
+    assert(timeout_ms > 0);
+    sink.len = 0;
+    if (client.credential != .realm_basic) {
+        const at: Origin = .{ .scheme = url.scheme, .host = url.host, .port = url.port };
+        const receiver = Receiver.of_buffer(sink, timeout_ms);
+        const accept = "application/json";
+        return request_following(client, at, url.target, accept, false, receiver, head, diag);
+    }
+    if (!auth.realm_allowed(origin.host, origin.scheme, url)) {
+        // Refused before the credential is sent anywhere.
+        diagnose.auth_refused(diag, .bad_realm, reference.registry(), reference.repository());
+        return error.Failed;
+    }
+    const request = auth.realm_request(url, client.basic(), timeout_ms);
+    client.net.call(&request, head, sink.sink()) catch |err| {
+        const where: diagnose.Target = .{
+            .host = url.host,
+            .port = url.port,
+            .scheme = url.scheme,
+        };
+        diagnose.network_failed(diag, err, where, client.net.last_errno());
+        return error.Failed;
+    };
+    assert(head.status >= 100);
+}
+
+/// The realm said no (401 or 403). For a Google registry the answer is the identity's: the access
+/// token refused, the repository denied, no credentials to try, or a host zbx sends none to.
+fn token_refused(
+    client: *const Client,
+    reference: *const Reference,
+    status: u16,
+    diag: *Diag,
+) Error {
+    assert(status >= 401);
+    assert(status <= 403);
+    assert(diag.code == null);
+    const registry = reference.registry();
+    const repository = reference.repository();
+    switch (client.google) {
+        .artifact_registry, .gcr => if (client.credential == .realm_basic) {
+            if (status == 401) {
+                google_diagnose.token_refused(diag, registry, false);
+            } else google_diagnose.repository_denied(diag, registry, repository);
+        } else google_diagnose.none_given(diag, registry, false),
+        .other_google => google_diagnose.unsupported_host(diag, registry),
+        .mirror, .not_google => diagnose.auth_refused(diag, .token_refused, registry, repository),
+    }
+    assert(diag.code != null);
+    return error.Failed;
 }
 
 /// "https://host:port/path" without the query, for a message.
@@ -621,7 +791,8 @@ fn request_of(
 ) net.Request {
     assert(target.len > 0);
     assert(at.port != 0);
-    const basic: []const u8 = if (own) client.basic() else "";
+    // Only ECR's credential goes to the registry origin; a realm credential goes to the realm.
+    const basic: []const u8 = if (own and client.credential == .ecr_basic) client.basic() else "";
     return .{
         .scheme = at.scheme,
         .host = at.host,
@@ -910,7 +1081,7 @@ fn request_blob(
             download.abandon();
             return blob_sink_failed(download, diag, err);
         };
-        if (head.status == 401 and attempt == 0 and client.basic_len == 0) {
+        if (head.status == 401 and attempt == 0 and client.credential != .ecr_basic) {
             // A token lasts minutes and a layer can take longer: ask for a fresh one, once.
             client.token_len = 0;
             const timeout = constants.net_request_timeout_ms;
@@ -920,7 +1091,7 @@ fn request_blob(
         break;
     }
     if (head.status == 416) return true;
-    const seen: Seen = .{ .basic = client.basic_len > 0 };
+    const seen = Seen.of(client, "");
     if (head.status != 206) try check_status(reference, origin, target, head, seen, diag);
     return false;
 }
@@ -1058,7 +1229,7 @@ pub fn fetch_range(
             .total_timeout_ms = left,
         };
         try request_following(client, origin, target, "", true, receiver, &head, diag);
-        if (head.status == 401 and attempt == 0 and client.basic_len == 0) {
+        if (head.status == 401 and attempt == 0 and client.credential != .ecr_basic) {
             client.token_len = 0; // The token ran out mid-run: a fresh one, once.
             const auth_left = deadline.remaining_ms(timeout_ms) orelse {
                 return out_of_time(origin, diag);
@@ -1111,7 +1282,7 @@ fn range_answer(
             return error.Failed;
         },
         else => {
-            const seen: Seen = .{ .basic = client.basic_len > 0 };
+            const seen = Seen.of(client, "");
             check_status(reference, origin, target, head, seen, diag) catch {};
             assert(diag.code != null);
             return if (head.status == 404) error.NotFound else error.Failed;

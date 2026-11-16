@@ -12,6 +12,8 @@
 const std = @import("std");
 const assert = std.debug.assert;
 const constants = @import("../constants.zig");
+const net = @import("net.zig");
+const reference_mod = @import("reference.zig");
 
 pub const Challenge = struct {
     /// The URL to ask for a token. Slices of the header text.
@@ -243,6 +245,55 @@ pub fn parse_token(body: []const u8, arena: std.mem.Allocator, out: []u8) ?[]con
 }
 
 // ---- Tests ---------------------------------------------------------------------------------
+
+// ---- Credentials to a realm: shared by push (`--username`) and pull (Google's access token) ----
+
+/// Whether the token realm `realm` may be sent a credential, for `registry_host` (owner,
+/// 2026-11-09): the realm is on the registry's own host, or is one of the known pairs (Docker
+/// Hub's registry and its auth service), or, when the registry itself is on loopback, on
+/// loopback. It is spoken to over TLS; plain HTTP only on loopback.
+pub fn realm_allowed(registry_host: []const u8, registry_scheme: net.Scheme, realm: net.Url) bool {
+    assert(registry_host.len > 0);
+    assert(realm.host.len > 0);
+    const loopback = reference_mod.is_loopback(realm.host);
+    if (realm.scheme == .http and !(loopback and registry_scheme == .http)) return false;
+    if (std.ascii.eqlIgnoreCase(realm.host, registry_host)) return true;
+    if (loopback) return reference_mod.is_loopback(registry_host);
+    for (known_pairs) |pair| {
+        const same = std.ascii.eqlIgnoreCase(registry_host, pair.registry);
+        if (same and std.ascii.eqlIgnoreCase(realm.host, pair.realm)) return true;
+    }
+    return false;
+}
+
+const Pair = struct { registry: []const u8, realm: []const u8 };
+
+/// Registries whose token service is on another host by design.
+const known_pairs = [_]Pair{
+    .{ .registry = "registry-1.docker.io", .realm = "auth.docker.io" },
+};
+
+/// The one request for a token with a credential: `Authorization: Basic` (`basic`, the base64 of
+/// `user:secret`) to the realm `url`, which `realm_allowed` has passed. No bearer goes with it,
+/// it is never followed through a redirect, and the answer (a token) is held as a secret.
+pub fn realm_request(url: net.Url, basic: []const u8, timeout_ms: u32) net.Request {
+    assert(url.target[0] == '/');
+    assert(basic.len > 0);
+    assert(timeout_ms > 0);
+    return .{
+        .scheme = url.scheme,
+        .host = url.host,
+        .port = url.port,
+        .target = url.target,
+        .accept = "application/json",
+        .bearer = "",
+        .basic = basic,
+        .body_bytes_max = constants.registry_token_response_bytes_max,
+        .idle_timeout_ms = constants.net_idle_timeout_ms,
+        .total_timeout_ms = timeout_ms,
+        .secret = true,
+    };
+}
 
 const testing = std.testing;
 

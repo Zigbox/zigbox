@@ -10,12 +10,11 @@
 const std = @import("std");
 const assert = std.debug.assert;
 const constants = @import("../constants.zig");
+const auth = @import("../registry/auth.zig");
 const diagnose = @import("diagnose.zig");
 const fs_mod = @import("../store/fs.zig");
 const host_mod = @import("../host.zig");
 const key = @import("../trust/key.zig");
-const net = @import("../registry/net.zig");
-const reference_mod = @import("../registry/reference.zig");
 
 const Host = host_mod.Host;
 const Problem = diagnose.PasswordProblem;
@@ -165,30 +164,8 @@ fn read_stdin(host: Host, buffer: []u8, problem: *Problem) Error!usize {
 
 // ---- Where a credential may go -------------------------------------------------------------
 
-/// Whether the token realm `realm` may be sent the password, for a push to `registry` (owner,
-/// 2026-11-09): the realm is on the registry's own host, or is one of the known pairs (Docker
-/// Hub's registry and its auth service), or, when the registry itself is on loopback, on
-/// loopback. It is spoken to over TLS; plain HTTP only on loopback.
-pub fn realm_allowed(registry_host: []const u8, registry_scheme: net.Scheme, realm: net.Url) bool {
-    assert(registry_host.len > 0);
-    assert(realm.host.len > 0);
-    const loopback = reference_mod.is_loopback(realm.host);
-    if (realm.scheme == .http and !(loopback and registry_scheme == .http)) return false;
-    if (std.ascii.eqlIgnoreCase(realm.host, registry_host)) return true;
-    if (loopback) return reference_mod.is_loopback(registry_host);
-    for (known_pairs) |pair| {
-        const same = std.ascii.eqlIgnoreCase(registry_host, pair.registry);
-        if (same and std.ascii.eqlIgnoreCase(realm.host, pair.realm)) return true;
-    }
-    return false;
-}
-
-const Pair = struct { registry: []const u8, realm: []const u8 };
-
-/// Registries whose token service is on another host by design.
-const known_pairs = [_]Pair{
-    .{ .registry = "registry-1.docker.io", .realm = "auth.docker.io" },
-};
+/// Whether the token realm `realm` may be sent the password: shared with pull, in `auth.zig`.
+pub const realm_allowed = auth.realm_allowed;
 
 /// The `Authorization: Basic` value of `credentials`: the base64 of `user:password`, in `out`.
 pub fn encode_basic(
