@@ -874,7 +874,7 @@ fn expected_code(id: doctor.CheckId) codes.Code {
         .overlay => .E0104,
         .subid => .E0105,
         .seccomp => .E0106,
-        .net => unreachable, // The net check only warns: it has no code to report.
+        .fuse, .net => unreachable, // These checks only warn: they have no code to report.
     };
 }
 
@@ -883,7 +883,7 @@ fn expected_code(id: doctor.CheckId) codes.Code {
 ///    check is FAIL; a fault is never answered ok or warn;
 ///  - if nothing at all was injected into it, the check equals the fault-free result, its
 ///    diagnostic included;
-///  - every report is well formed, every FAIL has its registered E01xx code, causes and fixes,
+///  - every report is well formed, every FAIL has its registered code, causes and fixes,
 ///    and the exit code is 2 exactly when some check is FAIL; no handle leaks;
 ///  - the whole CLI against the same host prints that report on stdout, one diagnostic block
 ///    per FAIL on stderr in check order with the code on the FAIL line, and exits 2.
@@ -950,8 +950,8 @@ fn check_doctor_report(
             assert(check.diag.code.? == expected_code(check.id));
             assert(check.diag.entry().blame == .environment);
         }
-        // The net check only warns, whatever the fault: nothing it looks for is required.
-        if (counts.hard > 0 and check.id != .net) assert(check.status == .fail);
+        // The fuse and net checks only warn, whatever the fault: only opt-ins need them.
+        if (counts.hard > 0 and !doctor.warns_only(check.id)) assert(check.status == .fail);
         if (counts.any == 0) {
             assert(check.status == reference.status);
             assert(std.mem.eql(u8, check.detail.slice(), reference.detail.slice()));

@@ -30,6 +30,11 @@
 //!
 //! Version 1 (M4) kept one `.reference = "..."` where version 2 keeps the tags; a version-1
 //! record reads as an image with that one tag, and is written as version 2 the next time.
+//!
+//! Version 4 (S2) adds `.partial = true` after the labels: the image was started lazily
+//! (`zbx run --lazy`) and some of its file objects are not in the store yet. Only a partial
+//! image's record is written as version 4; a whole image's stays version 3, so a release before
+//! S2 still reads every record of a whole image. A version-4 record without the line is whole.
 
 const std = @import("std");
 const assert = std.debug.assert;
@@ -46,7 +51,10 @@ const Digest = digest_mod.Digest;
 const PathBuf = fs_mod.PathBuf;
 const Store = layout.Store;
 
-pub const record_version: u32 = 3;
+/// The newest version this release reads, and writes for a partial image.
+pub const record_version: u32 = 4;
+/// The version written for a whole image: the newest before `partial`.
+pub const record_version_whole: u32 = 3;
 pub const directory_name = "images";
 
 /// Where a string is in `Settings.bytes`.
@@ -248,6 +256,8 @@ pub const Image = struct {
     layers: [constants.registry_layers_max]Sha256,
     settings: Settings,
     labels: Labels,
+    /// Started lazily, and some file objects are not local yet (version 4). Every writer sets it.
+    partial: bool,
 
     pub fn tag_text(image: *const Image, index: u32) []const u8 {
         assert(image.tag_count <= constants.image_tags_max);
@@ -323,7 +333,8 @@ pub fn render(image: *const Image, buffer: *[constants.image_record_bytes_max]u8
     assert(image.tag_count <= constants.image_tags_max);
     // Cannot fail: the buffer holds the fixed fields, the tags escaped (four bytes a byte at the
     // worst) and 128 layer lines of 90 bytes.
-    writer.print(".{{\n    .version = {d},\n", .{record_version}) catch unreachable; // Sized.
+    const version = if (image.partial) record_version else record_version_whole;
+    writer.print(".{{\n    .version = {d},\n", .{version}) catch unreachable; // Sized.
     for (0..image.tag_count) |index| {
         writer.writeAll("    .tags = ") catch unreachable; // Same bound.
         roots.put_string(&writer, image.tag_text(@intCast(index)));
@@ -340,6 +351,7 @@ pub fn render(image: *const Image, buffer: *[constants.image_record_bytes_max]u8
     }
     render_settings(&writer, &image.settings);
     render_labels(&writer, &image.labels);
+    if (image.partial) writer.writeAll("    .partial = true,\n") catch unreachable; // Same bound.
     writer.writeAll("}\n") catch unreachable; // Same bound.
     assert(writer.end <= buffer.len);
     return writer.buffered();
@@ -464,6 +476,7 @@ pub fn parse(text: []const u8, image: *Image) ParseResult {
     image.time = 0;
     image.settings.clear();
     image.labels.clear();
+    image.partial = false;
     var pending: PendingLabel = .{ .bytes = undefined, .len = 0, .waiting = false };
     var version: u32 = 0;
     var seen: u32 = 0; // A bit for each of manifest, platform, config and tree.
@@ -506,6 +519,10 @@ pub fn parse(text: []const u8, image: *Image) ParseResult {
             image.time = std.fmt.parseInt(u64, value, 10) catch return .malformed;
             // `render` holds a time under 2^40; a damaged record may not read as more.
             if (image.time >= 1 << 40) return .malformed;
+        } else if (std.mem.eql(u8, key, "partial")) {
+            // `render` writes only `true`, and only in version 4.
+            if (!std.mem.eql(u8, value, "true") or image.partial) return .malformed;
+            image.partial = true;
         } else if (std.mem.eql(u8, key, "layers")) {
             if (image.layer_count == constants.registry_layers_max) return .malformed;
             image.layers[image.layer_count] = quoted_digest(value) orelse return .malformed;
@@ -533,6 +550,7 @@ fn finish_parse(
     if (version == 0) return .malformed;
     if (version > record_version) return .newer;
     if (pending.waiting) return .malformed;
+    if (image.partial and version < 4) return .malformed;
     if (version < 3) {
         // Releases before version 3 kept no labels, so the image's are not known.
         if (image.labels.total > 0 or !image.labels.known) return .malformed;
@@ -636,7 +654,40 @@ fn sample() Image {
     image.layers[1] = Sha256.of("two");
     image.settings.clear();
     image.labels.clear();
+    image.partial = false;
     return image;
+}
+
+test "a partial image is version 4 with its line; a whole one stays version 3" {
+    // Goal: S2's image record: releases before it still read every whole image's record, and
+    // `partial` reads back only where `render` writes it. Method: render both, parse both, and
+    // break the partial one in the two ways a damaged record could.
+    var image = sample();
+    var buffer: [constants.image_record_bytes_max]u8 = undefined;
+    const whole = render(&image, &buffer);
+    try testing.expect(std.mem.indexOf(u8, whole, ".version = 3,") != null);
+    try testing.expect(std.mem.indexOf(u8, whole, "partial") == null);
+    var back: Image = undefined;
+    try testing.expectEqual(ParseResult.ok, parse(whole, &back));
+    try testing.expect(!back.partial);
+    image.partial = true;
+    const text = render(&image, &buffer);
+    try testing.expect(std.mem.indexOf(u8, text, ".version = 4,") != null);
+    try testing.expect(std.mem.indexOf(u8, text, "    .partial = true,\n") != null);
+    try testing.expectEqual(ParseResult.ok, parse(text, &back));
+    try testing.expect(back.partial);
+    try testing.expect(back.tree.eql(image.tree));
+    const alloc = testing.allocator;
+    const old = try std.mem.replaceOwned(u8, alloc, text, "version = 4", "version = 3");
+    defer alloc.free(old);
+    try testing.expectEqual(ParseResult.malformed, parse(old, &back));
+    const other = try std.mem.replaceOwned(u8, alloc, text, ".partial = true", ".partial = no");
+    defer alloc.free(other);
+    try testing.expectEqual(ParseResult.malformed, parse(other, &back));
+    const unmarked = try std.mem.replaceOwned(u8, alloc, text, "    .partial = true,\n", "");
+    defer alloc.free(unmarked);
+    try testing.expectEqual(ParseResult.ok, parse(unmarked, &back));
+    try testing.expect(!back.partial);
 }
 
 test "a record round-trips, and the worst case fits the buffer" {
@@ -796,7 +847,7 @@ test "a damaged or newer record is refused" {
     const text = render(&image, &buffer);
     var back: Image = undefined;
     const alloc = testing.allocator;
-    const newer = try std.mem.replaceOwned(u8, alloc, text, "version = 3", "version = 4");
+    const newer = try std.mem.replaceOwned(u8, alloc, text, "version = 3", "version = 5");
     defer testing.allocator.free(newer);
     try testing.expectEqual(ParseResult.newer, parse(newer, &back));
     const cut = text[0..std.mem.indexOf(u8, text, "    .tree").?];

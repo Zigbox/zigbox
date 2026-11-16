@@ -23,6 +23,7 @@ const image_find = @import("store/image_find.zig");
 const image_user = @import("image_user.zig");
 const images = @import("store/images.zig");
 const import = @import("store/import.zig");
+const lazy_start = @import("lazy_start.zig");
 const lock_file = @import("lock_file.zig");
 const namespace = @import("store/namespace.zig");
 const open = @import("store/open.zig");
@@ -64,6 +65,9 @@ pub const Services = struct {
     import_workspace: *import.Workspace,
     output: pull_commands.Output,
     warn: ?namespace.Warn,
+    /// `--lazy` with a server that can fetch: an image the store lacks starts from its lazy
+    /// index (`lazy_start.zig`) instead of a whole pull. Null pulls it whole.
+    lazy: ?*lazy_start.Workspace = null,
 };
 
 /// What the container is started with.
@@ -82,9 +86,14 @@ pub const Prepared = struct {
     /// The user as the run was told: `--user`, else the image's own `User`; empty for root by
     /// default. For a message only.
     user_text: []const u8 = "",
+    /// The image is not in the store: its index is in `Services.lazy`, and the run fetches its
+    /// files as they are read.
+    remote: bool = false,
 };
 
-const Record = enum { ok, absent, unreadable };
+/// `partial`: the record is a lazily started image's (`images.Image.partial`), its files not all
+/// in the store.
+const Record = enum { ok, partial, absent, unreadable };
 
 fn load_record(
     store: *const Store,
@@ -104,7 +113,31 @@ fn load_record(
             return error.Failed;
         },
     };
-    return .ok;
+    return if (ws.image.partial) .partial else .ok;
+}
+
+/// `load_record` for a run without `--lazy`: a partial image is pulled whole first, by digest (as
+/// `zbx pull` would; a pull by digest writes no lock entry), then read again.
+fn load_whole(
+    services: *const Services,
+    ws: *Workspace,
+    store: *const Store,
+    present: bool,
+    manifest: Sha256,
+    reference: *const reference_mod.Reference,
+    diag: *Diag,
+) Error!Record {
+    assert(diag.code == null);
+    const found = try load_record(store, present, manifest, ws, diag);
+    if (found != .partial) return found;
+    var text_buffer: [constants.reference_bytes_max + 80]u8 = undefined;
+    const text = std.fmt.bufPrint(&text_buffer, "{s}/{s}@{s}", .{
+        reference.registry(), reference.repository(), &manifest.text(),
+    }) catch return .absent; // Too long to name by digest: the caller says it is not there.
+    try pull_quietly(services, text, diag);
+    const again = try load_record(store, present, manifest, ws, diag);
+    // A lazy start of the same image between the pull and this read leaves it partial again.
+    return if (again == .partial) .absent else again;
 }
 
 /// Prepares a run of a build result: `operand` is the full digest of a record under
@@ -182,8 +215,11 @@ pub fn prepare(
         registry_diagnose.bad_reference(diag, operand, err);
         return error.Failed;
     };
-    if (reference.digest) |manifest| {
-        const found = try load_record(&store, present, manifest, ws, diag);
+    out.remote = try lazy_remote(services, ws, &store, present, operand, &reference, diag);
+    if (out.remote) {
+        assert(services.lazy != null);
+    } else if (reference.digest) |manifest| {
+        const found = try load_whole(services, ws, &store, present, manifest, &reference, diag);
         if (found != .ok) {
             image_diagnose.not_locked(diag, operand, null);
             return error.Failed;
@@ -192,6 +228,52 @@ pub fn prepare(
         try via_lock(services, ws, &store, present, operand, &reference, diag);
     }
     try compose(&store, ws, operand, given, user_flag, out, diag);
+}
+
+/// For `--lazy`: an image the store lacks, named by a digest, by the lock, or (with no lock) by a
+/// tag, starts from its lazy index; true when it does. False leaves the run to the usual path:
+/// the image is local, the lock does not name it, there is no fetching server, or the image has
+/// no index (`W1201`, and the usual path pulls it whole).
+fn lazy_remote(
+    services: *const Services,
+    ws: *Workspace,
+    store: *Store,
+    present: bool,
+    operand: []const u8,
+    reference: *const reference_mod.Reference,
+    diag: *Diag,
+) Error!bool {
+    assert(diag.code == null);
+    const lazy = services.lazy orelse return false;
+    var text_buffer: [constants.reference_bytes_max + 80]u8 = undefined;
+    var text: []const u8 = operand;
+    if (reference.digest) |manifest| {
+        if (try load_record(store, present, manifest, ws, diag) == .ok) return false;
+    } else {
+        const locking = &services.pull.locking;
+        var failure: lock_file.Failure = undefined;
+        lock_file.open_project(services.host, store.fs, locking, &failure) catch return false;
+        if (locking.located.exists) {
+            const index = locking.lock.find(operand) orelse return false;
+            const manifest = locking.lock.entries[index].manifest;
+            if (try load_record(store, present, manifest, ws, diag) == .ok) return false;
+            text = std.fmt.bufPrint(&text_buffer, "{s}/{s}@{s}", .{
+                reference.registry(), reference.repository(), &manifest.text(),
+            }) catch return false; // Too long to name by digest: the usual path says so.
+        }
+    }
+    _ = open.check(store, .create, diag) catch return error.Failed;
+    const outcome = lazy_start.start(
+        services.host,
+        services.pull,
+        lazy,
+        store,
+        text,
+        services.warn,
+        &ws.image,
+        diag,
+    ) catch return error.Failed;
+    return outcome == .lazy;
 }
 
 fn via_lock(
@@ -212,7 +294,7 @@ fn via_lock(
     };
     var made = false;
     if (!locking.located.exists) {
-        try pull_without_lock(services, operand, diag);
+        try pull_quietly(services, operand, diag);
         lock_file.open_project(services.host, store.fs, locking, &failure) catch {
             image_diagnose.lock_failure(diag, located_path(locking), failure);
             return error.Failed;
@@ -226,7 +308,8 @@ fn via_lock(
     };
     const entry = locking.lock.entries[index];
     const now_present = present or made;
-    const found = try load_record(store, now_present, entry.manifest, ws, diag);
+    const manifest = entry.manifest;
+    const found = try load_whole(services, ws, store, now_present, manifest, reference, diag);
     if (found != .ok) {
         try report_absent(store, ws, operand, path, entry.manifest, reference, diag);
         return error.Failed;
@@ -271,7 +354,9 @@ fn report_absent(
     );
 }
 
-fn pull_without_lock(services: *const Services, operand: []const u8, diag: *Diag) Error!void {
+/// Pulls `operand` as `zbx pull` would, without its output: a run without a lock, or the rest of
+/// a partial image.
+fn pull_quietly(services: *const Services, operand: []const u8, diag: *Diag) Error!void {
     assert(operand.len > 0);
     var quiet = services.output;
     quiet.quiet = true;

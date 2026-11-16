@@ -366,9 +366,9 @@ pub const DoctorNet = struct { code: []const u8, diagnostic: agent_json.Diagnost
 
 /// `doctor --output json` is the `zbx.doctor/1` document on stdout, nothing on stderr (a warning
 /// is not a failure: exit 0), and it follows `schema_text`, the output of `zbx schema doctor`.
-/// It lists the seven checks in order, a code only for the ones that are not ok; the `net` check
-/// warns with a `ZBX-W` code and a diagnostic whose first fix has a command and says whether
-/// it needs root.
+/// It lists the eight checks in order, a code only for the ones that are not ok; `fuse` is ok
+/// (the demo VMs have FUSE), and the `net` check warns with a `ZBX-W` code and a diagnostic
+/// whose first fix has a command and says whether it needs root.
 pub fn check_doctor_net(
     arena: Allocator,
     streams: Streams,
@@ -386,8 +386,9 @@ pub fn check_doctor_net(
         return error.DoctorWrong;
     }
     const list = member(doc, "checks") orelse return error.DoctorWrong;
-    if (list != .array or list.array.items.len != 7) return error.DoctorWrong;
-    const ids = [_][]const u8{ "kernel", "userns", "cgroup", "overlay", "subid", "seccomp", "net" };
+    const ids = [_][]const u8{ "kernel", "userns", "cgroup", "overlay", "subid", "seccomp" } ++
+        [_][]const u8{ "fuse", "net" };
+    if (list != .array or list.array.items.len != ids.len) return error.DoctorWrong;
     for (list.array.items, ids) |check, id| {
         const found = member(check, "id") orelse return error.DoctorWrong;
         if (found != .string or !std.mem.eql(u8, found.string, id)) return error.DoctorWrong;
@@ -395,11 +396,12 @@ pub fn check_doctor_net(
         if (state != .string) return error.DoctorWrong;
         const ok = std.mem.eql(u8, state.string, "ok");
         if (ok != (member(check, "code") == null)) return error.DoctorWrong;
+        if (std.mem.eql(u8, id, "fuse") and !ok) return error.DoctorWrong;
         if (!std.mem.eql(u8, id, "net")) continue;
         if (!std.mem.eql(u8, state.string, "warn")) return error.DoctorWrong;
         return try net_warning(arena, check);
     }
-    unreachable; // Seven checks were counted, and the last is net.
+    unreachable; // Eight checks were counted, and the last is net.
 }
 
 fn net_warning(arena: Allocator, check: Value) Error!DoctorNet {
@@ -667,7 +669,8 @@ const doctor_schema_text =
 ;
 
 fn doctor_document(arena: Allocator, net: []const u8) ![]const u8 {
-    const ids = [_][]const u8{ "kernel", "userns", "cgroup", "overlay", "subid", "seccomp" };
+    const ids = [_][]const u8{ "kernel", "userns", "cgroup", "overlay", "subid", "seccomp" } ++
+        [_][]const u8{"fuse"};
     var text: std.ArrayList(u8) = .empty;
     try text.appendSlice(arena, "{\"schema\":\"zbx.doctor/1\",\"ok\":true,\"checks\":[");
     for (ids) |id| {
@@ -725,6 +728,19 @@ test "doctor's json carries the net warning with a code and a fix that needs roo
     try testing.expectError(
         error.DoctorWrong,
         check_doctor_net(arena, captured(no_code, ""), 0, doctor_schema_text),
+    );
+    const fuse_ok = "{\"id\":\"fuse\",\"status\":\"ok\",\"detail\":\"fine\"}";
+    const fuse_warn = "{\"id\":\"fuse\",\"status\":\"warn\",\"detail\":\"no\"," ++
+        "\"code\":\"ZBX-W1203\"}";
+    const no_fuse = try std.mem.replaceOwned(u8, arena, good, fuse_ok, fuse_warn);
+    try testing.expectError(
+        error.DoctorWrong,
+        check_doctor_net(arena, captured(no_fuse, ""), 0, doctor_schema_text),
+    );
+    const seven = try std.mem.replaceOwned(u8, arena, good, fuse_ok ++ ",", "");
+    try testing.expectError(
+        error.DoctorWrong,
+        check_doctor_net(arena, captured(seven, ""), 0, doctor_schema_text),
     );
 }
 

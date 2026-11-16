@@ -182,8 +182,10 @@ pub fn parse_reference(workspace: *Workspace, text: []const u8, diag: *Diag) Err
     assert(workspace.reference.registry_len > 0);
 }
 
-/// Parses the reference and resolves it for the platform into `workspace.resolved`.
-fn resolve_with(
+/// Parses the reference and resolves it for the platform into `workspace.resolved`. `client`
+/// keeps its token and the place that answered, for more requests (a lazy run's ranges); the
+/// caller wipes `workspace.client` when it is done with it.
+pub fn resolve_with(
     host: Host,
     request: *const Request,
     workspace: *Workspace,
@@ -545,6 +547,35 @@ fn store_pipe_failed(host: Host, diag: *Diag, err: host_mod.Error) void {
         .err = err,
         .errno = host.last_errno(),
     } });
+}
+
+/// Fetches the configuration blob of `workspace.resolved` into the cache (checked by its digest)
+/// and reads it into `workspace.settings` and `workspace.labels`; no layer is fetched.
+pub fn fetch_settings(
+    client: *client_mod.Client,
+    workspace: *Workspace,
+    store: *const Store,
+    diag: *Diag,
+) Error!void {
+    assert(diag.code == null);
+    assert(workspace.resolved.layer_count > 0);
+    const blobs: blobs_mod.Blobs = .{ .fs = store.fs, .root = store.root_text() };
+    var failure: blobs_mod.Failure = undefined;
+    blobs.ensure_directories(&failure) catch {
+        diagnose.cache_failed(diag, blobs.root, &failure);
+        return error.Failed;
+    };
+    const resolved = &workspace.resolved;
+    workspace.fetched.config = client_mod.fetch_blob(
+        client,
+        &workspace.reference,
+        resolved.config_digest,
+        resolved.config_size,
+        blobs,
+        &workspace.download,
+        diag,
+    ) catch return error.Failed;
+    try read_settings(workspace, store, diag);
 }
 
 /// Reads the image's configuration blob (checked by its digest when it arrived) into

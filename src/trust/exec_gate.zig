@@ -137,6 +137,7 @@ test "exec counts the result a re-pulled image record derives" {
     image.layer_count = 0;
     image.settings.clear();
     image.labels.clear();
+    image.partial = false;
     var failure: @import("../store/fs.zig").Failure = undefined;
     try images.save(&store, &image, &failure);
     const binding: statement.Binding = .{ .manifest = image.manifest.bytes };

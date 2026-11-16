@@ -171,6 +171,11 @@ const ps_schema =
     \\"items":{"type":"object","required":["host","target"],
     \\"properties":{"host":{"type":"string"},"target":{"type":"string"}}}},
     \\"listen":{"type":"string","description":"M8b: --listen (127.0.0.1:PORT)"},
+    \\"lazy":{"type":"object","description":"S2: a lazy run's fetching; absent for any other",
+    \\"required":["local_percent","fetched_bytes","errors"],
+    \\"properties":{"local_percent":{"type":"integer","description":"of the image's bytes"},
+    \\"fetched_bytes":{"type":"integer","description":"on first read and in the background"},
+    \\"errors":{"type":"integer","description":"reads that failed (EIO)"}}},
     \\"devices":{"type":"array","description":"M10: each --device; absent for a run with none",
     \\"items":{"type":"object","required":["asked"],
     \\"properties":{"asked":{"type":"string","description":"as given"},
@@ -268,7 +273,8 @@ const doctor_schema =
     \\"ok":{"type":"boolean"},"subject":{"type":"string"},"detail":{"type":"string"}}}},
     \\"checks":{"type":"array","description":"every check, in the order of the text report",
     \\"items":{"type":"object","required":["id","status","detail"],
-    \\"properties":{"id":{"enum":["kernel","userns","cgroup","overlay","subid","seccomp","net"]},
+    \\"properties":{"id":{"enum":["kernel","userns","cgroup","overlay","subid","seccomp","fuse",
+    \\"net"]},
     \\"status":{"enum":["ok","warn","fail"]},"detail":{"type":"string",
     \\"description":"the line of the text report"},
     \\"code":{"type":"string","pattern":"^ZBX-[EW][0-9]{4}$",
@@ -332,7 +338,10 @@ const store_ls_schema =
     \\"manifest":{"type":"string","pattern":"^sha256:[0-9a-f]{64}$"},
     \\"platform":{"type":"string"},
     \\"tree":{"type":"string","pattern":"^b3:[0-9a-f]{64}$"},
-    \\"time":{"type":"integer"}}}}}}
+    \\"time":{"type":"integer"},
+    \\"partial":{"const":true,"description":"S2: started lazily, not every file local"},
+    \\"local_percent":{"type":"integer",
+    \\"description":"S2: of a partial image's bytes; absent when its tree cannot be read"}}}}}}
 ;
 
 const store_du_schema =
@@ -436,6 +445,8 @@ const store_verify_schema =
     \\"trees":{"type":"integer"},"roots":{"type":"integer"},
     \\"damaged":{"type":"integer","description":"all damaged things, listed or not"},
     \\"paths_truncated":{"type":"boolean","description":"the walk for paths ran out of room"},
+    \\"partial_images":{"type":"integer",
+    \\"description":"S2: images started with --lazy, not every file fetched: not damage"},
     \\"things":{"type":"array","items":{"type":"object",
     \\"required":["id","class","kind","reason","errno","reached","paths"],
     \\"properties":{"id":{"type":"string","pattern":"^b3:[0-9a-f]{64}$"},
@@ -1136,5 +1147,24 @@ test "run and doctor are one object schema without a $ref, as an agent can follo
     const ps_text = of("ps").?;
     for ([_][]const u8{ "\"network\"", "\"published\"", "\"env\"" }) |part| {
         try testing.expect(std.mem.indexOf(u8, ps_text, part) != null);
+    }
+}
+
+test "the doctor schema's id enum is every check the doctor runs, in its order" {
+    // Goal: a new doctor check cannot ship with a schema that refuses its id (S2's fuse check
+    // did, and the M5 agent demo caught it in the VM). Method: the enum read from the parsed
+    // schema against `doctor.CheckId`, member by member. Linux only: importing `doctor.zig` pulls
+    // its tests, which reach Linux-only code, into the macOS test root; the Linux roots cover it.
+    if (comptime @import("builtin").os.tag != .linux) return error.SkipZigTest;
+    const doctor = @import("doctor.zig");
+    var parsed = try std.json.parseFromSlice(std.json.Value, testing.allocator, doctor_schema, .{});
+    defer parsed.deinit();
+    const checks = parsed.value.object.get("properties").?.object.get("checks").?.object;
+    const item = checks.get("items").?.object.get("properties").?.object;
+    const ids = item.get("id").?.object.get("enum").?.array.items;
+    const names = @typeInfo(doctor.CheckId).@"enum".field_names;
+    try testing.expectEqual(names.len, ids.len);
+    inline for (names, 0..) |name, index| {
+        try testing.expectEqualStrings(name, ids[index].string);
     }
 }

@@ -69,6 +69,8 @@ pub const Probes = struct {
     overlay: host.ProbeOutcome = .ok,
     userns_error: ?host.Error = null,
     overlay_error: ?host.Error = null,
+    fuse: host.ProbeOutcome = .ok,
+    fuse_error: ?host.Error = null,
     /// An ordinary user cannot make an id-mapped mount of a file system the host owns.
     idmap: host.ProbeOutcome = .denied,
     idmap_error: ?host.Error = null,
@@ -1468,6 +1470,10 @@ pub const HostSim = struct {
             .overlay => {
                 if (sim.probes.overlay_error) |err| return sim.natural(err);
                 return sim.probes.overlay;
+            },
+            .fuse => {
+                if (sim.probes.fuse_error) |err| return sim.natural(err);
+                return sim.probes.fuse;
             },
         }
     }

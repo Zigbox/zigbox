@@ -88,6 +88,7 @@ fn record_for(tree: Digest, manifest: []const u8, tag: ?[]const u8) []const u8 {
     image.layers[0] = Sha256.of("layer");
     image.settings.clear();
     image.labels.clear();
+    image.partial = false;
     _ = image.settings.add(.entrypoint, "/bin/hello");
     _ = image.settings.add(.env, "GREETING=hi");
     _ = image.settings.set(.workdir, "/srv");
@@ -228,7 +229,7 @@ test "a record is refused for size, text, version and tree, and nothing is writt
         testing.allocator,
         good,
         "version = 3",
-        "version = 4",
+        "version = 5",
     );
     defer testing.allocator.free(newer);
     failure = try refused(newer, tree);

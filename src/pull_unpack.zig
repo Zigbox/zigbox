@@ -274,6 +274,7 @@ fn finish(job: *Job, store: *Store, result: *const import.Result, diag: *Diag) E
     }
     image.settings = job.settings.*;
     image.labels = job.labels.*;
+    image.partial = false; // Unpacked whole: this pull completes a lazily started image.
     var failure: fs_mod.Failure = undefined;
     images.save(store, &image, &failure) catch {
         const step = "writing the image record";

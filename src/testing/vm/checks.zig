@@ -148,7 +148,7 @@ pub fn split_streams(combined: []const u8) CheckError!Streams {
 // ---- The doctor report ---------------------------------------------------------------------
 
 pub const check_names = [_][]const u8{
-    "kernel", "userns", "cgroup", "overlay", "subid", "seccomp", "net",
+    "kernel", "userns", "cgroup", "overlay", "subid", "seccomp", "fuse", "net",
 };
 
 /// One parsed line of a doctor report (stdout).
@@ -159,7 +159,7 @@ pub const Line = struct {
 };
 
 /// Parses `ok   <name>  <detail>` / `FAIL <name>  <detail>  [ZBX-E01xx]` lines into `out`,
-/// requiring exactly the seven checks in order. Anything else is `ReportMalformed`.
+/// requiring exactly the eight checks in order. Anything else is `ReportMalformed`.
 pub fn parse_report(output: []const u8, out: *[check_names.len]Line) CheckError!void {
     var lines = std.mem.splitScalar(u8, output, '\n');
     var count: usize = 0;
@@ -182,7 +182,8 @@ pub fn parse_report(output: []const u8, out: *[check_names.len]Line) CheckError!
 }
 
 /// Demo step 1: every check is `ok` (the last, `net`, may be a `warn`: a missing pasta fails
-/// nothing), nothing is written to stderr, and the exit code is 0.
+/// nothing; `fuse` may not, as the demo VMs have FUSE), nothing is written to stderr, and the
+/// exit code is 0.
 pub fn check_all_ok(streams: Streams, exit_code: u8) CheckError!void {
     var report: [check_names.len]Line = undefined;
     try parse_report(streams.stdout, &report);
@@ -299,15 +300,17 @@ const good_report =
     "ok   overlay  overlayfs mounts inside a user and mount namespace\n" ++
     "ok   subid  demo (uid 1000): subuid 65536 ids, subgid 65536 ids\n" ++
     "ok   seccomp  seccomp is supported (current mode: disabled for this process)\n" ++
+    "ok   fuse  FUSE mounts inside a user namespace\n" ++
     "warn net  pasta not found: --net user and --publish need it (apt install passt)\n";
 
-/// The doctor with user.max_user_namespaces=0: userns and (needing a namespace) overlay fail.
+/// The doctor with user.max_user_namespaces=0: userns and (needing a namespace) overlay fail,
+/// and fuse (needing one too) only warns.
 const userns_failed_stdout =
     "ok   kernel  6.8.0-45-generic x86_64 (minimum 5.15)\n" ++
     "FAIL userns  user.max_user_namespaces is 0, so no user namespace can be created  " ++
     "[ZBX-E0101]\n" ++
     "ok   cgroup  c\nFAIL overlay  could not enter the user and mount namespaces  [ZBX-E0104]\n" ++
-    "ok   subid  s\nok   seccomp  s\nwarn net  n\n";
+    "ok   subid  s\nok   seccomp  s\nwarn fuse  f\nwarn net  n\n";
 
 const userns_failed_stderr =
     "error[ZBX-E0101]: can't create a user namespace\n" ++
@@ -389,6 +392,14 @@ test "step 1: a report with every check ok, an empty stderr and exit 0 passes" {
     const warned = "warn kernel  x\n" ++ good_report[good_report.len - 0 ..];
     const with_warn: Streams = .{ .stdout = warned, .stderr = "" };
     try testing.expectError(error.ReportMalformed, check_all_ok(with_warn, 0));
+    const fuse_at = comptime std.mem.indexOf(u8, good_report, "ok   fuse").?;
+    const fuse_warned = good_report[0..fuse_at] ++ "warn" ++ good_report[fuse_at + 4 ..];
+    const no_fuse: Streams = .{ .stdout = fuse_warned, .stderr = "" };
+    try testing.expectError(error.CheckNotOk, check_all_ok(no_fuse, 0));
+    const fuse_end = comptime std.mem.indexOfPos(u8, good_report, fuse_at, "\n").? + 1;
+    const seven = good_report[0..fuse_at] ++ good_report[fuse_end..];
+    const short: Streams = .{ .stdout = seven, .stderr = "" };
+    try testing.expectError(error.ReportMalformed, check_all_ok(short, 0));
 }
 
 test "step 2: the FAIL line, the stderr block, the fix and the exit code must all be right" {
@@ -421,12 +432,13 @@ test "step 2: each way the new output can regress is refused" {
     // is not under the `fix` label, and blocks that do not match the FAIL lines.
     const old_line = "FAIL userns  broken \u{2014} fix: sudo sysctl -w a.b=1  [ZBX-E0101]\n";
     const old_format = "ok   kernel  k\n" ++ old_line ++
-        "ok   cgroup  c\nok   overlay  o\nok   subid  s\nok   seccomp  s\nwarn net  n\n";
+        "ok   cgroup  c\nok   overlay  o\nok   subid  s\nok   seccomp  s\nok   fuse  f\n" ++
+        "warn net  n\n";
     const old: Streams = .{ .stdout = old_format, .stderr = userns_failed_stderr };
     try testing.expectError(error.FixOnStdout, check_fails_with_fix(old, 2, userns_failure));
 
     const no_code = "ok   kernel  k\nFAIL userns  broken\nok   cgroup  c\n" ++
-        "ok   overlay  o\nok   subid  s\nok   seccomp  s\nwarn net  n\n";
+        "ok   overlay  o\nok   subid  s\nok   seccomp  s\nok   fuse  f\nwarn net  n\n";
     const bare: Streams = .{ .stdout = no_code, .stderr = userns_failed_stderr };
     try testing.expectError(error.CodeMissing, check_fails_with_fix(bare, 2, userns_failure));
 

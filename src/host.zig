@@ -147,6 +147,10 @@ pub const ProbeKind = enum {
     /// with `Host.probe_idmap`, which names the path. zbx never uses such a mount; the doctor only
     /// reports the fact.
     idmap,
+    /// Whether this user can open `/dev/fuse` and mount FUSE from a scratch user and mount
+    /// namespace, as `zbx run --lazy` does (S2). Nothing serves the mount; it goes with the
+    /// namespace.
+    fuse,
 };
 
 pub const ProbeOutcome = enum {
@@ -157,6 +161,8 @@ pub const ProbeOutcome = enum {
     setup_denied,
     /// The namespace was created but writing setgroups/uid_map/gid_map was refused.
     map_denied,
+    /// FUSE only: `/dev/fuse` is missing, or this user may not open it.
+    no_device,
     /// The child failed for a reason that says nothing about the feature (no memory, ...).
     failed,
     /// The child was killed by a signal.

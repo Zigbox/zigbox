@@ -20,6 +20,7 @@ const digest_mod = @import("digest.zig");
 const fs_mod = @import("fs.zig");
 const layout = @import("layout.zig");
 const names_mod = @import("names.zig");
+const object = @import("object.zig");
 const roots = @import("roots.zig");
 const sets = @import("sets.zig");
 const tree = @import("tree.zig");
@@ -211,6 +212,32 @@ pub fn tree_stored(
     try count_tree(store, memory, digest, &usage, &objects, failure);
     assert(usage.objects <= usage.files);
     return usage.stored_bytes;
+}
+
+/// The percent of the tree `digest`'s distinct object bytes the store holds: what `zbx images`
+/// shows of a partial image (S2). A tree of no bytes is whole.
+pub fn tree_local_percent(
+    store: *const Store,
+    memory: *Memory,
+    digest: Digest,
+    failure: *Failure,
+) Error!u8 {
+    assert(memory.objects.len > 0);
+    var objects = sets.DigestMap.init(memory.objects);
+    var usage: TreeUsage = undefined;
+    try count_tree(store, memory, digest, &usage, &objects, failure);
+    var local: u64 = 0;
+    for (objects.slots) |slot| {
+        if (!slot.used) continue;
+        const held = object.has(store, slot.digest) catch |err| {
+            failure.* = io_failure(store.fs, err, "looking for the image's objects");
+            return error.Failed;
+        };
+        if (held) local += slot.value;
+    }
+    assert(local <= usage.stored_bytes);
+    if (usage.stored_bytes == 0) return 100;
+    return @intCast(local * 100 / usage.stored_bytes);
 }
 
 /// Counts the tree `digest` and how much of it other roots share.
