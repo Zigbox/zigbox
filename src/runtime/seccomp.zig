@@ -352,16 +352,22 @@ test "each group has a syscall it allows, on both architectures" {
     }
 }
 
-test "what the top-20 run found is allowed, and its neighbours that change things are not" {
-    // Goal: the two calls added from real failures (mongo asked get_mempolicy, a JDK asked
-    // fchmodat2) are allowed on both architectures, while the calls that change a NUMA policy
-    // and io_uring, which the images that ask for it do without, are still refused. Method:
-    // the shipped program's verdict for each name.
-    inline for (.{ "get_mempolicy", "fchmodat2", "fchmodat" }) |name| {
+test "the NUMA policy calls are allowed, and the calls that move pages are not" {
+    // Goal: the calls added from real failures (mongo asked get_mempolicy, a JDK asked
+    // fchmodat2) and the NUMA policy calls M2b allows (mbind, set_mempolicy and
+    // set_mempolicy_home_node, docs/decisions/2026-11-16-m2b-numa-syscalls.md) are allowed on
+    // both architectures, while move_pages and migrate_pages, which can act on another
+    // process's pages, and io_uring, which the images that ask for it do without, are still
+    // refused. Method: the shipped program's verdict for each name.
+    const allowed = .{
+        "get_mempolicy",           "fchmodat2", "fchmodat", "mbind", "set_mempolicy",
+        "set_mempolicy_home_node",
+    };
+    inline for (allowed) |name| {
         try testing.expectEqual(ret_allow, verdict(arch_x64, name, 0));
         try testing.expectEqual(ret_allow, verdict(arch_arm64, name, 0));
     }
-    const refused = .{ "set_mempolicy", "mbind", "migrate_pages", "move_pages", "io_uring_setup" };
+    const refused = .{ "migrate_pages", "move_pages", "io_uring_setup" };
     inline for (refused) |name| {
         try testing.expectEqual(denied, verdict(arch_x64, name, 0));
         try testing.expectEqual(denied, verdict(arch_arm64, name, 0));
@@ -376,7 +382,7 @@ test "what the container has no capability for is refused with EPERM" {
         "reboot",            "kexec_load",      "init_module", "finit_module", "delete_module",
         "bpf",               "perf_event_open", "keyctl",      "add_key",      "settimeofday",
         "clock_settime",     "swapon",          "sethostname", "userfaultfd",  "process_vm_readv",
-        "open_by_handle_at", "acct",            "quotactl",    "mbind",        "iopl",
+        "open_by_handle_at", "acct",            "quotactl",    "move_pages",   "iopl",
     };
     inline for (names) |name| {
         if (@hasField(SysX64, name)) {
