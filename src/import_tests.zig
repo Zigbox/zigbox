@@ -97,3 +97,24 @@ test "an empty Dockerfile name or -o value is refused, not a crash" {
     try expect_stderr("zbx state export pgdata -o pgdata.tar.gz");
     try testing.expect(files.content_of(output_path) == null);
 }
+
+test "a FROM or COPY --from reference over the lock's bound is refused with E0501, not a crash" {
+    // Goal: a reference in the Dockerfile longer than the lock's lookup accepts (once 4097 bytes
+    // or more reached the assertion in `lock_file.Lock.find`, bug ZBX-B0001) is one E0501 line
+    // and no file. Method: a 5000-byte name after FROM, then after COPY --from, then one just
+    // over `reference_bytes_max`; each import exits 1 with E0501 and writes nothing.
+    const long: [5000]u8 = @splat('a');
+    const over: [1025]u8 = @splat('b');
+    const cases = [_][]const u8{
+        "FROM " ++ long ++ "\n",
+        "FROM scratch\nCOPY --from=" ++ long ++ " /a /a\n",
+        "FROM " ++ over ++ "\n",
+    };
+    for (cases, 0..) |dockerfile, index| {
+        world(4 + index, dockerfile);
+        try testing.expectEqual(@as(u8, 1), run(&base));
+        try expect_stderr("E0501");
+        try testing.expect(std.mem.indexOf(u8, sim.stderr(), "ZBX-B") == null);
+        try testing.expect(files.content_of(output_path) == null);
+    }
+}
