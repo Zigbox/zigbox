@@ -1062,10 +1062,7 @@ pub fn parse(
                 break;
             },
             .detach, .read_only => try take_run_flag(diag, &p.run, given, argument),
-            .lazy => {
-                if (!build_options.lazy_start) return lazy_not_yet(diag, argument);
-                try take_run_flag(diag, &p.run, given, argument);
-            },
+            .lazy => try take_lazy(diag, &p.run, given, argument),
             .last, .no_redact => try take_bundle_flag(diag, &p.bundle, given, argument),
             .provenance => try take_provenance(diag, &invocation.provenance, given, argument),
             .resolve_only => try take_pull_option(diag, &p.pull, given, argument),
@@ -3156,6 +3153,18 @@ fn unknown_option(diag: *Diag, argument: []const u8) ParseError {
     diag.fix(.{ .sentence = "see the options:", .command = "zbx help" });
     assert(diag.code.? == .E0004);
     return error.UnknownOption;
+}
+
+/// `--lazy`: a run flag in a build with lazy start, refused in one without it (0.5.2).
+fn take_lazy(
+    diag: *Diag,
+    run_args: *RunArgs,
+    operands: []const []const u8,
+    argument: []const u8,
+) ParseError!void {
+    assert(classify(argument) == .lazy);
+    if (!build_options.lazy_start) return lazy_not_yet(diag, argument);
+    try take_run_flag(diag, run_args, operands, argument);
 }
 
 /// `--lazy` in a build without lazy start (`-Dlazy-start`, off in a release): 0.5.2 ships S2's
