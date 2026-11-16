@@ -12,6 +12,7 @@ const assert = std.debug.assert;
 const constants = @import("constants.zig");
 const bpf = @import("runtime/bpf.zig");
 const host = @import("host.zig");
+const knobs = @import("runtime/knobs.zig");
 const sim_world = @import("sim_world.zig");
 const fs_sim = @import("store/fs_sim.zig");
 const store_fs = @import("store/fs.zig");
@@ -429,6 +430,9 @@ pub const HostSim = struct {
         .no_new_privs = no_new_privs,
         .set_user = set_user,
         .install_seccomp = install_seccomp,
+        .get_rlimit = get_rlimit,
+        .set_rlimit = set_rlimit,
+        .write_sysctl = write_sysctl,
         .exec = exec,
         .gid = gid,
         .environment = environment,
@@ -1124,6 +1128,28 @@ pub const HostSim = struct {
         const sim = from_context(context);
         try sim.begin_call();
         if (sim.world.install_seccomp(program)) |errno| return sim.model_error(errno);
+    }
+
+    fn get_rlimit(context: *anyopaque, resource: knobs.Resource) host.Error!knobs.Rlimit {
+        const sim = from_context(context);
+        try sim.begin_call();
+        return sim.world.get_rlimit(resource);
+    }
+
+    fn set_rlimit(
+        context: *anyopaque,
+        resource: knobs.Resource,
+        limit: knobs.Rlimit,
+    ) host.Error!void {
+        const sim = from_context(context);
+        try sim.begin_call();
+        if (sim.world.set_rlimit(resource, limit)) |errno| return sim.model_error(errno);
+    }
+
+    fn write_sysctl(context: *anyopaque, path: [:0]const u8, value: []const u8) host.Error!void {
+        const sim = from_context(context);
+        try sim.begin_call();
+        if (sim.world.write_sysctl(path, value)) |errno| return sim.model_error(errno);
     }
 
     fn exec(context: *anyopaque, request: host.ExecRequest) host.Error!void {

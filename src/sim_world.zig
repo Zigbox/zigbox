@@ -25,6 +25,7 @@ const constants = @import("constants.zig");
 const host = @import("host.zig");
 const bpf = @import("runtime/bpf.zig");
 const seccomp = @import("runtime/seccomp.zig");
+const knobs = @import("runtime/knobs.zig");
 const sim_bus = @import("sim_bus.zig");
 
 pub const errno_perm: u16 = 1;
@@ -254,6 +255,11 @@ pub const Process = struct {
     /// pid to `cgroup.procs`), and whether that happened before it ran its first step.
     in_scope: bool,
     in_scope_before_run: bool,
+    /// The resource limits the process has, one per `knobs.Resource`: inherited from its
+    /// parent, the first process's from `World.rlimits_host`.
+    rlimits: [knobs.resources_count]knobs.Rlimit,
+    /// How many sysctls the process wrote (`write_sysctl`), for tests to count.
+    sysctls_written: u8,
     /// The process's controlling terminal is a pseudo-terminal's peer (`attach_terminal`).
     terminal: bool,
 
@@ -360,6 +366,8 @@ pub const World = struct {
     command_exit: host.ExitStatus,
     /// Mounting `/dev/pts` is refused (an environment without devpts for users).
     devpts_refused: bool,
+    /// The kernel refuses a sysctl's value (EINVAL: out of its range, or not a number).
+    sysctl_refused: bool,
     /// The kernel refuses overlay mounts (no module, a policy).
     overlay_refused: bool,
     /// The kernel refuses the lazy plan's FUSE mount (no `/dev/fuse`, a policy).
@@ -511,6 +519,7 @@ pub const World = struct {
         world.umask = null;
         world.command_exit = .{ .exited = 0 };
         world.devpts_refused = false;
+        world.sysctl_refused = false;
         world.overlay_refused = false;
         world.fuse_refused = false;
         world.broken_pipe_ignored = false;
@@ -1028,6 +1037,7 @@ pub const World = struct {
         child.listener_holds = parent.listener_holds;
         child.table = parent.table;
         child.uts = parent.uts;
+        child.rlimits = parent.rlimits;
         child.stdin_null = flags.stdin_null;
         if (flags.output) |pipes| {
             child.output_ends = .{ pipes.stdout, pipes.stderr };
@@ -2406,6 +2416,38 @@ pub const World = struct {
         return null;
     }
 
+    pub fn get_rlimit(world: *World, resource: knobs.Resource) knobs.Rlimit {
+        assert(world.current < world.processes.len);
+        return world.processes[world.current].rlimits[@backingInt(resource)];
+    }
+
+    /// Lowering is always allowed; raising a hard limit needs CAP_SYS_RESOURCE in the host's
+    /// user namespace, which no process of a container has.
+    pub fn set_rlimit(world: *World, resource: knobs.Resource, limit: knobs.Rlimit) ?u16 {
+        assert(world.current < world.processes.len);
+        if (limit.soft > limit.hard) return errno_inval;
+        const process = &world.processes[world.current];
+        const current = &process.rlimits[@backingInt(resource)];
+        if (limit.hard > current.hard) return errno_perm;
+        current.* = limit;
+        return null;
+    }
+
+    /// A write to `/proc/sys`: it needs the capabilities the child still has before it drops
+    /// them, and a net key needs a network namespace of the process's own.
+    pub fn write_sysctl(world: *World, path: []const u8, value: []const u8) ?u16 {
+        assert(std.mem.startsWith(u8, path, knobs.proc_path_prefix));
+        assert(value.len > 0);
+        const process = &world.processes[world.current];
+        if (process.capabilities != null or process.no_new_privs) return errno_perm;
+        const rest = path[knobs.proc_path_prefix.len..];
+        if (std.mem.startsWith(u8, rest, "net/") and !process.new_net) return errno_perm;
+        if (!process.new_ipc and !std.mem.startsWith(u8, rest, "net/")) return errno_perm;
+        if (world.sysctl_refused) return errno_inval;
+        process.sysctls_written +|= 1;
+        return null;
+    }
+
     pub fn die_with_parent(world: *World) void {
         const process = &world.processes[world.current];
         // A request after a change of user is the one that counts: the kernel cleared the first.
@@ -2512,9 +2554,19 @@ fn unused_process() Process {
         .joined = 0,
         .in_scope = false,
         .in_scope_before_run = false,
+        .rlimits = rlimits_default,
+        .sysctls_written = 0,
         .terminal = false,
     };
 }
+
+/// The limits of a shell on Ubuntu 24.04: what the user who runs zbx usually has.
+const rlimits_default: [knobs.resources_count]knobs.Rlimit = .{
+    .{ .soft = 1024, .hard = 524288 }, // nofile
+    .{ .soft = 63_000, .hard = 63_000 }, // nproc
+    .{ .soft = 8 << 20, .hard = 8 << 20 }, // memlock
+    .{ .soft = 8 << 20, .hard = knobs.unlimited }, // stack
+};
 
 /// Copies a null-terminated array of C strings into `buffer`, one per line, cutting at its end.
 fn copy_lines(buffer: *[text_bytes_max]u8, strings: host.CStrings) u16 {
@@ -2634,4 +2686,31 @@ pub fn scope_cgroup_path(buffer: []u8, scope: *const sim_bus.Scope) []const u8 {
         "/user.slice/user-{d}.slice/user@{d}.service{s}{s}/{s}",
         .{ scope.uid, scope.uid, separator, slice_part, scope.name.slice() },
     ) catch unreachable; // Same bound as above.
+}
+
+test "rlimits and sysctls: a hard limit only goes down, a sysctl needs its namespace" {
+    // Goal: the rules the child's `set_rlimit` and `write_sysctl` steps meet on a real kernel.
+    var world: World = undefined;
+    world.init();
+    world.processes[0].state = .running;
+    const nofile = world.get_rlimit(.nofile);
+    try testing.expectEqual(@as(u64, 524288), nofile.hard);
+    const above: knobs.Rlimit = .{ .soft = 1024, .hard = nofile.hard + 1 };
+    try testing.expectEqual(@as(?u16, errno_perm), world.set_rlimit(.nofile, above));
+    const inverted: knobs.Rlimit = .{ .soft = 10, .hard = 9 };
+    try testing.expectEqual(@as(?u16, errno_inval), world.set_rlimit(.nofile, inverted));
+    try testing.expectEqual(@as(?u16, null), world.set_rlimit(.nofile, .{ .soft = 9, .hard = 9 }));
+    try testing.expectEqual(@as(u64, 9), world.get_rlimit(.nofile).hard);
+    const somaxconn = "/proc/sys/net/core/somaxconn";
+    try testing.expectEqual(@as(?u16, errno_perm), world.write_sysctl(somaxconn, "8192"));
+    world.processes[0].new_net = true;
+    world.processes[0].new_ipc = true;
+    try testing.expectEqual(@as(?u16, null), world.write_sysctl(somaxconn, "8192"));
+    world.sysctl_refused = true;
+    const shmmax = "/proc/sys/kernel/shmmax";
+    try testing.expectEqual(@as(?u16, errno_inval), world.write_sysctl(shmmax, "x"));
+    world.sysctl_refused = false;
+    world.processes[0].capabilities = 1;
+    try testing.expectEqual(@as(?u16, errno_perm), world.write_sysctl(shmmax, "1"));
+    try testing.expectEqual(@as(u8, 1), world.processes[0].sysctls_written);
 }
