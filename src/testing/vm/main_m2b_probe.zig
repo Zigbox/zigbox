@@ -82,9 +82,10 @@ fn demo(init: std.process.Init, out: *Io.Writer, options: H.Options) !void {
         .{ .path = "/m2b/numa.sh", .body = numa_script },
         .{ .path = "/m2b/sysctl.sh", .body = sysctl_script },
         .{ .path = "/m2b/runtimes.sh", .body = runtimes_with_measure },
-        .{ .path = "/m2b/knobs.sh", .body = knobs_script },
     };
-    comptime assert(extra.len <= session_mod.extra_routes_max);
+    // The seed routes, the binary and the rootfs share `http_routes_max` with these.
+    const vm_limits = @import("zigbox_vm").limits;
+    comptime assert(vm_limits.seed_routes + 2 + extra.len <= vm_limits.http_routes_max);
     try session_mod.start(&session, init, out, overlay, accel, .{
         .binary = binary,
         .rootfs = rootfs,
@@ -105,7 +106,7 @@ fn demo(init: std.process.Init, out: *Io.Writer, options: H.Options) !void {
 }
 
 fn fetch_scripts(session: *Session, out: *Io.Writer) !void {
-    const names = [_][]const u8{ "numa", "sysctl", "runtimes", "knobs" };
+    const names = [_][]const u8{ "numa", "sysctl", "runtimes" };
     for (names) |name| {
         const command = try std.fmt.allocPrint(
             session.scratch_allocator(),
@@ -316,10 +317,12 @@ const runtimes_script =
 ;
 
 /// Part 3's half inside the container: what one runtime reports, then the cgroup files it opens.
-/// The harness serves at most `session_mod.extra_routes_max` extra routes, so `runtimes.sh`
-/// writes `measure.sh` itself from a quoted here-document before it does anything else.
+/// The harness serves eight routes in all, three of them extra here, so `runtimes.sh` writes
+/// `measure.sh` and `knobs.sh` itself from quoted here-documents before it does anything else.
 const runtimes_with_measure = "cat > /tmp/m2b/measure.sh <<'M2B_MEASURE'\n" ++
-    measure_script ++ "M2B_MEASURE\n" ++ runtimes_script;
+    measure_script ++ "M2B_MEASURE\n" ++
+    "cat > /tmp/m2b/knobs.sh <<'M2B_KNOBS'\n" ++ knobs_script ++ "M2B_KNOBS\n" ++
+    runtimes_script;
 
 const measure_script =
     \\set -u
