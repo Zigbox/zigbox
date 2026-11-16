@@ -81,10 +81,10 @@ fn demo(init: std.process.Init, out: *Io.Writer, options: H.Options) !void {
     const extra = [_]@import("zigbox_vm").Route{
         .{ .path = "/m2b/numa.sh", .body = numa_script },
         .{ .path = "/m2b/sysctl.sh", .body = sysctl_script },
-        .{ .path = "/m2b/runtimes.sh", .body = runtimes_script },
-        .{ .path = "/m2b/measure.sh", .body = measure_script },
+        .{ .path = "/m2b/runtimes.sh", .body = runtimes_with_measure },
         .{ .path = "/m2b/knobs.sh", .body = knobs_script },
     };
+    comptime assert(extra.len <= session_mod.extra_routes_max);
     try session_mod.start(&session, init, out, overlay, accel, .{
         .binary = binary,
         .rootfs = rootfs,
@@ -105,7 +105,7 @@ fn demo(init: std.process.Init, out: *Io.Writer, options: H.Options) !void {
 }
 
 fn fetch_scripts(session: *Session, out: *Io.Writer) !void {
-    const names = [_][]const u8{ "numa", "sysctl", "runtimes", "measure", "knobs" };
+    const names = [_][]const u8{ "numa", "sysctl", "runtimes", "knobs" };
     for (names) |name| {
         const command = try std.fmt.allocPrint(
             session.scratch_allocator(),
@@ -316,6 +316,11 @@ const runtimes_script =
 ;
 
 /// Part 3's half inside the container: what one runtime reports, then the cgroup files it opens.
+/// The harness serves at most `session_mod.extra_routes_max` extra routes, so `runtimes.sh`
+/// writes `measure.sh` itself from a quoted here-document before it does anything else.
+const runtimes_with_measure = "cat > /tmp/m2b/measure.sh <<'M2B_MEASURE'\n" ++
+    measure_script ++ "M2B_MEASURE\n" ++ runtimes_script;
+
 const measure_script =
     \\set -u
     \\NODE='const os=require("os"),v8=require("v8");console.log("constrainedMemory",
