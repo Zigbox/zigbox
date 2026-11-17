@@ -31,6 +31,8 @@ const EnvironmentVariable = host_sim.EnvironmentVariable;
 
 const credentials_path = "/home/ci/gcp.json";
 const subject_path = "/run/zbx/oidc-token";
+const key_path = "/home/ci/sa-key.json";
+const user_path = "/home/ci/adc.json";
 const project = "/home/alice/project";
 const lock_path = project ++ "/zbx.lock";
 const repository = "fixture/cdn";
@@ -40,6 +42,8 @@ const gcr_reference = "gcr.io/" ++ repository ++ ":latest";
 const disk_files = sim_run.files ++ [_]host_sim.File{
     .{ .path = credentials_path, .content = parse_tests.file_account },
     .{ .path = subject_path, .content = google_sim.subject_token ++ "\n" },
+    .{ .path = key_path, .content = "{\"type\":\"service_account\",\"private_key\":\"-----\"}" },
+    .{ .path = user_path, .content = "{\"type\":\"authorized_user\",\"refresh_token\":\"x\"}" },
 };
 
 const wif_env = sim_run.env_home ++ [_]EnvironmentVariable{
@@ -47,6 +51,12 @@ const wif_env = sim_run.env_home ++ [_]EnvironmentVariable{
 };
 const missing_file_env = sim_run.env_home ++ [_]EnvironmentVariable{
     .{ .name = "GOOGLE_APPLICATION_CREDENTIALS", .value = "/nowhere/gcp.json" },
+};
+const key_env = sim_run.env_home ++ [_]EnvironmentVariable{
+    .{ .name = "GOOGLE_APPLICATION_CREDENTIALS", .value = key_path },
+};
+const user_env = sim_run.env_home ++ [_]EnvironmentVariable{
+    .{ .name = "GOOGLE_APPLICATION_CREDENTIALS", .value = user_path },
 };
 const mirror_env = wif_env ++ [_]EnvironmentVariable{
     .{ .name = "ZBX_REGISTRY_MIRRORS", .value = "mirror.example" },
@@ -442,11 +452,50 @@ test "each workload identity failure has its code, and nothing else is tried" {
         try world.expect_clean();
         try world.expect_wiped();
     }
-    // A credentials file that cannot be read is E0561, with no network call at all.
-    world.setup(60, &missing_file_env);
-    try testing.expectEqual(@as(u8, 2), world.pull_of(reference));
-    try testing.expect(world.stderr_has("error[ZBX-E0561]"));
-    try testing.expectEqual(@as(u32, 0), world.wire.requests);
+}
+
+fn setup_on(world: *World, gcr: bool, seed: u64, env: []const EnvironmentVariable) void {
+    if (gcr) world.setup_at(seed, env, "gcr.io") else world.setup(seed, env);
+}
+
+test "a credentials file zbx cannot use does not stop a public pull, as in 0.5.2" {
+    // Goal: an unreadable, key or authorized_user file asks no service up front. A public image
+    // pulls anonymously; a private one is refused with the file's code after the realm's no, and
+    // no source stands in for the file.
+    const Case = struct { env: []const EnvironmentVariable, code: []const u8 };
+    const cases = [_]Case{
+        .{ .env = &missing_file_env, .code = "error[ZBX-E0561]" },
+        .{ .env = &key_env, .code = "error[ZBX-E0562]" },
+        .{ .env = &user_env, .code = "error[ZBX-E0563]" },
+    };
+    const world = try World.create();
+    defer world.destroy();
+    for (cases, 0..) |case, index| {
+        for ([_][:0]const u8{ reference, gcr_reference }) |text| {
+            const gcr = text.ptr == gcr_reference.ptr;
+            const seed: u64 = 60 + index * 4 + @as(u64, @intFromBool(gcr)) * 2;
+            setup_on(world, gcr, seed, case.env);
+            world.google.public = true;
+            world.google.metadata = .ok;
+            try testing.expectEqual(@as(u8, 0), world.pull_of(text));
+            try testing.expect(!world.stderr_has("error["));
+            try testing.expectEqual(@as(u32, 1), world.google.realm_calls);
+            try testing.expectEqual(@as(u32, 0), world.google.sts_calls);
+            try testing.expectEqual(@as(u32, 0), world.google.metadata_calls);
+            try world.expect_where_sent();
+            try world.expect_wiped();
+
+            setup_on(world, gcr, seed + 1, case.env);
+            world.google.metadata = .ok;
+            try testing.expect(world.pull_of(text) != 0);
+            try testing.expect(world.stderr_has(case.code));
+            try testing.expectEqual(@as(u32, 1), world.google.realm_calls);
+            try testing.expectEqual(@as(u32, 0), world.google.sts_calls);
+            try testing.expectEqual(@as(u32, 0), world.google.metadata_calls);
+            try world.expect_where_sent();
+            try world.expect_wiped();
+        }
+    }
 }
 
 test "a redirect to storage.googleapis.com gets no credential" {
@@ -616,7 +665,8 @@ fn ignore_event(context: *anyopaque, event: pull.Event) void {
 
 test "the library: a caller's token pulls, an expired one is refused before it is sent" {
     // Goal: the library entry as Zigcube calls it: a token pulls; one past its expiry is E0567
-    // with nothing sent; no token and no fallback is E0560 after the anonymous refusal.
+    // with nothing sent, as is an empty one; no token and no fallback is E0560 after the
+    // anonymous refusal.
     const library = try std.heap.page_allocator.create(Library);
     defer std.heap.page_allocator.destroy(library);
     const world = try World.create();
@@ -643,6 +693,14 @@ test "the library: a caller's token pulls, an expired one is refused before it i
     try testing.expectError(error.Failed, library.pull_once(host, &request));
     try testing.expectEqual(@as(?codes.Code, .E0567), library.diag.code);
     try testing.expectEqual(requests, world.wire.requests);
+    // An empty token is the caller's mistake: refused the same way, not a panic.
+    const length = library.token.len;
+    library.token.len = 0;
+    library.diag.reset();
+    try testing.expectError(error.Failed, library.pull_once(host, &request));
+    try testing.expectEqual(@as(?codes.Code, .E0567), library.diag.code);
+    try testing.expectEqual(requests, world.wire.requests);
+    library.token.len = length;
     request.google = null;
     library.diag.reset();
     try testing.expectError(error.Failed, library.pull_once(host, &request));

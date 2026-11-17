@@ -68,7 +68,8 @@ pub const Credential = enum { none, ecr_basic, realm_basic };
 /// Asked at most once per pull, when a Google registry's realm refuses an anonymous token
 /// request and the pull holds no credential: the access token to send to the realm as
 /// `oauth2accesstoken`, in the caller's storage, or null with the refusal in `diag`. The CLI asks
-/// the metadata server here (`pull_google.zig`).
+/// the metadata server here, or raises the refusal of a credentials file it deferred so a public
+/// image still pulls anonymously (`pull_google.zig`).
 pub const RealmFallback = struct {
     context: *anyopaque,
     call: *const fn (context: *anyopaque, registry: []const u8, diag: *Diag) ?[]const u8,
@@ -401,7 +402,7 @@ fn fetch_platform_manifest(
 
 /// The most the request target of a manifest takes: "/v2/", a repository, "/manifests/", a name.
 const manifest_target_bytes_max = 16 + constants.reference_repository_bytes_max +
-    constants.oci_digest_text_bytes;
+    reference_mod.manifest_name_bytes_max;
 
 /// Fetches the manifest `name` of `reference` into the workspace body and checks its digest. The
 /// anonymous flow lives here: a 401 gets one token and one repeat.

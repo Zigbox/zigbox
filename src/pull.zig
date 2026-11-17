@@ -243,9 +243,9 @@ fn google_login(
         client.realm_fallback = request.google_fallback;
         return;
     };
-    assert(token.len > 0);
-    if (token.expired(host.time_now())) {
-        // Refused before it is sent: the registry would only say 401.
+    if (token.len == 0 or token.expired(host.time_now())) {
+        // Refused before it is sent: the registry would only say 401. An empty token is a
+        // caller's mistake, refused as one rather than asserted.
         google_diagnose.token_refused(diag, registry, true);
         return error.Failed;
     }

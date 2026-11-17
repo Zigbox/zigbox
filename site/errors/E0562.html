@@ -76,7 +76,7 @@ footer{border-top:1px solid var(--line);padding-block:24px;color:var(--muted);
 <p class="summary">service account key files are not supported</p>
 <dl class="facts"><div><dt>Kind</dt><dd>error</dd></div><div><dt>Blame</dt><dd>user</dd></div><div><dt>Exit code</dt><dd>1</dd></div></dl>
 <h2>What it means</h2>
-<p>GOOGLE_APPLICATION_CREDENTIALS names a service account key file. zbx does not use key files: a key is a long-lived secret on disk, and anyone who has it is the service account. Use workload identity federation instead, whose external_account file holds no secret, and delete the key.</p>
+<p>GOOGLE_APPLICATION_CREDENTIALS names a service account key file. zbx does not use key files: a key is a long-lived secret on disk, and anyone who has it is the service account. Use workload identity federation instead, whose external_account file holds no secret, and delete the key. A public image still pulls: zbx names the file only when the registry refuses the anonymous pull.</p>
 <h2>Offline</h2>
 <p>The same text, without a network:</p>
 <pre class="term">zbx explain E0562</pre>

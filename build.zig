@@ -20,8 +20,8 @@ pub fn build(b: *std.Build) void {
     const manifest = @import("build.zig.zon");
     const options = b.addOptions();
     options.addOption([]const u8, "version", manifest.version);
-    // 0.5.2 ships lazy start (S2) dormant: `--lazy` is refused unless a build turns it on, which
-    // only demo-s2-lazy's zbx does (docs/decisions/2026-11-16-0.5.2-s2-dormant.md).
+    // 0.5.2 and 0.5.3 ship lazy start (S2) dormant: `--lazy` is refused unless a build turns it on,
+    // which only demo-s2-lazy's zbx does (docs/decisions/2026-11-16-0.5.2-s2-dormant.md).
     options.addOption(bool, "lazy_start", false);
 
     // LLVM in every mode, not Zig's own x86_64 backend in Debug: that backend writes each

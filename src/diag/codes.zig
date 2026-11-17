@@ -3146,12 +3146,13 @@ pub const registry = [_]Entry{
         .summary = "there are no Google credentials to pull from this registry",
         .explanation =
         \\zbx pulls from Artifact Registry (<region>-docker.pkg.dev) and the four
-        \\gcr.io hosts anonymously first, as from any registry. When the registry
-        \\refuses that, zbx looks for Google credentials: workload identity
-        \\federation, when GOOGLE_APPLICATION_CREDENTIALS names an external_account
-        \\file, and otherwise the metadata server of a Google Compute Engine
-        \\instance, asked once. Neither gave an access token. The message says what
-        \\each source did.
+        \\gcr.io hosts anonymously first, as from any registry, with one exception:
+        \\when GOOGLE_APPLICATION_CREDENTIALS names an external_account file, zbx
+        \\exchanges it for an access token (workload identity federation) before
+        \\the first request, and that answer is final. Without the variable, when
+        \\the registry refuses the anonymous pull, zbx asks the metadata server of
+        \\a Google Compute Engine instance, once. No source gave an access token.
+        \\The message says what each source did.
         \\
         \\On GitHub Actions or GKE, set up workload identity federation and point
         \\GOOGLE_APPLICATION_CREDENTIALS at its file. On Compute Engine, attach a
@@ -3172,7 +3173,9 @@ pub const registry = [_]Entry{
         \\GOOGLE_APPLICATION_CREDENTIALS names a credentials file, and zbx could not
         \\read it: it is missing, not readable by this user, not a regular file, or
         \\larger than 16384 bytes, the bound zbx reads. Once the variable is set,
-        \\its file is the answer: the metadata server is not tried instead.
+        \\its file is the answer: the metadata server is not tried instead. A
+        \\public image still pulls: zbx names the file only when the registry
+        \\refuses the anonymous pull.
         \\
         \\Check the path the variable names, or unset the variable.
         ,
@@ -3186,7 +3189,9 @@ pub const registry = [_]Entry{
         \\GOOGLE_APPLICATION_CREDENTIALS names a service account key file. zbx does
         \\not use key files: a key is a long-lived secret on disk, and anyone who
         \\has it is the service account. Use workload identity federation instead,
-        \\whose external_account file holds no secret, and delete the key.
+        \\whose external_account file holds no secret, and delete the key. A
+        \\public image still pulls: zbx names the file only when the registry
+        \\refuses the anonymous pull.
         ,
     },
     .{
@@ -3202,7 +3207,9 @@ pub const registry = [_]Entry{
         \\iamcredentials.googleapis.com. It does not use gcloud's user credentials
         \\(authorized_user), executable, AWS or certificate sources, a plain-HTTP
         \\url, another token_url or universe_domain, or a value written with JSON
-        \\escapes. The message names what the file has.
+        \\escapes. The message names what the file has. A public image still
+        \\pulls: zbx names the file only when the registry refuses the anonymous
+        \\pull.
         ,
     },
     .{
@@ -3305,7 +3312,8 @@ pub const registry = [_]Entry{
         \\The external_account file's audience is a workforce identity pool (for
         \\people signing in through an identity provider). zbx supports workload
         \\identity pools, for machines and CI. Use a workload identity pool's
-        \\provider.
+        \\provider. A public image still pulls: zbx names the file only when the
+        \\registry refuses the anonymous pull.
         ,
     },
     .{
@@ -5168,7 +5176,7 @@ pub const registry = [_]Entry{
         .blame = .user,
         .summary = "the image is too large for lazy start",
         .explanation =
-        \\Lazy start arrives in 0.6.0: this zbx (0.5.2) refuses --lazy with E0004.
+        \\Lazy start arrives in 0.6.0: this zbx (0.5.3) refuses --lazy with E0004.
         \\
         \\zbx run --lazy serves the image's files from memory it sets aside when
         \\the run starts: a table with room for a fixed number of entries (files,
@@ -5186,7 +5194,7 @@ pub const registry = [_]Entry{
         .blame = .user,
         .summary = "--lazy does not work with another option given",
         .explanation =
-        \\Lazy start arrives in 0.6.0: this zbx (0.5.2) refuses --lazy with E0004.
+        \\Lazy start arrives in 0.6.0: this zbx (0.5.3) refuses --lazy with E0004.
         \\
         \\zbx run --lazy starts a container before its image is all on disk,
         \\serving the files from the store as the container reads them. The server

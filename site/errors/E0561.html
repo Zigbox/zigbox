@@ -76,7 +76,7 @@ footer{border-top:1px solid var(--line);padding-block:24px;color:var(--muted);
 <p class="summary">the Google credentials file cannot be read</p>
 <dl class="facts"><div><dt>Kind</dt><dd>error</dd></div><div><dt>Blame</dt><dd>environment</dd></div><div><dt>Exit code</dt><dd>2</dd></div></dl>
 <h2>What it means</h2>
-<p>GOOGLE_APPLICATION_CREDENTIALS names a credentials file, and zbx could not read it: it is missing, not readable by this user, not a regular file, or larger than 16384 bytes, the bound zbx reads. Once the variable is set, its file is the answer: the metadata server is not tried instead.</p>
+<p>GOOGLE_APPLICATION_CREDENTIALS names a credentials file, and zbx could not read it: it is missing, not readable by this user, not a regular file, or larger than 16384 bytes, the bound zbx reads. Once the variable is set, its file is the answer: the metadata server is not tried instead. A public image still pulls: zbx names the file only when the registry refuses the anonymous pull.</p>
 <p>Check the path the variable names, or unset the variable.</p>
 <h2>Offline</h2>
 <p>The same text, without a network:</p>

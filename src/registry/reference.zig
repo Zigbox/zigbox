@@ -90,13 +90,14 @@ pub const Reference = struct {
     /// What names the manifest in a request: the digest when there is one, else the tag. A
     /// parsed reference has at least one of them.
     pub fn manifest_name(reference: *const Reference, buffer: *ManifestName) []const u8 {
-        assert(buffer.len == constants.oci_digest_text_bytes);
+        assert(buffer.len == manifest_name_bytes_max);
         assert(reference.registry_len > 0);
         if (reference.digest) |digest| {
             buffer[0..constants.oci_digest_text_bytes].* = digest.text();
             return buffer[0..constants.oci_digest_text_bytes];
         }
         const found = reference.tag().?;
+        assert(found.len <= buffer.len);
         @memcpy(buffer[0..found.len], found);
         return buffer[0..found.len];
     }
@@ -124,8 +125,14 @@ pub const Reference = struct {
     }
 };
 
-/// The room `manifest_name` needs: a digest is longer than a tag.
-pub const ManifestName = [constants.oci_digest_text_bytes]u8;
+/// The longest name `manifest_name` returns: a tag (up to 128 bytes) is longer than a digest
+/// (71), so the room is the larger of the two, never the digest's alone.
+pub const manifest_name_bytes_max = @max(
+    constants.reference_tag_bytes_max,
+    constants.oci_digest_text_bytes,
+);
+/// The room `manifest_name` needs.
+pub const ManifestName = [manifest_name_bytes_max]u8;
 /// The room `format` needs.
 pub const Formatted = [constants.reference_bytes_max]u8;
 
@@ -426,6 +433,18 @@ test "a digest decides, and a tag may come with it" {
     try testing.expect(reference.digest != null);
     try parse("alpine:3.20", &reference);
     try testing.expectEqualStrings("3.20", reference.manifest_name(&name));
+}
+
+test "manifest_name holds the longest tag, which is longer than a digest" {
+    // Goal: a tag of the full 128 bytes names the manifest whole (fuzzer `reference`, seed
+    // 2136361303, iteration 707655: a 78-byte tag overran a buffer sized for a digest).
+    const longest = "t" ++ repeat('0', constants.reference_tag_bytes_max - 1);
+    comptime assert(longest.len > constants.oci_digest_text_bytes);
+    var reference: Reference = undefined;
+    try parse("alpine:" ++ longest, &reference);
+    var name: ManifestName = undefined;
+    try testing.expectEqualStrings(longest, reference.manifest_name(&name));
+    try expect_refused("alpine:" ++ longest ++ "0", error.BadTag);
 }
 
 test "what is refused, each with its reason" {
