@@ -20,6 +20,12 @@
 //! The limits of a scope that started must be what the flags said, or in the cgroup files when
 //! the systemd is too old for the property.
 //!
+//! M2b adds `--require-host`: a scenario may require some of the four host settings, whose files
+//! the simulated host has with a value that meets the requirement or not, damaged, unreadable or
+//! not at all. A miss is refused (E0319, or E0321 for a setting that can't be read) before the
+//! scope, the ids or any process. And the kernel may refuse the container a cgroup namespace of
+//! its own (E0322).
+//!
 //! The oracle is independent of the code under test: it knows which code each kind of step
 //! should give, the order in which things fail (the parent's early steps, then the child's, then
 //! the wait), and reads the output by its text, not by the renderer's own functions.
@@ -35,6 +41,7 @@ const diag_fuzz = @import("fuzz_diag.zig");
 const plan_mod = @import("runtime/plan.zig");
 const records = @import("runtime/records.zig");
 const knobs = @import("runtime/knobs.zig");
+const host_settings = @import("runtime/host_settings.zig");
 const sim_run = @import("runtime/sim_run.zig");
 const repeat = @import("test_util.zig").repeat;
 
@@ -135,8 +142,9 @@ const EnvChoice = enum {
 const marker_given = "zbx-fuzz-secret-5d1";
 const marker_copied = "zbx-fuzz-copied-8e2";
 
-/// The words a command line of the fuzzer can have.
-const args_max = 48;
+/// The words a command line of the fuzzer can have: 44 without `--require-host`, and two for
+/// each of the four settings it can require.
+const args_max = 56;
 const Words = [args_max][:0]const u8;
 
 /// The other mounts of the run (M6 slice 3): none, a tmpfs, two binds and a secret that all
@@ -292,6 +300,9 @@ const Scenario = struct {
     knobs: KnobsChoice,
     /// The kernel refuses the value of the `--sysctl` (EINVAL), as it does one out of range.
     sysctl_refused: bool,
+    /// The kernel refuses `unshare(CLONE_NEWCGROUP)` (EINVAL); only a scoped run asks for it.
+    cgroup_namespace_refused: bool,
+    require: Requirements,
 
     /// Whether the probe finds a bus: the run then has a scope and the plan a step for it. A
     /// stale inherited address is not permission trouble, so nothing falls back from it.
@@ -431,6 +442,7 @@ fn random_scenario(random: std.Random) Scenario {
     scenario.pids = random_limit(random, &pids_texts);
     scenario.cpus = random_limit(random, &cpus_texts);
     random_cgroup(random, &scenario);
+    random_requirements(random, &scenario.require);
     return scenario;
 }
 
@@ -442,10 +454,12 @@ fn random_cgroup(random: std.Random, scenario: *Scenario) void {
     scenario.keeper_dies = random.uintLessThan(u8, 5) == 0;
     scenario.knobs = if (random.boolean()) .none else random.enumValue(KnobsChoice);
     scenario.sysctl_refused = scenario.knobs.has_sysctl() and random.uintLessThan(u8, 4) == 0;
+    scenario.cgroup_namespace_refused = scenario.bus == .fine and random.uintLessThan(u8, 8) == 0;
     // Scope cleanup and inherited-address faults are drawn only where nothing else is failing,
     // so that every warning and every connection of the run can be accounted for.
     const calm = scenario.fault_step == null and scenario.step_fault == .none and
-        scenario.helper_fails == null and !scenario.sysctl_refused;
+        scenario.helper_fails == null and !scenario.sysctl_refused and
+        !scenario.cgroup_namespace_refused;
     scenario.read_only = random.uintLessThan(u8, 4) == 0;
     scenario.net = random.enumValue(NetChoice);
     scenario.env = if (random.boolean()) .none else random.enumValue(EnvChoice);
@@ -665,6 +679,9 @@ fn verdict_of(scenario: *const Scenario) Verdict {
     if (scenario.limit_invalid()) return early_refusal(.E0306);
     if (scenario.name == .invalid) return early_refusal(.E0206);
     if (scenario.rootfs != .good) return early_refusal(.E0201);
+    // `--require-host` is checked with the knobs, before the mounts are resolved or the ids
+    // and the scope are looked at.
+    if (scenario.require.refusal()) |code| return early_refusal(code);
     // A bind of a path that is not there is refused before the ids are looked at.
     if (scenario.mounts == .missing) return early_refusal(.E0210);
     // The ids come next (and their warning), then the scope: a limit with no bus is refused.
@@ -697,6 +714,11 @@ fn verdict_of(scenario: *const Scenario) Verdict {
         const at = index_of(scenario, .write_sysctl);
         const sooner = if (child) |event| at < event.refused.step.? else true;
         if (sooner) child = refusal(.E0318, at, true);
+    }
+    if (scenario.cgroup_namespace_refused and scenario.scoped()) {
+        const at = index_of(scenario, .unshare_cgroup);
+        const sooner = if (child) |event| at < event.refused.step.? else true;
+        if (sooner) child = refusal(.E0322, at, true);
     }
     if (scenario.command == .missing_path or scenario.command == .missing_bare) {
         const exec = index_of(scenario, .exec);
@@ -1029,15 +1051,13 @@ pub fn fuzz_run(seed: u64) void {
     const scenario = random_scenario(random);
 
     var sim: HostSim = undefined;
-    if (scenario.full) sim_run.init(&sim, random.int(u64)) else sim_run.init_single(
-        &sim,
-        random.int(u64),
-    );
+    sim_run.start(&sim, random.int(u64), host_files_with(&scenario));
     sim.uid_value = scenario.uid;
     sim.gid_value = scenario.gid;
     sim.world.command_exit = scenario.command_exit;
     sim.world.devpts_refused = scenario.devpts_refused;
     sim.world.sysctl_refused = scenario.sysctl_refused;
+    sim.world.cgroup_namespace_refused = scenario.cgroup_namespace_refused;
     sim.world.disk_full = false;
     sim.world.helper_fails_with = scenario.helper_fails;
     sim.world.script = .{ 0, 0, 0, 0, 0, 0, 0, 0 };
@@ -1143,6 +1163,11 @@ fn command_line(scenario: *const Scenario, args: *Words) usize {
         else
             "net.core.somaxconn=8192";
         push_pair(args, &count, "--sysctl", text);
+    }
+    for (scenario.require.texts[0..scenario.require.count]) |*text| {
+        // Zero-terminated by `random_requirements`.
+        const value = std.mem.sliceTo(@as([*:0]const u8, @ptrCast(text)), 0);
+        push_pair(args, &count, "--require-host", value);
     }
     if (scenario.image) {
         push(args, &count, image_argument());
@@ -1259,6 +1284,7 @@ fn set_bus(sim: *HostSim, scenario: *const Scenario) void {
 }
 
 fn push(args: *Words, count: *usize, item: [:0]const u8) void {
+    assert(count.* < args_max);
     args[count.*] = item;
     count.* += 1;
 }
@@ -1547,6 +1573,9 @@ fn check_refused(
         // Refused before anything was created.
         // (A tree's worker is a process too; it was reaped, and leak() checks that.)
         if (!scenario.image) assert(sim.world.processes[1].state == .unused);
+        // A refusal drawn before `--require-host` is checked (a bad rootfs, say) stands instead.
+        const required = scenario.require.refusal();
+        if (required != null and required.? == code) check_required_refusal(sim, scenario, code);
         return;
     }
     // The diagnostic names the step in the output a person (or a script) can read. The default
@@ -1693,4 +1722,203 @@ test "run fuzzer: aimed faults reach E0312 and E0318, and those seeds pass" {
     try std.testing.expect(seen_sysctl != null);
     fuzz_run(seen_rlimit.?);
     fuzz_run(seen_sysctl.?);
+}
+
+// ---- `--require-host` ----------------------------------------------------------------------
+
+const HostSetting = host_settings.HostSetting;
+const HostRequirement = host_settings.HostRequirement;
+const settings_count = host_settings.settings_count;
+
+/// What the simulated host has at a setting's file.
+const SettingFile = union(enum) {
+    /// The kernel's file, holding this value.
+    value: u64,
+    /// No file: the host does not expose the setting.
+    absent,
+    /// The file is there and can't be read.
+    unreadable,
+    /// The file holds something that is not the setting's value.
+    malformed,
+};
+
+const setting_file_bytes_max = 64;
+
+/// The `--require-host` flags of a run, in the order given, and the host's four setting files.
+const Requirements = struct {
+    count: u32,
+    wanted: [settings_count]HostRequirement,
+    /// Each flag's value, zero-terminated, as the command line passes it.
+    texts: [settings_count][host_settings.text_bytes_max + 1]u8,
+    /// By `HostSetting`.
+    files: [settings_count]SettingFile,
+    /// Each file's contents, zero-terminated.
+    contents: [settings_count][setting_file_bytes_max]u8,
+
+    /// The code the run is refused with, or null when every requirement is met. This is the
+    /// oracle, written apart from `host_settings_check`: a required setting whose file can't
+    /// be read or holds nonsense refuses first, wherever it is in the list (E0321); then the
+    /// first requirement, in the order given, whose setting is absent (E0321) or misses (E0319).
+    fn refusal(require: *const Requirements) ?codes.Code {
+        assert(require.count <= settings_count);
+        for (require.wanted[0..require.count]) |wanted| {
+            switch (require.files[@backingInt(wanted.setting)]) {
+                .unreadable, .malformed => return .E0321,
+                .value, .absent => {},
+            }
+        }
+        for (require.wanted[0..require.count]) |wanted| {
+            switch (require.files[@backingInt(wanted.setting)]) {
+                .value => |value| {
+                    const meets = if (wanted.setting.is_minimum())
+                        value >= wanted.minimum
+                    else
+                        (wanted.allowed.bits >> @intCast(value)) & 1 == 1;
+                    if (!meets) return .E0319;
+                },
+                .absent, .unreadable, .malformed => return .E0321,
+            }
+        }
+        return null;
+    }
+};
+
+/// A quarter of the scenarios require one to four settings, in a random order. Every setting's
+/// file is drawn whether or not it is required: one the run does not name can't refuse it.
+fn random_requirements(random: std.Random, require: *Requirements) void {
+    var order: [settings_count]HostSetting = undefined;
+    @memcpy(&order, std.enums.values(HostSetting));
+    random.shuffle(HostSetting, &order);
+    require.count = 0;
+    if (random.uintLessThan(u8, 4) == 0) require.count = random.intRangeAtMost(u32, 1, 4);
+    for (std.enums.values(HostSetting)) |setting| {
+        require.files[@backingInt(setting)] = random_setting_file(random, setting);
+        write_setting_file(setting, require);
+    }
+    for (order[0..require.count], 0..) |setting, index| {
+        const wanted = random_wanted(random, setting, require.files[@backingInt(setting)]);
+        require.wanted[index] = wanted;
+        var rendered: [host_settings.text_bytes_max]u8 = undefined;
+        const text = host_settings.render_requirement(wanted, &rendered);
+        @memcpy(require.texts[index][0..text.len], text);
+        require.texts[index][text.len] = 0;
+    }
+    assert(require.count <= settings_count);
+    assert(host_settings.list_problem(require.wanted[0..require.count]) == null);
+}
+
+fn random_setting_file(random: std.Random, setting: HostSetting) SettingFile {
+    const file: SettingFile = switch (random.uintLessThan(u8, 10)) {
+        0 => .absent,
+        1 => .unreadable,
+        2 => .malformed,
+        else => .{ .value = random_setting_value(random, setting) },
+    };
+    if (file == .value) {
+        if (!setting.is_minimum()) assert(file.value < 3);
+    }
+    return file;
+}
+
+fn random_setting_value(random: std.Random, setting: HostSetting) u64 {
+    if (!setting.is_minimum()) return random.uintLessThan(u64, 3);
+    const value: u64 = switch (random.uintLessThan(u8, 3)) {
+        0 => 65530,
+        1 => 262144,
+        else => random.int(u64),
+    };
+    assert(setting.is_minimum());
+    return value;
+}
+
+/// A requirement of `setting` that the host's value, when it has one, meets about half the
+/// time: a minimum at, just above or just below the value; a set with or without it.
+fn random_wanted(random: std.Random, setting: HostSetting, host: SettingFile) HostRequirement {
+    const value: u64 = if (host == .value) host.value else random.uintLessThan(u64, 3);
+    if (setting.is_minimum()) {
+        const minimum = switch (random.uintLessThan(u8, 5)) {
+            0 => value,
+            1 => value +| 1,
+            2 => value -| 1,
+            3 => 0,
+            else => std.math.maxInt(u64),
+        };
+        return .{ .setting = setting, .minimum = minimum };
+    }
+    assert(value < 3);
+    var bits: u8 = random.intRangeAtMost(u8, 1, 7);
+    if (random.boolean()) bits |= @as(u8, 1) << @intCast(value);
+    const wanted: HostRequirement = .{ .setting = setting, .allowed = .{ .bits = bits } };
+    assert(wanted.well_formed());
+    return wanted;
+}
+
+/// The setting's file as the kernel writes it, or damaged; empty for one that is absent.
+fn write_setting_file(setting: HostSetting, require: *Requirements) void {
+    const storage = &require.contents[@backingInt(setting)];
+    @memset(storage, 0);
+    var writer: std.Io.Writer = .fixed(storage[0 .. setting_file_bytes_max - 1]);
+    // Cannot fail: a 20-digit count, or THP's three words, and a newline fit 63 bytes.
+    switch (require.files[@backingInt(setting)]) {
+        .absent, .unreadable => {},
+        .malformed => writer.writeAll("x\n") catch unreachable, // Same bound.
+        .value => |value| if (setting == .transparent_hugepage) {
+            for (setting.words(), 0..) |word, index| {
+                const separator: []const u8 = if (index == 0) "" else " ";
+                const open: []const u8 = if (index == value) "[" else "";
+                const close: []const u8 = if (index == value) "]" else "";
+                writer.print("{s}{s}{s}{s}", .{ separator, open, word, close }) catch
+                    unreachable; // Same bound.
+            }
+            writer.writeAll("\n") catch unreachable; // Same bound.
+        } else {
+            writer.print("{d}\n", .{value}) catch unreachable; // Same bound.
+        },
+    }
+    assert(storage[setting_file_bytes_max - 1] == 0);
+}
+
+/// The simulated host's files: the base set for the scenario's ids, then each setting file
+/// that is there. Static, as the simulator keeps a slice of it for the run.
+var host_files: [constants.sim_files_max]host_sim.File = undefined;
+
+fn host_files_with(scenario: *const Scenario) []const host_sim.File {
+    const base: []const host_sim.File = if (scenario.full)
+        &sim_run.files
+    else
+        &sim_run.files_single;
+    assert(base.len + settings_count <= host_files.len);
+    @memcpy(host_files[0..base.len], base);
+    var count: usize = base.len;
+    for (std.enums.values(HostSetting)) |setting| {
+        const index = @backingInt(setting);
+        const file = scenario.require.files[index];
+        if (file == .absent) continue;
+        host_files[count] = .{
+            .path = setting.path(),
+            .content = std.mem.sliceTo(&scenario.require.contents[index], 0),
+            .readable = file != .unreadable,
+        };
+        count += 1;
+    }
+    assert(count <= base.len + settings_count);
+    return host_files[0..count];
+}
+
+/// A run `--require-host` refused stopped before the scope, the ids and any process: no
+/// connection to the bus, no scope, no child, and its diagnostic names a required setting or
+/// its file.
+fn check_required_refusal(sim: *const HostSim, scenario: *const Scenario, code: codes.Code) void {
+    assert(code == scenario.require.refusal().?);
+    assert(sim.world.bus.connections == 0);
+    assert(sim.world.bus.scope_count() == 0);
+    assert(sim.world.bus.scopes_started == 0);
+    if (!scenario.image) assert(sim.world.processes[1].state == .unused);
+    var named = false;
+    for (scenario.require.wanted[0..scenario.require.count]) |wanted| {
+        // By its key, or by its file for one that could not be read.
+        if (std.mem.indexOf(u8, sim.stderr(), wanted.setting.key()) != null) named = true;
+        if (std.mem.indexOf(u8, sim.stderr(), wanted.setting.path()) != null) named = true;
+    }
+    assert(named);
 }
