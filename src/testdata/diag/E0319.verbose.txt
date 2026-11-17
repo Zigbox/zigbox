@@ -1,0 +1,10 @@
+error[ZBX-E0319]: vm.max_map_count is 65530, needs >=262144
+  cause  --require-host asks for vm.max_map_count>=262144, and this host's is
+         65530
+  key    vm.max_map_count
+  host   65530
+  needed >=262144
+  fix    set it on the host (a file in /etc/sysctl.d/ keeps it across boots):   sudo sysctl -w vm.max_map_count=262144
+         check every setting:                                                   zbx doctor
+  more   zbx explain E0319
+  docs   https://zigbox.github.io/zigbox/errors/E0319.html

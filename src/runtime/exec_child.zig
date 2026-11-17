@@ -29,7 +29,7 @@ pub const Context = struct {
     report: host_mod.Pipe,
     /// The namespace files the parent opened, by `host_mod.NamespaceKind`; null for one that is
     /// not joined.
-    namespaces: [6]?host_mod.Handle,
+    namespaces: [host_mod.namespaces_count]?host_mod.Handle,
     /// With a terminal: the peer the command takes as its three streams.
     peer: ?host_mod.Handle,
 };
@@ -71,10 +71,11 @@ fn joiner_step(child: *const Context, step: Step) Error!void {
     switch (step.kind) {
         .joiner_die_with_parent => try host.die_with_parent(),
         .join_namespace => {
-            // The parent opened none for a network that is the host's (`--net host`): there is
-            // nothing to join, and the command already has the container's network.
+            // The parent opened none for a network that is the host's (`--net host`), or a
+            // cgroup namespace that is zbx's (a container without one of its own): there is
+            // nothing to join, and the command already has the container's.
             const handle = child.namespaces[@backingInt(step.namespace)] orelse {
-                assert(step.namespace == .net);
+                if (step.namespace != .net) assert(step.namespace == .cgroup);
                 return;
             };
             try host.join_namespace(handle, step.namespace);

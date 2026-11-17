@@ -291,6 +291,8 @@ fn expected_code(kind: plan_mod.Kind) ?codes.Code {
         .bind_etc_file, .remount_etc_file, .unstage_etc_file => null,
         .restrict_capabilities, .clear_ambient => .E0207,
         .set_no_new_privs, .install_seccomp => .E0208,
+        .unshare_cgroup => .E0322,
+        .mount_cgroup => .E0323,
         .make_tmp_dir, .mount_tmp, .make_run_dir, .mount_run, .remount_readonly => .E0209,
         else => .E0205,
     };

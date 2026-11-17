@@ -270,14 +270,9 @@ fn step_kind_failed(
     switch (step.kind) {
         .spawn => namespaces_failed(host, details.facts, diag, failure),
         .deny_setgroups, .write_gid_map, .write_uid_map => map_failed(diag, operation, failure),
-        .run_newuidmap, .run_newgidmap => helper_failed(
-            diag,
-            plan,
-            step,
-            operation,
-            failure,
-            helper,
-        ),
+        .run_newuidmap, .run_newgidmap => {
+            helper_failed(diag, plan, step, operation, failure, helper);
+        },
         .start_scope => scope_step_failed(diag, plan.text(step.target), details.scope),
         .start_pasta => pasta_not_started(diag, plan, operation, failure),
         .await_pasta => pasta_not_ready(host, diag, plan, operation, failure, details.pasta),
@@ -305,12 +300,17 @@ fn step_kind_failed(
             failure.err,
             failure.errno,
         ),
+        .unshare_cgroup, .mount_cgroup => knobs_diagnose.cgroup_view_failed(
+            diag,
+            if (step.kind == .unshare_cgroup) .unshare else .mount,
+            operation,
+            failure.err,
+            failure.errno,
+        ),
         .restrict_capabilities,
         .clear_ambient,
         => hardening_failed(diag, .E0207, operation, failure),
-        .set_no_new_privs,
-        .install_seccomp,
-        => hardening_failed(diag, .E0208, operation, failure),
+        .set_no_new_privs, .install_seccomp => hardening_failed(diag, .E0208, operation, failure),
         .make_tmp_dir,
         .mount_tmp,
         .make_run_dir,

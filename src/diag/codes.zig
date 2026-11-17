@@ -105,6 +105,11 @@ pub const Code = enum(u16) {
     E0316,
     E0317,
     E0318,
+    E0319,
+    E0320,
+    E0321,
+    E0322,
+    E0323,
     W0301,
     W0302,
     E0401,
@@ -1663,6 +1668,82 @@ pub const registry = [_]Entry{
         \\
         \\net.ipv4.ping_group_range takes two group ids, which must both be ones
         \\the container has: within its id map.
+        ,
+    },
+    .{
+        .code = .E0319,
+        .severity = .@"error",
+        .blame = .environment,
+        .summary = "a host setting is not what --require-host asks",
+        .explanation =
+        \\--require-host checks a setting of the host before anything of the
+        \\container starts. The host's value does not meet the requirement, so
+        \\the run is refused. zbx only checks: it never writes the setting.
+        \\
+        \\The host's administrator sets it, with sysctl -w for the vm.* and fs.*
+        \\settings, or by writing /sys/kernel/mm/transparent_hugepage/enabled.
+        \\Either is lost at the next boot: a file in /etc/sysctl.d/ keeps a
+        \\sysctl, and a kernel command line option (transparent_hugepage=) or a
+        \\boot-time unit keeps the hugepage setting.
+        \\
+        \\"zbx doctor --require-host ..." runs the same check without a run.
+        ,
+    },
+    .{
+        .code = .E0320,
+        .severity = .@"error",
+        .blame = .user,
+        .summary = "a --require-host is not a requirement zbx knows",
+        .explanation =
+        \\A requirement names one of four settings, an operator and a value:
+        \\
+        \\  vm.max_map_count>=<count>
+        \\  fs.aio-max-nr>=<count>
+        \\  vm.overcommit_memory=<0, 1 or 2, or a comma list>
+        \\  transparent_hugepage=<always, madvise or never, or a comma list>
+        \\
+        \\Each setting takes the one operator shown, and is given at most once.
+        \\Quote a >= requirement in the shell, or the shell reads > as a
+        \\redirection.
+        ,
+    },
+    .{
+        .code = .E0321,
+        .severity = .@"error",
+        .blame = .environment,
+        .summary = "a host setting --require-host asks for can't be read",
+        .explanation =
+        \\--require-host reads the setting from /proc/sys, or for
+        \\transparent_hugepage from /sys/kernel/mm/transparent_hugepage/enabled.
+        \\The file is not there (a kernel built without transparent hugepages
+        \\has none) or could not be read, so the requirement can't be checked
+        \\and the run is refused.
+        ,
+    },
+    .{
+        .code = .E0322,
+        .severity = .@"error",
+        .blame = .environment,
+        .summary = "the container could not take a cgroup namespace",
+        .explanation =
+        \\A container with a cgroup scope takes a cgroup namespace of its own
+        \\once it is in the scope, so that it sees its scope as the root of the
+        \\cgroup tree (/proc/self/cgroup reads 0::/). The kernel refused the
+        \\namespace. Kernels since 4.6 have cgroup namespaces; one built without
+        \\them, or a sandbox that denies unshare, refuses it.
+        ,
+    },
+    .{
+        .code = .E0323,
+        .severity = .@"error",
+        .blame = .environment,
+        .summary = "the container's cgroup view could not be mounted",
+        .explanation =
+        \\A container with a cgroup scope gets a read-only cgroup2 on
+        \\/sys/fs/cgroup, rooted at its scope, so runtimes such as Java, .NET,
+        \\Go and Node size themselves to its limits. The kernel refused the
+        \\mount. Inside, pids.max reads one more than --pids: the scope also
+        \\holds zbx's keeper process.
         ,
     },
     .{

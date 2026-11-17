@@ -7,7 +7,7 @@ error[ZBX-E0312]: can't check or set a --ulimit
   ulimit nofile
   name   zbx-9bc203
   rootfs /srv/alpine
-  step   set_rlimit (62 of 69)
+  step   set_rlimit (64 of 71)
   fix    check your limits:             ulimit -a -H
          check what this host allows:   zbx doctor
   more   zbx explain E0312

@@ -14,6 +14,8 @@ const build_options = @import("build_options");
 const constants = @import("constants.zig");
 const host_mod = @import("host.zig");
 const doctor = @import("doctor.zig");
+const host_settings = @import("runtime/host_settings.zig");
+const host_settings_check = @import("runtime/host_settings_check.zig");
 const text_util = @import("text.zig");
 const codes = @import("diag/codes.zig");
 const errors = @import("diag/errors.zig");
@@ -116,9 +118,9 @@ const help_text =
     \\                  image says (entrypoint, command, environment, directory, user); words
     \\                  after -- replace its command. A tag is looked up in zbx.lock (made if
     \\                  absent), and refused if it and the store disagree
-    \\  <digest>        a tree of the store (or a unique prefix of 12 or more hex digits), run on
+    \\  <digest>        a tree of the store (or a unique prefix of 12+ hex digits), run on
     \\                  an overlay: its writes go to the container's own layer, never the store
-    \\  --rootfs <dir>  or a directory to use as the container's root, read and written in place
+    \\  --rootfs <dir>  or a directory as the container's root, read and written in place
     \\  --name <name>   the container's name and hostname (default: zbx- and six hex digits)
     \\  --memory <size> memory limit: 128m, 1g (needs the systemd user manager)
     \\  --pids <n>      limit on processes and threads
@@ -126,8 +128,9 @@ const help_text =
     \\  --ulimit <r>=<n>[:<n>]  limit nofile, nproc, memlock or stack (repeatable)
     \\  --shm-size <size>  /dev/shm's size (default 64m)
     \\  --sysctl <k>=<v>  set an allowed sysctl (repeatable; zbx explain E0316)
+    \\  --require-host <s><op><v>  refuse a host whose setting misses (zbx explain E0320)
     \\  --read-only     mount the root read-only, with a tmpfs at /tmp and /run
-    \\  --net <mode>    none (the default: a network of its own, only lo), host (share the host's)
+    \\  --net <mode>    none (the default: its own, only lo), host (the host's)
     \\                  or user (through pasta: apt install passt)
     \\  --publish <h:c> forward TCP port h here to port c inside (repeatable; --net user)
     \\  --listen <addr:port>  a TCP listener on the container's loopback (127.0.0.1, --net none),
@@ -136,30 +139,30 @@ const help_text =
     \\  --hosts-file <path>  this file, read-only, as /etc/hosts (--net none only)
     \\  -e <name>[=<value>]  set a variable in the container, over the image's (repeatable): with
     \\                  =<value> that value, without it zbx's own (an error if unset there).
-    \\                  A value is never stored or printed; only the name is shown
+    \\                  A value is never stored or printed, only its name
     \\  -d, --detach    start the container and return; zbx ps and zbx stop find it again
     \\  --timeout <ms>  stop the container after this long (SIGTERM, then SIGKILL)
     \\  --grace <ms>    time between SIGTERM and SIGKILL (default 10000)
-    \\  --state <name>:<path>[:ro]   mount the state volume <name> at <path> (repeatable, up to
+    \\  --state <name>:<path>[:ro]   the state volume <name> at <path> (repeatable, up to
     \\                  8); the first use makes it, empty. One run writes a volume at a time;
     \\                  :ro mounts it read-only, shared with other readers
     \\  --tmpfs <path>[:<size>]   an empty tmpfs at <path>, gone at exit (repeatable; 64m without a
     \\                  size; k, m or g). Its pages count against --memory
     \\  --bind <host>:<path>   the host's directory or file at <path>, always read-only; a
-    \\                  <host> that does not exist is an error, never made (repeatable)
-    \\  --device /dev/<path>|<vendor/class>=<name>   bind a host device node, or a CDI device from
+    \\                  missing <host> is an error, never made (repeatable)
+    \\  --device /dev/<path>|<vendor/class>=<name>   a host device node, or a CDI device from
     \\                  /etc/cdi, /var/run/cdi or $XDG_CONFIG_HOME/cdi (repeatable, up to
     \\                  16); groups carry over
     \\  --gpu all|dri   the render nodes and /dev/kfd you can open; all: NVIDIA CDI devices if any
     \\  --mount <host>:<path>  the project's directory or file at <path>, writable (repeatable).
-    \\                  <host> may be relative; with symbolic links followed it must be the
+    \\                  <host> may be relative; after symbolic links it must be the
     \\                  project directory (the one with zbx.lock, else the working directory) or
     \\                  inside it. The container must run as root, which is you: see --user
     \\  --secret <host-file>:<path>   a copy of one host file at <path>, read-only, mode 0400,
     \\                  owned by the container's root. Never stored or printed; the mount
     \\                  point is left out of zbx commit (repeatable).
     \\                  Up to 8 of --tmpfs, --bind, --mount and --secret; no two on one path
-    \\  --user <user>[:<group>]   run the command as this user of the image (a name from its
+    \\  --user <user>[:<group>]   run as this user of the image (a name from its
     \\                  /etc/passwd and /etc/group, or a number), over the image's own; --user 0
     \\                  makes a non-root image fit --mount
     \\  --              ends the options; everything after it is the command, as typed
@@ -452,6 +455,9 @@ pub const RunArgs = struct {
     /// network are checked when the run starts.
     sysctls: [constants.sysctls_max]runtime_spec.Sysctl = undefined,
     sysctls_count: u32 = 0,
+    /// `--require-host` (run and doctor), each parsed as it was read (E0320), one per setting.
+    host_requirements: [host_settings.settings_count]runtime_spec.HostRequirement = undefined,
+    host_requirements_count: u32 = 0,
     /// `logs`: `--follow`, `--tail` and `--stream` as typed (checked as they were read, E0219).
     follow: bool = false,
     tail: ?[]const u8 = null,
@@ -480,6 +486,13 @@ pub const RunArgs = struct {
     pub fn sysctls_slice(run_args: *const RunArgs) []const runtime_spec.Sysctl {
         assert(run_args.sysctls_count <= constants.sysctls_max);
         return run_args.sysctls[0..run_args.sysctls_count];
+    }
+
+    pub fn host_requirements_slice(
+        run_args: *const RunArgs,
+    ) []const runtime_spec.HostRequirement {
+        assert(run_args.host_requirements_count <= host_settings.settings_count);
+        return run_args.host_requirements[0..run_args.host_requirements_count];
     }
 
     pub fn publish_slice(run_args: *const RunArgs) []const runtime_spec.Publish {
@@ -516,9 +529,10 @@ const RunOption = enum {
     ulimit,
     shm_size,
     sysctl,
+    require_host,
 
     fn flag(option: RunOption) []const u8 {
-        assert(@backingInt(option) <= 25);
+        assert(@backingInt(option) <= 26);
         assert(@tagName(option).len > 0);
         return switch (option) {
             .rootfs => "--rootfs",
@@ -547,6 +561,7 @@ const RunOption = enum {
             .ulimit => "--ulimit",
             .shm_size => "--shm-size",
             .sysctl => "--sysctl",
+            .require_host => "--require-host",
         };
     }
 };
@@ -796,7 +811,7 @@ fn import_option_of(argument: []const u8) ?Token {
 /// `--rootfs`, `--rootfs=x` and the other value options of `run`, or null.
 fn run_option_of(argument: []const u8) ?Token {
     assert(argument.len <= constants.arg_bytes_max);
-    assert(std.enums.values(RunOption).len == 26);
+    assert(std.enums.values(RunOption).len == 27);
     inline for (comptime std.enums.values(RunOption)) |option| {
         const flag = comptime option.flag();
         if (std.mem.eql(u8, argument, flag)) return .{ .run_option_next = option };
@@ -1953,6 +1968,7 @@ fn run_slot(run_args: *RunArgs, option: RunOption) *?[]const u8 {
         .workdir => &run_args.workdir,
         .shm_size => &run_args.shm_size,
         .ulimit, .sysctl => unreachable, // Repeatable: `take_ulimit` and `take_sysctl` above.
+        .require_host => unreachable, // Repeatable: `take_require_host` above.
     };
 }
 
@@ -1997,6 +2013,7 @@ fn take_run_option(
     if (option == .gpu) return take_gpu(diag, run_args, value);
     if (option == .ulimit) return take_ulimit(diag, run_args, value);
     if (option == .sysctl) return take_sysctl(diag, run_args, value);
+    if (option == .require_host) return take_require_host(diag, run_args, value);
     const slot = run_slot(run_args, option);
     if (slot.* != null) return unexpected_argument(diag, command, argument);
     if (option == .user) {
@@ -2019,6 +2036,7 @@ fn option_allowed(command: Command, option: RunOption) bool {
     const is_log_option = option == .tail or option == .stream;
     return switch (command) {
         .run => !is_log_option and option != .workdir,
+        .doctor => option == .require_host,
         .logs => is_log_option,
         .exec => option == .user or option == .workdir,
         .stop => option == .timeout or option == .grace,
@@ -2047,13 +2065,14 @@ fn take_run_or_env(
     const is_stop = first != null and first.? == .stop;
     const is_logs = first != null and first.? == .logs;
     const is_exec = first != null and first.? == .exec;
+    const is_doctor = first != null and first.? == .doctor;
     switch (classify(argument)) {
         .env_next, .env_inline => {
             if (!is_run and !is_exec) return unknown_option(diag, argument);
             try take_env(diag, run_args, args, index);
         },
         else => {
-            if (!is_run and !is_stop and !is_logs and !is_exec) {
+            if (!is_run and !is_stop and !is_logs and !is_exec and !is_doctor) {
                 return unknown_option(diag, argument);
             }
             try take_run_option(diag, run_args, args, index, first.?);
@@ -2253,6 +2272,29 @@ fn take_sysctl(diag: *Diag, run_args: *RunArgs, value: []const u8) ParseError!vo
     }
     run_args.sysctls[run_args.sysctls_count] = parsed;
     run_args.sysctls_count += 1;
+}
+
+/// One `--require-host`: parsed now (E0320), and refused when its setting was required already.
+fn take_require_host(diag: *Diag, run_args: *RunArgs, value: []const u8) ParseError!void {
+    assert(diag.code == null);
+    assert(run_args.host_requirements_count <= host_settings.settings_count);
+    const parsed = switch (host_settings.parse_requirement(value)) {
+        .ok => |requirement| requirement,
+        .problem => |problem| {
+            host_settings_check.requirement_invalid(diag, value, problem.kind, problem.setting);
+            return error.BadOptionValue;
+        },
+    };
+    const count = run_args.host_requirements_count;
+    for (run_args.host_requirements[0..count]) |earlier| {
+        if (earlier.setting != parsed.setting) continue;
+        host_settings_check.requirement_invalid(diag, value, .repeated, parsed.setting);
+        return error.BadOptionValue;
+    }
+    // One per setting, so a fifth is a repeat and was refused above.
+    assert(count < host_settings.settings_count);
+    run_args.host_requirements[count] = parsed;
+    run_args.host_requirements_count = count + 1;
 }
 
 /// One `--publish`: parsed now, so that the diagnostic quotes the value that is wrong.
@@ -3559,7 +3601,10 @@ fn dispatch(host: Host, invocation: *const Invocation, storage: *Storage, diag: 
         ) catch |err| return lock_error(err),
         .build => try run_build(host, invocation, storage, diag),
         .inspect => try run_inspect(host, invocation, storage, diag),
-        .doctor => return run_doctor(host, invocation.options, &storage.handle.facts, diag),
+        .doctor => {
+            const facts = &storage.handle.facts;
+            return run_doctor(host, invocation.options, &invocation.run, facts, diag);
+        },
         .run => return run_container(host, invocation, storage, diag),
         .ps => commands.run_ps(
             host,
@@ -4076,6 +4121,7 @@ fn run_container(
         .publish = given.publish_slice(),
         .rlimits = given.rlimits,
         .sysctls = given.sysctls_slice(),
+        .host_requirements = given.host_requirements_slice(),
         .listen = given.listen,
         .hosts_file = given.hosts_file orelse "",
         .state = given.state_slice(),
@@ -5198,11 +5244,18 @@ fn write_container_exit(writer: *std.Io.Writer, reason: *const runtime.ExitReaso
 /// in check order, in the requested mode. Text blocks are separated by a blank line; JSON is
 /// one object per line. The exit code is the blame of the failures' diagnostics (the
 /// environment's) and, if stderr cannot be written, the same: there is nowhere to say so.
-fn run_doctor(host: Host, options: Options, facts: *doctor.Facts, diag: *Diag) RunError!u8 {
+fn run_doctor(
+    host: Host,
+    options: Options,
+    run_args: *const RunArgs,
+    facts: *doctor.Facts,
+    diag: *Diag,
+) RunError!u8 {
     assert(diag.code == null);
     var report: doctor.Report = undefined;
     const format: doctor.Format = if (options.output == .json) .json else .text;
-    try doctor.run(host, facts, &report, format, diag);
+    const requirements = run_args.host_requirements_slice();
+    try doctor.run(host, facts, &report, format, requirements, diag);
     const mode = options.mode();
     const color = mode != .json and host.color_enabled(.stderr);
     var buffer: [constants.output_bytes_max]u8 = undefined;
@@ -5712,7 +5765,7 @@ test "doctor --output json: every check with its status, a code for a failure or
         try testing.expect(document.get("ok").?.bool);
         const checks = document.get("checks").?.array.items;
         const ids = [_][]const u8{ "kernel", "userns", "cgroup", "overlay", "subid", "seccomp" } ++
-            [_][]const u8{ "fuse", "net" };
+            [_][]const u8{ "host-settings", "fuse", "net" };
         try testing.expectEqual(ids.len, checks.len);
         for (checks, ids) |check, id| {
             try testing.expectEqualStrings(id, check.object.get("id").?.string);
@@ -6674,6 +6727,48 @@ test "parse: --ulimit, --shm-size and --sysctl, each refusal its code, and not f
         const args = [_][]const u8{ "exec", "web", flag_text, "nofile=1", "--", "sh" };
         try testing.expectEqual(@as(?codes.Code, .E0004), try parse_case(&args, &invocation));
     }
+}
+
+test "parse: a setting --require-host names twice is E0320, the fifth flag included" {
+    // Goal: one requirement per setting, found across flags as they are read. Method: two
+    // settings parse in order; the same setting again, with another value, is E0320 whose cause
+    // says it is required twice; and five copies of one flag are E0320 at the second, never an
+    // overflow of the four slots at the fifth.
+    var invocation: Invocation = undefined;
+    const good = [_][]const u8{ "run", "--rootfs", "r", "--require-host" } ++
+        [_][]const u8{ "vm.max_map_count>=262144", "--require-host" } ++
+        [_][]const u8{ "transparent_hugepage=never,madvise", "--", "sh" };
+    try testing.expect(try parse_case(&good, &invocation) == null);
+    const requirements = invocation.run.host_requirements_slice();
+    try testing.expectEqual(@as(usize, 2), requirements.len);
+    try testing.expectEqual(host_settings.HostSetting.max_map_count, requirements[0].setting);
+    try testing.expectEqual(@as(u64, 262144), requirements[0].minimum);
+    const again = [_][]const u8{ "run", "--rootfs", "r", "--require-host" } ++
+        [_][]const u8{ "vm.max_map_count>=262144", "--require-host" } ++
+        [_][]const u8{ "vm.max_map_count>=1", "--", "sh" };
+    var diag: Diag = undefined;
+    diag.reset();
+    try testing.expectError(error.BadOptionValue, parse(&again, &invocation, &diag));
+    try testing.expectEqual(codes.Code.E0320, diag.code.?);
+    const cause = diag.last_cause().?;
+    try testing.expectEqualStrings(
+        "vm.max_map_count is required twice: give one requirement per setting",
+        cause,
+    );
+    var five: [3 + 2 * 5 + 2][]const u8 = undefined;
+    five[0] = "run";
+    five[1] = "--rootfs";
+    five[2] = "r";
+    for (0..5) |index| {
+        five[3 + 2 * index] = "--require-host";
+        five[4 + 2 * index] = "vm.max_map_count>=1";
+    }
+    five[five.len - 2] = "--";
+    five[five.len - 1] = "sh";
+    diag.reset();
+    try testing.expectError(error.BadOptionValue, parse(&five, &invocation, &diag));
+    try testing.expectEqual(codes.Code.E0320, diag.code.?);
+    try testing.expect(std.mem.indexOf(u8, diag.last_cause().?, "required twice") != null);
 }
 
 test "a --user value is held to its bound, and to USER or USER:GROUP" {

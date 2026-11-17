@@ -378,7 +378,7 @@ fn write_check(writer: *std.Io.Writer, check: *const doctor.Check) std.Io.Writer
     assert(check.detail.len > 0);
     assert((check.status != .ok) == (check.diag.code != null));
     try writer.print("{{\"check\":\"{s}\",\"status\":\"{s}\",\"detail\":", .{
-        @tagName(check.id), @tagName(check.status),
+        check.id.name(), @tagName(check.status),
     });
     try write_json_string(writer, check.detail.slice());
     try writer.writeAll("}\n");

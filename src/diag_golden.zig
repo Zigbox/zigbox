@@ -144,6 +144,25 @@ fn prepare_sysctl_refused(sim: *HostSim) void {
     sim.world.sysctl_refused = true;
 }
 
+fn prepare_cgroup_unshare_refused(sim: *HostSim) void {
+    prepare_step_refused(sim, sim_run.step_index_knobs(.unshare_cgroup), 1);
+}
+
+fn prepare_cgroup_mount_refused(sim: *HostSim) void {
+    prepare_step_refused(sim, sim_run.step_index_knobs(.mount_cgroup), 1);
+}
+
+/// A host whose vm.max_map_count is the kernel's default (M2b, `--require-host`).
+const map_count_files = sim_run.files ++ [_]@import("host_sim.zig").File{
+    .{ .path = "/proc/sys/vm/max_map_count", .content = "65530\n" },
+};
+
+fn prepare_map_count_default(sim: *HostSim) void {
+    sim_run.start(sim, 1, &map_count_files);
+}
+
+const require_map_count = [_][:0]const u8{ "--require-host", "vm.max_map_count>=262144" };
+
 fn knob_case(code: codes.Code, comptime knob: []const [:0]const u8) Case {
     const head = [_][:0]const u8{ "run", "--rootfs", "/srv/alpine" };
     const tail = [_][:0]const u8{ "--", "/bin/sh" };
@@ -1053,6 +1072,7 @@ fn sign_refused_missing(diag: *Diag) void {
 }
 
 const exec_plan = @import("runtime/exec_plan.zig");
+const exec_mod = @import("runtime/exec.zig");
 
 /// The index of the first step of `kind` in the plan of an exec into `prepare_running`'s
 /// container (a scope, every namespace, root), with or without a terminal.
@@ -1065,7 +1085,7 @@ fn exec_step_of(kind: exec_plan.Kind, terminal: bool) u32 {
         .term = null,
         .workdir = "",
         .user = null,
-        .namespaces = 0x3f,
+        .namespaces = exec_mod.all_namespaces, // What `zbx exec` joins.
         .terminal = terminal,
         .cgroup = true,
         .keep_groups = false,
@@ -1735,6 +1755,16 @@ const base_cases = [_]Case{
     knob_case(.E0316, &.{ "--sysctl", "vm.max_map_count=262144" }),
     knob_case(.E0317, &.{ "--net", "host", "--sysctl", "net.core.somaxconn=8192" }),
     .{ .code = .E0318, .args = &knob_args, .prepare = prepare_sysctl_refused, .exit = 125 },
+    .{
+        .code = .E0319,
+        .args = &(.{ "run", "--rootfs", "/srv/alpine" } ++ require_map_count ++ .{ "--", "sh" }),
+        .prepare = prepare_map_count_default,
+        .exit = 125,
+    },
+    knob_case(.E0320, &.{ "--require-host", "vm.max_map_count>262144" }),
+    knob_case(.E0321, &require_map_count),
+    .{ .code = .E0322, .args = &knob_args, .prepare = prepare_cgroup_unshare_refused, .exit = 125 },
+    .{ .code = .E0323, .args = &knob_args, .prepare = prepare_cgroup_mount_refused, .exit = 125 },
     .{
         .code = .W0301,
         .args = &.{ "run", "--rootfs", "/srv/alpine", "--name", "web-1", "--", "/bin/sh" },

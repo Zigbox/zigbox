@@ -54,6 +54,9 @@ const State = struct {
     /// The image's `ldconfig` did not run for the CDI libraries: `exec` hands the command
     /// `Plan.ld_library_path` instead.
     ld_failed: bool,
+    /// A /sys step that leaves no /sys failed with its note: the cgroup view, which is mounted
+    /// on /sys/fs/cgroup, is not tried.
+    sys_missing: bool,
 };
 
 pub const go_ahead: u8 = 1;
@@ -75,6 +78,7 @@ pub fn entry(context: *anyopaque) u8 {
         .listener = null,
         .fuse = null,
         .ld_failed = false,
+        .sys_missing = false,
     };
     for (child.plan.steps[0..child.plan.count], 0..) |*step, index| {
         if (plan_mod.side_of(step.kind) != .child) continue;
@@ -94,6 +98,7 @@ pub fn entry(context: *anyopaque) u8 {
             write_record(child, record);
             if (step.tolerant) {
                 if (step.kind == .run_ldconfig) state.ld_failed = true;
+                if (leaves_no_sys(step.kind)) state.sys_missing = true;
                 const group = plan_mod.group_of(step);
                 if (group > 0) state.failed_etc |= @as(u8, 1) << @intCast(group - 1);
                 continue;
@@ -114,11 +119,20 @@ pub fn entry(context: *anyopaque) u8 {
 /// still be writable; it runs whatever happened before.
 fn skipped(step: *const Step, state: *const State) bool {
     assert(plan_mod.side_of(step.kind) == .child);
+    if (step.kind == .mount_cgroup) return state.sys_missing;
     const group = plan_mod.group_of(step);
     assert(group <= 3);
     if (group == 0) return false;
     if (step.kind == .unstage_etc_file) return false;
     return state.failed_etc & (@as(u8, 1) << @intCast(group - 1)) != 0;
+}
+
+/// The /sys steps whose failure leaves the container without a /sys: the directory, the bind
+/// and the fresh sysfs. A failed read-only remount leaves the bind in place.
+fn leaves_no_sys(kind: plan_mod.Kind) bool {
+    assert(@backingInt(kind) <= @backingInt(plan_mod.Kind.exec));
+    if (kind == .remount_sys) assert(plan_mod.is_sys(kind));
+    return kind == .make_sys_dir or kind == .bind_sys or kind == .mount_sysfs;
 }
 
 /// Tells the parent. If this write fails there is nobody to tell and nothing more to do: the
@@ -160,7 +174,7 @@ fn run_step(child: *const Context, step: *const Step, state: *State) Error!void 
         .make_run_dir, .make_sys_dir, .make_etc_dir => try make_dir(host, target),
         .mount_tmp => try mount(host, .tmp_tmpfs, target, null),
         .mount_run => try mount(host, .run_tmpfs, target, null),
-        .remount_readonly => try mount(host, .remount_readonly, target, null),
+        .remount_readonly, .remount_etc_file => try mount(host, .remount_readonly, target, null),
         .restrict_capabilities => try host.restrict_capabilities(capabilities.keep_mask),
         .clear_ambient => try host.clear_ambient(),
         .set_no_new_privs => try host.no_new_privs(),
@@ -172,10 +186,11 @@ fn run_step(child: *const Context, step: *const Step, state: *State) Error!void 
         .mount_fuse => state.fuse = try host.mount_fuse(target),
         .send_fuse => try send_fuse(child, state),
         .mount_sysfs => try mount(host, .sysfs, target, null),
+        .unshare_cgroup => try host.unshare_cgroup(),
+        .mount_cgroup => try mount_cgroup_view(host, target),
         .create_etc_file => try host.create_file(target, true),
         .stage_etc_file => try host.write_file_mode(target, plan.text(step.source), 0o644),
         .bind_etc_file, .bind_device, .bind_user_device => try bind_file(host, plan, step),
-        .remount_etc_file => try mount(host, .remount_readonly, target, null),
         .unstage_etc_file => try unstage(host, target),
         .remount_sys => try mount(host, .remount_readonly_tree, target, null),
         .enter_workdir => try enter_workdir(host, target),
@@ -193,9 +208,9 @@ fn run_step(child: *const Context, step: *const Step, state: *State) Error!void 
         .write_sysctl => try host.write_sysctl(target, plan.text(step.source)),
         .set_rlimit => try set_rlimit(host, plan, step.index),
         .exec => try exec(child, state),
-        // Handled by `run_state_step` and `run_mount_step` above.
+        // Handled by `run_state_step` and `run_mount_step` above, or the parent's steps.
         .make_state_data, .make_state_stage, .bind_state, .remount_state => unreachable,
-        .make_state_target, .move_state, .remove_state_stage => unreachable,
+        .make_state_target, .move_state, .remove_state_stage, .serve_fuse => unreachable,
         .make_mount_stage_dir, .make_mount_stage_file, .copy_secret => unreachable,
         .bind_mount_dir, .bind_mount_file, .remount_mount, .remount_mount_tree => unreachable,
         .make_mount_target_dir, .make_mount_target_file, .move_mount => unreachable,
@@ -203,7 +218,7 @@ fn run_step(child: *const Context, step: *const Step, state: *State) Error!void 
         .make_pipes, .spawn, .deny_setgroups, .write_gid_map, .write_uid_map => unreachable,
         .run_newuidmap, .run_newgidmap, .spawn_keeper, .start_scope => unreachable,
         .start_pasta, .await_pasta, .release_child, .await_report, .reap => unreachable,
-        .receive_listener, .serve_fuse => unreachable, // These two lines: the parent's steps.
+        .receive_listener => unreachable,
     }
 }
 
@@ -335,6 +350,16 @@ fn make_parents(host: Host, path: [:0]const u8) host_mod.Error!void {
         prefix[at] = 0;
         if (at > 1) try host.make_directory(prefix[0..at :0], true);
     }
+}
+
+/// The cgroup view: the cover first, then the read-only cgroup2 on it (`host_mod.MountKind`).
+/// Both are one step, not tolerant: a failure after the cover is E0323, never a container
+/// without a view.
+fn mount_cgroup_view(host: Host, target: [:0]const u8) host_mod.Error!void {
+    assert(target.len > 0);
+    assert(std.mem.endsWith(u8, target, "/sys/fs/cgroup"));
+    try mount(host, .cgroup_cover, target, null);
+    try mount(host, .cgroup2, target, null);
 }
 
 fn mount(

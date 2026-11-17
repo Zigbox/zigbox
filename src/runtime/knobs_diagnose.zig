@@ -1,6 +1,8 @@
 //! The diagnostics of the workload knobs (ZBX-E0310 to ZBX-E0318): a `--ulimit`, `--shm-size`
 //! or `--sysctl` that is refused before the run starts, and the child's step that set one and
-//! failed. Only the parent calls this; nothing here prints.
+//! failed; and of the cgroup view (ZBX-E0322, ZBX-E0323), the child's steps that give a scoped
+//! container its own cgroup namespace and a read-only cgroup2. Only the parent calls this;
+//! nothing here prints.
 
 const std = @import("std");
 const assert = std.debug.assert;
@@ -10,6 +12,7 @@ const errors = @import("../diag/errors.zig");
 const Diag = @import("../diag/diag.zig").Diag;
 const host_mod = @import("../host.zig");
 const knobs = @import("knobs.zig");
+const host_settings = @import("host_settings.zig");
 
 const linux = std.os.linux;
 
@@ -248,6 +251,15 @@ fn sysctl_host_setting(diag: *Diag, sysctl: knobs.Sysctl) void {
         diag.fix_with("set it on the host instead:", "sudo sysctl -w {s}=<value>", .{sysctl.key});
         diag.mark_last_fix_template();
     }
+    if (host_settings.lookup(sysctl.key)) |setting| {
+        // M2b: one of the four settings a run can require of its host instead.
+        const sentence = "or refuse the run on a host without it:";
+        diag.fix_with(sentence, "--require-host '{s}{s}<value>'", .{
+            setting.key(),
+            setting.operator(),
+        });
+        diag.mark_last_fix_template();
+    }
     diag.fix(.{ .sentence = "the keys a container may set:", .command = "zbx explain E0316" });
     assert(diag.code.? == .E0316);
 }
@@ -288,4 +300,39 @@ fn key_of(path: []const u8, buffer: *[knobs.key_bytes_max]u8) []const u8 {
     assert(rest.len <= buffer.len);
     for (rest, buffer[0..rest.len]) |byte, *out| out.* = if (byte == '/') '.' else byte;
     return buffer[0..rest.len];
+}
+
+/// The child's cgroup view step that failed.
+pub const CgroupViewStep = enum { unshare, mount };
+
+/// ZBX-E0322 (the namespace) and ZBX-E0323 (the mount): a step of the cgroup view failed. The
+/// run is refused rather than started with a view that would show zbx's own cgroup or none.
+pub fn cgroup_view_failed(
+    diag: *Diag,
+    step: CgroupViewStep,
+    operation: []const u8,
+    err: host_mod.Error,
+    errno: u16,
+) void {
+    assert(diag.code == null);
+    assert(operation.len > 0);
+    const code: codes.Code = switch (step) {
+        .unshare => .E0322,
+        .mount => .E0323,
+    };
+    diag.raise(code);
+    errors.cause_host_error(diag, operation, err, errno);
+    switch (step) {
+        .unshare => diag.cause("the kernel or a policy refused a cgroup namespace " ++
+            "(unshare CLONE_NEWCGROUP), which kernels since 4.6 have", .{}),
+        .mount => diag.cause("the kernel refused a cgroup2 mount in the container's cgroup " ++
+            "namespace, on /sys/fs/cgroup", .{}),
+    }
+    if (err == error.AccessDenied) {
+        const dmesg = "sudo dmesg | grep -iE 'apparmor|seccomp|selinux|userns'";
+        diag.fix(.{ .sentence = "look for the policy that denies it:", .command = dmesg });
+    }
+    diag.fix(.{ .sentence = "check what this host allows:", .command = "zbx doctor" });
+    assert(diag.code.? == code);
+    assert(diag.causes.count > 1);
 }

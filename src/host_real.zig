@@ -144,6 +144,7 @@ pub const HostReal = struct {
         .get_rlimit = get_rlimit,
         .set_rlimit = set_rlimit,
         .write_sysctl = write_sysctl,
+        .unshare_cgroup = unshare_cgroup,
         .install_seccomp = install_seccomp,
         .exec = exec,
         .gid = gid,
@@ -618,7 +619,15 @@ pub const HostReal = struct {
                 0,
                 @intFromPtr(bind_source.?), // The mount data; `Host.mount` asserted it is set.
             ),
-            .proc, .sysfs, .dev_tmpfs, .devpts, .tmp_tmpfs, .run_tmpfs => blk: {
+            .proc,
+            .sysfs,
+            .cgroup_cover,
+            .cgroup2,
+            .dev_tmpfs,
+            .devpts,
+            .tmp_tmpfs,
+            .run_tmpfs,
+            => blk: {
                 const fresh = fresh_filesystem(request.kind);
                 const data = @intFromPtr(fresh.data.ptr);
                 break :blk linux.mount(fresh.source, target, fresh.type, fresh.flags, data);
@@ -1021,6 +1030,12 @@ pub const HostReal = struct {
         const invalid: isize = -@as(isize, @backingInt(linux.E.INVAL));
         try check(@bitCast(invalid)); // A short write: the kernel took a cut value.
         unreachable; // `check` fails on an errno.
+    }
+
+    fn unshare_cgroup(context: *anyopaque) host.Error!void {
+        _ = from_context(context);
+        assert(linux.CLONE.NEWCGROUP != 0);
+        try check(linux.unshare(linux.CLONE.NEWCGROUP));
     }
 
     fn install_seccomp(context: *anyopaque, program: []const bpf.Insn) host.Error!void {
@@ -1540,7 +1555,7 @@ pub const HostReal = struct {
         const self = from_context(context);
         assert(pid > 1);
         var path: [48:0]u8 = undefined;
-        // Cannot fail: "/proc/" and "/ns/" and a name of four bytes, and a pid of ten digits.
+        // Cannot fail: "/proc/", "/ns/", a name of at most six bytes and a pid of ten digits.
         const target = std.fmt.bufPrintSentinel(&path, "/proc/{d}/ns/{s}", .{
             pid, kind.file_name(),
         }, 0) catch unreachable; // Same bound as above.
@@ -1575,6 +1590,7 @@ pub const HostReal = struct {
             .uts => linux.CLONE.NEWUTS,
             .net => linux.CLONE.NEWNET,
             .pid => linux.CLONE.NEWPID,
+            .cgroup => linux.CLONE.NEWCGROUP,
             .mount => linux.CLONE.NEWNS,
         };
         // The type is given, so the kernel refuses a file of another kind of namespace.
@@ -1902,6 +1918,20 @@ fn fresh_filesystem(kind: host.MountKind) Fresh {
             .flags = ms.RDONLY | ms.NOSUID | ms.NODEV | ms.NOEXEC,
             .data = "",
         },
+        // Covers the host's cgroup2 below a bound /sys, so the view goes on a mount of another
+        // kind (`host.MountKind.cgroup_cover`); on a fresh sysfs it changes only the mount table.
+        .cgroup_cover => .{
+            .source = "tmpfs",
+            .type = "tmpfs",
+            .flags = ms.RDONLY | ms.NOSUID | ms.NODEV | ms.NOEXEC,
+            .data = "mode=555,size=4k",
+        },
+        .cgroup2 => .{
+            .source = "cgroup2",
+            .type = "cgroup2",
+            .flags = ms.RDONLY | ms.NOSUID | ms.NODEV | ms.NOEXEC,
+            .data = "",
+        },
         .dev_tmpfs => .{
             .source = "tmpfs",
             .type = "tmpfs",
@@ -1930,7 +1960,35 @@ fn fresh_filesystem(kind: host.MountKind) Fresh {
     };
     assert(fresh.source.len > 0);
     assert(fresh.flags & ms.BIND == 0);
+    // Pair with the simulator, which records a mount's read-only bit from the same function.
+    assert((fresh.flags & ms.RDONLY != 0) == host.mounted_read_only(kind));
     return fresh;
+}
+
+test "the cgroup view and its cover are mounted read-only, nosuid, nodev and noexec" {
+    // Goal: the security point of the M2b view: a container under `--memory` must not be able to
+    // write its own scope's limits through /sys/fs/cgroup. No VM step writes to the view, so
+    // this is the gate that fails when `MS_RDONLY` is dropped. Method: the flags of every fresh
+    // kind against `host.mounted_read_only`, which the simulator follows, then the four flags of
+    // the view and the cover one by one.
+    const ms = linux.MS;
+    const fresh_kinds = [_]host.MountKind{
+        .proc,      .sysfs,  .cgroup_cover, .cgroup2,
+        .dev_tmpfs, .devpts, .tmp_tmpfs,    .run_tmpfs,
+    };
+    for (fresh_kinds) |kind| {
+        const read_only = fresh_filesystem(kind).flags & ms.RDONLY != 0;
+        try std.testing.expectEqual(host.mounted_read_only(kind), read_only);
+    }
+    for ([_]host.MountKind{ .cgroup_cover, .cgroup2 }) |kind| {
+        const flags = fresh_filesystem(kind).flags;
+        try std.testing.expect(flags & ms.RDONLY != 0);
+        try std.testing.expect(flags & ms.NOSUID != 0);
+        try std.testing.expect(flags & ms.NODEV != 0);
+        try std.testing.expect(flags & ms.NOEXEC != 0);
+    }
+    try std.testing.expectEqualStrings("cgroup2", fresh_filesystem(.cgroup2).type);
+    try std.testing.expectEqualStrings("tmpfs", fresh_filesystem(.cgroup_cover).type);
 }
 
 test "real host reads a file, reports a missing one, and closes every handle" {

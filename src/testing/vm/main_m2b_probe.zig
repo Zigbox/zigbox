@@ -8,14 +8,16 @@
 //!      user, network and IPC namespace, read back there, and the host's value checked unchanged;
 //!      then what `pasta`, attached to such a namespace after the writes, changes.
 //!   3. Runtimes: Java 21, Go 1.25, .NET 8 and Node under the installed `zbx run --memory 256m
-//!      --cpus 1.5`, with the default network and with `--net host`: what each sizes itself to,
-//!      and which cgroup files it opens.
+//!      --cpus 1`, with the default network, `--net host` and `--net user`: what each sizes
+//!      itself to, and which cgroup files it opens. Slice 2 runs only this part, as the after
+//!      of slice 1's table (which ran `--cpus 1.5` with parts 1, 2 and 4 too).
 //!   4. The slice's knobs by hand (`--ulimit`, `--shm-size`, `--sysctl`, NUMA), as the brief's
 //!      demo steps 1, 2, 3 and 6 run them. Under a binary without the knobs, the flags are
 //!      refused; that output is the "before".
-//! Every line the guest prints starts with `probe:`. The probe judges nothing but whether its
-//! scripts ran: its output is evidence for docs/decisions/, read by a person. Throwaway: the
-//! demo is slice 3's `demo-m2b`. `zig build demo-m2b-probe` (KVM) or `-Daccel=tcg`.
+//! Every line the guest prints starts with `probe:`. The probe judges whether its scripts ran,
+//! whether each `zbx run` of part 3 succeeded, and that the view is the container's own
+//! (`0::/`) and read-only; the rest is evidence for docs/decisions/, read by a person.
+//! Throwaway: the demo is slice 3's `demo-m2b`. `zig build demo-m2b-probe` (KVM) or `-Daccel=tcg`.
 
 const std = @import("std");
 const Io = std.Io;
@@ -151,13 +153,13 @@ fn part(
     return 1;
 }
 
+/// Slice 2 runs only the runtime parts again, the after of slice 1's table (the NUMA and sysctl
+/// measurements stand as recorded), and adds `--net user`, so all three network modes are seen.
 const parts = [_][2][]const u8{
-    .{ "numa", "sh /tmp/m2b/numa.sh" },
-    .{ "sysctl", "runuser -u demo -- sh /tmp/m2b/sysctl.sh" },
     .{ "runtimes: provisioning", "sh /tmp/m2b/runtimes.sh setup" },
     .{ "runtimes: default network", "sh /tmp/m2b/runtimes.sh none" },
     .{ "runtimes: --net host", "sh /tmp/m2b/runtimes.sh host" },
-    .{ "knobs by hand", "sh /tmp/m2b/knobs.sh" },
+    .{ "runtimes: --net user", "sh /tmp/m2b/runtimes.sh user" },
 };
 const parts_count: u32 = parts.len;
 
@@ -333,13 +335,16 @@ const runtimes_script =
     \\  ls $R/app/out/probe.dll >/dev/null 2>&1 || echo "probe: dotnet: publish FAILED"
     \\  echo "probe: setup: done"; exit 0
     \\fi
-    \\[ "$1" = host ] && N="--net host" || N=""
+    \\N=""; [ "$1" = host ] && N="--net host"; [ "$1" = user ] && N="--net user"
+    \\F=0
     \\for rt in view java go dotnet node; do
     \\  echo "probe: [$1] $rt:"
-    \\  $Z run $N --rootfs $R --memory 256m --cpus 1.5 -e HOME=/tmp -e DOTNET_NOLOGO=1 \
-    \\    -- sh /m2b/measure.sh $rt 2>&1 | head -45 | sed "s/^/probe: [$1] $rt: /"
+    \\  o=$($Z run $N --rootfs $R --memory 256m --cpus 1 -e HOME=/tmp -e DOTNET_NOLOGO=1 \
+    \\    -- sh /m2b/measure.sh $rt 2>&1); s=$?
+    \\  echo "$o" | head -45 | sed "s/^/probe: [$1] $rt: /"
+    \\  [ $s -eq 0 ] || { echo "probe: [$1] $rt: FAILED, the run exited $s"; F=1; }
     \\done
-    \\echo "probe: runtimes $1: done"
+    \\echo "probe: runtimes $1: done"; exit $F
     \\
 ;
 
@@ -360,6 +365,10 @@ const measure_script =
     \\view) echo "/proc/self/cgroup: $(cat /proc/self/cgroup)"
     \\  grep -E ' - cgroup2? ' /proc/self/mountinfo || echo "mountinfo: no cgroup mount"
     \\  echo "/sys/fs/cgroup: $(ls /sys/fs/cgroup 2>&1 | head -8 | tr '\n' ' ')"
+    \\  for f in memory.max cpu.max pids.max; do echo "$f: $(cat /sys/fs/cgroup/$f 2>&1)"; done
+    \\  grep -qx '0::/' /proc/self/cgroup || { echo "view: FAILED, not 0::/"; exit 1; }
+    \\  t=$(touch /sys/fs/cgroup/probe 2>&1); echo "touch: $t"
+    \\  echo "$t" | grep -q 'Read-only file system' || { echo "view: FAILED, writable"; exit 1; }
     \\  exit 0 ;;
     \\java) java -XshowSettings:system -version 2>&1 | head -20
     \\  java -XX:+PrintFlagsFinal -version 2>/dev/null |

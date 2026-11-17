@@ -44,12 +44,39 @@ const project_mod = @import("runtime/project.zig");
 const diag_codes = @import("diag/codes.zig");
 const diag_errors = @import("diag/errors.zig");
 const Diag = @import("diag/diag.zig").Diag;
+const host_settings = @import("runtime/host_settings.zig");
+const host_settings_check = @import("runtime/host_settings_check.zig");
 
 const Host = host_mod.Host;
+const HostSetting = host_settings.HostSetting;
+const HostRequirement = host_settings.HostRequirement;
 
 pub const Status = enum { ok, fail, warn };
 
-pub const CheckId = enum { kernel, userns, cgroup, overlay, subid, seccomp, fuse, net };
+pub const CheckId = enum {
+    kernel,
+    userns,
+    cgroup,
+    overlay,
+    subid,
+    seccomp,
+    /// M2b: the four host settings `--require-host` checks. Information only, unless
+    /// `zbx doctor --require-host` gave requirements.
+    host_settings,
+    fuse,
+    net,
+
+    /// The check's name on its line, in JSON and in its diagnostic.
+    pub fn name(id: CheckId) []const u8 {
+        const text: []const u8 = switch (id) {
+            .host_settings => "host-settings",
+            else => @tagName(id),
+        };
+        assert(text.len > 0);
+        assert(text.len <= 16);
+        return text;
+    }
+};
 
 pub const Detail = text_util.Bounded(constants.detail_bytes_max);
 /// The diagnostic code of each check: one per check, so a FAIL line and its block name the same
@@ -62,6 +89,9 @@ pub fn code_of(id: CheckId) diag_codes.Code {
         .overlay => .E0104,
         .subid => .E0105,
         .seccomp => .E0106,
+        // M2b: only under `zbx doctor --require-host`; a setting it cannot read is E0321
+        // (`codes_of_failure`).
+        .host_settings => .E0319,
         // The fuse and net checks only ever warn (`warns_only`): their codes are W1203 and W0102.
         .fuse, .net => unreachable, // `Check.problem` is never called for them.
     };
@@ -70,10 +100,24 @@ pub fn code_of(id: CheckId) diag_codes.Code {
     return code;
 }
 
+/// Whether a FAIL of check `id` may carry `code`: its own, or for the host-settings line also
+/// ZBX-E0321, a required setting the host does not expose or that cannot be read.
+pub fn failure_code_allowed(id: CheckId, code: diag_codes.Code) bool {
+    if (code == code_of(id)) return true;
+    return id == .host_settings and code == .E0321;
+}
+
 /// The checks whose requirement only an opt-in needs (`--net user`, `--lazy`): they warn, never
 /// FAIL, whatever they find, and leave the exit code alone. They come last in the report.
 pub fn warns_only(id: CheckId) bool {
     return id == .fuse or id == .net;
+}
+
+/// The checks a fault in their reads does not FAIL: those that only warn, and the host-settings
+/// line, which is information only without `--require-host` and shows a setting it could not
+/// read as `unreadable`.
+pub fn passes_on_fault(id: CheckId) bool {
+    return warns_only(id) or id == .host_settings;
 }
 
 /// The code of the warning a check can give (M6), or null for a check that never warns. A
@@ -85,7 +129,7 @@ pub fn warning_code_of(id: CheckId) ?diag_codes.Code {
         .net => .W0102,
         // S2: FUSE is needed only by `zbx run --lazy`, an opt-in; the run itself refuses E1201.
         .fuse => .W1203,
-        .kernel, .cgroup, .overlay, .subid, .seccomp => null,
+        .kernel, .cgroup, .overlay, .subid, .seccomp, .host_settings => null,
     };
     if (code) |found| {
         assert(diag_codes.entry(found).severity == .warning);
@@ -137,7 +181,7 @@ pub const Check = struct {
         check.detail.print(format, args);
         assert(check.detail.len > 0);
         check.diag.raise(warning_code_of(check.id).?);
-        check.diag.while_("running the {s} check of zbx doctor", .{@tagName(check.id)});
+        check.diag.while_("running the {s} check of zbx doctor", .{check.id.name()});
         check.diag.cause("{s}", .{check.detail.slice()});
         assert(check.diag.causes.count == 1);
     }
@@ -151,7 +195,7 @@ pub const Check = struct {
         check.detail.print(format, args);
         assert(check.detail.len > 0);
         check.diag.raise(code_of(check.id));
-        check.diag.while_("running the {s} check of zbx doctor", .{@tagName(check.id)});
+        check.diag.while_("running the {s} check of zbx doctor", .{check.id.name()});
         assert(check.diag.whiles.count == 1);
     }
 
@@ -177,8 +221,8 @@ pub const Check = struct {
         check.could_not_run = true;
         var buffer: [256]u8 = undefined;
         const format = "the {s} check could not run: {s}";
-        // Cannot fail: the check name is at most 7 bytes and `what` at most 160.
-        const operation = std.fmt.bufPrint(&buffer, format, .{ @tagName(check.id), what }) catch
+        // Cannot fail: the check name is at most 16 bytes and `what` at most 160.
+        const operation = std.fmt.bufPrint(&buffer, format, .{ check.id.name(), what }) catch
             unreachable; // Same bound as above.
         const diag = &check.diag;
         diag_errors.cause_host_error(diag, operation, failure.err, failure.errno);
@@ -213,6 +257,8 @@ pub const Check = struct {
 
 pub const Report = struct {
     checks: [constants.doctor_checks_count]Check,
+    /// M2b: the four host settings as read (null: absent or unreadable), for the JSON report.
+    host_values: host_settings.HostSettings,
 
     /// The exit code is the blame of the first failing check's diagnostic: the one place that
     /// decides it (diag/codes.zig). Every failure here is the environment's.
@@ -249,7 +295,8 @@ pub const Report = struct {
 
     fn validate_failure(check: *const Check) void {
         assert(check.status == .fail);
-        assert(check.diag.code.? == code_of(check.id)); // The line and the block agree.
+        // The line and the block agree.
+        assert(failure_code_allowed(check.id, check.diag.code.?));
         assert(check.diag.entry().blame == .environment);
         assert(check.diag.causes.count > 0);
         assert(check.diag.fixes.count > 0);
@@ -452,6 +499,12 @@ pub const Facts = struct {
     /// `pasta`, which `--net user` and `--publish` need.
     pasta: PastaFact,
 
+    /// M2b: each host setting's file as read, and the requirements of
+    /// `zbx doctor --require-host` (empty: the line is information only).
+    host_reads: host_settings_check.Reads,
+    host_reads_attempted: bool,
+    host_requirements: []const HostRequirement,
+
     /// Clears every flag and result; the byte buffers are left as they are. Facts is large, so
     /// it is initialised in place rather than by assigning a struct value.
     pub fn reset(facts: *Facts) void {
@@ -480,6 +533,9 @@ pub const Facts = struct {
         facts.seccomp_err = null;
         facts.seccomp_errno = 0;
         facts.pasta = .{};
+        facts.host_reads = @splat(.absent);
+        facts.host_reads_attempted = false;
+        facts.host_requirements = &.{};
     }
 };
 
@@ -504,6 +560,7 @@ pub fn gather_one(host: Host, facts: *Facts, id: CheckId) void {
         .seccomp => gather_seccomp(host, facts),
         .net => gather_net(host, facts),
         .fuse => facts.probe_fuse.run(host, .fuse),
+        .host_settings => gather_host_settings(host, facts),
     }
     // Each id ran its own gather step, not a neighbour's.
     switch (id) {
@@ -514,8 +571,17 @@ pub fn gather_one(host: Host, facts: *Facts, id: CheckId) void {
         .subid => assert(facts.subgid.attempted),
         .seccomp => assert(facts.status.attempted),
         .net => assert(facts.pasta.attempted),
+        .host_settings => assert(facts.host_reads_attempted),
         .fuse => {}, // As for overlay: an outcome or an error, both valid.
     }
+}
+
+fn gather_host_settings(host: Host, facts: *Facts) void {
+    for (std.enums.values(HostSetting)) |setting| {
+        facts.host_reads[@backingInt(setting)] = host_settings_check.read_one(host, setting);
+    }
+    facts.host_reads_attempted = true;
+    assert(facts.host_reads.len == host_settings.settings_count);
 }
 
 fn gather_overlay(host: Host, facts: *Facts) void {
@@ -705,9 +771,11 @@ pub fn evaluate(facts: *const Facts, report: *Report) void {
             .seccomp => evaluate_seccomp(facts, check),
             .net => evaluate_net(facts, check),
             .fuse => evaluate_fuse(facts, check),
+            .host_settings => evaluate_host_settings(facts, check),
         }
         if (check.status == .fail) add_context(facts, check);
     }
+    report.host_values = host_values_of(&facts.host_reads);
     report.validate();
 }
 
@@ -722,7 +790,7 @@ fn add_context(facts: *const Facts, check: *Check) void {
     }
     switch (check.id) {
         .cgroup, .subid => check.diag.context("uid", "{d}", .{facts.uid}),
-        .kernel, .userns, .overlay, .seccomp, .net, .fuse => {},
+        .kernel, .userns, .overlay, .seccomp, .net, .fuse, .host_settings => {},
     }
 }
 
@@ -1287,6 +1355,62 @@ fn evaluate_overlay(facts: *const Facts, check: *Check) void {
 }
 
 /// S2: whether `zbx run --lazy` can serve an image here. Only that flag needs FUSE.
+/// M2b: the four values on one line, always ok; under `zbx doctor --require-host`, a FAIL on a
+/// miss with the run's own code and fix (host_settings_check.zig).
+fn evaluate_host_settings(facts: *const Facts, check: *Check) void {
+    assert(facts.host_reads_attempted);
+    assert(check.status == .ok);
+    // The command line parsed the requirements: one well-formed requirement per setting.
+    assert(host_settings.list_problem(facts.host_requirements) == null);
+    const requirements = facts.host_requirements;
+    host_settings_check.check_reads(&facts.host_reads, requirements, &check.diag) catch {
+        assert(check.diag.code != null);
+        check.status = .fail;
+        // The symptom: a miss's one line, or why the setting could not be read.
+        const symptom = if (check.diag.headline.len > 0)
+            check.diag.headline.slice()
+        else
+            check.diag.last_cause().?;
+        check.detail.print("{s}", .{symptom});
+        assert(check.detail.len > 0);
+        return;
+    };
+    var line: Detail = .{};
+    write_host_values(&facts.host_reads, &line);
+    check.pass("{s}", .{line.slice()});
+}
+
+/// `vm.max_map_count 65530, fs.aio-max-nr 65536, ...`: each value as the host shows it.
+fn write_host_values(reads: *const host_settings_check.Reads, line: *Detail) void {
+    assert(line.len == 0);
+    for (std.enums.values(HostSetting), 0..) |setting, index| {
+        const separator: []const u8 = if (index == 0) "" else ", ";
+        switch (reads[@backingInt(setting)]) {
+            .value => |value| {
+                var buffer: [20]u8 = undefined;
+                const text = host_settings.render_value(setting, value, &buffer);
+                line.print("{s}{s} {s}", .{ separator, setting.key(), text });
+            },
+            .absent => line.print("{s}{s} not exposed", .{ separator, setting.key() }),
+            .unreadable => line.print("{s}{s} unreadable", .{ separator, setting.key() }),
+            .malformed => line.print("{s}{s} malformed", .{ separator, setting.key() }),
+        }
+    }
+    assert(line.len > 0);
+}
+
+fn host_values_of(reads: *const host_settings_check.Reads) host_settings.HostSettings {
+    var values: host_settings.HostSettings = .{};
+    for (std.enums.values(HostSetting)) |setting| {
+        switch (reads[@backingInt(setting)]) {
+            .value => |value| values.set(setting, value),
+            .absent, .unreadable, .malformed => values.set(setting, null),
+        }
+    }
+    assert(reads.len == host_settings.settings_count);
+    return values;
+}
+
 fn evaluate_fuse(facts: *const Facts, check: *Check) void {
     assert(check.detail.len == 0);
     assert(check.status == .ok);
@@ -1714,13 +1838,13 @@ pub fn render(report: *const Report, color: bool, buffer: []u8) []const u8 {
 
 fn render_line(writer: *std.Io.Writer, check: Check, color: bool) void {
     assert(check.detail.len > 0);
-    if (check.status == .fail) assert(check.diag.code.? == code_of(check.id));
+    if (check.status == .fail) assert(failure_code_allowed(check.id, check.diag.code.?));
     const style = style_of(check.status);
     // Cannot fail: constants.zig asserts, at comptime, that six maximal lines fit the buffer.
     if (color) writer.writeAll(style.color) catch unreachable;
     writer.writeAll(style.label) catch unreachable; // Same.
     if (color) writer.writeAll("\x1b[0m") catch unreachable; // Same.
-    const line = .{ @tagName(check.id), check.detail.slice() };
+    const line = .{ check.id.name(), check.detail.slice() };
     writer.print(" {s}  {s}", line) catch unreachable; // Same.
     if (check.status == .fail) {
         // The code ties the line to its diagnostic block on stderr.
@@ -1743,9 +1867,10 @@ pub fn run(
     facts: *Facts,
     report: *Report,
     format: Format,
+    requirements: []const HostRequirement,
     diag: *Diag,
 ) error{OutputFailed}!void {
-    inspect(host, facts, report);
+    inspect_requiring(host, facts, report, requirements);
     var gpu: doctor_gpu.Section = undefined;
     doctor_gpu.gather(host, &gpu);
     if (format == .json) return write_json(host, report, &gpu, diag);
@@ -1800,13 +1925,46 @@ pub fn write_json(
     for (&report.checks, 0..) |*check, index| {
         try write_check_json(host, check, index > 0, diag);
     }
-    if (gpu.count == 0) return write_piece(host, "]}\n", diag);
     var buffer: [constants.output_bytes_max]u8 = undefined;
     var writer = std.Io.Writer.fixed(&buffer);
-    writer.writeAll("],\"gpu\":[") catch unreachable; // Short text in a message.
+    write_host_values_json(&writer, &report.host_values);
+    if (gpu.count == 0) {
+        writer.writeAll("}\n") catch unreachable; // Short text in a message.
+        return write_piece(host, writer.buffered(), diag);
+    }
+    writer.writeAll(",\"gpu\":[") catch unreachable; // Short text in a message.
     doctor_gpu.write_json(gpu, &writer);
     writer.writeAll("]}\n") catch unreachable; // Same.
     try write_piece(host, writer.buffered(), diag);
+}
+
+/// M2b: `],"host_settings":{"vm.max_map_count":65530,...}` after the checks: each value as a
+/// number (THP's as its word, a string), null where the host did not expose it or it could not
+/// be read.
+fn write_host_values_json(
+    writer: *std.Io.Writer,
+    values: *const host_settings.HostSettings,
+) void {
+    assert(writer.end == 0);
+    assert(writer.buffer.len >= 256);
+    // Cannot fail: four keys and values, under 200 bytes, in a message.
+    writer.writeAll("],\"host_settings\":{") catch unreachable; // Same bound.
+    for (std.enums.values(HostSetting), 0..) |setting, index| {
+        const separator: []const u8 = if (index == 0) "" else ",";
+        writer.print("{s}\"{s}\":", .{ separator, setting.key() }) catch unreachable; // Same.
+        const value = values.value(setting) orelse {
+            writer.writeAll("null") catch unreachable; // Same bound.
+            continue;
+        };
+        var text: [20]u8 = undefined;
+        const rendered = host_settings.render_value(setting, value, &text);
+        if (setting == .transparent_hugepage) {
+            writer.print("\"{s}\"", .{rendered}) catch unreachable; // Same bound.
+        } else {
+            writer.writeAll(rendered) catch unreachable; // A count, or 0, 1 or 2.
+        }
+    }
+    writer.writeAll("}") catch unreachable; // Same bound.
 }
 
 fn write_piece(host: Host, text: []const u8, diag: *Diag) error{OutputFailed}!void {
@@ -1831,7 +1989,7 @@ fn write_check_json(
     // fit a message.
     if (comma) writer.writeByte(',') catch unreachable;
     writer.print("{{\"id\":\"{s}\",\"status\":\"{s}\",\"detail\":", .{
-        @tagName(check.id), @tagName(check.status),
+        check.id.name(), @tagName(check.status),
     }) catch unreachable; // Same bound.
     json_string(&writer, check.detail.slice()) catch unreachable; // Same bound.
     if (check.status == .ok) {
@@ -1851,7 +2009,20 @@ fn write_check_json(
 
 /// The doctor's checks without any output: for a bundle, which keeps the report as JSON.
 pub fn inspect(host: Host, facts: *Facts, report: *Report) void {
+    inspect_requiring(host, facts, report, &.{});
+}
+
+/// The checks with the requirements of `zbx doctor --require-host` (M2b), which the command
+/// line parsed: one well-formed requirement per setting.
+pub fn inspect_requiring(
+    host: Host,
+    facts: *Facts,
+    report: *Report,
+    requirements: []const HostRequirement,
+) void {
+    assert(requirements.len <= host_settings.settings_count);
     facts.reset();
+    facts.host_requirements = requirements;
     gather(host, facts);
     evaluate(facts, report);
     assert(report.checks[0].id == .kernel);
@@ -2003,6 +2174,57 @@ test "snapshot: every fixture's report, its diagnostic blocks and its exit code"
     }
 }
 
+test "doctor --require-host: a miss FAILs the host-settings line with the run's own code" {
+    // Goal: `zbx doctor --require-host` judges the host as `zbx run` would: an unmet minimum is
+    // a FAIL with ZBX-E0319 and the miss's one line, a setting the kernel does not expose is a
+    // FAIL with ZBX-E0321, and a met requirement passes. Method: run the CLI on two fixtures
+    // with a requirement each, and read the host-settings line, the stderr block and the exit.
+    const cases = [_]struct {
+        fixture: []const u8,
+        requirement: []const u8,
+        line: []const u8,
+        code: ?[]const u8,
+    }{
+        .{
+            .fixture = "ubuntu_2404",
+            .requirement = "vm.max_map_count>=2000000",
+            .line = "FAIL host-settings  vm.max_map_count is 1048576, needs >=2000000  [ZBX-E0319]",
+            .code = "error[ZBX-E0319]",
+        },
+        .{
+            .fixture = "host_settings_partial",
+            .requirement = "transparent_hugepage=madvise",
+            .line = "FAIL host-settings  /sys/kernel/mm/transparent_hugepage/enabled is not " ++
+                "there: this kernel has no transparent hugepages  [ZBX-E0321]",
+            .code = "error[ZBX-E0321]",
+        },
+        .{
+            .fixture = "ubuntu_2404",
+            .requirement = "vm.max_map_count>=1048576",
+            .line = "ok   host-settings  vm.max_map_count 1048576",
+            .code = null,
+        },
+    };
+    var target: HostSim = undefined;
+    for (cases) |case| {
+        const fixture = for (&fixtures.all) |*fixture| {
+            if (std.mem.eql(u8, fixture.name, case.fixture)) break fixture;
+        } else unreachable; // Both fixtures are in the list.
+        target.init(7, fixture.files);
+        fixture.apply(&target);
+        const args = [_][]const u8{ "doctor", "--require-host", case.requirement };
+        const code = cli.run(target.interface(), &args);
+        try testing.expectEqual(@as(u32, 1), count_lines(target.stdout(), case.line));
+        if (case.code) |header| {
+            try testing.expectEqual(constants.exit_environment, code);
+            try testing.expectEqual(@as(u32, 1), count_lines(target.stderr(), header));
+        } else {
+            try testing.expectEqual(constants.exit_ok, code);
+            try testing.expectEqual(@as(usize, 0), target.stderr().len);
+        }
+    }
+}
+
 test "the healthy fixtures pass and warn does not change the exit code" {
     // Goal: pin which fixtures exit 0, so a changed policy cannot flip one unnoticed.
     const passing = [_][]const u8{
@@ -2014,6 +2236,7 @@ test "the healthy fixtures pass and warn does not change the exit code" {
         "gpu_cdi_refused",                "gpu_driver_no_spec",
         "gpu_render_closed",              "gpu_cdi_yaml",
         "gpu_cdi_stale",                  "fuse_missing",
+        "host_settings_partial",
     };
     var target: HostSim = undefined;
     for (fixtures.all) |fixture| {
@@ -2059,11 +2282,12 @@ test "every check has its own code, and a FAIL's diagnostic is blamed on the env
     // Goal: the mapping from check to code is total and distinct (one code per check, E0101 to
     // E0106), and a failing check carries a diagnostic with a cause, a fix and the exit code
     // of its blame. Method: the empty host fails every check that reads files.
-    // The fuse and net checks only warn, so they have no code.
+    // The fuse and net checks only warn, so they have no code; the host-settings line fails
+    // only on `--require-host` (E0319, M2b), so it is not one of the E01 host checks.
     var seen: [constants.doctor_checks_count]diag_codes.Code = undefined;
     var index: usize = 0;
     for (std.enums.values(CheckId)) |id| {
-        if (warns_only(id)) continue;
+        if (passes_on_fault(id)) continue;
         seen[index] = code_of(id);
         for (seen[0..index]) |earlier| try testing.expect(earlier != seen[index]);
         try testing.expect(std.mem.startsWith(u8, @tagName(seen[index]), "E01"));
@@ -2079,8 +2303,9 @@ test "every check has its own code, and a FAIL's diagnostic is blamed on the env
     var failures: u32 = 0;
     for (report.checks) |check| {
         // The simulator's defaults let the kernel, overlay and fuse checks pass; the rest read
-        // files.
-        const passes = check.id == .kernel or check.id == .overlay or check.id == .fuse;
+        // files. The host-settings line, with no requirement, shows "not exposed" and passes.
+        const passes = check.id == .kernel or check.id == .overlay or check.id == .fuse or
+            check.id == .host_settings;
         const expected = !passes and check.id != .net;
         try testing.expectEqual(expected, check.status == .fail);
         if (!expected) continue;
@@ -2152,11 +2377,11 @@ test "a failed read at every step of the healthy host is a FAIL, never ok" {
     fixture.apply(&target);
     facts.reset();
     for (std.enums.values(CheckId)) |id| {
-        if (!warns_only(id)) gather_one(target.interface(), &facts, id);
+        if (!passes_on_fault(id)) gather_one(target.interface(), &facts, id);
     }
     const calls_before_net = target.call_count;
     for (kinds) |kind| {
-        for (0..64) |index| {
+        for (0..96) |index| {
             target.init(3, fixture.files);
             fixture.apply(&target);
             target.faults.fail_call_index = @intCast(index);
@@ -2324,7 +2549,7 @@ test "snapshot: the GPU section in text and in the zbx.doctor/1 document" {
             cli.run(target.interface(), &.{ "doctor", "--output", "json" }),
         );
         const json = target.stdout();
-        try testing.expect(std.mem.indexOf(u8, json, "],\"gpu\":[") != null);
+        try testing.expect(std.mem.indexOf(u8, json, "},\"gpu\":[") != null);
         try testing.expect(try test_util.json_is_valid(std.mem.trimEnd(u8, json, "\n")));
         try testing.expectEqualStrings(
             @embedFile("testdata/doctor/" ++ name ++ ".json.txt"),

@@ -366,7 +366,7 @@ pub const DoctorNet = struct { code: []const u8, diagnostic: agent_json.Diagnost
 
 /// `doctor --output json` is the `zbx.doctor/1` document on stdout, nothing on stderr (a warning
 /// is not a failure: exit 0), and it follows `schema_text`, the output of `zbx schema doctor`.
-/// It lists the eight checks in order, a code only for the ones that are not ok; `fuse` is ok
+/// It lists the nine checks in order, a code only for the ones that are not ok; `fuse` is ok
 /// (the demo VMs have FUSE), and the `net` check warns with a `ZBX-W` code and a diagnostic
 /// whose first fix has a command and says whether it needs root.
 pub fn check_doctor_net(
@@ -387,7 +387,7 @@ pub fn check_doctor_net(
     }
     const list = member(doc, "checks") orelse return error.DoctorWrong;
     const ids = [_][]const u8{ "kernel", "userns", "cgroup", "overlay", "subid", "seccomp" } ++
-        [_][]const u8{ "fuse", "net" };
+        [_][]const u8{ "host-settings", "fuse", "net" };
     if (list != .array or list.array.items.len != ids.len) return error.DoctorWrong;
     for (list.array.items, ids) |check, id| {
         const found = member(check, "id") orelse return error.DoctorWrong;
@@ -401,7 +401,7 @@ pub fn check_doctor_net(
         if (!std.mem.eql(u8, state.string, "warn")) return error.DoctorWrong;
         return try net_warning(arena, check);
     }
-    unreachable; // Eight checks were counted, and the last is net.
+    unreachable; // Nine checks were counted, and the last is net.
 }
 
 fn net_warning(arena: Allocator, check: Value) Error!DoctorNet {
@@ -670,7 +670,7 @@ const doctor_schema_text =
 
 fn doctor_document(arena: Allocator, net: []const u8) ![]const u8 {
     const ids = [_][]const u8{ "kernel", "userns", "cgroup", "overlay", "subid", "seccomp" } ++
-        [_][]const u8{"fuse"};
+        [_][]const u8{ "host-settings", "fuse" };
     var text: std.ArrayList(u8) = .empty;
     try text.appendSlice(arena, "{\"schema\":\"zbx.doctor/1\",\"ok\":true,\"checks\":[");
     for (ids) |id| {

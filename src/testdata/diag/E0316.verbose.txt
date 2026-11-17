@@ -3,7 +3,8 @@ error[ZBX-E0316]: a --sysctl is a host setting
   cause  vm.max_map_count is a host setting, not one of the container's own
          namespaces, so a container can't set it
   sysctl vm.max_map_count
-  fix    set it on the host instead:     sudo sysctl -w vm.max_map_count=<value>
-         the keys a container may set:   zbx explain E0316
+  fix    set it on the host instead:               sudo sysctl -w vm.max_map_count=<value>
+         or refuse the run on a host without it:   --require-host 'vm.max_map_count>=<value>'
+         the keys a container may set:             zbx explain E0316
   more   zbx explain E0316
   docs   https://zigbox.github.io/zigbox/errors/E0316.html

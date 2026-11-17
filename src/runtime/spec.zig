@@ -19,6 +19,11 @@ pub const knobs = @import("knobs.zig");
 pub const Rlimit = knobs.Rlimit;
 pub const Rlimits = knobs.Rlimits;
 pub const Sysctl = knobs.Sysctl;
+pub const host_settings = @import("host_settings.zig");
+pub const HostSetting = host_settings.HostSetting;
+pub const HostValueSet = host_settings.HostValueSet;
+pub const HostRequirement = host_settings.HostRequirement;
+pub const HostSettings = host_settings.HostSettings;
 
 /// A key and a value kept in the run record, for whoever started the container to find it by.
 pub const Label = struct {
@@ -415,6 +420,9 @@ pub const Spec = struct {
     /// Sysctls of the container's own namespaces (`--sysctl`), at most `sysctls_max`, each a key
     /// of `policy/sysctls.zon`; `net.*` keys need a network namespace of the container's own.
     sysctls: []const Sysctl = &.{},
+    /// What the run requires of the host's settings (`--require-host`), one per setting: checked
+    /// by the parent before the scope, the namespaces or any process, never written.
+    host_requirements: []const HostRequirement = &.{},
 };
 
 /// Null if `path` can be a working directory: absolute, no NUL, no ".." part, and short.
@@ -642,6 +650,8 @@ const repeat = @import("../test_util.zig").repeat;
 
 test {
     _ = @import("knobs.zig");
+    _ = @import("host_settings.zig");
+    _ = @import("host_settings_check.zig");
     _ = @import("knobs_check.zig");
     _ = @import("knobs_diagnose.zig");
 }

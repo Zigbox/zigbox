@@ -50,13 +50,15 @@ pub fn check_same_refusal(
     }
 }
 
-/// `cat /proc/self/cgroup` in the exec'd command: its unified line names the container's scope.
-pub fn check_cgroup(output: []const u8, scope: []const u8) Error!void {
+/// `cat /proc/self/cgroup` in the exec'd command: its unified line is `0::/`, the root of the
+/// container's cgroup namespace, which the run rooted at its scope (M2b slice 2: exec joins that
+/// namespace). A line naming a host path, the scope's included, means exec did not join it.
+pub fn check_cgroup(output: []const u8) Error!void {
     var lines = std.mem.splitScalar(u8, output, '\n');
     while (lines.next()) |line| {
         const trimmed = std.mem.trim(u8, line, " \r");
         if (!std.mem.startsWith(u8, trimmed, "0::")) continue;
-        if (std.mem.endsWith(u8, trimmed, scope)) return;
+        if (std.mem.eql(u8, trimmed, "0::/")) return;
         return error.LimitWrong;
     }
     return error.LimitWrong;
@@ -135,12 +137,12 @@ test "check_same_refusal: the same failure, the kernel's words, never zbx's code
 }
 
 test "check_cgroup and check_fork_refused" {
-    const scope = "zbx-ex2.scope";
-    const line = "0::/user.slice/user-1000.slice/user@1000.service/app.slice/zbx-ex2.scope\n";
-    try check_cgroup(line, scope);
-    const elsewhere = "0::/user.slice/session-3.scope\n";
-    try testing.expectError(error.LimitWrong, check_cgroup(elsewhere, scope));
-    try testing.expectError(error.LimitWrong, check_cgroup("", scope));
+    try check_cgroup("0::/\n");
+    // The scope's host path: exec stayed in zbx's cgroup namespace.
+    const host_path = "0::/user.slice/user-1000.slice/user@1000.service/app.slice/zbx-ex2.scope\n";
+    try testing.expectError(error.LimitWrong, check_cgroup(host_path));
+    try testing.expectError(error.LimitWrong, check_cgroup("0::/../session-3.scope\n"));
+    try testing.expectError(error.LimitWrong, check_cgroup(""));
     const refused = two("", "sh: can't fork: Resource temporarily unavailable\n");
     try check_fork_refused(refused, 2);
     try testing.expectError(error.LimitWrong, check_fork_refused(refused, 0));

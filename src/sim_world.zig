@@ -123,6 +123,18 @@ pub const MountTable = struct {
         return null;
     }
 
+    /// The mount on top at `target`: the last one made there, which is what a path lookup
+    /// reaches (`remove_at` keeps the order).
+    pub fn top(table: *const MountTable, target: []const u8) ?u32 {
+        assert(target.len > 0);
+        assert(table.count <= constants.sim_mounts_max);
+        var found: ?u32 = null;
+        for (table.slice(), 0..) |*mount, index| {
+            if (mount.target.eql(target)) found = @intCast(index);
+        }
+        return found;
+    }
+
     pub fn has(table: *const MountTable, kind: host.MountKind, target: []const u8) bool {
         for (table.slice()) |*mount| {
             if (mount.kind == kind and mount.target.eql(target)) return true;
@@ -137,9 +149,12 @@ pub const MountTable = struct {
         return true;
     }
 
+    /// Keeps the order of the rest: a later mount at a target is above an earlier one (`top`).
     fn remove_at(table: *MountTable, index: u32) void {
         assert(index < table.count);
-        table.mounts[index] = table.mounts[table.count - 1];
+        assert(table.count <= constants.sim_mounts_max);
+        const rest = table.mounts[index + 1 .. table.count];
+        std.mem.copyForwards(Mount, table.mounts[index .. table.count - 1], rest);
         table.count -= 1;
     }
 
@@ -255,6 +270,11 @@ pub const Process = struct {
     /// pid to `cgroup.procs`), and whether that happened before it ran its first step.
     in_scope: bool,
     in_scope_before_run: bool,
+    /// A cgroup namespace of its own (`unshare_cgroup`, M2b), and whether the process was in the
+    /// container's cgroup when it took it: a namespace taken outside would be rooted in zbx's
+    /// own cgroup, and the container would see that cgroup's siblings and limits.
+    new_cgroup: bool,
+    cgroup_rooted_in_scope: bool,
     /// The resource limits the process has, one per `knobs.Resource`: inherited from its
     /// parent, the first process's from `World.rlimits_host`.
     rlimits: [knobs.resources_count]knobs.Rlimit,
@@ -312,6 +332,11 @@ pub const script_max: u32 = 8;
 pub const namespace_handle_base: u32 = 3000;
 pub const namespace_handles_max: u32 = 8;
 
+comptime {
+    // An exec opens one handle per namespace it joins.
+    assert(namespace_handles_max >= host.namespaces_count);
+}
+
 /// What a namespace handle names: the namespaces of the process it was opened for, as they were
 /// then (the kernel keeps a namespace alive while a descriptor of it is open).
 pub const NamespaceSnapshot = struct {
@@ -323,6 +348,9 @@ pub const NamespaceSnapshot = struct {
     new_net: bool,
     loopback_up: bool,
     pid_namespace: u32,
+    /// Its cgroup namespace (M2b): one of its own, and rooted in its scope.
+    new_cgroup: bool,
+    cgroup_rooted_in_scope: bool,
 };
 
 /// Room for what the simulated user types (`World.input`) and for what reaches a pseudo-terminal.
@@ -368,6 +396,8 @@ pub const World = struct {
     devpts_refused: bool,
     /// The kernel refuses a sysctl's value (EINVAL: out of its range, or not a number).
     sysctl_refused: bool,
+    /// The kernel refuses a cgroup namespace (EINVAL: a kernel built without them).
+    cgroup_namespace_refused: bool,
     /// Reading a resource limit is refused (ENOSYS: a sandbox's seccomp filter on prlimit64).
     rlimit_read_refused: bool,
     /// The kernel refuses overlay mounts (no module, a policy).
@@ -522,6 +552,7 @@ pub const World = struct {
         world.command_exit = .{ .exited = 0 };
         world.devpts_refused = false;
         world.sysctl_refused = false;
+        world.cgroup_namespace_refused = false;
         world.rlimit_read_refused = false;
         world.overlay_refused = false;
         world.fuse_refused = false;
@@ -1026,6 +1057,9 @@ pub const World = struct {
         child.new_pid = flags.pid;
         child.new_ipc = flags.ipc or parent.new_ipc;
         child.new_net = flags.net or parent.new_net;
+        // No spawn flag takes a cgroup namespace (the child unshares it), so it is inherited.
+        child.new_cgroup = parent.new_cgroup;
+        child.cgroup_rooted_in_scope = parent.cgroup_rooted_in_scope;
         child.loopback_up = parent.loopback_up and !flags.net;
         child.pid_namespace = if (flags.pid) child.pid else parent.children_pid_namespace;
         child.children_pid_namespace = child.pid_namespace;
@@ -1270,6 +1304,7 @@ pub const World = struct {
         world.add_node(proc_directory, .dir);
         if (world.find_process(scope.pid)) |process| {
             world.scope_started_before_child_ran = process.state == .pending;
+            process.in_scope = true; // The unit's PIDs property moved it.
         }
         world.write_event_files(directory);
         if (world.keeper_dies_early and scope.keeper_pid != 0) {
@@ -1839,6 +1874,8 @@ pub const World = struct {
             .unused, .zombie, .reaped => return .{ .errno = errno_noent },
         }
         if (kind == .net and !target.new_net) return .{ .handle = null };
+        // A process without a cgroup namespace of its own is in zbx's: nothing to open.
+        if (kind == .cgroup and !target.new_cgroup) return .{ .handle = null };
         const slot = for (&world.namespace_handles, 0..) |*entry, index| {
             if (entry.* == null) break index;
         } else return .{ .errno = errno_nomem };
@@ -1851,6 +1888,8 @@ pub const World = struct {
             .new_net = target.new_net,
             .loopback_up = target.loopback_up,
             .pid_namespace = target.pid_namespace,
+            .new_cgroup = target.new_cgroup,
+            .cgroup_rooted_in_scope = target.cgroup_rooted_in_scope,
         };
         return .{ .handle = namespace_handle_base + @as(u32, @intCast(slot)) };
     }
@@ -1911,6 +1950,13 @@ pub const World = struct {
                 process.loopback_up = snapshot.loopback_up;
             },
             .pid => process.children_pid_namespace = snapshot.pid_namespace,
+            .cgroup => {
+                // Only a namespace of the container's own is opened, so one is joined; its root
+                // stays the container's scope whatever cgroup the joiner is in.
+                assert(snapshot.new_cgroup);
+                process.new_cgroup = true;
+                process.cgroup_rooted_in_scope = snapshot.cgroup_rooted_in_scope;
+            },
             .mount => {
                 // The root and the directory become the namespace's root.
                 process.table = snapshot.table;
@@ -2264,6 +2310,8 @@ pub const World = struct {
             world.moved_kind(request.source.?)
         else
             request.kind;
+        if (request.kind == .cgroup2) return world.mount_cgroup2(&target);
+        if (request.kind == .cgroup_cover) return world.mount_cgroup_cover(&target);
         if (world.mount_target_error(wants, &target)) |errno| return errno;
         if (request.kind == .move) return world.move_mount(request.source.?, &target);
         // A sysfs shows the network devices of the namespace it is mounted in, so the kernel
@@ -2284,13 +2332,73 @@ pub const World = struct {
             .target = target,
             .kind = request.kind,
             .own_pid_namespace = process.new_pid,
-            .read_only = request.kind == .sysfs,
+            .read_only = host.mounted_read_only(request.kind),
         };
         // A mount made while the tree is still shared propagates to the namespace it was
         // copied from. That is the host's: the leak `make_private` exists to prevent.
         if (!table.private and process.table != 0) _ = world.tables[0].add(made);
         const added = table.add(made);
         return if (added) null else errno_nomem;
+    }
+
+    /// A cgroup2 is mounted only by a process in a cgroup namespace of its own (the user
+    /// namespace that owns the mount namespace has no say over the initial one), on the
+    /// `fs/cgroup` directory every sysfs has: below a /sys mount of the container's, either a
+    /// fresh sysfs or the host's bound. Below the host's, the host's cgroup2 is mounted on that
+    /// directory, and the kernel refuses its superblock again there (EBUSY, found on the VM),
+    /// unless a mount of another kind covers it first (`cgroup_cover`).
+    fn mount_cgroup2(world: *World, target: *const SimPath) ?u16 {
+        const process = &world.processes[world.current];
+        const table = &world.tables[process.table];
+        assert(target.slice().len > 0);
+        if (!process.new_cgroup) return errno_perm;
+        const sys = cgroup_sys(target) orelse return errno_noent;
+        const bound = table.has(.bind_tree, sys);
+        if (!bound) {
+            if (!table.has(.sysfs, sys)) return errno_noent;
+        }
+        if (bound) {
+            if (!table.has(.cgroup_cover, target.slice())) return errno_busy;
+        }
+        return world.add_cgroup_mount(target, .cgroup2);
+    }
+
+    /// The cover is a tmpfs: any owner of the mount namespace may mount it, on the `fs/cgroup`
+    /// of a /sys of the container's.
+    fn mount_cgroup_cover(world: *World, target: *const SimPath) ?u16 {
+        const table = &world.tables[world.processes[world.current].table];
+        assert(target.slice().len > 0);
+        const sys = cgroup_sys(target) orelse return errno_noent;
+        const below_sysfs = table.has(.sysfs, sys) or table.has(.bind_tree, sys);
+        if (!below_sysfs) return errno_noent;
+        return world.add_cgroup_mount(target, .cgroup_cover);
+    }
+
+    /// The /sys of a `<sys>/fs/cgroup` target; null for any other target.
+    fn cgroup_sys(target: *const SimPath) ?[]const u8 {
+        const suffix = "/fs/cgroup";
+        const text = target.slice();
+        assert(text.len > 0);
+        if (!std.mem.endsWith(u8, text, "/sys" ++ suffix)) return null;
+        const sys = text[0 .. text.len - suffix.len];
+        assert(std.mem.endsWith(u8, sys, "/sys"));
+        return sys;
+    }
+
+    fn add_cgroup_mount(world: *World, target: *const SimPath, kind: host.MountKind) ?u16 {
+        const process = &world.processes[world.current];
+        const table = &world.tables[process.table];
+        if (kind != .cgroup2) assert(kind == .cgroup_cover);
+        const made: Mount = .{
+            .target = target.*,
+            .kind = kind,
+            .own_pid_namespace = process.new_pid,
+            // From the request's kind, as the real host's flags are (`host.mounted_read_only`).
+            .read_only = host.mounted_read_only(kind),
+        };
+        assert(made.read_only);
+        if (!table.private and process.table != 0) _ = world.tables[0].add(made);
+        return if (table.add(made)) null else errno_nomem;
     }
 
     /// The kind of the mount that `MS_MOVE` takes from `source`; a directory's if there is none.
@@ -2451,6 +2559,20 @@ pub const World = struct {
         return null;
     }
 
+    /// `unshare(CLONE_NEWCGROUP)`: needs CAP_SYS_ADMIN over the user namespace, which the child
+    /// has until it drops its capabilities. The namespace's root is the cgroup the process is
+    /// in now, which the model records for tests to check.
+    pub fn unshare_cgroup(world: *World) ?u16 {
+        const process = &world.processes[world.current];
+        assert(world.current < world.processes.len);
+        if (!process.new_user) return errno_perm;
+        if (process.capabilities != null or process.no_new_privs) return errno_perm;
+        if (world.cgroup_namespace_refused) return errno_inval;
+        process.new_cgroup = true;
+        process.cgroup_rooted_in_scope = process.in_scope;
+        return null;
+    }
+
     pub fn die_with_parent(world: *World) void {
         const process = &world.processes[world.current];
         // A request after a change of user is the one that counts: the kernel cleared the first.
@@ -2557,6 +2679,8 @@ fn unused_process() Process {
         .joined = 0,
         .in_scope = false,
         .in_scope_before_run = false,
+        .new_cgroup = false,
+        .cgroup_rooted_in_scope = false,
         .rlimits = rlimits_default,
         .sysctls_written = 0,
         .terminal = false,
@@ -2716,4 +2840,69 @@ test "rlimits and sysctls: a hard limit only goes down, a sysctl needs its names
     world.processes[0].capabilities = 1;
     try testing.expectEqual(@as(?u16, errno_perm), world.write_sysctl(shmmax, "1"));
     try testing.expectEqual(@as(u8, 1), world.processes[0].sysctls_written);
+}
+
+test "cgroup view: a namespace of its own first, then a cgroup2 below a /sys" {
+    // Goal: the rules the child's `unshare_cgroup` and `mount_cgroup` steps meet on a real
+    // kernel: the namespace needs the capabilities the child holds in its user namespace, the
+    // mount needs the namespace, and the target is the `fs/cgroup` of a /sys mount.
+    var world: World = undefined;
+    world.init();
+    world.processes[0].state = .running;
+    const target = "/root/sys/fs/cgroup";
+    const request: host.MountRequest = .{ .kind = .cgroup2, .target = target, .source = null };
+    try testing.expectEqual(@as(?u16, errno_perm), world.unshare_cgroup());
+    world.processes[0].new_user = true;
+    try testing.expectEqual(@as(?u16, errno_perm), world.mount(request));
+    world.cgroup_namespace_refused = true;
+    try testing.expectEqual(@as(?u16, errno_inval), world.unshare_cgroup());
+    world.cgroup_namespace_refused = false;
+    world.processes[0].in_scope = true;
+    try testing.expectEqual(@as(?u16, null), world.unshare_cgroup());
+    try testing.expect(world.processes[0].cgroup_rooted_in_scope);
+    try testing.expectEqual(@as(?u16, errno_noent), world.mount(request));
+    const table = &world.tables[world.processes[0].table];
+    var sys: SimPath = .{};
+    try testing.expect(sys.set("/root/sys"));
+    try testing.expect(table.add(.{ .target = sys, .kind = .sysfs, .own_pid_namespace = false }));
+    try testing.expectEqual(@as(?u16, null), world.mount(request));
+    try testing.expect(table.has(.cgroup2, target));
+    try testing.expect(table.mounts[table.top(target).?].read_only);
+    world.processes[0].capabilities = 1;
+    try testing.expectEqual(@as(?u16, errno_perm), world.unshare_cgroup());
+}
+
+test "cgroup view: below the host's /sys, bound, only over the cover" {
+    // Goal: the EBUSY the VM found under `--net host`: the host's cgroup2 is mounted on the
+    // bound /sys's `fs/cgroup`, and the kernel refuses its superblock again there. Method: a
+    // process in a cgroup namespace of its own below a bound /sys; the view is refused until
+    // the cover is mounted, then it goes on top of it, read-only.
+    var world: World = undefined;
+    world.init();
+    world.processes[0].state = .running;
+    world.processes[0].new_user = true;
+    world.processes[0].in_scope = true;
+    try testing.expectEqual(@as(?u16, null), world.unshare_cgroup());
+    const target = "/root/sys/fs/cgroup";
+    const view: host.MountRequest = .{ .kind = .cgroup2, .target = target, .source = null };
+    const cover: host.MountRequest = .{ .kind = .cgroup_cover, .target = target, .source = null };
+    const table = &world.tables[world.processes[0].table];
+    var sys: SimPath = .{};
+    try testing.expect(sys.set("/root/sys"));
+    const bound_sys: Mount = .{ .target = sys, .kind = .bind_tree, .own_pid_namespace = false };
+    try testing.expect(table.add(bound_sys));
+    try testing.expectEqual(@as(?u16, errno_busy), world.mount(view));
+    try testing.expect(!table.has(.cgroup2, target));
+    try testing.expectEqual(@as(?u16, null), world.mount(cover));
+    try testing.expectEqual(@as(?u16, null), world.mount(view));
+    const top = table.top(target).?;
+    try testing.expectEqual(@as(?host.MountKind, .cgroup2), table.mounts[top].kind);
+    try testing.expect(table.mounts[top].read_only);
+    try testing.expect(table.mounts[table.find(target).?].read_only); // The cover, below it.
+    const elsewhere: host.MountRequest = .{
+        .kind = .cgroup_cover,
+        .target = "/root/fs/cgroup",
+        .source = null,
+    };
+    try testing.expectEqual(@as(?u16, errno_noent), world.mount(elsewhere));
 }

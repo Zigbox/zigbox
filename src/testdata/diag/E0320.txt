@@ -1,0 +1,5 @@
+error[ZBX-E0320]: a --require-host is not a requirement zbx knows
+  cause  'vm.max_map_count>262144' has no >= or =: write <setting><op><value>
+  fix    a valid requirement looks like this (quote it, or the shell reads > as a redirection):   zbx run --rootfs ./alpine --require-host 'vm.max_map_count>=262144' -- /bin/sh
+  more   zbx explain E0320 · rerun with --verbose for the full cause chain
+  docs   https://zigbox.github.io/zigbox/errors/E0320.html

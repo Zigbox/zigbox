@@ -466,6 +466,7 @@ pub fn started(sim: *const HostSim, expected: Started) ?[]const u8 {
     const hostname = sim.world.hostnames[child.uts].slice();
     if (!std.mem.eql(u8, hostname, expected.name)) return "the child's hostname is wrong";
     if (hardening(child)) |problem| return problem;
+    if (cgroup_namespace(child)) |problem| return problem;
     const isolated = expected.network.isolated();
     if (child.new_net != isolated) return "the network namespace is not as asked";
     if (child.loopback_up != isolated) return "the loopback interface is not as asked";
@@ -476,7 +477,21 @@ pub fn started(sim: *const HostSim, expected: Started) ?[]const u8 {
         expected.devpts,
         expected.read_only,
         if (expected.network_mounts) isolated else null,
+        child.in_scope,
     );
+}
+
+/// A container in a scope has a cgroup namespace of its own, taken once it was in the scope, so
+/// its root is the scope; a container without a scope has none (M2b).
+fn cgroup_namespace(child: *const sim_world.Process) ?[]const u8 {
+    assert(child.execd);
+    if (!child.in_scope) {
+        if (child.new_cgroup) return "a container without a scope took a cgroup namespace";
+        return null;
+    }
+    if (!child.new_cgroup) return "a container in a scope has no cgroup namespace";
+    if (!child.cgroup_rooted_in_scope) return "the cgroup namespace is rooted outside the scope";
+    return null;
 }
 
 /// The capabilities, no_new_privs and the filter are all in place when the command starts.
@@ -498,6 +513,7 @@ fn container_mounts(
     devpts: bool,
     read_only: bool,
     isolated: ?bool,
+    scoped: bool,
 ) ?[]const u8 {
     if (!table.private) return "the mounts were not made private";
     if (!table.has(root_kind, root_path)) return "the rootfs was not mounted as the plan says";
@@ -520,7 +536,8 @@ fn container_mounts(
     const run = table.has(.run_tmpfs, join(&buffer, root_path, "/run"));
     if (run != read_only) return "/run is wrong";
     if (isolated) |own_network| {
-        if (network_mounts(table, root_path, own_network, read_only)) |problem| return problem;
+        const problem = network_mounts(table, root_path, own_network, read_only, scoped);
+        if (problem != null) return problem;
     }
     const root = table.find(root_path) orelse return "the rootfs is not a mount";
     if (table.mounts[root].read_only != read_only) return "the rootfs is not as read-only as asked";
@@ -532,12 +549,14 @@ fn container_mounts(
 }
 
 /// /sys is a sysfs of the container's own when it has its own network namespace and the host's,
-/// bound, when it has not; the two generated /etc files are read-only binds either way.
+/// bound, when it has not, with the read-only cgroup view on top in a scoped run; the two
+/// generated /etc files are read-only binds either way.
 fn network_mounts(
     table: *const sim_world.MountTable,
     root_path: []const u8,
     isolated: bool,
     read_only: bool,
+    scoped: bool,
 ) ?[]const u8 {
     assert(root_path.len > 0);
     assert(table.count <= constants.sim_mounts_max);
@@ -549,6 +568,15 @@ fn network_mounts(
     if (!table.mounts[sys_index].read_only) {
         // A bind of the host's /sys is made read-only by the remount.
         return "/sys is writable";
+    }
+    const cgroup = join(&buffer, root_path, "/sys/fs/cgroup");
+    if (table.has(.cgroup2, cgroup) != scoped) return "the cgroup view is not as the scope asks";
+    if (table.has(.cgroup_cover, cgroup) != scoped) return "the cgroup cover is not as asked";
+    if (scoped) {
+        // The view is what the container reaches: on top, over the cover.
+        const index = table.top(cgroup).?; // `has` found a mount there.
+        if (table.mounts[index].kind != .cgroup2) return "the cgroup view is not on top";
+        if (!table.mounts[index].read_only) return "the cgroup view is writable";
     }
     for ([_][]const u8{ "/etc/hosts", "/etc/resolv.conf", "/etc/hostname" }) |name| {
         const path = join(&buffer, root_path, name);

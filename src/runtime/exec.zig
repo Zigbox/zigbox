@@ -213,7 +213,11 @@ pub fn start(
     assert(handle.pid != null);
 }
 
-const all_namespaces: u8 = 0x3f;
+pub const all_namespaces: u8 = 0x7f;
+
+comptime {
+    assert(@popCount(all_namespaces) == host_mod.namespaces_count);
+}
 
 /// Sets `handle` up as a start that has not begun, for a caller that may refuse before `start`.
 pub fn init_handle(host: Host, spec: *const Spec, options: Options, handle: *Handle) void {
@@ -501,8 +505,14 @@ fn parent_step(
         .make_pipes => try make_pipes(handle),
         .open_namespace => {
             const opened = try host.open_namespace(handle.container_pid, step.namespace);
-            // Only the network can be the host's (`--net host`); any other is the container's.
-            if (opened == null and step.namespace != .net) return error.IoFailed;
+            // Only the network (`--net host`) and the cgroup namespace (a container without a
+            // scope, or one a release before M2b started) can be zbx's own; any other is the
+            // container's.
+            if (opened == null) {
+                if (step.namespace != .net) {
+                    if (step.namespace != .cgroup) return error.IoFailed;
+                }
+            }
             handle.child.namespaces[@backingInt(step.namespace)] = opened;
             handle.namespaces_open = true;
         },
@@ -639,7 +649,7 @@ fn reap_joiner(handle: *Handle) host_mod.Error!void {
 }
 
 fn close_namespaces(handle: *Handle) void {
-    assert(handle.child.namespaces.len == 6);
+    assert(handle.child.namespaces.len == host_mod.namespaces_count);
     if (handle.joiner != null) assert(handle.status == .starting);
     if (!handle.namespaces_open) return;
     handle.namespaces_open = false;

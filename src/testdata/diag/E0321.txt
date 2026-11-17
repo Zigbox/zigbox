@@ -1,0 +1,6 @@
+error[ZBX-E0321]: a host setting --require-host asks for can't be read
+  cause  /proc/sys/vm/max_map_count is not there: this kernel does not expose
+         vm.max_map_count
+  fix    see what this host has:   zbx doctor
+  more   zbx explain E0321 · rerun with --verbose for the full cause chain
+  docs   https://zigbox.github.io/zigbox/errors/E0321.html

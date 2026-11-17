@@ -91,9 +91,11 @@ pub const Text = struct {
     len: u32,
 };
 
-/// The steps the plan can have: the parent's seven, six namespaces, the terminal and the cgroup;
-/// the joiner's two and six namespaces; the command's nine, the terminal and two for a user.
-pub const steps_max: u32 = (7 + 6 + 2) + (2 + 6) + (9 + 1 + 2);
+/// The steps the plan can have: the parent's seven, seven namespaces, the terminal and the
+/// cgroup; the joiner's two and seven namespaces; the command's nine, the terminal and two for a
+/// user.
+pub const steps_max: u32 = (7 + host_mod.namespaces_count + 2) + (2 + host_mod.namespaces_count) +
+    (9 + 1 + 2);
 
 /// The variables the command's environment can hold: the container's (its defaults and the
 /// image's and the run's), the `-e` of the exec, and TERM.
@@ -518,14 +520,14 @@ pub fn describe(step: Step) []const u8 {
 
 comptime {
     assert(steps_max <= std.math.maxInt(u8)); // A failure record names a step in a byte.
-    assert(std.enums.values(host_mod.NamespaceKind).len == 6);
+    assert(std.enums.values(host_mod.NamespaceKind).len == host_mod.namespaces_count);
     assert(paths_bytes_max >= 2 * (constants.arg_bytes_max + constants.command_word_bytes_max));
     assert(strings_bytes_max > constants.exec_strings_bytes_max + environ_bytes_max);
 }
 
 const testing = std.testing;
 
-const all_namespaces: u8 = 0x3f;
+const all_namespaces: u8 = 0x7f;
 
 fn test_input(command: []const []const u8) Input {
     return .{
@@ -551,17 +553,19 @@ test "the plan joins user first and mount last, then the order the kernel needs"
     input.user = .{ .uid = 1000, .gid = 1000 };
     plan.build(&input);
     try testing.expectEqual(steps_max, plan.count);
-    var joins: [6]host_mod.NamespaceKind = undefined;
+    var joins: [host_mod.namespaces_count]host_mod.NamespaceKind = undefined;
     var joined: u32 = 0;
     for (plan.steps[0..plan.count]) |step| {
         if (step.kind != .join_namespace) continue;
         joins[joined] = step.namespace;
         joined += 1;
     }
-    try testing.expectEqual(@as(u32, 6), joined);
+    try testing.expectEqual(host_mod.namespaces_count, joined);
     try testing.expectEqual(host_mod.NamespaceKind.user, joins[0]);
     try testing.expectEqual(host_mod.NamespaceKind.pid, joins[4]);
-    try testing.expectEqual(host_mod.NamespaceKind.mount, joins[5]);
+    // The cgroup namespace after the user namespace, whose CAP_SYS_ADMIN it needs (M2b).
+    try testing.expectEqual(host_mod.NamespaceKind.cgroup, joins[5]);
+    try testing.expectEqual(host_mod.NamespaceKind.mount, joins[6]);
     const order = [_]Kind{
         .spawn_joiner,       .await_forked,     .reap_joiner,           .join_cgroup,
         .release_command,    .join_namespace,   .fork_command,          .await_release,

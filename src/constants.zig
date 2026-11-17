@@ -90,7 +90,7 @@ pub const user_name_bytes_max: u32 = 256;
 pub const controller_name_bytes_max: u32 = 32;
 pub const controllers_count_max: u32 = 32;
 pub const kernel_number_digits_max: u32 = 9;
-pub const doctor_checks_count: u32 = 8;
+pub const doctor_checks_count: u32 = 9;
 pub const detail_bytes_max: u32 = 240;
 pub const binary_candidates_count: u32 = 3;
 /// The doctor's look for `pasta` (M5): directories of PATH tried, the longest path kept, and the
@@ -1592,8 +1592,8 @@ comptime {
     assert(sim_nodes_max >= 64);
     assert(sim_mounts_max >= container_devices_count + 8);
     // The worst run's mounts: the root, /proc, /dev, M1's devices, /dev/shm and /dev/pts, /sys,
-    // /tmp and /run, two /etc files and twice the staging of a state volume or other mount, and
-    // `--device`s. The simulator's table holds them all.
+    // /tmp and /run, the cgroup view and its cover, three /etc files, twice the staging of a
+    // state volume or other mount, and `--device`s. The simulator's table holds them all.
     assert(sim_mounts_max >= 24 + container_devices_count + state_volumes_max + mounts_max +
         run_devices_max);
     assert(sim_nodes_max >= 160 + 2 * run_devices_max);
