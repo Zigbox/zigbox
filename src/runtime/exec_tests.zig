@@ -210,6 +210,12 @@ test "exec into a stopped container names its state; a missing one is E0402" {
     const missing = exec.start(sim.interface(), &other, .{}, &exec_handle, &diag);
     try testing.expectError(error.StartFailed, missing);
     try testing.expectEqual(codes.Code.E0402, diag.code.?);
+    // `zbx exec "" -- sh` is refused the same way, not an assertion (the cli fuzzer, 0.5.3).
+    diag.reset();
+    other.name = "";
+    const empty = exec.start(sim.interface(), &other, .{}, &exec_handle, &diag);
+    try testing.expectError(error.StartFailed, empty);
+    try testing.expectEqual(codes.Code.E0402, diag.code.?);
     try testing.expectEqual(@as(u32, 0), sim.world.unreaped_children());
 }
 

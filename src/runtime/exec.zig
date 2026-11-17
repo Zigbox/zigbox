@@ -321,13 +321,14 @@ fn find_container(
 /// E0220).
 pub fn find_running(host: Host, name: []const u8, record: *records.Parsed, diag: *Diag) Error!void {
     assert(diag.code == null);
-    assert(name.len > 0);
     var dir: records.Dir = undefined;
     if (!records.locate(host, &dir)) {
         diagnose.no_such_container(diag, name, .no_state);
         return error.StartFailed;
     }
-    records.load(host, &dir, name, record) catch |err| {
+    // `zbx exec "" -- sh` reaches here: no record has an empty name, as `stop ""` says.
+    const loaded = if (name.len == 0) error.NotFound else records.load(host, &dir, name, record);
+    loaded catch |err| {
         const missing = err == error.NotFound;
         const why: diagnose.NoContainer = if (missing) .no_record else .unreadable_record;
         diagnose.no_such_container(diag, name, why);
