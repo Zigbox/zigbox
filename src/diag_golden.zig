@@ -1727,7 +1727,7 @@ const base_cases = [_]Case{
         .exit = 125,
     },
     knob_case(.E0310, &.{ "--ulimit", "nofile=4096:1024" }),
-    knob_case(.E0311, &.{ "--ulimit", "nofile=1024:1048576" }),
+    knob_case(.E0311, &.{ "--ulimit", "memlock=64m" }),
     .{ .code = .E0312, .args = &knob_args, .prepare = prepare_rlimit_refused, .exit = 125 },
     knob_case(.E0313, &.{ "--shm-size", "256q" }),
     knob_case(.E0314, &.{ "--memory", "128m", "--shm-size", "256m" }),

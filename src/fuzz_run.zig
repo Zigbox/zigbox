@@ -476,6 +476,24 @@ fn random_cgroup(random: std.Random, scenario: *Scenario) void {
     if (calm and scenario.bus != .no_environment and random.uintLessThan(u8, 4) == 0) {
         scenario.inherited = random.enumValue(Inherited);
     }
+    aim_fault_at_knob(random, scenario);
+}
+
+/// A drawn fault lands on one of a hundred indexes, so the one or two knob steps of a plan are
+/// rarely hit: a third of the faults of a scenario with a knob are moved onto a knob's step.
+fn aim_fault_at_knob(random: std.Random, scenario: *Scenario) void {
+    if (scenario.fault_step == null) return;
+    if (scenario.knobs == .none) return;
+    if (random.uintLessThan(u8, 3) != 0) return;
+    const kind: plan_mod.Kind = switch (scenario.knobs) {
+        .none => unreachable, // Returned above: a scenario with no knob has no knob step.
+        .ulimit => .set_rlimit,
+        .sysctl => .write_sysctl,
+        .both => if (random.boolean()) .set_rlimit else .write_sysctl,
+    };
+    assert(scenario.knobs != .none);
+    scenario.fault_step = index_of(scenario, kind);
+    assert(kind_at(scenario, scenario.fault_step.?) == kind);
 }
 
 fn random_limit(random: std.Random, table: []const LimitText) ?LimitText {
@@ -1630,4 +1648,23 @@ fn check_record(sim: *const HostSim, scenario: *const Scenario, verdict: *const 
     check_record_v2(scenario, verdict, &parsed);
     assert(parsed.ids.? == if (scenario.full) records.IdsMode.full else records.IdsMode.single);
     assert(parsed.ended != null);
+}
+
+test "run fuzzer: aimed faults reach E0312 and E0318, and those seeds pass" {
+    var seen_rlimit: ?u64 = null;
+    var seen_sysctl: ?u64 = null;
+    var seed: u64 = 0;
+    while (seed < 4000) : (seed += 1) {
+        var prng = std.Random.Xoshiro256.init(seed);
+        const scenario = random_scenario(prng.random());
+        const verdict = verdict_of(&scenario);
+        if (verdict != .refused) continue;
+        if (verdict.refused.code == .E0312 and seen_rlimit == null) seen_rlimit = seed;
+        if (verdict.refused.code == .E0318 and seen_sysctl == null) seen_sysctl = seed;
+        if (seen_rlimit != null and seen_sysctl != null) break;
+    }
+    try std.testing.expect(seen_rlimit != null);
+    try std.testing.expect(seen_sysctl != null);
+    fuzz_run(seen_rlimit.?);
+    fuzz_run(seen_sysctl.?);
 }

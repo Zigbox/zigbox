@@ -48,7 +48,7 @@ run:
   --pids <n>      limit on processes and threads
   --cpus <n>      CPU limit, in CPUs: 0.5 is half of one
   --ulimit <r>=<n>[:<n>]  limit nofile, nproc, memlock or stack (repeatable)
-  --shm-size <size>  /dev/shm's size (default 64m)
+  --shm-size <size>  /dev/shm's size, rounded up to a page (default 64m)
   --sysctl <k>=<v>  set an allowed sysctl (repeatable; zbx explain E0316)
   --read-only     mount the root read-only, with a tmpfs at /tmp and /run
   --net <mode>    none (the default: a network of its own, only lo), host (share the host's)

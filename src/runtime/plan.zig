@@ -544,7 +544,7 @@ pub const Overlay = struct {
 const empty_text: Text = .{ .offset = 0, .len = 0 };
 
 /// The longest `/dev/shm` mount data: "mode=1777,size=" and a u64 in decimal.
-pub const shm_data_bytes_max: u32 = "mode=1777,size=".len + 20;
+pub const shm_data_bytes_max: u32 = constants.shm_data_bytes_max;
 
 pub const Plan = struct {
     steps: [constants.plan_steps_max]Step,

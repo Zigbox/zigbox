@@ -1135,6 +1135,7 @@ pub const HostSim = struct {
     fn get_rlimit(context: *anyopaque, resource: knobs.Resource) host.Error!knobs.Rlimit {
         const sim = from_context(context);
         try sim.begin_call();
+        if (sim.world.rlimit_read_refused) return sim.model_error(38); // ENOSYS
         return sim.world.get_rlimit(resource);
     }
 

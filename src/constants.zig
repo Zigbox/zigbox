@@ -501,6 +501,13 @@ pub const meminfo_bytes_max: u32 = 8 << 10;
 pub const sysctls_max: u32 = 16;
 /// The longest value of one `--sysctl`: printable ASCII, written to `/proc/sys` in one write.
 pub const sysctl_value_bytes_max: u32 = 256;
+/// The room for a sysctl's path below the container's `/proc/sys`, with its NUL: `knobs.zig`
+/// asserts at comptime that the longest key on the allowlist fits.
+pub const sysctl_proc_path_bytes_max: u32 = 64;
+/// The longest `/dev/shm` mount data, "mode=1777,size=" and a u64 in decimal.
+pub const shm_data_bytes_max: u32 = "mode=1777,size=".len + 20;
+/// The resource limits `--ulimit` sets (nofile, nproc, memlock, stack): `knobs.zig` asserts it.
+pub const ulimit_resources_count: u32 = 4;
 
 // Run records (slice 2).
 /// Records kept; the oldest is deleted when a run would make it more.
@@ -509,6 +516,8 @@ pub const runs_max: u32 = 32;
 /// adds the workload knobs (`.limit_shm`, `.ulimits`, `.sysctls`), written only for a run that
 /// set one, so a run without them leaves the bytes it did before.
 pub const record_version: u32 = 12;
+/// What a record with a workload knob is written as, and only such a record (M2b).
+pub const record_version_knobs: u32 = 12;
 /// What a record without a listener is written as: a run that never asked for `--listen` leaves
 /// the same bytes it did before version 10 (which only added `.listen`).
 pub const record_version_plain: u32 = 9;
@@ -1519,9 +1528,10 @@ comptime {
         state_volume_path_bytes_max + rootfs_bytes_max + 2 * 20 + 6);
     // Each device: its path below the rootfs and its host path, with their NULs.
     const device_paths = run_devices_max * (rootfs_bytes_max + 2 * device_path_bytes_max + 8);
-    // Each sysctl: its path below /proc/sys (`knobs.proc_path_bytes_max`, under 64) and its
-    // value, with their NULs; and the `/dev/shm` mount data.
-    const knob_paths = sysctls_max * (64 + sysctl_value_bytes_max + 2) + 40;
+    // Each sysctl: its path below /proc/sys and its value, with their NULs; and the `/dev/shm`
+    // mount data with its NUL.
+    const knob_paths = sysctls_max * (sysctl_proc_path_bytes_max + sysctl_value_bytes_max + 2) +
+        shm_data_bytes_max + 1;
     assert(paths_needed + state_paths + device_paths + knob_paths <= plan_paths_bytes_max);
     assert(plan_steps_max <= std.math.maxInt(u8)); // The failure record names a step in a byte.
     assert(id_map_line_bytes_max >= "0 4294967295 1\n".len);
@@ -1586,6 +1596,8 @@ comptime {
     assert(record_version_plain + 1 == record_version_listen);
     assert(record_version_listen + 1 == record_version_lazy);
     assert(record_version_lazy + 1 == record_version);
+    assert(record_version_lazy + 1 == record_version_knobs);
+    assert(record_version_knobs <= record_version);
     assert(bundle_stage_bytes_max + 16 * 1024 <= bundle_gz_bytes_max);
     assert(bundle_gz_bytes_max <= write_bytes_max);
     assert(bundle_file_bytes_max * 2 < bundle_stage_bytes_max);
@@ -1641,7 +1653,7 @@ comptime {
     // mount, at most six, and the CDI devices at most four (`plan.cdi_steps_count_max`).
     // The knobs (M2b) add a step per sysctl and per resource limit, of which there are four.
     assert(80 + state_volumes_max * 8 + mounts_max * 6 + 2 * run_devices_max + 4 +
-        sysctls_max + 4 <= plan_steps_max);
+        sysctls_max + ulimit_resources_count <= plan_steps_max);
     assert(plan_steps_max <= std.math.maxInt(u8));
     // The stage names end in one digit; a mount's value and options fit their buffers.
     assert(mounts_max <= 10);

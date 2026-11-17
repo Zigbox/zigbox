@@ -288,7 +288,14 @@ fn step_kind_failed(
         .mount_overlay => overlay_failed(diag, operation, failure),
         .set_rlimit => {
             const resource: knobs.Resource = @fromBackingInt(@intCast(step.index));
-            knobs_diagnose.rlimit_failed(diag, operation, resource, failure.err, failure.errno);
+            knobs_diagnose.rlimit_failed(
+                diag,
+                operation,
+                .set,
+                resource,
+                failure.err,
+                failure.errno,
+            );
         },
         .write_sysctl => knobs_diagnose.sysctl_failed(
             diag,

@@ -90,6 +90,11 @@ fn guest_command(init: std.process.Init.Minimal) ?u8 {
 }
 
 test {
+    // The run fuzzer's own test: its aimed faults reach the knob steps' codes.
+    _ = @import("fuzz_run.zig");
+}
+
+test {
     // Pull every module's tests into this test binary.
     _ = @import("constants.zig");
     _ = @import("host.zig");

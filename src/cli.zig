@@ -124,7 +124,7 @@ const help_text =
     \\  --pids <n>      limit on processes and threads
     \\  --cpus <n>      CPU limit, in CPUs: 0.5 is half of one
     \\  --ulimit <r>=<n>[:<n>]  limit nofile, nproc, memlock or stack (repeatable)
-    \\  --shm-size <size>  /dev/shm's size (default 64m)
+    \\  --shm-size <size>  /dev/shm's size, rounded up to a page (default 64m)
     \\  --sysctl <k>=<v>  set an allowed sysctl (repeatable; zbx explain E0316)
     \\  --read-only     mount the root read-only, with a tmpfs at /tmp and /run
     \\  --net <mode>    none (the default: a network of its own, only lo), host (share the host's)
@@ -5903,6 +5903,9 @@ const Reach = struct {
     publish: []const runtime_spec.Publish = &.{},
     env: []const runtime_spec.Label = &.{},
     env_names: []const []const u8 = &.{},
+    rlimits: runtime_spec.Rlimits = .{},
+    sysctls: []const runtime_spec.Sysctl = &.{},
+    shm_bytes: ?u64 = null,
 };
 
 fn running_container_with(sim: *HostSim, name: []const u8, reach: Reach) !void {
@@ -5918,6 +5921,9 @@ fn running_container_with(sim: *HostSim, name: []const u8, reach: Reach) !void {
         .publish = reach.publish,
         .env = reach.env,
         .env_names = reach.env_names,
+        .rlimits = reach.rlimits,
+        .sysctls = reach.sysctls,
+        .limits = .{ .shm_bytes = reach.shm_bytes },
     };
     const options: runtime.StartOptions = .{ .detached = true };
     try runtime.start(sim.interface(), &container, options, &test_storage.handle, &diag);
@@ -6212,6 +6218,43 @@ test "run --timeout stops the container when its time is up and says so" {
         [_][]const u8{ "--timeout", "2000", "--" } ++ sleeping;
     try testing.expectEqual(@as(u8, 143), command_line(&sim, &json));
     try testing.expect(std.mem.indexOf(u8, sim.stderr(), "\"timed_out\":true") != null);
+}
+
+test "snapshot: run and ps JSON with every knob are the checked-in documents, valid JSON" {
+    // Goal: the review of #178 found the knobs spliced into the exit line by hand (`end -= 3`)
+    // with no test of the whole document, so a field inserted before them could make every
+    // knobbed run's JSON invalid unseen. Method: a run with all three knobs and `ps` of a
+    // running one; each document is byte for byte the checked-in text, parses as JSON, and
+    // carries the knobs where `zbx.run/1` and `zbx.ps/1` say.
+    var sim: HostSim = undefined;
+    sim_run.init(&sim, 6);
+    const args = [_][]const u8{ "run", "--output", "json", "--rootfs", sim_run.rootfs_path } ++
+        [_][]const u8{ "--ulimit", "nofile=4096:8192", "--shm-size", "256m" } ++
+        [_][]const u8{ "--sysctl", "net.core.somaxconn=4096", "--", "/bin/true" };
+    try testing.expectEqual(@as(u8, 0), command_line(&sim, &args));
+    const run_want = @embedFile("testdata/run_knobs.json.txt");
+    try testing.expectEqualStrings(run_want, sim.stderr());
+    const run_json = try parse_json(sim.stderr());
+    defer run_json.deinit();
+    const exit = run_json.value.object.get("container_exit").?.object;
+    try testing.expectEqual(@as(i64, 256 << 20), exit.get("shm_bytes").?.integer);
+    try testing.expect(exit.get("ulimits") != null);
+    try testing.expect(exit.get("sysctls") != null);
+
+    const sysctls = [_]runtime_spec.Sysctl{.{ .key = "net.core.somaxconn", .value = "4096" }};
+    var rlimits: runtime_spec.Rlimits = .{};
+    rlimits.set(.memlock, .{ .soft = 1 << 20, .hard = 8 << 20 });
+    const reach: Reach = .{ .rlimits = rlimits, .sysctls = &sysctls, .shm_bytes = 128 << 20 };
+    try running_container_with(&sim, "db-1", reach);
+    sim.stdout_len = 0;
+    try testing.expectEqual(@as(u8, 0), command_line(&sim, &.{ "ps", "--output", "json" }));
+    const ps_want = @embedFile("testdata/ps_knobs.json.txt");
+    try testing.expectEqualStrings(ps_want, sim.stdout());
+    const ps_json = try parse_json(sim.stdout());
+    defer ps_json.deinit();
+    const one = ps_json.value.object.get("containers").?.array.items[0].object;
+    try testing.expect(one.get("ulimits") != null);
+    try testing.expect(one.get("sysctls") != null);
 }
 
 var policy_files: @import("store/fs_sim.zig").SimFs = undefined;

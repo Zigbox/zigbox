@@ -38,6 +38,9 @@ pub const Resource = enum(u8) {
 };
 
 pub const resources_count: u32 = std.enums.values(Resource).len;
+comptime {
+    assert(resources_count == constants.ulimit_resources_count);
+}
 
 /// A soft and a hard limit; `unlimited` is no bound. The soft one is never above the hard one.
 pub const Rlimit = struct {
@@ -101,6 +104,9 @@ pub const UlimitProblem = enum {
     /// A number past what the kernel can hold.
     too_large,
     soft_above_hard,
+    /// `nofile=unlimited`: the kernel caps `RLIMIT_NOFILE` at `fs.nr_open`, so it refuses
+    /// `RLIM_INFINITY` for it, even for root.
+    nofile_unlimited,
     /// The same name twice.
     repeated,
 };
@@ -128,7 +134,11 @@ pub fn parse_ulimit(text: []const u8) UlimitParse {
     const hard = parse_value(resource, hard_text) catch |err| {
         return .{ .problem = problem_of(err) };
     };
+    if (resource == .nofile) {
+        if (hard == unlimited) return .{ .problem = .nofile_unlimited };
+    }
     if (soft > hard) return .{ .problem = .soft_above_hard };
+    if (resource == .nofile) assert(hard < unlimited);
     return .{ .ok = .{ .resource = resource, .limit = .{ .soft = soft, .hard = hard } } };
 }
 
@@ -248,8 +258,8 @@ pub const key_bytes_max: u32 = longest: {
 pub const proc_path_prefix = "/proc/sys/";
 pub const proc_path_bytes_max: u32 = proc_path_prefix.len + key_bytes_max;
 comptime {
-    // `constants.zig` sizes the plan's text for a sysctl path below 64 bytes.
-    assert(proc_path_bytes_max < 64);
+    // `constants.zig` sizes the plan's text for a sysctl path, with its NUL.
+    assert(proc_path_bytes_max < constants.sysctl_proc_path_bytes_max);
     assert(key_bytes_max > 0);
 }
 
@@ -392,6 +402,8 @@ test "parse_ulimit: one value sets both, two set soft and hard, sizes take units
     try testing.expectEqual(@as(u64, 0), parse_ulimit("nproc=0").ok.limit.hard);
     const both = parse_ulimit("stack=unlimited").ok.limit;
     try testing.expectEqual(Rlimit{ .soft = unlimited, .hard = unlimited }, both);
+    const nproc = parse_ulimit("nproc=unlimited").ok.limit; // Only nofile refuses it.
+    try testing.expectEqual(Rlimit{ .soft = unlimited, .hard = unlimited }, nproc);
 }
 
 test "parse_ulimit: every refusal, at the edges" {
@@ -411,6 +423,9 @@ test "parse_ulimit: every refusal, at the edges" {
         .{ "memlock=999999999999999999g", UlimitProblem.too_large },
         .{ "nofile=8192:4096", UlimitProblem.soft_above_hard },
         .{ "nofile=unlimited:1", UlimitProblem.soft_above_hard },
+        // The kernel caps nofile at fs.nr_open, so it never takes unlimited (review of #178).
+        .{ "nofile=unlimited", UlimitProblem.nofile_unlimited },
+        .{ "nofile=1024:unlimited", UlimitProblem.nofile_unlimited },
     };
     inline for (cases) |case| {
         try testing.expectEqual(case[1], parse_ulimit(case[0]).problem);

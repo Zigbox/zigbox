@@ -212,7 +212,7 @@ pub fn render(view: *const View, buffer: *[constants.record_bytes_max]u8) []cons
     const plain = constants.record_version_plain;
     const has_new = view.listen != null or view.devices.len > 0;
     const version = if (has_knobs(view))
-        constants.record_version
+        constants.record_version_knobs
     else if (view.lazy != null)
         constants.record_version_lazy
     else if (has_new) constants.record_version_listen else plain;
@@ -917,6 +917,19 @@ pub fn parse(text: []const u8, out: *Parsed) ParseError!void {
 fn check_knobs(out: *const Parsed) ParseError!void {
     assert(out.sysctls_count <= constants.sysctls_max);
     assert(out.rlimits.problem() == null); // `parse_ulimits` refused soft above hard.
+    // Render writes version 12 exactly when a knob is set, so a knob in an older version, or a
+    // version 12 record without one, is not a record any zbx wrote.
+    const knobbed = out.limits.shm_bytes != null or out.rlimits.count() > 0 or
+        out.sysctls_count > 0;
+    if (knobbed) {
+        if (out.version < constants.record_version_knobs) return error.Malformed;
+    } else {
+        if (out.version == constants.record_version_knobs) return error.Malformed;
+    }
+    if (out.rlimits.nofile) |nofile| {
+        // `--ulimit` refuses an unlimited nofile, so no run that started has one.
+        if (nofile.hard == knobs.unlimited) return error.Malformed;
+    }
     if (out.limits.shm_bytes) |shm_bytes| {
         if (shm_bytes < constants.shm_bytes_min) return error.Malformed;
         if (out.limits.memory_bytes) |memory_bytes| {
@@ -1086,7 +1099,10 @@ fn parse_limit_field(key: []const u8, value: []const u8, out: *Parsed) ?bool {
     }
     if (std.mem.eql(u8, key, "limit_shm")) {
         // Written only when set: `null` is not a value render writes.
-        out.limits.shm_bytes = std.fmt.parseInt(u64, value, 10) catch return false;
+        // Digits only, as render writes it: `parseInt` would also take `+` and `_`.
+        if (value.len > 20) return false;
+        for (value) |digit| if (!std.ascii.isDigit(digit)) return false;
+        out.limits.shm_bytes = std.fmt.parseUnsigned(u64, value, 10) catch return false;
         return true;
     }
     return null;
@@ -2605,6 +2621,9 @@ test "version 12 keeps the knobs; a version 11 record, as S2 wrote it, reads wit
     try expect_malformed_edits(text, sysctls_line, &bad_sysctls);
     try expect_malformed_edits(text, "    .limit_shm = 67108864,\n", &bad_shm);
     try expect_malformed_edits(text, "    .network = .user,\n", &.{"    .network = .host,\n"});
+    // A knob is written only at version 12: an older version with one was not written by zbx.
+    const older = [_][]const u8{ "    .version = 11,\n", "    .version = 9,\n" };
+    try expect_malformed_edits(text, "    .version = 12,\n", &older);
     // Without a knob, a lazy run's record stays version 11, which a release before reads.
     view.limits = .{};
     view.rlimits = .{};
@@ -2616,8 +2635,12 @@ test "version 12 keeps the knobs; a version 11 record, as S2 wrote it, reads wit
         .errors = 0,
         .local_percent = 0,
     };
-    try parse(render(&view, &buffer), &parsed);
+    const lazy_text = render(&view, &buffer);
+    try parse(lazy_text, &parsed);
     try testing.expectEqual(@as(u32, constants.record_version_lazy), parsed.version);
+    // And version 12 is written only with a knob: one without any was not written by zbx.
+    const knobless = [_][]const u8{"    .version = 12,\n"};
+    try expect_malformed_edits(lazy_text, "    .version = 11,\n", &knobless);
 }
 
 const bad_ulimits = [_][]const u8{
@@ -2633,6 +2656,7 @@ const bad_ulimits = [_][]const u8{
     "    .ulimits = \"nofile=4096:18446744073709551616\",\n",
     "    .ulimits = \"core=1:1\",\n",
     "    .ulimits = 4096,\n",
+    "    .ulimits = \"nofile=4096:unlimited\",\n",
 };
 
 const bad_sysctls = [_][]const u8{
@@ -2657,6 +2681,9 @@ const bad_shm = [_][]const u8{
     "    .limit_shm = 1073741825,\n",
     "    .limit_shm = null,\n",
     "    .limit_shm = \"64m\",\n",
+    "    .limit_shm = +67108864,\n",
+    "    .limit_shm = 67_108_864,\n",
+    "    .limit_shm = 99999999999999999999,\n",
 };
 
 /// Each edit of `line` in `text` is refused as Malformed.
@@ -2881,18 +2908,19 @@ test "a run record is read whole up to record_bytes_max, on a real kernel, and r
     const host = bound_host.interface();
     worst_record.fill();
     const view = worst_record.view();
+    // Both files are removed before the directory, even when a step below fails.
+    var storage: [constants.state_path_bytes_max + 80]u8 = undefined;
+    defer _ = std.os.linux.unlink(record_path(&dir, view.name, &storage));
+    var at_storage: [constants.state_path_bytes_max + 80]u8 = undefined;
+    defer _ = std.os.linux.unlink(record_path(&dir, "at-bound", &at_storage));
     try save(host, &dir, &view);
     var parsed: Parsed = undefined;
     try load(host, &dir, view.name, &parsed);
     try testing.expectEqual(@as(u8, constants.sysctls_max), parsed.sysctls_count);
-    var storage: [constants.state_path_bytes_max + 80]u8 = undefined;
-    defer _ = std.os.linux.unlink(record_path(&dir, view.name, &storage));
     var bytes: [constants.record_bytes_max]u8 = undefined;
     // The worst record is larger than any other file the host reads: it needs its own path.
     try testing.expect(render(&view, &bytes).len > constants.file_bytes_max);
 
-    var at_storage: [constants.state_path_bytes_max + 80]u8 = undefined;
-    defer _ = std.os.linux.unlink(record_path(&dir, "at-bound", &at_storage));
     const at = load_sized(&dir, "at-bound", constants.record_bytes_max, &parsed);
     try testing.expectError(error.Damaged, at);
     const past = load_sized(&dir, "at-bound", constants.record_bytes_max + 1, &parsed);

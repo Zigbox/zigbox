@@ -50,9 +50,26 @@ fn check_rlimits(host: Host, rlimits: knobs.Rlimits, diag: *Diag) Error!void {
         knobs_diagnose.ulimit_invalid(diag, name, .soft_above_hard);
         return error.StartFailed;
     }
+    if (rlimits.nofile) |nofile| {
+        // A library caller's `unlimited` nofile, which the flag's parser already refuses.
+        if (nofile.hard == knobs.unlimited) {
+            knobs_diagnose.ulimit_invalid(diag, "nofile=", .nofile_unlimited);
+            return error.StartFailed;
+        }
+    }
     for (std.enums.values(knobs.Resource)) |resource| {
         const asked = rlimits.get(resource) orelse continue;
-        const own = host.get_rlimit(resource) catch continue; // The child's call then says why.
+        // A limit that can't be read can't be checked, and the child's set would then fail
+        // late with less to say, so the run is refused here, before anything is created.
+        const own = host.get_rlimit(resource) catch |err| {
+            var buffer: [48]u8 = undefined;
+            const operation = std.fmt.bufPrint(&buffer, "reading your {s} limit (prlimit64)", .{
+                @tagName(resource),
+            }) catch unreachable; // The longest name is 7 bytes.
+            const errno = host.last_errno();
+            knobs_diagnose.rlimit_failed(diag, operation, .read, resource, err, errno);
+            return error.StartFailed;
+        };
         assert(own.soft <= own.hard);
         if (asked.hard > own.hard) {
             knobs_diagnose.ulimit_above_hard(diag, resource, asked.hard, own.hard, host.uid());

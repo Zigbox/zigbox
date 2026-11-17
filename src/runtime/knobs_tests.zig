@@ -161,3 +161,95 @@ test "a sysctl value the kernel refuses is E0318, naming the key and the value" 
     try testing.expect(!sim.world.processes[1].execd);
     try no_leak(&sim, &before);
 }
+
+test "E0311's limits.conf fix is in KiB for memlock and stack, and systemd's in bytes" {
+    // Goal: the review of #178 found the limits.conf line in bytes, which pam_limits reads as
+    // KiB, granting 1024 times what was asked. Method: a memlock one past the user's 8 MiB, and
+    // a stack size that is not a whole KiB; each fix and the unit line give the asked limit in
+    // the unit their reader takes, and a count (nofile) is left as it is.
+    const Expect = struct {
+        resource: knobs.Resource,
+        hard: u64,
+        login: []const u8,
+        unit: []const u8,
+    };
+    const expects = [_]Expect{
+        .{
+            .resource = .memlock,
+            .hard = 64 << 20,
+            .login = "hard memlock 65536\"",
+            .unit = "LimitMEMLOCK=67108864",
+        },
+        .{
+            .resource = .memlock,
+            .hard = (8 << 20) + 1,
+            .login = "hard memlock 8193\"",
+            .unit = "LimitMEMLOCK=8388609",
+        },
+        .{
+            .resource = .nofile,
+            .hard = 524289,
+            .login = "hard nofile 524289\"",
+            .unit = "LimitNOFILE=524289",
+        },
+    };
+    for (expects, 0..) |expect, index| {
+        var sim: HostSim = undefined;
+        sim_run.init(&sim, 40 + index);
+        var container = knob_spec();
+        container.rlimits.set(expect.resource, .{ .soft = 0, .hard = expect.hard });
+        var diag: Diag = undefined;
+        diag.reset();
+        const result = run.start(sim.interface(), &container, .{}, handle_get(), &diag);
+        try testing.expectError(error.StartFailed, result);
+        try testing.expectEqual(codes.Code.E0311, diag.code.?);
+        const login = diag.fixes.slice()[0].command.slice();
+        if (std.mem.indexOf(u8, login, expect.login) == null) std.debug.print("{s}\n", .{login});
+        try testing.expect(std.mem.indexOf(u8, login, expect.login) != null);
+        var unit_found = false;
+        for (diag.pairs.slice()) |*pair| {
+            if (std.mem.eql(u8, pair.value.slice(), expect.unit)) unit_found = true;
+        }
+        try testing.expect(unit_found);
+    }
+}
+
+test "a limit zbx can't read is E0312 before anything is created, not a late child failure" {
+    // Goal: the review of #178 found a failed read of the user's own limit skipped, so the run
+    // went on to fail in the child. Method: the sim refuses prlimit64 reads (a sandbox's
+    // seccomp filter); the run is refused, nothing was spawned or written, and the cause names
+    // the read and the resource.
+    var sim: HostSim = undefined;
+    sim_run.init(&sim, 50);
+    const before = sim_run.baseline(&sim);
+    sim.world.rlimit_read_refused = true;
+    var container = knob_spec();
+    container.rlimits.set(.nofile, .{ .soft = 1024, .hard = 4096 });
+    var diag: Diag = undefined;
+    diag.reset();
+    const result = run.start(sim.interface(), &container, .{}, handle_get(), &diag);
+    try testing.expectError(error.StartFailed, result);
+    try testing.expectEqual(codes.Code.E0312, diag.code.?);
+    const cause = diag.causes.items[0].slice();
+    try testing.expect(std.mem.indexOf(u8, cause, "reading your nofile limit") != null);
+    try testing.expect(sim.world.processes[1].state == .unused);
+    try testing.expectEqual(@as(u32, 0), sim.world.written_count);
+    try no_leak(&sim, &before);
+}
+
+test "a library caller's unlimited nofile is E0310, as the flag's is" {
+    // Goal: the kernel never takes unlimited for nofile, so a Spec that asks for it is refused
+    // with the flag's code and cause rather than an E0311 whose fix can't work.
+    var sim: HostSim = undefined;
+    sim_run.init(&sim, 51);
+    var container = knob_spec();
+    container.rlimits.set(.nofile, .{ .soft = 1024, .hard = knobs.unlimited });
+    var diag: Diag = undefined;
+    diag.reset();
+    const result = run.start(sim.interface(), &container, .{}, handle_get(), &diag);
+    try testing.expectError(error.StartFailed, result);
+    try testing.expectEqual(codes.Code.E0310, diag.code.?);
+    const cause = diag.last_cause().?;
+    try testing.expect(std.mem.indexOf(u8, cause, "fs.nr_open") != null);
+    try testing.expect(sim.world.processes[1].state == .unused);
+}

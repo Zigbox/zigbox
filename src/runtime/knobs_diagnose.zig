@@ -40,6 +40,8 @@ pub fn ulimit_invalid(diag: *Diag, text: []const u8, problem: knobs.UlimitProble
         .not_a_number => diag.cause("the value is not a count, a size or unlimited", .{}),
         .too_large => diag.cause("the value is past what the kernel can hold", .{}),
         .soft_above_hard => diag.cause("the soft limit is above the hard one", .{}),
+        .nofile_unlimited => diag.cause("nofile has no unlimited: the kernel caps it at " ++
+            "fs.nr_open, so give a number up to that", .{}),
         .repeated => diag.cause("the same resource is set twice", .{}),
     }
     diag.fix(.{
@@ -73,10 +75,13 @@ pub fn ulimit_above_hard(
     diag.cause("--ulimit {s} asks for a hard limit of {s}, above your own, {s}; a rootless " ++
         "run can't raise it", .{ @tagName(resource), asked_text, hard_text });
     diag.context("unit", "{s}={s}", .{ resource.systemd_property(), asked_text });
+    // limits.conf(5) reads memlock and stack in KiB, where systemd's `Limit*=` take bytes.
+    var login_buffer: [24]u8 = undefined;
+    const login_text = value_text(limits_conf_value(resource, asked), &login_buffer);
     diag.fix_with(
         "raise it for logins (then log in again):",
         "echo \"$(id -un) hard {s} {s}\" | sudo tee -a /etc/security/limits.conf",
-        .{ @tagName(resource), asked_text },
+        .{ @tagName(resource), login_text },
     );
     diag.fix_with(
         "or for the user manager, under [Service]:",
@@ -85,6 +90,17 @@ pub fn ulimit_above_hard(
     );
     assert(diag.code.? == .E0311);
     assert(diag.fixes.count > 0);
+}
+
+/// A hard limit in the unit `/etc/security/limits.conf` reads it in: KiB for the sizes, rounded
+/// up so the line grants at least what was asked; a count, or `unlimited`, as it is.
+pub fn limits_conf_value(resource: knobs.Resource, asked: u64) u64 {
+    if (asked == knobs.unlimited) return asked;
+    if (!resource.is_size()) return asked;
+    const result = std.math.divCeil(u64, asked, 1024) catch unreachable; // 1024 is not zero.
+    assert(result < knobs.unlimited);
+    assert(result * 1024 >= asked);
+    return result;
 }
 
 /// A limit as `ulimit` writes it: a number, or `unlimited`.
@@ -96,10 +112,16 @@ fn value_text(value: u64, buffer: *[24]u8) []const u8 {
     return result;
 }
 
-/// ZBX-E0312: the child's `setrlimit` failed, after the parent's check let it through.
+/// Which call of a `--ulimit` failed: the parent reading the user's own limit to check it, or
+/// the child setting it.
+pub const RlimitStage = enum { read, set };
+
+/// ZBX-E0312: the parent's read of the user's own limit failed, before anything was created, or
+/// the child's `setrlimit` failed after the parent's check let it through.
 pub fn rlimit_failed(
     diag: *Diag,
     operation: []const u8,
+    stage: RlimitStage,
     resource: knobs.Resource,
     err: host_mod.Error,
     errno: u16,
@@ -109,8 +131,12 @@ pub fn rlimit_failed(
     diag.raise(.E0312);
     diag.context("ulimit", "{s}", .{@tagName(resource)});
     errors.cause_host_error(diag, operation, err, errno);
-    diag.cause("the limit passed zbx's check against your own, so a security policy or a " ++
-        "change to your limits since is the usual reason", .{});
+    switch (stage) {
+        .read => diag.cause("zbx checks each --ulimit against your own hard limit before it " ++
+            "starts anything, and can't without it; a security policy is the usual reason", .{}),
+        .set => diag.cause("the limit passed zbx's check against your own, so a security " ++
+            "policy or a change to your limits since is the usual reason", .{}),
+    }
     diag.fix_with("check your limits:", "ulimit -a -H", .{});
     diag.fix(.{ .sentence = "check what this host allows:", .command = "zbx doctor" });
     assert(diag.code.? == .E0312);

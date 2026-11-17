@@ -1512,8 +1512,9 @@ pub const registry = [_]Entry{
         \\soft and the hard limit. The names are nofile (open files), nproc
         \\(processes of the user), memlock (locked memory) and stack. nofile and
         \\nproc take counts; memlock and stack take sizes in --memory's syntax
-        \\(k, m or g, binary units). Any value may be unlimited. The soft limit
-        \\can't be above the hard one.
+        \\(k, m or g, binary units). Any value may be unlimited, except nofile's:
+        \\the kernel caps open files at fs.nr_open and refuses unlimited. The
+        \\soft limit can't be above the hard one.
         \\
         \\Without --ulimit, the container keeps the limits zbx was started with.
         \\nproc counts every process of the user who runs zbx, inside the
@@ -1536,20 +1537,32 @@ pub const registry = [_]Entry{
         \\user@<uid>.service (LimitNOFILE=, LimitNPROC=, LimitMEMLOCK=,
         \\LimitSTACK=). Raise the one that applies, log in again, and check with
         \\ulimit -H -a. The user manager's memlock is often 8 MiB.
+        \\
+        \\limits.conf reads memlock and stack in KiB, and systemd's LimitMEMLOCK=
+        \\and LimitSTACK= read bytes, so the two fixes show different numbers for
+        \\the same limit.
         ,
     },
     .{
         .code = .E0312,
         .severity = .@"error",
         .blame = .environment,
-        .summary = "can't set a --ulimit in the container",
+        .summary = "can't check or set a --ulimit",
         .explanation =
-        \\The container sets each --ulimit on itself (setrlimit) before it drops
-        \\its capabilities. zbx has already checked the limit against the hard
-        \\limit it was started with, so this should not fail: a security policy,
-        \\or limits that changed since the check, is the usual reason.
+        \\Before anything starts, zbx reads its own limit for each --ulimit
+        \\(prlimit64) to check the value against it; a run whose limit can't be
+        \\read is refused, since it can't be checked. The container then sets each
+        \\--ulimit on itself (setrlimit) before it drops its capabilities. After
+        \\the check that should not fail: a security policy, or limits that
+        \\changed since the check, is the usual reason.
         \\
-        \\The cause names the resource and the kernel's reason.
+        \\The limits apply to everything in the container, including the steps zbx
+        \\runs there before the command (ldconfig for --device), and they are set
+        \\before --user switches to the image's user. nproc counts that user's
+        \\processes on the whole host, so a low nproc can make the command's own
+        \\start fail with EAGAIN when that user already runs as many.
+        \\
+        \\The cause names the call, the resource and the kernel's reason.
         ,
     },
     .{
@@ -4958,7 +4971,7 @@ comptime {
     // build error, and lets `entry` index the table directly.
     assert(registry.len == fields.len);
     assert(fields.len <= std.math.maxInt(u16));
-    @setEvalBranchQuota(600_000);
+    @setEvalBranchQuota(800_000);
     for (registry, fields, 0..) |item, name, index| {
         assert(@backingInt(item.code) == index);
         assert(std.mem.eql(u8, @tagName(item.code), name));

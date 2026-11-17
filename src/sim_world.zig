@@ -368,6 +368,8 @@ pub const World = struct {
     devpts_refused: bool,
     /// The kernel refuses a sysctl's value (EINVAL: out of its range, or not a number).
     sysctl_refused: bool,
+    /// Reading a resource limit is refused (ENOSYS: a sandbox's seccomp filter on prlimit64).
+    rlimit_read_refused: bool,
     /// The kernel refuses overlay mounts (no module, a policy).
     overlay_refused: bool,
     /// The kernel refuses the lazy plan's FUSE mount (no `/dev/fuse`, a policy).
@@ -520,6 +522,7 @@ pub const World = struct {
         world.command_exit = .{ .exited = 0 };
         world.devpts_refused = false;
         world.sysctl_refused = false;
+        world.rlimit_read_refused = false;
         world.overlay_refused = false;
         world.fuse_refused = false;
         world.broken_pipe_ignored = false;
