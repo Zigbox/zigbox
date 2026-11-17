@@ -244,8 +244,8 @@ fn scan_roots(io: Io, secrets: []const u8, excludes: []const u8, roots: []const 
         return 1;
     }
     var count = tokens;
-    for (scan.shapes) |shape| {
-        needles[count] = shape;
+    for (scan.shapes) |prefix| {
+        needles[count] = prefix;
         count += 1;
     }
     scanner.init(needles[0..count]);
