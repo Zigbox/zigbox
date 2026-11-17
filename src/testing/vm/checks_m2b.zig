@@ -903,7 +903,10 @@ test "check_not_running: the stop took effect" {
     const arena = arena_state.allocator();
     const running = check_not_running(arena, recorded.ps_old, 0, "m2bold");
     try testing.expectError(error.RecordWrong, running);
-    try check_not_running(arena, recorded.ps_old, 0, "m2bpub");
+    try check_not_running(arena, recorded.ps_old, 0, "m2bnone");
+    for ([_][]const u8{ "m2bold", "m2bpub", "m2bdev" }) |name| {
+        try check_not_running(arena, recorded.ps_all, 0, name);
+    }
     try testing.expectError(error.ExitCodeWrong, check_not_running(arena, recorded.ps_old, 1, "x"));
     const ended = ps_head ++ "{\"name\":\"m2bold\",\"state\":\"exited\",\"exit_code\":137}]}";
     try check_not_running(arena, ended, 0, "m2bold");
