@@ -607,9 +607,9 @@ fn agent_view(session: *Session, out: *Io.Writer) !void {
 
 // ---- The upgrade test ------------------------------------------------------------------------
 
-/// v0.5.2 writes run record version 9 for a detached run, with `.publish` when it has
-/// `--publish`, and version 10 when it has `--device` (constants.zig and run_record.zig at the
-/// tag).
+/// v0.5.2 writes run record version 9 for a detached run, with the forward in `.publish` when it
+/// has `--publish`, and version 10 when it has `--device` (constants.zig and run_record.zig at
+/// the tag).
 const record_plain: u32 = 9;
 const record_device: u32 = 10;
 const old_plain = "m2bold";
