@@ -40,9 +40,9 @@ an Alpine minirootfs in `./alpine`.
    error[ZBX-E0311]: --ulimit is above your own hard limit
    ```
    exit 125, before anything starts. The cause names your hard limit; the fixes are the
-   `/etc/security/limits.conf` line (log in again after) and `systemctl edit user@<uid>.service`
-   with `LimitNOFILE=<value>` under `[Service]` (the `LimitNOFILE=` line itself is in
-   `--output json`'s `context.unit` and in `--verbose`).
+   `/etc/security/limits.conf` line (log in again after) and `systemctl edit user@<uid>.service`,
+   whose sentence names the line to add, `LimitNOFILE=<value>` under `[Service]` (also in
+   `--output json`'s `context.unit`).
 2. **`/dev/shm`.**
    ```
    $ zbx run --rootfs ./alpine --shm-size 256m -- df -k /dev/shm
@@ -123,9 +123,12 @@ mixes into the lines it compares.
   and fix commands read from the diagnostic's fields; `zbx explain <code> --output json` agrees
   with each. The agent applies E0319's root fix (the harness stands in for the person with
   sudo), runs E0319's second fix (`zbx doctor`, as JSON) to see 262144, and reruns to exit 0.
-- **The upgrade test.** v0.5.2 starts a detached container (`zbx-old run -d ... -- sleep
-  300`); this `zbx` lists it running with `ps --output json`, its run record is version 9, and
-  this `zbx stop` stops it.
+- **The upgrade test.** v0.5.2 starts three detached containers (`zbx-old run -d ... -- sleep
+  300`): plain (`m2bold`), with `--net user -p 18080:80` (`m2bpub`) and with `--device
+  /dev/fuse` (`m2bdev`). This `zbx` lists each running with `ps --output json` (`m2bpub` under
+  `user` with its one forward), reads each run record (version 9, 9 with its `.publish` line,
+  and 10 with its `.devices` line), stops each with `zbx stop`, and `ps --all --output json`
+  then lists none of them running.
 
 ## Language runtimes, before and after
 
@@ -156,13 +159,14 @@ do the same with a private cgroup namespace.
 - **Step 3 sets `net.core.somaxconn` to 8192, not the brief's 4096** (slice 3). 4096 is the
   VM kernel's default (since Linux 5.4), so the brief's step would pass with the knob doing
   nothing ([decision](../decisions/2026-11-16-m2b-sysctl-keys.md)).
-- **The view check runs under `--net host` and the default, not `--net user`** (slice 3). The
-  runtime measurement covered `--net user`; the demo does not, to keep `pasta` out of its setup.
-- **E0311's one-line text names `systemctl edit user@<uid>.service`, not `LimitNOFILE=`**
-  (slice 3 finding, not changed). The `LimitNOFILE=<value>` line is in the JSON context
-  (`unit`) and in `--verbose`; the demo asserts it in the agent test.
-- **E0314's JSON context carries `size` only, not the `--memory` value** (slice 3 finding, not
-  changed). An agent reads the memory limit from its own command line.
+- **The view check runs under `--net host`, `--net none` and `--net user`** (slice 3 fix). Under
+  `--net user` the demo also reads a `net` sysctl back after pasta has set the network up, so a
+  key pasta reset would show there.
+- **The upgrade reads a version-10 record from `--device`, not from `-p`** (slice 3 fix). v0.5.2
+  writes version 10 only for a run with a listener or devices; a `-p` run is version 9 with a
+  `.publish` line. The demo starts both, so it reads a v9 record with a forward and a v10 record.
+  `/dev/fuse` because v0.5.2 binds `/dev/null` and the other standard devices itself and refuses
+  them as `--device`.
 - **ci-changes.sh has no separate rules for the policy files, the plan, the child or doctor**
   (slice 3). They fall through to the rule that selects every demo, `m2b` among them; the table
   test pins that for `sysctls.zon`, `plan.zig` and `doctor.zig`.
@@ -225,7 +229,8 @@ do the same with a private cgroup namespace.
   64 MiB is not checked against a smaller `--memory`.
 - **A sysctl that pasta or the kernel resets.** zbx writes each `--sysctl` once, in the child,
   before the program starts. pasta sets addresses and routes, not sysctls, and kept all 15 `net`
-  keys in the slice 1 check; but anything that writes the key later inside the container (the
+  keys in the slice 1 check (demo-m2b reads `net.core.somaxconn` back under `--net user` on
+  every run); but anything that writes the key later inside the container (the
   program, a network helper, a kernel event such as an interface coming up for the per-interface
   keys) wins, and zbx does not re-check. Read the value back from `/proc/sys` inside if it
   matters.

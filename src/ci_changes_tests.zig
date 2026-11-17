@@ -63,6 +63,38 @@ const rows = [_]Row{
         .paths = &.{ "src/testing/vm/checks_m2b.zig", "src/testing/vm/numa_probe/numa_probe.zig" },
         .true_outputs = &.{ "code", "demo_m2b" },
     },
+    // main_m2b.zig imports later demos' checks (its upgrade step): each selects demo_m2b as well
+    // as its own demo and every later one.
+    .{
+        .paths = &.{"src/testing/vm/checks_m3.zig"},
+        .true_outputs = &.{
+            "code",    "demo_m2b", "demo_m3",  "demo_m4", "demo_m5",  "demo_m6",
+            "demo_m6b", "demo_m6d", "demo_m7", "demo_m8",  "demo_m8b", "demo_m9",
+            "demo_m10", "demo_c4",  "demo_s2_lazy",
+        },
+    },
+    .{
+        .paths = &.{"src/testing/vm/checks_m4.zig"},
+        .true_outputs = &.{
+            "code",    "demo_m2b", "demo_m4", "demo_m5",  "demo_m6", "demo_m6b",
+            "demo_m6d", "demo_m7", "demo_m8", "demo_m8b", "demo_m9", "demo_m10",
+            "demo_c4",  "demo_s2_lazy",
+        },
+    },
+    .{
+        .paths = &.{"src/testing/vm/checks_upgrade_m5.zig"},
+        .true_outputs = &.{
+            "code",    "demo_m2b", "demo_m5", "demo_m6", "demo_m6b", "demo_m6d", "demo_m7",
+            "demo_m8", "demo_m8b", "demo_m9", "demo_m10", "demo_c4", "demo_s2_lazy",
+        },
+    },
+    .{
+        .paths = &.{"src/testing/vm/checks_upgrade_m6b.zig"},
+        .true_outputs = &.{
+            "code",    "demo_m2b", "demo_m6b", "demo_m6d", "demo_m7", "demo_m8",
+            "demo_m8b", "demo_m9", "demo_m10", "demo_c4",  "demo_s2_lazy",
+        },
+    },
     // The M2b knobs (the policy files, the plan, the child, doctor) reach every VM demo,
     // demo_m2b among them.
     .{

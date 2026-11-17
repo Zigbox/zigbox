@@ -97,6 +97,12 @@ classify() {
     # M2b's harness and numa-probe. Its knobs (src/runtime/policy/*, the plan, the child,
     # src/doctor.zig) fall through to want_all, which includes m2b.
     src/testing/vm/*_m2b.zig | src/testing/vm/numa_probe/*) want_one m2b; return ;;
+    # main_m2b.zig imports these later demos' checks (its upgrade step, and the files they
+    # import): demo-m2b as well as their own demo and every later one.
+    src/testing/vm/checks_m3.zig) want_one m2b; want_from m3; return ;;
+    src/testing/vm/checks_m4.zig) want_one m2b; want_from m4; return ;;
+    src/testing/vm/checks_upgrade_m5.zig) want_one m2b; want_from m5; return ;;
+    src/testing/vm/checks_upgrade_m6b.zig) want_one m2b; want_from m6b; return ;;
     src/testing/vm/*_m6d.zig | src/testing/vm/m6d_fixture/*) want_one m6d; return ;;
     src/testing/vm/*_s2_lazy.zig) want_one s2_lazy; return ;;
     # fixture_http.zig is the HTTP server demo-m9's fetch step runs in the guest; no other uses it.

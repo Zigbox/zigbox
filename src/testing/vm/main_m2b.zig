@@ -2,7 +2,8 @@
 //! the pinned Alpine minirootfs unpacked as user `demo`, with `numactl` added by `apk` inside a
 //! `zbx run` and `numa-probe` copied in). The six steps of the spec, as the user `demo`:
 //!   1. `--ulimit nofile=4096:8192` reads back 4096 and 8192; one above the user's own hard
-//!      limit is refused (E0311), naming the limit and both fixes.
+//!      limit is refused (E0311), naming the limit and both fixes, the user manager's with the
+//!      `LimitNOFILE=` line to add.
 //!   2. `--shm-size 256m` gives a /dev/shm of 262144 1K-blocks; `--memory 128m --shm-size 256m`
 //!      is refused (E0314), saying /dev/shm counts against --memory.
 //!   3. `--sysctl net.core.somaxconn=8192` reads back 8192 (the VM kernel's default is 4096, so
@@ -14,10 +15,12 @@
 //!   5. The cgroup view: `0::/`, 268435456, `150000 100000`; a write to it fails, read-only.
 //!   6. `numactl --interleave=all true` exits 0 (v0.5.2 fails it: recorded), and numa-probe
 //!      prints the four policy calls ok and the two page movers EPERM.
-//! Then: /dev/shm filling --memory is an OOM kill with the M2 report; under --net host (and the
-//! default) the host's cgroup tree is not reachable at /sys/fs/cgroup; the scripted agent runs
-//! steps 1 to 5 with `--output json` and `zbx explain` only; and the upgrade test: v0.5.2 starts
-//! a detached container, this zbx lists it from its version-9 run record and stops it.
+//! Then: /dev/shm filling --memory is an OOM kill with the M2 report; under --net host, --net
+//! none and --net user the host's cgroup tree is not reachable at /sys/fs/cgroup (and under
+//! --net user a net.* sysctl survives pasta); the scripted agent runs steps 1 to 5 with
+//! `--output json` and `zbx explain` only; and the upgrade test: v0.5.2 starts three detached
+//! containers (plain and `-p`, record version 9; `--device`, version 10), this zbx lists them
+//! from their records, stops them, and `ps --all` shows none running.
 //! Every assertion is a function of checks_m2b.zig or checks_m2.zig with a unit test.
 //! `zig build demo-m2b` (KVM) or `zig build demo-m2b -Daccel=tcg`. See docs/demos/m2b.md.
 
@@ -172,7 +175,9 @@ fn set_map_count(session: *Session, out: *Io.Writer, value: []const u8) !void {
     const command = try format(session, "sysctl -w vm.max_map_count={s}", .{value});
     const result = try session.run(command, limits.command_timeout_kvm_s);
     try H.show(out, command, result);
-    if (result.status != 0) return error.SysctlFailed;
+    checks.check_ran(result.status) catch |err| {
+        return fail_step(out, "provisioning", "expected the sysctl to be set", err);
+    };
 }
 
 fn install_old(session: *Session, out: *Io.Writer) !void {
@@ -185,7 +190,9 @@ fn install_old(session: *Session, out: *Io.Writer) !void {
     );
     const result = try session.run(command, limits.command_timeout_kvm_s);
     try H.show(out, "install " ++ old_release.m2b_tag, result);
-    if (result.status != 0) return error.InstallFailed;
+    checks.check_ran(result.status) catch |err| {
+        return fail_step(out, "provisioning", "expected " ++ old_release.m2b_tag ++ " to run", err);
+    };
 }
 
 fn unpack_rootfs(session: *Session, out: *Io.Writer, timer: *H.Timer) !void {
@@ -199,7 +206,9 @@ fn unpack_rootfs(session: *Session, out: *Io.Writer, timer: *H.Timer) !void {
     );
     const result = try session.run(command, limits.command_timeout_kvm_s);
     try H.show(out, "unpack the rootfs", result);
-    if (result.status != 0) return error.UnpackFailed;
+    checks.check_ran(result.status) catch |err| {
+        return fail_step(out, "provisioning", "expected the rootfs unpacked", err);
+    };
     // The kernel prints a report to the console for every OOM kill; the console is where the
     // harness reads the command's output.
     try show(session, out, "quiet the kernel's console", "dmesg -n 1");
@@ -219,14 +228,17 @@ fn install_numactl(session: *Session, out: *Io.Writer, timer: *H.Timer) !void {
         "/etc/resolv.conf && printf \"%s\\n\" " ++ apk_main ++ " " ++ apk_community ++ " > " ++
         rootfs_dir ++ "/etc/apk/repositories'";
     const configured = try session.run(configure, limits.command_timeout_kvm_s);
-    if (configured.status != 0) {
-        return fail_step(out, "provisioning", "apk configuration", error.ProvisionFailed);
-    }
+    try H.show(out, "configure apk", configured);
+    checks.check_ran(configured.status) catch |err| {
+        return fail_step(out, "provisioning", "apk configuration", err);
+    };
     const apk = zbx ++ " run --net host --rootfs " ++ rootfs_dir ++
         " --name apk1 -- apk add --no-cache numactl-tools";
     const result = try session.run(apk, 300);
     try H.show(out, "apk add numactl-tools, inside zbx run", result);
-    if (result.status != 0) return fail_step(out, "provisioning", "apk add", error.ProvisionFailed);
+    checks.check_ran(result.status) catch |err| {
+        return fail_step(out, "provisioning", "apk add", err);
+    };
     const copied = try session.copy_in(.{
         .route = "/m2b/numa-probe",
         .guest_path = rootfs_dir ++ "/numa-probe",
@@ -234,7 +246,9 @@ fn install_numactl(session: *Session, out: *Io.Writer, timer: *H.Timer) !void {
         .mode = "755",
     });
     try H.show(out, "copy numa-probe into the rootfs", copied);
-    if (copied.status != 0) return fail_step(out, "provisioning", "copy", error.ProvisionFailed);
+    checks.check_ran(copied.status) catch |err| {
+        return fail_step(out, "provisioning", "copy", err);
+    };
     try set_map_count(session, out, map_count_low);
     try timer.lap(out, "numactl");
 }
@@ -263,14 +277,16 @@ fn step_ulimit(session: *Session, out: *Io.Writer, timer: *H.Timer) !void {
     const above = try format(session, run_prefix ++ " --ulimit nofile={d} -- true", .{hard + 1});
     const refused = try split(session, out, above);
     var hard_text: [24]u8 = undefined;
+    var unit_text: [40]u8 = undefined;
     const needles = [_][]const u8{
         try std.fmt.bufPrint(&hard_text, "{d}", .{hard}),
         "/etc/security/limits.conf",
         "user@1000.service",
+        try std.fmt.bufPrint(&unit_text, "LimitNOFILE={d} under [Service]", .{hard + 1}),
     };
     checks.check_text_refusal(refused.streams, refused.status, "ZBX-E0311", &needles) catch |err| {
         return fail_step(out, step, "expected E0311 naming the hard limit, limits.conf and " ++
-            "the user manager", err);
+            "the user manager's LimitNOFILE=", err);
     };
     try timer.lap(out, "step 1");
 }
@@ -337,8 +353,8 @@ fn step_require_host(session: *Session, out: *Io.Writer, timer: *H.Timer) !void 
     };
     try set_map_count(session, out, map_count_needed);
     const again = try split(session, out, command);
-    agent_json.check_exited(session.scratch_allocator(), again.streams, again.status, 0) catch {
-        if (again.status != 0) return fail_step(out, step, "expected exit 0", error.ExitCodeWrong);
+    checks.check_quiet(again.streams, again.status) catch |err| {
+        return fail_step(out, step, "expected exit 0 and nothing said", err);
     };
     try timer.lap(out, "step 4");
 }
@@ -366,7 +382,9 @@ fn step_numa(session: *Session, out: *Io.Writer, timer: *H.Timer) !void {
     try out.print("\ndemo-m2b: STEP 6: NUMA memory policy\n", .{});
     const interleave = run_prefix ++ " -- numactl --interleave=all true";
     const ran = try split(session, out, interleave);
-    if (ran.status != 0) return fail_step(out, step, interleave, error.ExitCodeWrong);
+    checks.check_quiet(ran.streams, ran.status) catch |err| {
+        return fail_step(out, step, "expected numactl to exit 0, quiet", err);
+    };
     // The same command under v0.5.2, whose filter had none of the policy calls: recorded in
     // docs/demos/m2b.md as the before.
     const before = zbx_old ++ " run --net none --rootfs " ++ rootfs_dir ++
@@ -399,24 +417,35 @@ fn extra_shm_oom(session: *Session, out: *Io.Writer, timer: *H.Timer) !void {
 }
 
 /// What the container finds at /sys/fs/cgroup: each entry, the memory limit, its own cgroup.
+/// The script is left open: each caller closes its quote, after adding to it.
 const view_probe = " -- sh -c 'for e in /sys/fs/cgroup/*; do echo LS:${e##*/}; done; " ++
-    "echo MEMORY:$(cat /sys/fs/cgroup/memory.max); echo CGROUP:$(cat /proc/self/cgroup)'";
+    "echo MEMORY:$(cat /sys/fs/cgroup/memory.max); echo CGROUP:$(cat /proc/self/cgroup)";
 
 /// The host's cgroup tree is not reachable at /sys/fs/cgroup under --net host (the host's /sys
-/// is bound there) or the default. Mountinfo still lists the host's cgroup2 under --net host:
-/// a recorded cut, not asserted.
+/// is bound there), the default, or --net user (pasta's namespace). Mountinfo still lists the
+/// host's cgroup2 under --net host: a recorded cut, not asserted.
 fn extra_host_tree(session: *Session, out: *Io.Writer, timer: *H.Timer) !void {
     try out.print("\ndemo-m2b: EXTRA: the host's cgroup tree is not reachable\n", .{});
     const modes = [_][]const u8{ "host", "none" };
     inline for (modes) |mode| {
         const command = zbx ++ " run --net " ++ mode ++ " --rootfs " ++ rootfs_dir ++
-            " --memory 256m" ++ view_probe;
+            " --memory 256m" ++ view_probe ++ "'";
         const result = try split(session, out, command);
         checks.check_view(result.streams, result.status, "268435456") catch |err| {
             return fail_step(out, "EXTRA --net " ++ mode, "expected the scope's own files " ++
                 "and no host slice at /sys/fs/cgroup", err);
         };
     }
+    // Under --net user, pasta sets the network up after zbx has written the sysctls: the value
+    // read back inside is the one the run set (pasta resets no net.* key).
+    const user = zbx ++ " run --net user --rootfs " ++ rootfs_dir ++ " --memory 256m" ++
+        " --sysctl net.core.somaxconn=8192" ++ view_probe ++
+        "; echo SYSCTL:$(cat /proc/sys/net/core/somaxconn)'";
+    const result = try split(session, out, user);
+    checks.check_view_sysctl(result.streams, result.status, "268435456", "8192") catch |err| {
+        return fail_step(out, "EXTRA --net user", "expected the scope's own files, no host " ++
+            "slice, and somaxconn 8192 after pasta", err);
+    };
     try timer.lap(out, "host tree");
 }
 
@@ -478,35 +507,14 @@ fn agent_ulimit(session: *Session, out: *Io.Writer) !void {
     const hard = try hard_nofile(session, out, "AGENT 1");
     const above = try format(session, json_prefix ++ " --ulimit nofile={d} -- true", .{hard + 1});
     const found = try refusal_of(session, out, above, "ZBX-E0311");
-    var asked: [24]u8 = undefined;
-    var own: [24]u8 = undefined;
-    var unit: [40]u8 = undefined;
-    const wanted = .{
-        try std.fmt.bufPrint(&asked, "{d}", .{hard + 1}),
-        try std.fmt.bufPrint(&own, "{d}", .{hard}),
-        try std.fmt.bufPrint(&unit, "LimitNOFILE={d}", .{hard + 1}),
-    };
-    read_e0311(found, wanted[0], wanted[1], wanted[2]) catch |err| {
+    checks.check_e0311(found, hard, demo_uid) catch |err| {
         return fail_step(out, "AGENT 1", "expected asked, hard, the unit line and the fixes " ++
             "in the diagnostic's fields", err);
     };
 }
 
-fn read_e0311(
-    found: agent_json.Diagnostic,
-    asked: []const u8,
-    hard: []const u8,
-    unit: []const u8,
-) checks.Error!void {
-    try checks.expect_context(found, "asked", asked);
-    try checks.expect_context(found, "hard", hard);
-    try checks.expect_context(found, "unit", unit);
-    const logins = try checks.fix_at(found, 0);
-    if (std.mem.indexOf(u8, logins, "/etc/security/limits.conf") == null) return error.FixWrong;
-    if (std.mem.indexOf(u8, logins, " nofile ") == null) return error.FixWrong;
-    const manager = try checks.fix_at(found, 1);
-    if (std.mem.indexOf(u8, manager, "user@1000.service") == null) return error.FixWrong;
-}
+/// The uid of the user `demo` the harness provisions.
+const demo_uid: u32 = 1000;
 
 fn agent_shm_and_sysctl(session: *Session, out: *Io.Writer) !void {
     const shm = try accepted(session, out, json_prefix ++ " --shm-size 256m -- true");
@@ -528,12 +536,9 @@ fn agent_shm_and_sysctl(session: *Session, out: *Io.Writer) !void {
     checks.expect_context(e0316, "sysctl", "vm.max_map_count") catch |err| {
         return fail_step(out, "AGENT 3", "expected context.sysctl vm.max_map_count", err);
     };
-    const pointer = checks.fix_at(e0316, 1) catch |err| {
-        return fail_step(out, "AGENT 3", "expected a second fix with a command", err);
+    checks.check_require_host_pointer(e0316, "vm.max_map_count") catch |err| {
+        return fail_step(out, "AGENT 3", "expected the template fix --require-host", err);
     };
-    if (!std.mem.startsWith(u8, pointer, "--require-host ")) {
-        return fail_step(out, "AGENT 3", "expected the fix --require-host", error.FixWrong);
-    }
     const shared = zbx_json ++ " run --net host --rootfs " ++ rootfs_dir ++
         " --sysctl net.core.somaxconn=8192 -- true";
     const e0317 = try refusal_of(session, out, shared, "ZBX-E0317");
@@ -564,17 +569,19 @@ fn agent_require_host(session: *Session, out: *Io.Writer) !void {
     const doctor_fix = try session.scratch_allocator().dupe(u8, try checks.fix_at(found, 1));
     const applied = try session.run(fix, limits.command_timeout_kvm_s);
     try H.show(out, fix, applied);
-    if (applied.status != 0) return fail_step(out, step, fix, error.ExitCodeWrong);
+    checks.check_ran(applied.status) catch |err| {
+        return fail_step(out, step, "expected the root fix to run", err);
+    };
     var buffer: [256]u8 = undefined;
     const doctor = agent_json.fix_command(&buffer, zbx, doctor_fix) catch |err| {
         return fail_step(out, step, "expected the second fix to be a zbx command", err);
     };
     const report = try split(session, out, doctor);
     const arena = session.scratch_allocator();
-    const value = checks.doctor_host_value(arena, report.streams.stdout, "vm.max_map_count");
-    if ((value catch 0) != 262144) {
-        return fail_step(out, step, "expected the doctor to read 262144", error.DoctorWrong);
-    }
+    const doc = report.streams.stdout;
+    checks.check_doctor_reads(arena, doc, "vm.max_map_count", 262144) catch |err| {
+        return fail_step(out, step, "expected the doctor to read 262144", err);
+    };
     _ = try accepted(session, out, command);
 }
 
@@ -593,40 +600,95 @@ fn agent_view(session: *Session, out: *Io.Writer) !void {
     const write = json_prefix ++ " --memory 256m -- sh -c 'echo 1 > /sys/fs/cgroup/memory.max'";
     const failed = try split(session, out, write);
     const arena = session.scratch_allocator();
-    checks.check_program_failed(arena, failed.streams, failed.status) catch |err| {
-        return fail_step(out, step, "expected the write to fail inside the container", err);
+    checks.check_read_only_write(arena, failed.streams, failed.status) catch |err| {
+        return fail_step(out, step, "expected the write to fail: Read-only file system", err);
     };
 }
 
 // ---- The upgrade test ------------------------------------------------------------------------
 
-/// v0.5.2 writes run record version 9 for a plain detached run (constants.zig at the tag).
-const run_record_version_old: u32 = 9;
-const old_container = "m2bold";
+/// v0.5.2 writes run record version 9 for a detached run, with `.publish` when it has `-p`, and
+/// version 10 when it has `--device` (constants.zig and run_record.zig at the tag).
+const record_plain: u32 = 9;
+const record_device: u32 = 10;
+const old_plain = "m2bold";
+const old_published = "m2bpub";
+const old_device = "m2bdev";
+const old_names = [_][]const u8{ old_plain, old_published, old_device };
+/// /dev/fuse: a device v0.5.2 does not bind on its own (it reserves /dev/null and the rest).
+const old_starts = [_][]const u8{
+    "--net none",
+    "--net user -p 18080:80",
+    "--net none --device /dev/fuse",
+};
 
 fn upgrade(session: *Session, out: *Io.Writer, timer: *H.Timer) !void {
-    const step = "UPGRADE";
-    try out.print("\ndemo-m2b: UPGRADE: " ++ old_release.m2b_tag ++ " starts a container, " ++
-        "this zbx reads its record\n", .{});
-    const start = zbx_old ++ " run -d --net none --rootfs " ++ rootfs_dir ++ " --name " ++
-        old_container ++ " -- sleep 300";
-    const started = try split(session, out, start);
-    if (started.status != 0) return fail_step(out, step, start, error.ExitCodeWrong);
+    try out.print("\ndemo-m2b: UPGRADE: " ++ old_release.m2b_tag ++ " starts three containers, " ++
+        "this zbx reads their records and stops them\n", .{});
+    inline for (old_names, old_starts) |name, flags| {
+        const start = zbx_old ++ " run -d " ++ flags ++ " --rootfs " ++ rootfs_dir ++
+            " --name " ++ name ++ " -- sleep 300";
+        const started = try split(session, out, start);
+        checks.check_detached(started.streams, started.status, name) catch |err| {
+            return fail_step(out, "UPGRADE " ++ name, "expected the old zbx to start it", err);
+        };
+    }
     const ps = try split(session, out, zbx_json ++ " ps");
     const arena = session.scratch_allocator();
-    const stdout = ps.streams.stdout;
-    _ = checks_up6b.check_old_running(arena, stdout, ps.status, old_container) catch |err| {
-        return fail_step(out, step, "expected ps to list the old container running", err);
+    const listed = ps.streams.stdout;
+    inline for (.{ old_plain, old_device }) |name| {
+        _ = checks_up6b.check_old_running(arena, listed, ps.status, name) catch |err| {
+            return fail_step(out, "UPGRADE " ++ name, "expected ps to list it running", err);
+        };
+    }
+    checks.check_old_published(arena, listed, ps.status, old_published, .{ 18080, 80 }) catch |e| {
+        return fail_step(out, "UPGRADE " ++ old_published, "expected ps to list it running " ++
+            "under --net user with 18080:80", e);
     };
-    const version = "grep -h version " ++ state_dir ++ "/runs/" ++ old_container ++ ".zon";
-    const record = try session.run(version, limits.command_timeout_kvm_s);
-    try H.show(out, version, record);
-    checks_up5.check_record_version(record.output, run_record_version_old) catch |err| {
-        return fail_step(out, step, "expected the run record to be version 9", err);
-    };
-    const stop = try split(session, out, zbx ++ " stop " ++ old_container);
-    if (stop.status != 0) return fail_step(out, step, "zbx stop", error.ExitCodeWrong);
+    try upgrade_records(session, out);
+    try upgrade_stop(session, out);
     try timer.lap(out, "upgrade");
+}
+
+/// Each record is the version v0.5.2 wrote, with the line its flag added.
+fn upgrade_records(session: *Session, out: *Io.Writer) !void {
+    const versions = [_]u32{ record_plain, record_plain, record_device };
+    const lines = [_][]const u8{
+        ".detached = true,",
+        ".publish = .{ \"18080:80\" },",
+        ".devices = \"/dev/fuse\",",
+    };
+    inline for (old_names, versions, lines) |name, version, line| {
+        const command = "cat " ++ state_dir ++ "/runs/" ++ name ++ ".zon";
+        const record = try session.run(command, limits.command_timeout_kvm_s);
+        try H.show(out, command, record);
+        checks.check_ran(record.status) catch |err| {
+            return fail_step(out, "UPGRADE " ++ name, "expected its run record", err);
+        };
+        checks_up5.check_record_version(record.output, version) catch |err| {
+            return fail_step(out, "UPGRADE " ++ name, "expected the record's version", err);
+        };
+        checks.check_record_line(record.output, line) catch |err| {
+            return fail_step(out, "UPGRADE " ++ name, "expected the record line " ++ line, err);
+        };
+    }
+}
+
+/// This zbx stops each, and `ps` then lists none of them running.
+fn upgrade_stop(session: *Session, out: *Io.Writer) !void {
+    inline for (old_names) |name| {
+        const stop = try split(session, out, zbx ++ " stop " ++ name);
+        checks.check_stopped(stop.streams, stop.status, name) catch |err| {
+            return fail_step(out, "UPGRADE " ++ name, "expected zbx stop to stop it", err);
+        };
+    }
+    const ps = try split(session, out, zbx_json ++ " ps --all");
+    const arena = session.scratch_allocator();
+    inline for (old_names) |name| {
+        checks.check_not_running(arena, ps.streams.stdout, ps.status, name) catch |err| {
+            return fail_step(out, "UPGRADE " ++ name, "expected the stop to take effect", err);
+        };
+    }
 }
 
 test {
