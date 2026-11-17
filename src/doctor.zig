@@ -2174,6 +2174,57 @@ test "snapshot: every fixture's report, its diagnostic blocks and its exit code"
     }
 }
 
+test "doctor --require-host: a miss FAILs the host-settings line with the run's own code" {
+    // Goal: `zbx doctor --require-host` judges the host as `zbx run` would: an unmet minimum is
+    // a FAIL with ZBX-E0319 and the miss's one line, a setting the kernel does not expose is a
+    // FAIL with ZBX-E0321, and a met requirement passes. Method: run the CLI on two fixtures
+    // with a requirement each, and read the host-settings line, the stderr block and the exit.
+    const cases = [_]struct {
+        fixture: []const u8,
+        requirement: []const u8,
+        line: []const u8,
+        code: ?[]const u8,
+    }{
+        .{
+            .fixture = "ubuntu_2404",
+            .requirement = "vm.max_map_count>=2000000",
+            .line = "FAIL host-settings  vm.max_map_count is 1048576, needs >=2000000  [ZBX-E0319]",
+            .code = "error[ZBX-E0319]",
+        },
+        .{
+            .fixture = "host_settings_partial",
+            .requirement = "transparent_hugepage=madvise",
+            .line = "FAIL host-settings  /sys/kernel/mm/transparent_hugepage/enabled is not " ++
+                "there: this kernel has no transparent hugepages  [ZBX-E0321]",
+            .code = "error[ZBX-E0321]",
+        },
+        .{
+            .fixture = "ubuntu_2404",
+            .requirement = "vm.max_map_count>=1048576",
+            .line = "ok   host-settings  vm.max_map_count 1048576",
+            .code = null,
+        },
+    };
+    var target: HostSim = undefined;
+    for (cases) |case| {
+        const fixture = for (&fixtures.all) |*fixture| {
+            if (std.mem.eql(u8, fixture.name, case.fixture)) break fixture;
+        } else unreachable; // Both fixtures are in the list.
+        target.init(7, fixture.files);
+        fixture.apply(&target);
+        const args = [_][]const u8{ "doctor", "--require-host", case.requirement };
+        const code = cli.run(target.interface(), &args);
+        try testing.expectEqual(@as(u32, 1), count_lines(target.stdout(), case.line));
+        if (case.code) |header| {
+            try testing.expectEqual(constants.exit_environment, code);
+            try testing.expectEqual(@as(u32, 1), count_lines(target.stderr(), header));
+        } else {
+            try testing.expectEqual(constants.exit_ok, code);
+            try testing.expectEqual(@as(usize, 0), target.stderr().len);
+        }
+    }
+}
+
 test "the healthy fixtures pass and warn does not change the exit code" {
     // Goal: pin which fixtures exit 0, so a changed policy cannot flip one unnoticed.
     const passing = [_][]const u8{
