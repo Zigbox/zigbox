@@ -5168,7 +5168,7 @@ pub const registry = [_]Entry{
         .blame = .user,
         .summary = "the image is too large for lazy start",
         .explanation =
-        \\Lazy start arrives in 0.6.0: this zbx (0.5.2) refuses --lazy with E0004.
+        \\Lazy start arrives in 0.6.0: this zbx (0.5.3) refuses --lazy with E0004.
         \\
         \\zbx run --lazy serves the image's files from memory it sets aside when
         \\the run starts: a table with room for a fixed number of entries (files,
@@ -5186,7 +5186,7 @@ pub const registry = [_]Entry{
         .blame = .user,
         .summary = "--lazy does not work with another option given",
         .explanation =
-        \\Lazy start arrives in 0.6.0: this zbx (0.5.2) refuses --lazy with E0004.
+        \\Lazy start arrives in 0.6.0: this zbx (0.5.3) refuses --lazy with E0004.
         \\
         \\zbx run --lazy starts a container before its image is all on disk,
         \\serving the files from the store as the container reads them. The server
