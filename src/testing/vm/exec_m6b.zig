@@ -115,7 +115,7 @@ fn refused_alike(session: *Session, out: *Io.Writer) !void {
 }
 
 fn in_the_cgroup(session: *Session, out: *Io.Writer) !void {
-    const title = "\n{s}: EXEC 3: the command is in the container's cgroup and under its --pids\n";
+    const title = "\n{s}: EXEC 3: exec is in the container's cgroup namespace, under its --pids\n";
     try out.print(title, .{H.demo_name});
     _ = try ok(session, out, zn ++ " run -d --name ex2 --pids 2 alpine -- sleep 1000");
     const cgroup = try ok(session, out, zn ++ " exec ex2 -- cat /proc/self/cgroup" ++ no_input);
