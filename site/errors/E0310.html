@@ -76,7 +76,7 @@ footer{border-top:1px solid var(--line);padding-block:24px;color:var(--muted);
 <p class="summary">a --ulimit is not valid</p>
 <dl class="facts"><div><dt>Kind</dt><dd>error</dd></div><div><dt>Blame</dt><dd>user</dd></div><div><dt>Exit code</dt><dd>1 (125 in zbx run)</dd></div></dl>
 <h2>What it means</h2>
-<p>--ulimit sets a resource limit of the container's processes, as ulimit does: --ulimit name=soft[:hard], once per name. One value sets both the soft and the hard limit. The names are nofile (open files), nproc (processes of the user), memlock (locked memory) and stack. nofile and nproc take counts; memlock and stack take sizes in --memory's syntax (k, m or g, binary units). Any value may be unlimited. The soft limit can't be above the hard one.</p>
+<p>--ulimit sets a resource limit of the container's processes, as ulimit does: --ulimit name=soft[:hard], once per name. One value sets both the soft and the hard limit. The names are nofile (open files), nproc (processes of the user), memlock (locked memory) and stack. nofile and nproc take counts; memlock and stack take sizes in --memory's syntax (k, m or g, binary units). Any value may be unlimited, except nofile's: the kernel caps open files at fs.nr_open and refuses unlimited. The soft limit can't be above the hard one.</p>
 <p>Without --ulimit, the container keeps the limits zbx was started with. nproc counts every process of the user who runs zbx, inside the container and out, because the container's root is that user.</p>
 <h2>Offline</h2>
 <p>The same text, without a network:</p>

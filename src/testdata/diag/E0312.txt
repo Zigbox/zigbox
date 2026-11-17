@@ -1,4 +1,4 @@
-error[ZBX-E0312]: can't set a --ulimit in the container
+error[ZBX-E0312]: can't check or set a --ulimit
   cause  the limit passed zbx's check against your own, so a security policy or
          a change to your limits since is the usual reason
   fix    check your limits:             ulimit -a -H

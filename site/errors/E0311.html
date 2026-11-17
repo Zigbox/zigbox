@@ -78,6 +78,7 @@ footer{border-top:1px solid var(--line);padding-block:24px;color:var(--muted);
 <h2>What it means</h2>
 <p>A rootless run can lower a hard limit but never raise it: raising one needs CAP_SYS_RESOURCE in the host's user namespace. zbx checks each --ulimit against the hard limit it was started with and refuses one above it, rather than set a lower value than was asked.</p>
 <p>The limits come from the login session (/etc/security/limits.conf) or, for a process started by the systemd user manager, from its unit, user@&lt;uid&gt;.service (LimitNOFILE=, LimitNPROC=, LimitMEMLOCK=, LimitSTACK=). Raise the one that applies, log in again, and check with ulimit -H -a. The user manager's memlock is often 8 MiB.</p>
+<p>limits.conf reads memlock and stack in KiB, and systemd's LimitMEMLOCK= and LimitSTACK= read bytes, so the two fixes show different numbers for the same limit.</p>
 <h2>Offline</h2>
 <p>The same text, without a network:</p>
 <pre class="term">zbx explain E0311</pre>

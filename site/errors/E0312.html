@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <title>ZBX-E0312 · Zigbox</title>
-<meta name="description" content="can't set a --ulimit in the container">
+<meta name="description" content="can't check or set a --ulimit">
 <link rel="canonical" href="https://zigbox.github.io/zigbox/errors/E0312.html">
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Familjen+Grotesk:wght@500;700&amp;family=IBM+Plex+Sans:wght@400;500;600&amp;family=IBM+Plex+Mono:wght@400;500&amp;display=swap">
@@ -73,11 +73,12 @@ footer{border-top:1px solid var(--line);padding-block:24px;color:var(--muted);
 <main class="wrap">
 <p class="eyebrow">Diagnostic code</p>
 <h1>ZBX-E0312</h1>
-<p class="summary">can't set a --ulimit in the container</p>
+<p class="summary">can't check or set a --ulimit</p>
 <dl class="facts"><div><dt>Kind</dt><dd>error</dd></div><div><dt>Blame</dt><dd>environment</dd></div><div><dt>Exit code</dt><dd>2 (125 in zbx run)</dd></div></dl>
 <h2>What it means</h2>
-<p>The container sets each --ulimit on itself (setrlimit) before it drops its capabilities. zbx has already checked the limit against the hard limit it was started with, so this should not fail: a security policy, or limits that changed since the check, is the usual reason.</p>
-<p>The cause names the resource and the kernel's reason.</p>
+<p>Before anything starts, zbx reads its own limit for each --ulimit (prlimit64) to check the value against it; a run whose limit can't be read is refused, since it can't be checked. The container then sets each --ulimit on itself (setrlimit) before it drops its capabilities. After the check that should not fail: a security policy, or limits that changed since the check, is the usual reason.</p>
+<p>The limits apply to everything in the container, including the steps zbx runs there before the command (ldconfig for --device), and they are set before --user switches to the image's user. nproc counts that user's processes on the whole host, so a low nproc can make the command's own start fail with EAGAIN when that user already runs as many.</p>
+<p>The cause names the call, the resource and the kernel's reason.</p>
 <h2>Offline</h2>
 <p>The same text, without a network:</p>
 <pre class="term">zbx explain E0312</pre>

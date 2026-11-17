@@ -6255,6 +6255,8 @@ test "snapshot: run and ps JSON with every knob are the checked-in documents, va
     const one = ps_json.value.object.get("containers").?.array.items[0].object;
     try testing.expect(one.get("ulimits") != null);
     try testing.expect(one.get("sysctls") != null);
+    const limits = one.get("limits").?.object;
+    try testing.expectEqual(@as(i64, 128 << 20), limits.get("shm_bytes").?.integer);
 }
 
 var policy_files: @import("store/fs_sim.zig").SimFs = undefined;
