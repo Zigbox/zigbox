@@ -1,6 +1,6 @@
 # VM runs on demand, for work in progress. A push to a branch named vm/<demo>-<anything> runs that
 # one demo in the KVM VM, where it takes minutes instead of the quarter hour TCG takes in a build
-# container without KVM. <demo> is m0 to m6, m6b, m7, m8b (the listener handoff), m9 (the zbx import demo), m10 (the --device and --gpu demo), s2 (the S2 slice 1 FUSE probe), m2bprobe (the M2b slice 1 measurements), s2lazy (S2 slice 4, zbx run --lazy from the store), c4 (Zigcube's 0.5.2 requests), m8 (the slice 10 export check, then slice 7's packages on four guests, demo-m8-packages), z7 (the zigbox_vm hostfwd check), or all. Nothing else runs: no build matrix, no fuzzers
+# container without KVM. <demo> is m0 to m6, m6b, m7, m8b (the listener handoff), m9 (the zbx import demo), m10 (the --device and --gpu demo), m6d (Artifact Registry through WIF; not in all, it needs the owner's Google setup), s2 (the S2 slice 1 FUSE probe), m2bprobe (the M2b slice 1 measurements), s2lazy (S2 slice 4, zbx run --lazy from the store), c4 (Zigcube's 0.5.2 requests), m8 (the slice 10 export check, then slice 7's packages on four guests, demo-m8-packages), z7 (the zigbox_vm hostfwd check), or all. Nothing else runs: no build matrix, no fuzzers
 # (ci.yml does those on the PR). The run deletes its own scratch branch when it ends, pass or fail,
 # because a cloud session's git proxy cannot delete branches; the run and its logs stay readable.
 # A newer push to the same branch cancels the run it supersedes. See AGENTS.md, "Git".
@@ -17,19 +17,36 @@ concurrency:
 permissions:
   contents: write # only to delete the scratch branch at the end
   packages: write # only vm/m8-push-ghcr: the push to ghcr.io/zigbox/zigbox-demo
+  # Every vm/* run gets id-token: write (one job; only vm/m6d-* asks for a token): the OIDC token
+  # Google's STS exchanges (docs/demos/m6d.md).
+  id-token: write
 
 jobs:
   demo:
     name: ${{ github.ref_name }}
     runs-on: ubuntu-24.04
     timeout-minutes: 60
+    # demo-m6d's Google setup: repository variables, not secrets (docs/demos/m6d.md).
+    env:
+      ZBX_GAR_PROVIDER: ${{ vars.ZBX_GAR_PROVIDER }}
+      ZBX_GAR_SERVICE_ACCOUNT: ${{ vars.ZBX_GAR_SERVICE_ACCOUNT }}
+      ZBX_GAR_REGISTRY: ${{ vars.ZBX_GAR_REGISTRY }}
+      ZBX_GCR_REGISTRY: ${{ vars.ZBX_GCR_REGISTRY }}
     steps:
       # The whole history: demo-m3 and later build an older release for the upgrade test.
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0
+      - name: Check the Google setup (vm/m6d-* only)
+        id: setup
+        if: startsWith(github.ref_name, 'vm/m6d-')
+        uses: ./.github/actions/m6d-setup
+        with:
+          fork: 'false'
       - name: Which demo
         id: pick
+        env:
+          M6D_RUN: ${{ steps.setup.outputs.run }}
         run: |
           name="${GITHUB_REF_NAME#vm/}"
           demo="${name%%-*}"
@@ -39,8 +56,10 @@ jobs:
             m2bprobe) steps="demo-m2b-probe" ;;
             m8) steps="demo-m8 demo-m8-packages" ;;
             s2lazy) steps="demo-s2-lazy" ;;
+            # Without the owner's Google setup, one NOT RUN line and nothing runs.
+            m6d) steps="demo-m6d"; if [ "$M6D_RUN" != true ]; then steps=""; fi ;;
             all) steps="demo-m0 demo-m1 demo-m2 demo-m3 demo-m4 demo-m5 demo-m6 demo-m6b demo-m7 demo-m8 demo-m8b demo-m9 demo-m10 demo-c4 demo-s2-probe demo-s2-lazy demo-z7" ;;
-            *) echo "vm: branch $GITHUB_REF_NAME names no demo (vm/m0..m6-<x>, vm/m6b-<x>, vm/m7-<x>, vm/m8-<x>, vm/m8b-<x>, vm/m9-<x>, vm/m10-<x>, vm/c4-<x>, vm/s2-<x>, vm/s2lazy-<x>, vm/z7-<x> or vm/all-<x>)"; exit 1 ;;
+            *) echo "vm: branch $GITHUB_REF_NAME names no demo (vm/m0..m6-<x>, vm/m6b-<x>, vm/m7-<x>, vm/m8-<x>, vm/m8b-<x>, vm/m9-<x>, vm/m10-<x>, vm/m6d-<x>, vm/c4-<x>, vm/s2-<x>, vm/s2lazy-<x>, vm/z7-<x> or vm/all-<x>)"; exit 1 ;;
           esac
           # The slice 12 check pushes to GHCR from the runner and runs no guest demo.
           if [ "$name" = "m8-push-ghcr" ]; then steps=""; fi

@@ -44,6 +44,7 @@ jobs:
       demo_m5: ${{ steps.pick.outputs.demo_m5 }}
       demo_m6: ${{ steps.pick.outputs.demo_m6 }}
       demo_m6b: ${{ steps.pick.outputs.demo_m6b }}
+      demo_m6d: ${{ steps.pick.outputs.demo_m6d }}
       demo_m7: ${{ steps.pick.outputs.demo_m7 }}
       demo_m8: ${{ steps.pick.outputs.demo_m8 }}
       demo_m8_packages: ${{ steps.pick.outputs.demo_m8_packages }}
@@ -727,6 +728,56 @@ jobs:
           key: vm-alpine-${{ hashFiles('src/testing/vm/alpine.zon') }}
       - name: Run the M10 demo
         run: zig build demo-m10 -Daccel=kvm
+
+  # The M6d demo (docs/demos/m6d.md): pulls from Artifact Registry and gcr.io with GitHub's
+  # OIDC token exchanged through Workload Identity Federation; no key file exists. The harness
+  # asks the runner for the token itself and serves it once to the guest, so it is on no command
+  # line and in no log. Without the owner's Google setup (the four repository variables) or
+  # without an OIDC token (a fork's pull request gets none), the job says so in one line and
+  # passes, and the demo is recorded as not run.
+  demo-m6d:
+    name: demo-m6d (Ubuntu 24.04 VM, KVM, Artifact Registry and gcr.io through WIF)
+    needs: changes
+    if: ${{ needs.changes.outputs.demo_m6d == 'true' }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    permissions:
+      contents: read
+      id-token: write # only for the OIDC token Google's STS exchanges
+    env:
+      ZBX_GAR_PROVIDER: ${{ vars.ZBX_GAR_PROVIDER }}
+      ZBX_GAR_SERVICE_ACCOUNT: ${{ vars.ZBX_GAR_SERVICE_ACCOUNT }}
+      ZBX_GAR_REGISTRY: ${{ vars.ZBX_GAR_REGISTRY }}
+      ZBX_GCR_REGISTRY: ${{ vars.ZBX_GCR_REGISTRY }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Check the Google setup
+        id: setup
+        uses: ./.github/actions/m6d-setup
+        with:
+          fork: ${{ github.event.pull_request && github.event.pull_request.head.repo.full_name != github.repository }}
+      - uses: ./.github/actions/setup-zig
+        if: steps.setup.outputs.run == 'true'
+      - name: Install QEMU
+        if: steps.setup.outputs.run == 'true'
+        uses: ./.github/actions/install-apt
+        with:
+          packages: qemu-system-x86 qemu-utils
+      - name: Enable KVM
+        if: steps.setup.outputs.run == 'true'
+        run: |
+          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' | sudo tee /etc/udev/rules.d/99-kvm4all.rules
+          sudo udevadm control --reload-rules
+          sudo udevadm trigger --name-match=kvm
+      - name: Cache the VM base image
+        if: steps.setup.outputs.run == 'true'
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: .zig-cache/zbx-vm/ubuntu-24.04-server-cloudimg-amd64.img
+          key: vm-image-${{ hashFiles('src/testing/vm/lib/image.zon') }}
+      - name: Run the M6d demo
+        if: steps.setup.outputs.run == 'true'
+        run: zig build demo-m6d -Daccel=kvm
 
   # The C4 demo (docs/demos/c4.md): Zigcube's four 0.5.2 requests. A multi-threaded stand-in for
   # its supervisor makes sockets in a running container's network, `exec` joins that network, an

@@ -70,6 +70,19 @@ pub const Server = struct {
         server.route_count += 1;
     }
 
+    /// Replaces the body of the route at `path`, which must be one: demo-m6d serves a short-lived
+    /// token for one fetch, then an empty body. Called between commands, never mid-response.
+    pub fn set_route(server: *Server, path: []const u8, body: []const u8) void {
+        assert(body.len <= limits.http_body_bytes_max);
+        var found = false;
+        for (server.routes[0..server.route_count]) |*route| {
+            if (!std.mem.eql(u8, route.path, path)) continue;
+            route.body = body;
+            found = true;
+        }
+        assert(found);
+    }
+
     /// Whether `path` is one of the routes.
     pub fn serves(server: *const Server, path: []const u8) bool {
         assert(server.route_count <= limits.http_routes_max);

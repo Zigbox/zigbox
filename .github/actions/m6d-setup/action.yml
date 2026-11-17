@@ -1,0 +1,56 @@
+name: demo-m6d setup
+description: >
+  Decides whether demo-m6d runs (ci.yml's demo-m6d job, vm.yml's vm/m6d-* branches). It runs
+  only with the owner's Google setup, the repository variables of docs/demos/m6d.md, and with an
+  OIDC token to exchange, which the runner offers only to a job with `id-token: write` and never
+  to a fork's pull request. On a fork's pull request, or without a variable, it writes a
+  `::warning::` line and a job-summary line `demo-m6d: NOT RUN (<reason>)`, and the job stays
+  green: a missing setup is a demo not run, not a failed one. With the variables set and not a
+  fork, a missing OIDC token means the job lost `id-token: write`: that fails (exit 1). Prints
+  names only, never a value. Inline, not a script file: the repository allows no new shell
+  scripts (src/tidy.zig).
+
+# The caller's environment carries ZBX_GAR_PROVIDER, ZBX_GAR_SERVICE_ACCOUNT, ZBX_GAR_REGISTRY
+# and ZBX_GCR_REGISTRY; the runner sets ACTIONS_ID_TOKEN_REQUEST_URL and _TOKEN.
+inputs:
+  fork:
+    description: '"true" for a fork''s pull request.'
+    required: true
+outputs:
+  run:
+    description: '"true" when the demo runs.'
+    value: ${{ steps.decide.outputs.run }}
+runs:
+  using: composite
+  steps:
+    - name: Decide
+      id: decide
+      shell: bash
+      env:
+        FORK: ${{ inputs.fork }}
+      run: |
+        set -euo pipefail
+        output=${GITHUB_OUTPUT:-/dev/stdout}
+
+        skip() {
+          echo "::warning::demo-m6d: NOT RUN ($1; setup: docs/demos/m6d.md)"
+          if [ -n "${GITHUB_STEP_SUMMARY:-}" ]; then
+            echo "demo-m6d: NOT RUN ($1)" >> "$GITHUB_STEP_SUMMARY"
+          fi
+          echo "run=false" >> "$output"
+          exit 0
+        }
+
+        if [ "${FORK:-false}" = true ]; then skip "a fork's pull request gets no OIDC token"; fi
+        # ZBX_GAR_SERVICE_ACCOUNT is optional: without it the federated identity reads directly.
+        for name in ZBX_GAR_PROVIDER ZBX_GAR_REGISTRY ZBX_GCR_REGISTRY; do
+          if [ -z "${!name:-}" ]; then skip "the repository variable $name is not set"; fi
+        done
+        # The setup is there and this is not a fork: no token means the job lost id-token: write.
+        for name in ACTIONS_ID_TOKEN_REQUEST_URL ACTIONS_ID_TOKEN_REQUEST_TOKEN; do
+          if [ -z "${!name:-}" ]; then
+            echo "::error::demo-m6d: FAILED ($name is not set: the job needs id-token: write)"
+            exit 1
+          fi
+        done
+        echo "run=true" >> "$output"
