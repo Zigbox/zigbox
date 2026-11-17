@@ -14,6 +14,8 @@ const build_options = @import("build_options");
 const constants = @import("constants.zig");
 const host_mod = @import("host.zig");
 const doctor = @import("doctor.zig");
+const host_settings = @import("runtime/host_settings.zig");
+const host_settings_check = @import("runtime/host_settings_check.zig");
 const text_util = @import("text.zig");
 const codes = @import("diag/codes.zig");
 const errors = @import("diag/errors.zig");
@@ -126,6 +128,8 @@ const help_text =
     \\  --ulimit <r>=<n>[:<n>]  limit nofile, nproc, memlock or stack (repeatable)
     \\  --shm-size <size>  /dev/shm's size (default 64m)
     \\  --sysctl <k>=<v>  set an allowed sysctl (repeatable; zbx explain E0316)
+    \\  --require-host <s><op><v>  refuse the run unless the host's setting meets it, as in
+    \\                  'vm.max_map_count>=262144' (once per setting; zbx explain E0320)
     \\  --read-only     mount the root read-only, with a tmpfs at /tmp and /run
     \\  --net <mode>    none (the default: a network of its own, only lo), host (share the host's)
     \\                  or user (through pasta: apt install passt)
@@ -452,6 +456,9 @@ pub const RunArgs = struct {
     /// network are checked when the run starts.
     sysctls: [constants.sysctls_max]runtime_spec.Sysctl = undefined,
     sysctls_count: u32 = 0,
+    /// `--require-host` (run and doctor), each parsed as it was read (E0320), one per setting.
+    host_requirements: [host_settings.settings_count]runtime_spec.HostRequirement = undefined,
+    host_requirements_count: u32 = 0,
     /// `logs`: `--follow`, `--tail` and `--stream` as typed (checked as they were read, E0219).
     follow: bool = false,
     tail: ?[]const u8 = null,
@@ -480,6 +487,13 @@ pub const RunArgs = struct {
     pub fn sysctls_slice(run_args: *const RunArgs) []const runtime_spec.Sysctl {
         assert(run_args.sysctls_count <= constants.sysctls_max);
         return run_args.sysctls[0..run_args.sysctls_count];
+    }
+
+    pub fn host_requirements_slice(
+        run_args: *const RunArgs,
+    ) []const runtime_spec.HostRequirement {
+        assert(run_args.host_requirements_count <= host_settings.settings_count);
+        return run_args.host_requirements[0..run_args.host_requirements_count];
     }
 
     pub fn publish_slice(run_args: *const RunArgs) []const runtime_spec.Publish {
@@ -516,9 +530,10 @@ const RunOption = enum {
     ulimit,
     shm_size,
     sysctl,
+    require_host,
 
     fn flag(option: RunOption) []const u8 {
-        assert(@backingInt(option) <= 25);
+        assert(@backingInt(option) <= 26);
         assert(@tagName(option).len > 0);
         return switch (option) {
             .rootfs => "--rootfs",
@@ -547,6 +562,7 @@ const RunOption = enum {
             .ulimit => "--ulimit",
             .shm_size => "--shm-size",
             .sysctl => "--sysctl",
+            .require_host => "--require-host",
         };
     }
 };
@@ -1953,6 +1969,7 @@ fn run_slot(run_args: *RunArgs, option: RunOption) *?[]const u8 {
         .workdir => &run_args.workdir,
         .shm_size => &run_args.shm_size,
         .ulimit, .sysctl => unreachable, // Repeatable: `take_ulimit` and `take_sysctl` above.
+        .require_host => unreachable, // Repeatable: `take_require_host` above.
     };
 }
 
@@ -1997,6 +2014,7 @@ fn take_run_option(
     if (option == .gpu) return take_gpu(diag, run_args, value);
     if (option == .ulimit) return take_ulimit(diag, run_args, value);
     if (option == .sysctl) return take_sysctl(diag, run_args, value);
+    if (option == .require_host) return take_require_host(diag, run_args, value);
     const slot = run_slot(run_args, option);
     if (slot.* != null) return unexpected_argument(diag, command, argument);
     if (option == .user) {
@@ -2019,6 +2037,7 @@ fn option_allowed(command: Command, option: RunOption) bool {
     const is_log_option = option == .tail or option == .stream;
     return switch (command) {
         .run => !is_log_option and option != .workdir,
+        .doctor => option == .require_host,
         .logs => is_log_option,
         .exec => option == .user or option == .workdir,
         .stop => option == .timeout or option == .grace,
@@ -2047,13 +2066,14 @@ fn take_run_or_env(
     const is_stop = first != null and first.? == .stop;
     const is_logs = first != null and first.? == .logs;
     const is_exec = first != null and first.? == .exec;
+    const is_doctor = first != null and first.? == .doctor;
     switch (classify(argument)) {
         .env_next, .env_inline => {
             if (!is_run and !is_exec) return unknown_option(diag, argument);
             try take_env(diag, run_args, args, index);
         },
         else => {
-            if (!is_run and !is_stop and !is_logs and !is_exec) {
+            if (!is_run and !is_stop and !is_logs and !is_exec and !is_doctor) {
                 return unknown_option(diag, argument);
             }
             try take_run_option(diag, run_args, args, index, first.?);
@@ -2253,6 +2273,29 @@ fn take_sysctl(diag: *Diag, run_args: *RunArgs, value: []const u8) ParseError!vo
     }
     run_args.sysctls[run_args.sysctls_count] = parsed;
     run_args.sysctls_count += 1;
+}
+
+/// One `--require-host`: parsed now (E0320), and refused when its setting was required already.
+fn take_require_host(diag: *Diag, run_args: *RunArgs, value: []const u8) ParseError!void {
+    assert(diag.code == null);
+    assert(run_args.host_requirements_count <= host_settings.settings_count);
+    const parsed = switch (host_settings.parse_requirement(value)) {
+        .ok => |requirement| requirement,
+        .problem => |problem| {
+            host_settings_check.requirement_invalid(diag, value, problem.kind, problem.setting);
+            return error.BadOptionValue;
+        },
+    };
+    const count = run_args.host_requirements_count;
+    for (run_args.host_requirements[0..count]) |earlier| {
+        if (earlier.setting != parsed.setting) continue;
+        host_settings_check.requirement_invalid(diag, value, .repeated, parsed.setting);
+        return error.BadOptionValue;
+    }
+    // One per setting, so a fifth is a repeat and was refused above.
+    assert(count < host_settings.settings_count);
+    run_args.host_requirements[count] = parsed;
+    run_args.host_requirements_count = count + 1;
 }
 
 /// One `--publish`: parsed now, so that the diagnostic quotes the value that is wrong.
@@ -4076,6 +4119,7 @@ fn run_container(
         .publish = given.publish_slice(),
         .rlimits = given.rlimits,
         .sysctls = given.sysctls_slice(),
+        .host_requirements = given.host_requirements_slice(),
         .listen = given.listen,
         .hosts_file = given.hosts_file orelse "",
         .state = given.state_slice(),

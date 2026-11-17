@@ -435,6 +435,7 @@ pub const HostSim = struct {
         .get_rlimit = get_rlimit,
         .set_rlimit = set_rlimit,
         .write_sysctl = write_sysctl,
+        .unshare_cgroup = unshare_cgroup,
         .exec = exec,
         .gid = gid,
         .environment = environment,
@@ -1153,6 +1154,12 @@ pub const HostSim = struct {
         const sim = from_context(context);
         try sim.begin_call();
         if (sim.world.write_sysctl(path, value)) |errno| return sim.model_error(errno);
+    }
+
+    fn unshare_cgroup(context: *anyopaque) host.Error!void {
+        const sim = from_context(context);
+        try sim.begin_call();
+        if (sim.world.unshare_cgroup()) |errno| return sim.model_error(errno);
     }
 
     fn exec(context: *anyopaque, request: host.ExecRequest) host.Error!void {

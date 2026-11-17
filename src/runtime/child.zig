@@ -54,6 +54,9 @@ const State = struct {
     /// The image's `ldconfig` did not run for the CDI libraries: `exec` hands the command
     /// `Plan.ld_library_path` instead.
     ld_failed: bool,
+    /// A /sys step that leaves no /sys failed with its note: the cgroup view, which is mounted
+    /// on /sys/fs/cgroup, is not tried.
+    sys_missing: bool,
 };
 
 pub const go_ahead: u8 = 1;
@@ -75,6 +78,7 @@ pub fn entry(context: *anyopaque) u8 {
         .listener = null,
         .fuse = null,
         .ld_failed = false,
+        .sys_missing = false,
     };
     for (child.plan.steps[0..child.plan.count], 0..) |*step, index| {
         if (plan_mod.side_of(step.kind) != .child) continue;
@@ -94,6 +98,7 @@ pub fn entry(context: *anyopaque) u8 {
             write_record(child, record);
             if (step.tolerant) {
                 if (step.kind == .run_ldconfig) state.ld_failed = true;
+                if (leaves_no_sys(step.kind)) state.sys_missing = true;
                 const group = plan_mod.group_of(step);
                 if (group > 0) state.failed_etc |= @as(u8, 1) << @intCast(group - 1);
                 continue;
@@ -114,11 +119,20 @@ pub fn entry(context: *anyopaque) u8 {
 /// still be writable; it runs whatever happened before.
 fn skipped(step: *const Step, state: *const State) bool {
     assert(plan_mod.side_of(step.kind) == .child);
+    if (step.kind == .mount_cgroup) return state.sys_missing;
     const group = plan_mod.group_of(step);
     assert(group <= 3);
     if (group == 0) return false;
     if (step.kind == .unstage_etc_file) return false;
     return state.failed_etc & (@as(u8, 1) << @intCast(group - 1)) != 0;
+}
+
+/// The /sys steps whose failure leaves the container without a /sys: the directory, the bind
+/// and the fresh sysfs. A failed read-only remount leaves the bind in place.
+fn leaves_no_sys(kind: plan_mod.Kind) bool {
+    assert(@backingInt(kind) <= @backingInt(plan_mod.Kind.exec));
+    if (kind == .remount_sys) assert(plan_mod.is_sys(kind));
+    return kind == .make_sys_dir or kind == .bind_sys or kind == .mount_sysfs;
 }
 
 /// Tells the parent. If this write fails there is nobody to tell and nothing more to do: the
@@ -172,6 +186,8 @@ fn run_step(child: *const Context, step: *const Step, state: *State) Error!void 
         .mount_fuse => state.fuse = try host.mount_fuse(target),
         .send_fuse => try send_fuse(child, state),
         .mount_sysfs => try mount(host, .sysfs, target, null),
+        .unshare_cgroup => try host.unshare_cgroup(),
+        .mount_cgroup => try mount(host, .cgroup2, target, null),
         .create_etc_file => try host.create_file(target, true),
         .stage_etc_file => try host.write_file_mode(target, plan.text(step.source), 0o644),
         .bind_etc_file, .bind_device, .bind_user_device => try bind_file(host, plan, step),

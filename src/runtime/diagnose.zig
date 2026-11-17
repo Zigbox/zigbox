@@ -305,6 +305,13 @@ fn step_kind_failed(
             failure.err,
             failure.errno,
         ),
+        .unshare_cgroup, .mount_cgroup => knobs_diagnose.cgroup_view_failed(
+            diag,
+            if (step.kind == .unshare_cgroup) .unshare else .mount,
+            operation,
+            failure.err,
+            failure.errno,
+        ),
         .restrict_capabilities,
         .clear_ambient,
         => hardening_failed(diag, .E0207, operation, failure),

@@ -55,6 +55,18 @@ pub const Error = run.Error;
 /// The memory `start`'s trust gate works in: the caller's, in static or heap storage.
 pub const GateWorkspace = start_gate.Workspace;
 
+/// `--require-host` (M2b): the host settings a run may require (`Spec.host_requirements`),
+/// read through the host and checked purely, so a caller can report them as a node's facts.
+const host_settings = @import("runtime/host_settings.zig");
+const host_settings_check = @import("runtime/host_settings_check.zig");
+pub const HostSetting = host_settings.HostSetting;
+pub const HostValueSet = host_settings.HostValueSet;
+pub const HostRequirement = host_settings.HostRequirement;
+pub const HostSettings = host_settings.HostSettings;
+pub const parse_host_requirement = host_settings.parse_requirement;
+pub const host_settings_read = host_settings_check.host_settings_read;
+pub const host_requirements_check = host_settings_check.host_requirements_check;
+
 /// `run.start` behind the trust gate. The ungated start is not part of the library.
 pub const start = start_gate.start;
 

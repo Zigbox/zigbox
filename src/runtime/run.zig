@@ -48,6 +48,7 @@ const codes = @import("../diag/codes.zig");
 const render = @import("../diag/render.zig");
 const diagnose = @import("diagnose.zig");
 const knobs_check = @import("knobs_check.zig");
+const host_settings_check = @import("host_settings_check.zig");
 const doctor = @import("../doctor.zig");
 const ids = @import("ids.zig");
 const logfile = @import("logfile.zig");
@@ -1236,7 +1237,7 @@ fn check_limits(limits: spec_mod.Limits, diag: *Diag) Error!void {
 }
 
 /// The workload knobs (`--ulimit`, `--shm-size`, `--sysctl`), against the caller's own limits,
-/// the host's memory and the run's network.
+/// the host's memory and the run's network; then `--require-host`, against the host's settings.
 fn check_knobs(host: Host, container: *const Spec, diag: *Diag) Error!void {
     assert(diag.code == null);
     assert(container.sysctls.len <= std.math.maxInt(u32));
@@ -1247,6 +1248,8 @@ fn check_knobs(host: Host, container: *const Spec, diag: *Diag) Error!void {
         .memory_bytes = container.limits.memory_bytes,
         .isolated = container.network.isolated(),
     }, diag) catch return error.StartFailed;
+    host_settings_check.preflight(host, container.host_requirements, diag) catch
+        return error.StartFailed;
 }
 
 /// Decides whether this run has a scope. It has one if the user's systemd manager answers; if

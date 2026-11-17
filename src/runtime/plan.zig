@@ -141,6 +141,10 @@ pub const Kind = enum {
     // The child.
     die_with_parent,
     await_release,
+    /// In a plan with a scope (M2b): the child, now in the container's cgroup, takes a cgroup
+    /// namespace of its own (`unshare(CLONE_NEWCGROUP)`), whose root is that cgroup. Not
+    /// tolerant: E0322.
+    unshare_cgroup,
     set_hostname,
     /// Only when the input asks: the file mode creation mask the command inherits.
     set_umask,
@@ -196,6 +200,11 @@ pub const Kind = enum {
     /// ... and there a sysfs of the container's own replaces the three /sys steps above but
     /// the first. A sysfs shows the devices of the network namespace it is mounted in.
     mount_sysfs,
+    /// ... and, in a plan with a scope (M2b), a read-only cgroup2 on `<rootfs>/sys/fs/cgroup`,
+    /// on top of either /sys: the container's own cgroup, seen from the namespace
+    /// `unshare_cgroup` made. Not tolerant (E0323), but not tried when /sys is missing (a /sys
+    /// step failed with its note): no /sys, no view, as before.
+    mount_cgroup,
     /// The generated /etc files (`netfiles.zig`). Their mount points are made first, where the
     /// image's own tree is not written: in the overlay's extra lower layer for a tree from the
     /// store, in the rootfs for a directory. The text is staged in a hidden file of the
@@ -322,6 +331,9 @@ pub const lazy_steps_count: u32 = 3;
 
 /// The steps a scope adds to the parent's: the keeper and the scope itself.
 pub const scope_steps_count: u32 = 2;
+
+/// The steps a scope adds to the child's: the cgroup namespace and the cgroup2 view (M2b).
+pub const cgroup_view_steps_count: u32 = 2;
 
 /// The steps `--net user` adds to the parent's: pasta's start and the wait for it to be ready.
 pub const pasta_steps_count: u32 = 2;
@@ -753,7 +765,7 @@ pub const Plan = struct {
             state_read_only_steps_count * plan.state_read_only_count;
         const listener = listener_steps_count * @as(u32, @intFromBool(plan.has_listener));
         const lazy = lazy_steps_count * @as(u32, @intFromBool(plan.lazy));
-        const scope = scope_steps_count * @intFromBool(plan.scoped);
+        const scope = (scope_steps_count + cgroup_view_steps_count) * @intFromBool(plan.scoped);
         const given_hosts: u32 = if (plan.hosts_file) 2 else 0; // The hosts file's stage/unstage.
         const user_devices = user_device_steps_count * plan.device_count;
         return plan.cdi_steps() + base + scope + read_only + extras + pasta + state +
@@ -1086,6 +1098,7 @@ pub const Plan = struct {
         const proc = plan.add_text(&.{ rootfs_text, "/proc" });
         plan.push(.die_with_parent, empty_text, empty_text, 0);
         plan.push(.await_release, empty_text, empty_text, 0);
+        if (plan.scoped) plan.push(.unshare_cgroup, empty_text, empty_text, 0);
         plan.push(.set_hostname, plan.hostname_ref, empty_text, 0);
         if (plan.has_umask) plan.push(.set_umask, empty_text, empty_text, 0);
         plan.push(.make_mounts_private, plan.add_text(&.{"/"}), empty_text, 0);
@@ -1455,9 +1468,11 @@ pub const Plan = struct {
 
     /// The container's /sys: the host's, bound recursively and made read-only, when it shares
     /// the host's network namespace; a sysfs of its own, read-only, when it has one.
+    /// /sys, and then, in a plan with a scope, the cgroup view on top of it (either /sys).
     fn push_sys(plan: *Plan, rootfs: []const u8) void {
         const start = plan.count;
-        const expected: u32 = if (plan.isolated()) 2 else 3;
+        const sys: u32 = if (plan.isolated()) 2 else 3;
+        const expected = sys + @as(u32, @intFromBool(plan.scoped));
         defer assert(plan.count == start + expected);
         assert(rootfs.len > 0);
         assert(plan.count < constants.plan_steps_max);
@@ -1465,10 +1480,13 @@ pub const Plan = struct {
         plan.push(.make_sys_dir, inside, empty_text, 0);
         if (plan.isolated()) {
             plan.push(.mount_sysfs, inside, empty_text, 0);
-            return;
+        } else {
+            plan.push(.bind_sys, inside, plan.add_text(&.{"/sys"}), 0);
+            plan.push(.remount_sys, inside, empty_text, 0);
         }
-        plan.push(.bind_sys, inside, plan.add_text(&.{"/sys"}), 0);
-        plan.push(.remount_sys, inside, empty_text, 0);
+        if (!plan.scoped) return;
+        const cgroup = plan.add_text(&.{ rootfs, "/sys/fs/cgroup" });
+        plan.push(.mount_cgroup, cgroup, empty_text, 0);
     }
 
     fn push_links(plan: *Plan, rootfs: []const u8) void {
@@ -1716,6 +1734,8 @@ pub fn describe(step: *const Step, buffer: []u8) []const u8 {
         .receive_listener, .serve_fuse => parent_phrase(step.kind),
         .die_with_parent => "asking the kernel to end the container if zbx dies",
         .await_release => "waiting for zbx to write the container's id maps",
+        .unshare_cgroup => "taking a cgroup namespace of the container's own",
+        .mount_cgroup => "mounting the container's cgroup read-only on /sys/fs/cgroup",
         .set_hostname => "setting the container's hostname",
         .set_umask => "setting the file mode creation mask",
         .make_mounts_private => "making the container's mounts private",
@@ -1780,7 +1800,8 @@ comptime {
     assert(steps_count_single <= constants.plan_steps_max);
     // The longest plan: the single map, a scope, a read-only root, a working directory, a user
     // (and the death signal asked for again after it) and pasta.
-    const longest = steps_count_single + scope_steps_count + read_only_steps_count +
+    const longest = steps_count_single + scope_steps_count + cgroup_view_steps_count +
+        read_only_steps_count +
         read_only_hostname_steps_count + 3 + pasta_steps_count +
         (state_steps_count + state_read_only_steps_count) * constants.state_volumes_max +
         mount_steps_staged * constants.mounts_max +
@@ -2024,7 +2045,7 @@ test "a plan with a scope has the start_scope step before the go-ahead, with its
     var input = test_input(&.{"sh"});
     input.scope = .{ .version = 255, .limits = .{ .pids = 64 } };
     plan.build(&input);
-    try testing.expectEqual(steps_count_single + 2, plan.count);
+    try testing.expectEqual(steps_count_single + 2 + cgroup_view_steps_count, plan.count);
     try testing.expectEqual(Kind.spawn_keeper, plan.steps[plan.first_child() - 3].kind);
     try testing.expectEqual(Kind.start_scope, plan.steps[plan.first_child() - 2].kind);
     try testing.expectEqual(Kind.release_child, plan.steps[plan.first_child() - 1].kind);
@@ -2041,7 +2062,7 @@ test "a plan with a scope has the start_scope step before the go-ahead, with its
 
     input.mapping = .{ .full = test_helpers };
     plan.build(&input);
-    try testing.expectEqual(steps_count_full + 2, plan.count);
+    try testing.expectEqual(steps_count_full + 2 + cgroup_view_steps_count, plan.count);
     try testing.expectEqual(Kind.spawn_keeper, plan.steps[4].kind);
     try testing.expectEqual(Kind.start_scope, plan.steps[5].kind);
 

@@ -778,6 +778,8 @@ fn step_failure(scenario: *const Scenario, kind: plan_mod.Kind) ?codes.Code {
         .mount_overlay => return .E0425,
         .set_rlimit => return .E0312,
         .write_sysctl => return .E0318,
+        .unshare_cgroup => return .E0322,
+        .mount_cgroup => return .E0323,
         // The steps that may fail: skipped with a note.
         .mount_pts, .make_sys_dir, .bind_sys, .remount_sys, .mount_sysfs => return null,
         .make_etc_dir, .create_etc_file, .stage_etc_file => return null,

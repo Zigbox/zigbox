@@ -309,6 +309,9 @@ pub const MountKind = enum {
     /// A fresh sysfs on `target`, read-only: nosuid, nodev, noexec. In a network namespace of the
     /// container's own it shows that namespace's devices, not the host's.
     sysfs,
+    /// A fresh cgroup2 on `target`, read-only: nosuid, nodev, noexec (M2b). In a cgroup namespace
+    /// of the caller's own, its root is the cgroup the caller was in when it took the namespace.
+    cgroup2,
     /// An overlayfs mount on `target`. `source` is the mount data (`userxattr,lowerdir=...`):
     /// the kernel reads it as text, so it is the one request whose source is not a path.
     overlay,
@@ -571,6 +574,9 @@ pub const VTable = struct {
     /// or truncating it (a sysctl takes its whole value from one write). The kernel's EINVAL is a
     /// value it refused.
     write_sysctl: *const fn (context: *anyopaque, path: [:0]const u8, value: []const u8) Error!void,
+    /// Takes a cgroup namespace of the caller's own (`unshare(CLONE_NEWCGROUP)`), rooted at the
+    /// cgroup it is in now. Needs CAP_SYS_ADMIN over its user namespace.
+    unshare_cgroup: *const fn (context: *anyopaque) Error!void,
     /// Installs a seccomp filter (`seccomp(SECCOMP_SET_MODE_FILTER)`). Needs `no_new_privs` first.
     install_seccomp: *const fn (context: *anyopaque, program: []const bpf.Insn) Error!void,
     /// Replaces the process. Returns only on failure in the real host; the simulator returns
@@ -1267,6 +1273,13 @@ pub const Host = struct {
         assert(value.len > 0);
         assert(value.len <= constants.sysctl_value_bytes_max);
         try host.vtable.write_sysctl(host.context, path, value);
+        assert(host.vtable.last_errno(host.context) == 0);
+    }
+
+    pub fn unshare_cgroup(host: Host) Error!void {
+        assert(@intFromPtr(host.vtable) != 0);
+        assert(@intFromPtr(host.context) != 0);
+        try host.vtable.unshare_cgroup(host.context);
         assert(host.vtable.last_errno(host.context) == 0);
     }
 
