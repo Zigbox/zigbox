@@ -4,7 +4,7 @@ error[ZBX-E0224]: can't give the command a terminal
          EMFILE
   name   web-1
   pid    502
-  step   open_terminal (8 of 33)
+  step   open_terminal (9 of 35)
   fix    run it without a terminal:   zbx exec web-1 -- <command> < /dev/null
   more   zbx explain E0224
   docs   https://zigbox.github.io/zigbox/errors/E0224.html

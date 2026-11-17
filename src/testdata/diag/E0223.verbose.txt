@@ -6,7 +6,7 @@ error[ZBX-E0223]: the working directory is not in the container
   dir    /nowhere
   name   web-1
   pid    502
-  step   enter_workdir (23 of 31)
+  step   enter_workdir (25 of 33)
   fix    make it first:   zbx exec web-1 -- mkdir -p /nowhere
          or name one the container has: --workdir /
   more   zbx explain E0223
