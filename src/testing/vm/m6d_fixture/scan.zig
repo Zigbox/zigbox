@@ -91,6 +91,23 @@ pub const Scanner = struct {
 /// (`oauth2accesstoken:` in base64).
 pub const shapes = [_][]const u8{ "ya29.", "b2F1dGgyYWNjZXNzdG9rZW46" };
 
+/// Whether step 5 leaves `path` out: the secrets directory itself and what is under it (not a
+/// sibling whose name only starts the same), and each path in the comma-separated `excludes`.
+pub fn excluded(path: []const u8, secrets: []const u8, excludes: []const u8) bool {
+    assert(secrets.len > 0);
+    assert(secrets[secrets.len - 1] != '/');
+    if (std.mem.startsWith(u8, path, secrets)) {
+        if (path.len == secrets.len) return true;
+        if (path[secrets.len] == '/') return true;
+    }
+    var list = std.mem.splitScalar(u8, excludes, ',');
+    while (list.next()) |exclude| {
+        if (exclude.len == 0) continue;
+        if (std.mem.eql(u8, path, exclude)) return true;
+    }
+    return false;
+}
+
 const testing = std.testing;
 
 fn scan_in_pieces(scanner: *Scanner, text: []const u8, piece: usize) ?Hit {
@@ -156,4 +173,55 @@ test "a whole chunk of filler between two halves of a long needle" {
     try testing.expectEqual(@as(?Hit, null), scanner.feed(needle[0..100]));
     const hit = scanner.feed(needle[100..]) orelse return error.TestUnexpectedResult;
     try testing.expectEqual(@as(u64, chunk_bytes - 100), hit.offset);
+}
+
+/// Feeds `chunk_bytes - before` bytes of filler, then the needle and filler to fill the next
+/// chunk, so the needle starts `before` bytes before the first chunk boundary.
+fn hit_across_boundary(scanner: *Scanner, needle: []const u8, before: usize) !?Hit {
+    assert(before <= needle.len);
+    const text = try testing.allocator.alloc(u8, 2 * chunk_bytes);
+    defer testing.allocator.free(text);
+    @memset(text, '.');
+    @memcpy(text[chunk_bytes - before ..][0..needle.len], needle);
+    scanner.reset();
+    _ = scanner.feed(text[0..chunk_bytes]);
+    return scanner.feed(text[chunk_bytes..]);
+}
+
+test "a needle as long as the bound, with one byte past the chunk boundary, is found" {
+    // Goal: the carry is exactly `longest - 1`, so a needle whose last byte alone is in the next
+    // chunk is found (a carry of `longest - 2` loses it). Method: put a needle of
+    // `needle_bytes_max` bytes `longest - 1` and `longest` bytes before the boundary, and wholly
+    // after it.
+    var needle: [needle_bytes_max]u8 = undefined;
+    for (&needle, 0..) |*byte, index| byte.* = 'a' + @as(u8, @intCast(index % 26));
+    const needles = [_][]const u8{&needle};
+    const scanner = try testing.allocator.create(Scanner);
+    defer testing.allocator.destroy(scanner);
+    scanner.* = .{};
+    scanner.init(&needles);
+    const cases = [_]usize{ needle_bytes_max - 1, needle_bytes_max - 2, 1 };
+    for (cases) |before| {
+        const hit = try hit_across_boundary(scanner, &needle, before) orelse
+            return error.TestUnexpectedResult;
+        try testing.expectEqual(@as(u64, chunk_bytes - before), hit.offset);
+    }
+    // Wholly in the first chunk: found by the first feed, and not again by the second.
+    const whole = try hit_across_boundary(scanner, &needle, needle_bytes_max) orelse
+        return error.TestUnexpectedResult;
+    try testing.expectEqual(@as(u64, chunk_bytes - needle_bytes_max), whole.offset);
+}
+
+test "the secrets directory is excluded, a sibling that shares its prefix is not" {
+    // Goal: step 5 skips only what it must. Method: paths under, at, and beside the directory.
+    const secrets = "/home/demo/m6d-secrets";
+    const excludes = "/home/demo/zbx,/home/demo/m6d-helper";
+    try testing.expect(excluded("/home/demo/m6d-secrets", secrets, excludes));
+    try testing.expect(excluded("/home/demo/m6d-secrets/oidc-0", secrets, excludes));
+    try testing.expect(!excluded("/home/demo/m6d-secrets-cache/x", secrets, excludes));
+    try testing.expect(!excluded("/home/demo/m6d-secretsx", secrets, excludes));
+    try testing.expect(excluded("/home/demo/zbx", secrets, excludes));
+    try testing.expect(excluded("/home/demo/m6d-helper", secrets, excludes));
+    try testing.expect(!excluded("/home/demo/zbx.lock", secrets, excludes));
+    try testing.expect(!excluded("/home/demo/project/zbx", secrets, ",,"));
 }

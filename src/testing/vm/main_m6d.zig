@@ -41,6 +41,8 @@ const wif_direct = "/home/demo/wif-direct.json";
 const oidc_route = "/m6d/oidc";
 const helper_route = "/m6d/helper";
 const credentials = "GOOGLE_APPLICATION_CREDENTIALS=" ++ wif ++ " ";
+/// What step 5 searches: the demo user's home, its runtime directory, /tmp and /var/tmp.
+const scan_roots = [_][]const u8{ "/home/demo", "/run/user/1000", "/tmp", "/var/tmp" };
 const run_name = "m6d-hello";
 /// The OIDC tokens the guest may be given: the helper reads at most this many as needles.
 const oidc_fetches_max = scan.needles_max - scan.shapes.len;
@@ -83,7 +85,7 @@ pub fn main(init: std.process.Init) !u8 {
         try out.print("demo-m6d: bad arguments ({s})\n", .{@errorName(err)});
         return 2;
     };
-    const config = read_config(init, out) orelse return 3;
+    const config = (read_config(init, out) catch return 1) orelse return 3;
     const started = session_mod.now_ms();
     demo(init, out, options, config) catch |err| {
         if (err == error.NoKvm) return 1;
@@ -94,14 +96,17 @@ pub fn main(init: std.process.Init) !u8 {
     return 0;
 }
 
-/// The repository variables and the runner's token request, checked; null (after one line
-/// saying the demo was not run and why) when one is missing or malformed.
-fn read_config(init: std.process.Init, out: *Io.Writer) ?checks.Config {
+const ConfigFailure = error{ Malformed, Unmasked };
+
+/// The repository variables and the runner's token request, checked. Null, after one line
+/// saying the demo was not run and why, when one is missing; an error, after one line saying the
+/// demo failed, when one is malformed.
+fn read_config(init: std.process.Init, out: *Io.Writer) ConfigFailure!?checks.Config {
     var values: [6]?[]const u8 = undefined;
     const names = checks.variable_names ++ checks.runner_names;
     for (names, 0..) |name, index| values[index] = init.environ_map.get(name);
     if (checks.first_missing(values)) |name| {
-        out.print("demo-m6d: NOT RUN: {s} is not set (setup: docs/demos/m6d.md)\n", .{name}) catch
+        out.print("demo-m6d: NOT RUN ({s} is not set; setup: docs/demos/m6d.md)\n", .{name}) catch
             {};
         return null;
     }
@@ -112,9 +117,10 @@ fn read_config(init: std.process.Init, out: *Io.Writer) ?checks.Config {
         .gcr_registry = values[3].?,
     };
     checks.check_config(config) catch |err| {
-        out.print("demo-m6d: NOT RUN: the repository variables are malformed ({s}); " ++
-            "see docs/demos/m6d.md\n", .{@errorName(err)}) catch {};
-        return null;
+        // Set but wrong is a broken setup, not a missing one: a failure.
+        out.print("demo-m6d: FAILED (the repository variables are malformed: {s}; " ++
+            "see docs/demos/m6d.md)\n", .{@errorName(err)}) catch {};
+        return error.Malformed;
     };
     oidc = .{
         .request_url = values[4].?,
@@ -122,6 +128,12 @@ fn read_config(init: std.process.Init, out: *Io.Writer) ?checks.Config {
         .provider = config.provider,
     };
     assert(oidc.request_token.len > 0);
+    mask_in_job_log(init, out, oidc.request_token) catch |err| {
+        out.print("demo-m6d: FAILED (the runner's token request could not be masked: {s})\n", .{
+            @errorName(err),
+        }) catch {};
+        return error.Unmasked;
+    };
     return config;
 }
 
@@ -268,6 +280,22 @@ fn fetch_oidc(init: std.process.Init) ![]const u8 {
     return oidc.token[0..token.len];
 }
 
+/// Asks the GitHub runner to redact `secret` from the job log (`::add-mask::`), before anything
+/// can print it: the guest console and the harness's own lines are copied into that log. The
+/// line goes to this process's stdout, which the runner reads and does not echo, and is flushed
+/// at once; never on an argument list. Outside GitHub Actions (a developer's terminal) nothing
+/// is written, since there the line itself would show the secret.
+fn mask_in_job_log(init: std.process.Init, out: *Io.Writer, secret: []const u8) !void {
+    assert(secret.len > 0);
+    // A line break would end the command early and print the rest of the secret.
+    if (std.mem.indexOfAny(u8, secret, "\r\n") != null) return error.SecretNotMaskable;
+    const actions = init.environ_map.get("GITHUB_ACTIONS") orelse return;
+    if (!std.mem.eql(u8, actions, "true")) return;
+    try out.flush();
+    try out.print("::add-mask::{s}\n", .{secret});
+    try out.flush();
+}
+
 /// Gives the guest a fresh OIDC token, unless the last is still fresh: served for one fetch into
 /// `oidc-<n>` (0600), copied over `oidc` (the file the external_account files name), then the
 /// route is blanked and the token zeroed here.
@@ -277,11 +305,10 @@ fn refresh_oidc(context: *Context) !void {
     if (oidc.count == oidc_fetches_max) return error.OidcFetchesExhausted;
     const session = context.session;
     const token = try fetch_oidc(context.init);
+    defer std.crypto.secureZero(u8, &oidc.token);
+    try mask_in_job_log(context.init, context.out, token);
     session.server.set_route(oidc_route, token);
-    defer {
-        session.server.set_route(oidc_route, "");
-        std.crypto.secureZero(u8, &oidc.token);
-    }
+    defer session.server.set_route(oidc_route, "");
     const command = try std.fmt.allocPrint(
         session.scratch_allocator(),
         "runuser -u demo -- sh -c 'umask 077 && cd {s} && " ++
@@ -438,11 +465,16 @@ fn step_scan(context: *Context) !void {
     try H.show(context.out, "write the whole journal where the search reads it", dumped);
     if (dumped.status != 0) return fail_step(context.out, "STEP 5", error.JournalNotWritten);
     const command = helper ++ " scan " ++ secrets_dir ++ " " ++ zbx ++ "," ++ helper ++
-        " /home/demo /run/user/1000 /tmp /var/tmp";
+        " " ++ scan_roots[0] ++ " " ++ scan_roots[1] ++ " " ++ scan_roots[2] ++ " " ++
+        scan_roots[3];
     const result = try H.run_split(session, command);
     try H.show_split(context.out, command, result);
     const needles_min: u32 = oidc.count + @as(u32, scan.shapes.len);
-    checks.check_scan(result.streams, result.status, needles_min) catch |err|
+    // The demo user's home holds zbx's store and records, /var/tmp the journal just written;
+    // the runtime directory and /tmp may be empty, but must be searched.
+    const nonempty = [_][]const u8{ scan_roots[0], scan_roots[3] };
+    const roots: []const []const u8 = &scan_roots;
+    checks.check_scan(result.streams, result.status, needles_min, roots, &nonempty) catch |err|
         return fail_step(context.out, "STEP 5", err);
 }
 

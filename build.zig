@@ -394,6 +394,7 @@ fn add_test_step(
             .root_source_file = b.path("src/runtime/policy/seccomp.zon"),
         });
         add_m9_cases(b, module);
+        add_m6d_goldens(b, module);
         if (std.mem.eql(u8, root, macos_root)) link_macos(module, add_vm_image(b, options));
         // The demos are built on the VM module; the module's own root needs no import of itself.
         const needs_vm = std.mem.startsWith(u8, root, "src/testing/vm/main") or
@@ -852,6 +853,18 @@ fn add_m6d_helper(b: *std.Build, harness_module: *std.Build.Module) void {
     });
     harness_module.addAnonymousImport("m6d_helper", .{
         .root_source_file = helper.getEmittedBin(),
+    });
+}
+
+/// demo-m6d's refusals as zbx prints them (the diagnostic goldens), for the harness's unit tests
+/// of steps 1 and 4: a harness can embed only files under `src/testing/vm/`. Data, like
+/// `add_m9_cases`: the test roots that do not read them pay nothing.
+fn add_m6d_goldens(b: *std.Build, module: *std.Build.Module) void {
+    module.addAnonymousImport("m6d_e0560", .{
+        .root_source_file = b.path("src/testdata/diag/E0560.txt"),
+    });
+    module.addAnonymousImport("m6d_e0568", .{
+        .root_source_file = b.path("src/testdata/diag/E0568.txt"),
     });
 }
 

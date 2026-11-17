@@ -40,14 +40,36 @@ the pull it checks. So step 5 searches for:
   realm's Basic value).
 
 A `shapes` check makes the first shape a checked claim: the helper resolves through the same
-files and asserts that each token starts with `ya29.`. The registry's Bearer token has no
-documented shape. It is left to slice 2's simulation, which knows the token it issued.
+files and reports each token's class (`google_access`: starts with `ya29.`) and length, never a
+byte of it, not even the prefix; its output is saved where step 5 searches (review, slice 3). The
+registry's Bearer token has no documented shape, so its live coverage is zero: a cut, accepted by
+the supervisor in the slice 3 review. It is left to slice 2's simulation, which knows the token
+it issued.
 
 ## The console is masked in the guest
 
 The harness copies the guest console into the job log. zbx's output is saved to files, and the
 helper's `mask` prints them with every served OIDC token and every token-shaped run replaced by
 `[masked]`. A leak still fails step 5's search, which reads the saved files, not the console.
+
+## The job log masks every token the harness holds
+
+On a runner (`GITHUB_ACTIONS=true`) the harness writes `::add-mask::<token>` to its own stdout
+for the request token and for each OIDC token, as soon as it has it and before anything could
+print it. The line goes to stdout, never on an argument list, and a value with a line break is
+refused (it could not be masked). Outside Actions nothing is written, because there the line would
+itself show the token.
+
+## A demo not run is a warning and a green job; a lost token is a failure
+
+On a fork's pull request, or while a repository variable is unset, the gate writes
+`::warning::demo-m6d: NOT RUN (<reason>; setup: ...)` and the job-summary line
+`demo-m6d: NOT RUN (<reason>)`, and the job stays green, so `main` stays green until the owner's
+Google setup exists. A run that printed it is not a passed demo, and the README never counts it
+as one. With the variables set and not a fork, missing `ACTIONS_ID_TOKEN_REQUEST_*` means the job
+lost `id-token: write`: the gate fails (exit 1), not skips (supervisor, slice 3 review). In the
+harness, a malformed variable is likewise a failure (exit 1), and only a missing one is `NOT RUN`
+(exit 3).
 
 ## A library gap
 

@@ -3,9 +3,10 @@
 //!
 //!   helper shapes <label> <credentials-file> [<label> <credentials-file>]
 //!       Resolves a token through each workload identity file (the library call, as the agent
-//!       makes it) and checks that it starts with a shape the scan searches for, so that step 5's
-//!       search for tokens it cannot know exactly (each zbx run exchanges its own) is a checked
-//!       claim. The tokens are wiped, never written.
+//!       makes it) and says its class and length (shape.zig): whether it starts with the shape
+//!       the scan searches for, so that step 5's search for tokens it cannot know exactly (each
+//!       zbx run exchanges its own) is a checked claim. No byte of a token is printed, not even
+//!       its prefix. The tokens are wiped, never written.
 //!   helper agent <reference>
 //!       The library path: resolves the token from GOOGLE_APPLICATION_CREDENTIALS itself and
 //!       pulls with it (`pull.Request.google`). Prints one JSON document, nothing else.
@@ -23,6 +24,7 @@ const Io = std.Io;
 const zigbox = @import("zigbox");
 const scan = @import("scan.zig");
 const mask = @import("mask.zig");
+const shape = @import("shape.zig");
 
 const HostReal = zigbox.host_real.HostReal;
 const Diag = zigbox.diag.Diag;
@@ -116,14 +118,15 @@ fn shapes(host: zigbox.host.Host, pairs: []const [:0]const u8) u8 {
     var index: usize = 0;
     while (index < pairs.len) : (index += 2) {
         const label = pairs[index];
+        if (label.len == 0 or label.len > 32) return usage();
         if (!resolve_with(host, pairs[index + 1], label)) return 1;
-        const shaped = std.mem.startsWith(u8, google_token.text(), scan.shapes[0]);
+        var buffer: [shape.line_bytes_max]u8 = undefined;
+        // The class and the length only: no byte of the token, not even its prefix.
+        const class = shape.classify(google_token.text());
+        const line = shape.shape_line(&buffer, label, google_token.text());
         google_token.wipe();
-        if (!shaped) {
-            say("shapes: {s} token does not start with a searched shape", .{label});
-            return 1;
-        }
-        say("shapes: {s} token starts with {s}", .{ label, scan.shapes[0] });
+        say("{s}", .{line});
+        if (class != .google_access) return 1;
     }
     assert(google_token.len == 0);
     return 0;
@@ -231,17 +234,6 @@ fn mask_file(io: Io, secrets: []const u8, path: []const u8) u8 {
     return 0;
 }
 
-fn excluded(path: []const u8, secrets: []const u8, excludes: []const u8) bool {
-    assert(secrets.len > 0);
-    if (std.mem.startsWith(u8, path, secrets)) return true;
-    var list = std.mem.splitScalar(u8, excludes, ',');
-    while (list.next()) |exclude| {
-        if (exclude.len == 0) continue;
-        if (std.mem.eql(u8, path, exclude)) return true;
-    }
-    return false;
-}
-
 fn scan_roots(io: Io, secrets: []const u8, excludes: []const u8, roots: []const [:0]const u8) u8 {
     assert(roots.len > 0);
     defer std.crypto.secureZero(u8, std.mem.sliceAsBytes(&needle_storage));
@@ -259,7 +251,11 @@ fn scan_roots(io: Io, secrets: []const u8, excludes: []const u8, roots: []const 
     scanner.init(needles[0..count]);
     say("needles {d}", .{count});
     var tally: Tally = .{};
-    for (roots) |root| scan_root(io, root, secrets, excludes, &tally);
+    for (roots) |root| {
+        const before = tally.files;
+        scan_root(io, root, secrets, excludes, &tally);
+        say("root {s} files {d}", .{ root, tally.files - before });
+    }
     say("files {d} bytes {d} skipped {d}", .{ tally.files, tally.bytes, tally.skipped });
     if (tally.hits == 0 and tally.skipped == 0) {
         say("scan: clean", .{});
@@ -300,7 +296,7 @@ fn scan_root(
             tally.skipped += 1;
             continue;
         };
-        if (excluded(path, secrets, excludes)) continue;
+        if (scan.excluded(path, secrets, excludes)) continue;
         scan_file(io, entry.dir, entry.basename, path, tally);
     }
 }

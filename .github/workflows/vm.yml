@@ -17,7 +17,9 @@ concurrency:
 permissions:
   contents: write # only to delete the scratch branch at the end
   packages: write # only vm/m8-push-ghcr: the push to ghcr.io/zigbox/zigbox-demo
-  id-token: write # only vm/m6d-*: the OIDC token Google's STS exchanges (docs/demos/m6d.md)
+  # Every vm/* run gets id-token: write (one job; only vm/m6d-* asks for a token): the OIDC token
+  # Google's STS exchanges (docs/demos/m6d.md).
+  id-token: write
 
 jobs:
   demo:

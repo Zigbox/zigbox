@@ -2,7 +2,7 @@
 
 **Status: built, not demonstrated.** `demo-m6d` has never run against Google. The owner has not
 yet set up the Google project below, so every run so far (CI and `vm/m6d-*`) printed the
-`NOT RUN` line and ran nothing. M6d stays "built, not demonstrated" until the `demo-m6d` job is
+`NOT RUN` warning and ran nothing. M6d stays "built, not demonstrated" until the `demo-m6d` job is
 green against the real repositories.
 
 The brief is [docs/briefs/M6d-gar.md](../briefs/M6d-gar.md). The harness is
@@ -40,10 +40,13 @@ user `demo` runs zbx.
 
 Two checks run before step 5:
 
-- **Shapes.** The helper resolves a token through the same file, as zbx does, and checks that it
-  starts with `ya29.`, the shape step 5 searches for. With impersonation it checks both the
-  federated token and the service account's. This makes step 5's search for tokens nobody can know
-  exactly (each zbx run exchanges its own) a checked claim.
+- **Shapes.** The helper resolves a token through the same file, as zbx does, and reports its
+  class and length, one line per token: `shapes: federated token: google_access, <n> bytes`.
+  `google_access` means it starts with `ya29.`, the shape step 5 searches for. The helper never
+  prints a byte of a token, not even that prefix: its output is saved under `/home/demo`, which
+  step 5 searches, and is shown through the mask, which would replace a prefix. With
+  impersonation it reports both the federated token and the service account's. This makes step
+  5's search for tokens nobody can know exactly (each zbx run exchanges its own) a checked claim.
 - **Agent.** `helper agent <gar>/zbx-demo/hello:latest` is the library path. It resolves the token
   itself, as an agent would, and passes it to `pull.pull` through `pull.Request.google`. It prints
   one JSON document, which must match the CLI's `--output json` (same reference and digest).
@@ -62,6 +65,11 @@ Two checks run before step 5:
 - The route is blanked and the harness's copy zeroed as soon as the guest has it.
 - A token is good for about 5 minutes, so the harness fetches a new one before a step when the
   last is more than 3 minutes old.
+- On a GitHub runner (`GITHUB_ACTIONS=true`), the harness writes `::add-mask::` for the request
+  token and for each OIDC token to its own stdout as soon as it has it, before anything could
+  print it, so the runner redacts it from the job log whatever path it takes. The line goes to the
+  runner's stdout, never on an argument list, and is not written outside Actions, where it would
+  itself show the token.
 
 The guest console is copied into the job log, so zbx's output never goes to it directly. A
 wrapper saves stdout and stderr to `/home/demo/m6d-out/<step>.out` and `.err`. The helper's
@@ -87,8 +95,10 @@ Nothing here is a secret. zbx never asks for or handles a key.
    CMD ["echo", "hello"]
    ```
    `docker buildx build --platform linux/amd64,linux/arm64 -t <region>-docker.pkg.dev/<project>/zbx-demo/hello:latest --push .`,
-   then the same for `zbx-denied/hello:latest` and `gcr.io/<project>/hello:latest`. The image in
-   `zbx-denied` matters: without it, E0568 would be about a missing image, not about a denial.
+   then the same for `zbx-denied/hello:latest` and `gcr.io/<project>/hello:latest`. Step 4 shows
+   the permission refusal, not that the image exists: Artifact Registry answers a caller without
+   `downloadArtifacts` with the same 403 whether or not the image or the repository is there, so
+   E0568 comes back either way. The image is pushed so that the repository is a real one.
 3. A workload identity pool with an OIDC provider:
    - issuer `https://token.actions.githubusercontent.com`;
    - the default allowed audience (the provider's own `https://iam.googleapis.com/...` name);
@@ -101,6 +111,10 @@ Nothing here is a secret. zbx never asks for or handles a key.
        (assertion.ref == 'refs/heads/main' || assertion.ref.startsWith('refs/pull/') ||
         assertion.ref.startsWith('refs/heads/vm/'))
      ```
+   - recommended: also require `assertion.repository_id == '<id>'` (or
+     `assertion.repository_owner_id`), Google's advice, because a repository name can be
+     registered again after a rename or a deletion; the numeric id cannot. Map it too
+     (`attribute.repository_id=assertion.repository_id`).
 4. One of two ways to grant access. Prefer the first: it is the common setup, and it exercises
    one more step (IAM Credentials).
    - **Impersonation.** A service account `zbx-pull` with `roles/artifactregistry.reader` on
@@ -125,7 +139,8 @@ Nothing here is a secret. zbx never asks for or handles a key.
 
    The harness checks their shape (`checks_m6d.check_config`): the provider is a full resource
    name with a numeric project, and no value is longer than 200 bytes. A malformed value is a
-   `NOT RUN` line naming the problem, not a failure.
+   failure (`demo-m6d: FAILED (the repository variables are malformed: <error>; ...)`, exit 1):
+   the setup was started and is wrong, which is not the same as no setup.
 
 ## Running it
 
@@ -134,19 +149,29 @@ Nothing here is a secret. zbx never asks for or handles a key.
   and cloud code.
 - **Scratch branch.** `git push origin HEAD:vm/m6d-<slug>` runs it in `vm.yml`. `vm/all-*` does
   not include it, because without the setup it would only print `NOT RUN`.
-- **Both workflows give the job `id-token: write`.** `.github/actions/m6d-setup` decides first whether
-  it runs. Without a variable, without an OIDC token, or on a fork's pull request, it prints one
-  line, adds that line to the job summary, and the job passes:
+- **`id-token: write`.** `ci.yml` grants it to the `demo-m6d` job alone. `vm.yml` grants it at
+  workflow level, so every `vm/*` run (not only `vm/m6d-*`) can ask for an OIDC token; the
+  provider's attribute condition admits `refs/heads/vm/*`, so code on such a branch could mint a
+  token the provider accepts. Every `vm/*` branch is pushed by this repository's own sessions.
+- **The gate.** `.github/actions/m6d-setup` decides first whether the demo runs. On a fork's pull
+  request, or without a repository variable, it does not run: the gate writes a warning and a
+  job-summary line, and the job stays green, so `main` stays green until the owner finishes the
+  Google setup (docs/decisions/2026-11-17-m6d-slice3-oidc-in-the-vm.md):
   ```
-  demo-m6d: NOT RUN: the repository variable ZBX_GAR_PROVIDER is not set (setup: docs/demos/m6d.md)
+  ::warning::demo-m6d: NOT RUN (the repository variable ZBX_GAR_PROVIDER is not set; setup: docs/demos/m6d.md)
   ```
-  A run that printed this is not a passed demo.
+  The summary line is `demo-m6d: NOT RUN (<reason>)`. A run that printed this is not a passed
+  demo. With the variables set and not a fork, a missing OIDC token is a failure, not a skip: the
+  job lost `id-token: write`, and the gate exits 1 saying so.
 - **By hand** (a developer machine with KVM; this needs a GitHub OIDC token, so only from inside
   an Actions job): set the four variables and the runner's `ACTIONS_ID_TOKEN_REQUEST_URL` and
   `ACTIONS_ID_TOKEN_REQUEST_TOKEN`, then run `zig build demo-m6d -Daccel=kvm`. The harness itself
-  prints the same `NOT RUN` line and exits 3 when any of them is missing.
+  prints `demo-m6d: NOT RUN (<name> is not set; setup: docs/demos/m6d.md)` and exits 3 when any
+  of them is missing.
 
-The demo ends with `demo-m6d: PASSED` or `demo-m6d: FAILED at STEP n: <reason>`.
+The demo ends with `demo-m6d: PASSED in <n> s`. A failed check prints
+`demo-m6d: <step> FAILED (<Error>)` (for example `demo-m6d: STEP 4 FAILED (RefusalWrong)`), and
+the demo then ends with `demo-m6d: FAILED (<Error>)`.
 
 ## Failure modes
 
@@ -157,7 +182,8 @@ The demo ends with `demo-m6d: PASSED` or `demo-m6d: FAILED at STEP n: <reason>`.
 | Impersonation not granted (`roles/iam.workloadIdentityUser` missing) | E0566: Google refused to impersonate the service account | simulation and golden; live only if the owner breaks the binding by hand |
 | The provider refuses the token (wrong audience, attribute condition) | E0565: Google refused the workload identity token exchange | simulation and golden; a wrong setup shows it live |
 | The repository is denied | E0568, naming the repository and `artifactregistry.repositories.downloadArtifacts` | step 4, live |
-| A fork's pull request | no OIDC token: `NOT RUN: a fork's pull request gets no OIDC token`, job passes | `.github/actions/m6d-setup` |
+| A fork's pull request | no OIDC token: `NOT RUN (a fork's pull request gets no OIDC token; ...)`, a warning, job passes | `.github/actions/m6d-setup` |
+| Variables set, but the job has no `id-token: write` | `demo-m6d: FAILED (ACTIONS_ID_TOKEN_REQUEST_URL is not set: the job needs id-token: write)`, job fails | `.github/actions/m6d-setup` |
 
 ## By hand on GCE: the metadata server (not run in CI)
 
@@ -180,14 +206,40 @@ the output here when someone does.
 
 ## Scope cuts
 
-- **Step 5 does not search for the exact registry Bearer token or STS token.** Each zbx run
-  exchanges its own, and nothing outside zbx can learn them without logging them. Step 5 searches
-  for the OIDC tokens exactly and for the shapes of the others: `ya29.` (checked live by the
-  shape check) and the base64 of `oauth2accesstoken:`. The registry's Bearer token has no
-  documented shape. It is covered by slice 2's simulation (`src/google/pull_tests.zig`), which
-  searches the store and the records for the token it made.
+- **The registry realm's Bearer token has no live coverage.** Step 5 does not search for the
+  exact registry Bearer token or STS token: each zbx run exchanges its own, and nothing outside
+  zbx can learn them without logging them. Step 5 searches for the OIDC tokens exactly and for
+  the shapes of the others: `ya29.` (checked live by the shape check) and the base64 of
+  `oauth2accesstoken:`. The registry's Bearer token has no documented shape, so live coverage of
+  it is zero: a change that wrote the real realm token into a record would pass step 5. It is
+  covered only by slice 2's simulation (`src/google/pull_tests.zig`), which searches the store
+  and the records for the token its fake registry made. Accepted by the supervisor in the slice 3
+  review.
 - **The harness's `std.http` client keeps its own heap buffers,** which the harness cannot zero.
   The token buffers the harness owns are zeroed, and the process ends with the job.
 - **`credential_source.url`** (the token from a URL rather than a file) is covered by simulation
   only, as the brief says.
 - **arm64** is not pulled: the guest is amd64. The index's arm64 entry is only resolved past.
+
+## Not in M6d
+
+As the brief lists (docs/briefs/M6d-gar.md, "Not in M6d"), none of these is built, and the demo
+does not exercise them:
+
+- service-account JSON key files (refused with E0562; zbx never reads a key);
+- `authorized_user` and other gcloud application-default user credentials;
+- executable-sourced and AWS-sourced external accounts;
+- X.509 (`certificate`) credential sources;
+- workforce identity pools;
+- `~/.docker/config.json`;
+- Docker credential helpers;
+- push to Artifact Registry;
+- the Mac.
+
+## Known gap: the Mac
+
+Not on the Mac yet. The macOS `zbx` forwards `pull` to its Linux guest, and the guest has no
+Google credentials: no `GOOGLE_APPLICATION_CREDENTIALS` file and no metadata server. So
+`zbx pull <region>-docker.pkg.dev/...` on a Mac is refused with E0560 from the guest. This is by
+design for now: credentials are never forwarded from the Mac into the guest, and M6d adds no way
+to do it.

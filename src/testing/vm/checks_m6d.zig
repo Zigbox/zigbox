@@ -10,6 +10,7 @@ const checks_m4 = @import("checks_m4.zig");
 const checks_m3 = @import("checks_m3.zig");
 const scan = @import("m6d_fixture/scan.zig");
 const mask = @import("m6d_fixture/mask.zig");
+const shape = @import("m6d_fixture/shape.zig");
 
 pub const Streams = checks.Streams;
 
@@ -127,7 +128,8 @@ fn check_service_account(email: []const u8) ConfigError!void {
     const suffix = ".iam.gserviceaccount.com";
     const at = std.mem.indexOfScalar(u8, email, '@') orelse return error.ServiceAccountWrong;
     if (!std.mem.endsWith(u8, email, suffix)) return error.ServiceAccountWrong;
-    if (at + 1 > email.len - suffix.len) return error.ServiceAccountWrong;
+    // The suffix has no `@`, so the first `@` is before it.
+    assert(at < email.len - suffix.len);
     if (!is_id(email[0..at])) return error.ServiceAccountWrong;
     if (!is_id(email[at + 1 .. email.len - suffix.len])) return error.ServiceAccountWrong;
 }
@@ -317,53 +319,109 @@ pub fn check_agent(
     cli: checks_m4.PullDoc,
 ) Error!void {
     assert(reference.len > 0);
+    assert(checks_m3.is_digest(cli.tree)); // check_pull checked it.
     if (status != 0) return error.ExitCodeWrong;
     const doc = checks_m4.parse_json(AgentDoc, arena, streams.stdout) catch return error.JsonWrong;
     if (!std.mem.eql(u8, doc.schema, "zbx-demo.m6d-agent/1")) return error.JsonWrong;
     if (!std.mem.eql(u8, doc.reference, reference)) return error.JsonWrong;
     if (!std.mem.eql(u8, doc.token_source, "workload_identity")) return error.JsonWrong;
-    if (!checks_m3.is_digest(doc.tree)) return error.DigestWrong;
     if (!std.mem.eql(u8, doc.manifest_digest, cli.manifest_digest)) return error.DigestWrong;
     if (!std.mem.eql(u8, doc.tree, cli.tree)) return error.DigestWrong;
 }
 
-/// The helper's shape check: the federated token (and, when impersonating, the access token)
-/// starts with `ya29.`, the shape step 5 searches for; it says so in one line per token and
-/// prints nothing else.
-pub fn check_shapes(streams: Streams, status: u8, impersonate: bool) Error!void {
-    if (status != 0) return error.ExitCodeWrong;
-    const federated = "shapes: federated token starts with ya29.";
-    const access = "shapes: access token starts with ya29.";
-    const wanted = if (impersonate) federated ++ "\n" ++ access else federated;
-    if (!std.mem.eql(u8, std.mem.trim(u8, streams.stdout, " \r\n"), wanted)) {
-        return error.OutputWrong;
-    }
-    if (streams.stderr.len != 0) return error.OutputWrong;
+/// Whether `text` carries anything token-shaped: a searched shape, a JWT's start, or the mask's
+/// mark (the harness reads the helper only through the mask).
+fn has_token_shape(text: []const u8) bool {
+    for (scan.shapes) |prefix| if (has(text, prefix)) return true;
+    if (has(text, "eyJ")) return true;
+    return has(text, mask.mask_text);
 }
 
-/// Step 5: the helper's search found none of `needles_min` or more needles in at least one
-/// file of each root.
-pub fn check_scan(streams: Streams, status: u8, needles_min: u32) Error!void {
+/// One line of the helper's shape check: `shapes: <label> token: google_access, <n> bytes`, with
+/// bytes after the `ya29.` prefix.
+fn check_shape_line(line: []const u8, label: []const u8) Error!void {
+    assert(label.len > 0);
+    assert(label.len <= 32);
+    var buffer: [shape.line_bytes_max]u8 = undefined;
+    const head = std.fmt.bufPrint(&buffer, "shapes: {s} token: {t}, ", .{
+        label, shape.Class.google_access,
+    }) catch unreachable; // 8 + 32 + 9 + 13 + 2 bytes at most, under line_bytes_max.
+    if (!std.mem.startsWith(u8, line, head)) return error.OutputWrong;
+    const rest = line[head.len..];
+    const tail = " bytes";
+    if (!std.mem.endsWith(u8, rest, tail)) return error.OutputWrong;
+    const count = std.fmt.parseInt(u32, rest[0 .. rest.len - tail.len], 10) catch
+        return error.OutputWrong;
+    if (count <= scan.shapes[0].len) return error.OutputWrong;
+}
+
+/// The helper's shape check: the federated token (and, when impersonating, the access token) has
+/// the class step 5 searches by shape. One line per token, its class and length, and nothing
+/// token-shaped: no prefix, no byte of a token.
+pub fn check_shapes(streams: Streams, status: u8, impersonate: bool) Error!void {
+    if (status != 0) return error.ExitCodeWrong;
+    if (streams.stderr.len != 0) return error.OutputWrong;
+    if (has_token_shape(streams.stdout)) return error.SecretFound;
+    var lines = std.mem.splitScalar(u8, std.mem.trim(u8, streams.stdout, " \r\n"), '\n');
+    try check_shape_line(std.mem.trimEnd(u8, lines.first(), "\r"), "federated");
+    if (impersonate) {
+        const access = lines.next() orelse return error.OutputWrong;
+        try check_shape_line(std.mem.trimEnd(u8, access, "\r"), "access");
+    }
+    if (lines.next() != null) return error.OutputWrong;
+}
+
+/// The count on the helper's `<prefix><number>...` line, or null without one.
+fn count_after(line: []const u8, prefix: []const u8) ?u64 {
+    assert(prefix.len > 0);
+    if (!std.mem.startsWith(u8, line, prefix)) return null;
+    const rest = line[prefix.len..];
+    const end = std.mem.indexOfScalar(u8, rest, ' ') orelse rest.len;
+    return std.fmt.parseInt(u64, rest[0..end], 10) catch null;
+}
+
+/// The files the helper searched under `root`: its `root <root> files <n>` line, or null.
+fn root_files(stdout: []const u8, root: []const u8) ?u64 {
+    assert(root.len > 0);
+    var buffer: [256]u8 = undefined;
+    const prefix = std.fmt.bufPrint(&buffer, "root {s} files ", .{root}) catch return null;
+    var lines = std.mem.splitScalar(u8, stdout, '\n');
+    while (lines.next()) |raw| {
+        const line = std.mem.trim(u8, raw, " \r");
+        if (count_after(line, prefix)) |files| return files;
+    }
+    return null;
+}
+
+/// Step 5: the helper searched for `needles_min` or more needles, under every one of `roots`
+/// (each reported, none skipped), at least one file under each of `nonempty`, and found none.
+pub fn check_scan(
+    streams: Streams,
+    status: u8,
+    needles_min: u32,
+    roots: []const []const u8,
+    nonempty: []const []const u8,
+) Error!void {
+    assert(roots.len > 0);
     if (status != 0) return error.SecretFound;
     if (has(streams.stdout, "HIT ")) return error.SecretFound;
     var lines = std.mem.splitScalar(u8, streams.stdout, '\n');
     var clean = false;
-    var needles: u32 = 0;
-    var files: u64 = 0;
+    var needles: u64 = 0;
     while (lines.next()) |raw| {
         const line = std.mem.trim(u8, raw, " \r");
         if (std.mem.eql(u8, line, "scan: clean")) clean = true;
-        if (std.mem.startsWith(u8, line, "needles ")) {
-            needles = std.fmt.parseInt(u32, line["needles ".len..], 10) catch 0;
-        }
-        if (std.mem.startsWith(u8, line, "files ")) {
-            const end = std.mem.indexOfScalarPos(u8, line, 6, ' ') orelse line.len;
-            files = std.fmt.parseInt(u64, line[6..end], 10) catch 0;
-        }
+        if (count_after(line, "needles ")) |count| needles = count;
     }
     if (!clean) return error.SecretFound;
     if (needles < needles_min) return error.SecretFound;
-    if (files == 0) return error.SecretFound;
+    for (roots) |root| {
+        if (root_files(streams.stdout, root) == null) return error.SecretFound;
+    }
+    for (nonempty) |root| {
+        const files = root_files(streams.stdout, root) orelse return error.SecretFound;
+        if (files == 0) return error.SecretFound;
+    }
 }
 
 test {
