@@ -1711,6 +1711,15 @@ fn cdi_phrase(kind: Kind) []const u8 {
     };
 }
 
+fn cgroup_phrase(kind: Kind) []const u8 {
+    if (kind != .unshare_cgroup) assert(kind == .mount_cgroup);
+    assert(side_of(kind) == .child);
+    return switch (kind) {
+        .unshare_cgroup => "taking a cgroup namespace of the container's own",
+        else => "mounting the container's cgroup read-only on /sys/fs/cgroup",
+    };
+}
+
 /// The name a step's phrase ends with: a device, an /etc file or a link; empty for the rest.
 fn step_name(step: *const Step) []const u8 {
     assert(step.index < 256);
@@ -1725,7 +1734,6 @@ fn step_name(step: *const Step) []const u8 {
 
 pub fn describe(step: *const Step, buffer: []u8) []const u8 {
     assert(buffer.len >= 128);
-    const name = step_name(step);
     const phrase: []const u8 = switch (step.kind) {
         .make_pipes, .spawn, .deny_setgroups, .write_gid_map => parent_phrase(step.kind),
         .write_uid_map, .run_newuidmap, .run_newgidmap => parent_phrase(step.kind),
@@ -1734,8 +1742,7 @@ pub fn describe(step: *const Step, buffer: []u8) []const u8 {
         .receive_listener, .serve_fuse => parent_phrase(step.kind),
         .die_with_parent => "asking the kernel to end the container if zbx dies",
         .await_release => "waiting for zbx to write the container's id maps",
-        .unshare_cgroup => "taking a cgroup namespace of the container's own",
-        .mount_cgroup => "mounting the container's cgroup read-only on /sys/fs/cgroup",
+        .unshare_cgroup, .mount_cgroup => cgroup_phrase(step.kind),
         .set_hostname => "setting the container's hostname",
         .set_umask => "setting the file mode creation mask",
         .make_mounts_private => "making the container's mounts private",
@@ -1793,7 +1800,7 @@ pub fn describe(step: *const Step, buffer: []u8) []const u8 {
         .install_seccomp => "installing the seccomp filter",
         else => volume_phrase(step.kind), // The state volumes' steps and the other mounts'.
     };
-    return std.fmt.bufPrint(buffer, "{s}{s}", .{ phrase, name }) catch phrase;
+    return std.fmt.bufPrint(buffer, "{s}{s}", .{ phrase, step_name(step) }) catch phrase;
 }
 
 comptime {

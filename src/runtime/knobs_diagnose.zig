@@ -12,6 +12,7 @@ const errors = @import("../diag/errors.zig");
 const Diag = @import("../diag/diag.zig").Diag;
 const host_mod = @import("../host.zig");
 const knobs = @import("knobs.zig");
+const host_settings = @import("host_settings.zig");
 
 const linux = std.os.linux;
 
@@ -248,6 +249,15 @@ fn sysctl_host_setting(diag: *Diag, sysctl: knobs.Sysctl) void {
         "container can't set it", .{sysctl.key});
     if (knobs.is_host_setting(sysctl.key)) {
         diag.fix_with("set it on the host instead:", "sudo sysctl -w {s}=<value>", .{sysctl.key});
+        diag.mark_last_fix_template();
+    }
+    if (host_settings.lookup(sysctl.key)) |setting| {
+        // M2b: one of the four settings a run can require of its host instead.
+        const sentence = "or refuse the run on a host without it:";
+        diag.fix_with(sentence, "--require-host '{s}{s}<value>'", .{
+            setting.key(),
+            setting.operator(),
+        });
         diag.mark_last_fix_template();
     }
     diag.fix(.{ .sentence = "the keys a container may set:", .command = "zbx explain E0316" });

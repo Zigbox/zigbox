@@ -174,7 +174,7 @@ fn run_step(child: *const Context, step: *const Step, state: *State) Error!void 
         .make_run_dir, .make_sys_dir, .make_etc_dir => try make_dir(host, target),
         .mount_tmp => try mount(host, .tmp_tmpfs, target, null),
         .mount_run => try mount(host, .run_tmpfs, target, null),
-        .remount_readonly => try mount(host, .remount_readonly, target, null),
+        .remount_readonly, .remount_etc_file => try mount(host, .remount_readonly, target, null),
         .restrict_capabilities => try host.restrict_capabilities(capabilities.keep_mask),
         .clear_ambient => try host.clear_ambient(),
         .set_no_new_privs => try host.no_new_privs(),
@@ -191,7 +191,6 @@ fn run_step(child: *const Context, step: *const Step, state: *State) Error!void 
         .create_etc_file => try host.create_file(target, true),
         .stage_etc_file => try host.write_file_mode(target, plan.text(step.source), 0o644),
         .bind_etc_file, .bind_device, .bind_user_device => try bind_file(host, plan, step),
-        .remount_etc_file => try mount(host, .remount_readonly, target, null),
         .unstage_etc_file => try unstage(host, target),
         .remount_sys => try mount(host, .remount_readonly_tree, target, null),
         .enter_workdir => try enter_workdir(host, target),
@@ -209,9 +208,9 @@ fn run_step(child: *const Context, step: *const Step, state: *State) Error!void 
         .write_sysctl => try host.write_sysctl(target, plan.text(step.source)),
         .set_rlimit => try set_rlimit(host, plan, step.index),
         .exec => try exec(child, state),
-        // Handled by `run_state_step` and `run_mount_step` above.
+        // Handled by `run_state_step` and `run_mount_step` above, or the parent's steps.
         .make_state_data, .make_state_stage, .bind_state, .remount_state => unreachable,
-        .make_state_target, .move_state, .remove_state_stage => unreachable,
+        .make_state_target, .move_state, .remove_state_stage, .serve_fuse => unreachable,
         .make_mount_stage_dir, .make_mount_stage_file, .copy_secret => unreachable,
         .bind_mount_dir, .bind_mount_file, .remount_mount, .remount_mount_tree => unreachable,
         .make_mount_target_dir, .make_mount_target_file, .move_mount => unreachable,
@@ -219,7 +218,7 @@ fn run_step(child: *const Context, step: *const Step, state: *State) Error!void 
         .make_pipes, .spawn, .deny_setgroups, .write_gid_map, .write_uid_map => unreachable,
         .run_newuidmap, .run_newgidmap, .spawn_keeper, .start_scope => unreachable,
         .start_pasta, .await_pasta, .release_child, .await_report, .reap => unreachable,
-        .receive_listener, .serve_fuse => unreachable, // These two lines: the parent's steps.
+        .receive_listener => unreachable,
     }
 }
 

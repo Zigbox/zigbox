@@ -57,6 +57,7 @@ const cdi_fuzz = @import("fuzz_cdi.zig");
 const trust_fuzz = @import("fuzz_trust.zig");
 const provenance_fuzz = @import("fuzz_provenance.zig");
 const verified_fuzz = @import("fuzz_verified.zig");
+const host_settings_fuzz = @import("fuzz_host_settings.zig");
 const codes = @import("diag/codes.zig");
 const render = @import("diag/render.zig");
 const test_util = @import("test_util.zig");
@@ -82,6 +83,7 @@ const fuzzers = [_]Fuzzer{
     .{ .name = "diag", .run_iteration = diag_fuzz.fuzz_diag },
     .{ .name = "diagnostic", .run_iteration = diagnostic_fuzz.fuzz_diagnostic },
     .{ .name = "run", .run_iteration = run_fuzz.fuzz_run },
+    .{ .name = "host_settings", .run_iteration = host_settings_fuzz.fuzz_host_settings },
     .{ .name = "record", .run_iteration = record_fuzz.fuzz_record },
     .{ .name = "logs", .run_iteration = logs_fuzz.fuzz_logs },
     .{ .name = "result", .run_iteration = result_fuzz.fuzz_result },
@@ -875,6 +877,8 @@ fn expected_code(id: doctor.CheckId) codes.Code {
         .subid => .E0105,
         .seccomp => .E0106,
         .fuse, .net => unreachable, // These checks only warn: they have no code to report.
+        // Information only without `--require-host`, which this fuzzer does not pass.
+        .host_settings => unreachable,
     };
 }
 
@@ -950,8 +954,11 @@ fn check_doctor_report(
             assert(check.diag.code.? == expected_code(check.id));
             assert(check.diag.entry().blame == .environment);
         }
-        // The fuse and net checks only warn, whatever the fault: only opt-ins need them.
-        if (counts.hard > 0 and !doctor.warns_only(check.id)) assert(check.status == .fail);
+        // The fuse and net checks only warn, whatever the fault: only opt-ins need them. The
+        // host-settings line reports what it could not read, and passes.
+        if (counts.hard > 0 and !doctor.passes_on_fault(check.id)) {
+            assert(check.status == .fail);
+        }
         if (counts.any == 0) {
             assert(check.status == reference.status);
             assert(std.mem.eql(u8, check.detail.slice(), reference.detail.slice()));
@@ -1109,7 +1116,8 @@ fn doctor_output_cut_by_interrupts(
     var failed: u32 = 0;
     for (&report.checks) |*check| failed += @intFromBool(check.status == .fail);
     if (diag_fuzz.find_diagnostics(sim.stderr()).count < failed) return true;
-    if (json) return !std.mem.endsWith(u8, sim.stdout(), "]}\n");
+    // The document ends "}}\n" (host_settings) or "]}\n" (gpu); a cut one has no newline.
+    if (json) return !std.mem.endsWith(u8, sim.stdout(), "}\n");
     var buffer: [constants.output_bytes_max]u8 = undefined;
     return !std.mem.eql(u8, report_part(sim.stdout()), doctor.render(report, false, &buffer));
 }
@@ -1138,7 +1146,7 @@ fn check_doctor_document(
     var failed: u32 = 0;
     for (checks, &report.checks) |item, *check| {
         const object = item.object;
-        assert(std.mem.eql(u8, object.get("id").?.string, @tagName(check.id)));
+        assert(std.mem.eql(u8, object.get("id").?.string, check.id.name()));
         assert(std.mem.eql(u8, object.get("status").?.string, @tagName(check.status)));
         assert(std.mem.eql(u8, object.get("detail").?.string, check.detail.slice()));
         if (check.status == .ok) {

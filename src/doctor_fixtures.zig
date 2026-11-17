@@ -6,6 +6,7 @@
 const std = @import("std");
 const host = @import("host.zig");
 const sim = @import("host_sim.zig");
+const host_settings = @import("runtime/host_settings.zig");
 
 const File = sim.File;
 
@@ -56,6 +57,12 @@ pub const Spec = struct {
     newgidmap: ?Binary = .{},
     /// `pasta` on PATH (/usr/bin/pasta): the warning of the net check goes away.
     pasta: ?Binary = null,
+    /// The host-settings line's files (M2b), as Ubuntu 24.04 and Fedora 40 ship them: both raise
+    /// vm.max_map_count to 1048576 (the kernel's default is 65530).
+    max_map_count: ?[]const u8 = "1048576\n",
+    aio_max_nr: ?[]const u8 = "65536\n",
+    overcommit_memory: ?[]const u8 = "0\n",
+    transparent_hugepage: ?[]const u8 = "always [madvise] never\n",
     /// What that pasta says to `--version`; null: the simulator's default, a recent release.
     pasta_version: ?[]const u8 = null,
     status: ?[]const u8 = default_status,
@@ -166,6 +173,10 @@ pub fn build(comptime spec: Spec) Fixture {
         list.add_binary("/usr/bin/newgidmap", spec.newgidmap);
         list.add_binary("/usr/bin/pasta", spec.pasta);
         list.add("/proc/self/status", spec.status);
+        list.add(host_settings.HostSetting.max_map_count.path(), spec.max_map_count);
+        list.add(host_settings.HostSetting.aio_max_nr.path(), spec.aio_max_nr);
+        list.add(host_settings.HostSetting.overcommit_memory.path(), spec.overcommit_memory);
+        list.add(host_settings.HostSetting.transparent_hugepage.path(), spec.transparent_hugepage);
         for (spec.extra_files) |file| {
             list.items[list.len] = file;
             list.len += 1;
@@ -244,6 +255,14 @@ pub const all = [_]Fixture{
         .subgid = "ubuntu:100000:65536\n",
         .newuidmap = null,
         .newgidmap = null,
+        .max_map_count = "65530\n",
+    }),
+    // A kernel without transparent hugepages and an aio-max-nr that is not a number: the
+    // host-settings line says so and still passes, since nothing requires them.
+    build(.{
+        .name = "host_settings_partial",
+        .aio_max_nr = "lots\n",
+        .transparent_hugepage = null,
     }),
     // cgroup v2 is mounted but its root offers only hugetlb (a namespaced mount in a sandbox).
     build(.{

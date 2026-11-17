@@ -98,21 +98,53 @@ pub fn host_requirements_check(
     return error.StartFailed;
 }
 
-/// The run's check: the list's own problems first, then only the settings it names are read
-/// (one the run does not ask about can't refuse it), then the comparison.
+/// One read per setting, indexed by `HostSetting`.
+pub const Reads = [host_settings.settings_count]Read;
+
+/// The run's check: only the settings the requirements name are read (one the run does not ask
+/// about can't refuse it), then `check_reads`.
 pub fn preflight(host: Host, requirements: []const HostRequirement, diag: *Diag) Error!void {
     assert(diag.code == null);
     if (requirements.len == 0) return;
+    var reads: Reads = @splat(.absent);
+    for (requirements) |requirement| {
+        reads[@backingInt(requirement.setting)] = read_one(host, requirement.setting);
+    }
+    try check_reads(&reads, requirements, diag);
+    assert(diag.code == null);
+}
+
+/// The requirements against settings already read (the run's preflight, and the doctor's
+/// host-settings line): the list's own problems first (ZBX-E0320), then a required setting
+/// that could not be read (ZBX-E0321), then the comparison. Reads of settings no requirement
+/// names are not looked at.
+pub fn check_reads(
+    reads: *const Reads,
+    requirements: []const HostRequirement,
+    diag: *Diag,
+) Error!void {
+    assert(diag.code == null);
+    assert(reads.len == host_settings.settings_count);
     if (host_settings.list_problem(requirements)) |problem| {
         list_invalid(diag, requirements, problem);
         return error.StartFailed;
     }
-    var wanted: [host_settings.settings_count]HostSetting = undefined;
-    for (requirements, wanted[0..requirements.len]) |requirement, *setting| {
-        setting.* = requirement.setting;
-    }
     var settings: HostSettings = .{};
-    try read(host, &settings, wanted[0..requirements.len], diag);
+    for (requirements) |requirement| {
+        const setting = requirement.setting;
+        switch (reads[@backingInt(setting)]) {
+            .value => |value| settings.set(setting, value),
+            .absent => settings.set(setting, null),
+            .unreadable => |failure| {
+                unreadable(diag, setting, failure.err, failure.errno);
+                return error.StartFailed;
+            },
+            .malformed => {
+                malformed(diag, setting);
+                return error.StartFailed;
+            },
+        }
+    }
     try host_requirements_check(&settings, requirements, diag);
     assert(diag.code == null);
 }

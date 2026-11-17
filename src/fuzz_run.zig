@@ -477,6 +477,19 @@ fn random_cgroup(random: std.Random, scenario: *Scenario) void {
         scenario.inherited = random.enumValue(Inherited);
     }
     aim_fault_at_knob(random, scenario);
+    aim_fault_at_cgroup_view(random, scenario);
+}
+
+/// As for the knobs: the cgroup view's two steps (M2b, E0322 and E0323) are two of a plan's
+/// dozens, so a sixth of the faults of a plan that has them are moved onto one.
+fn aim_fault_at_cgroup_view(random: std.Random, scenario: *Scenario) void {
+    if (scenario.fault_step == null) return;
+    if (random.uintLessThan(u8, 6) != 0) return;
+    const kind: plan_mod.Kind = if (random.boolean()) .unshare_cgroup else .mount_cgroup;
+    const index = find_index(scenario, kind) orelse return;
+    scenario.fault_step = index;
+    assert(kind_at(scenario, index) == kind);
+    assert(step_failure(scenario, kind) != null);
 }
 
 /// A drawn fault lands on one of a hundred indexes, so the one or two knob steps of a plan are
@@ -580,6 +593,17 @@ fn kind_at(scenario: *const Scenario, index: u32) plan_mod.Kind {
     plan_for(&plan, scenario);
     assert(index < plan.count);
     return plan.steps[index].kind;
+}
+
+/// The index of the first step of `kind` in the scenario's plan, or null if it has none.
+fn find_index(scenario: *const Scenario, kind: plan_mod.Kind) ?u32 {
+    var plan: plan_mod.Plan = undefined;
+    plan_for(&plan, scenario);
+    assert(plan.count > 0);
+    for (plan.steps[0..plan.count], 0..) |step, index| {
+        if (step.kind == kind) return @intCast(index);
+    }
+    return null;
 }
 
 fn index_of(scenario: *const Scenario, kind: plan_mod.Kind) u32 {

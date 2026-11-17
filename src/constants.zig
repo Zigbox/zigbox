@@ -90,7 +90,7 @@ pub const user_name_bytes_max: u32 = 256;
 pub const controller_name_bytes_max: u32 = 32;
 pub const controllers_count_max: u32 = 32;
 pub const kernel_number_digits_max: u32 = 9;
-pub const doctor_checks_count: u32 = 8;
+pub const doctor_checks_count: u32 = 9;
 pub const detail_bytes_max: u32 = 240;
 pub const binary_candidates_count: u32 = 3;
 /// The doctor's look for `pasta` (M5): directories of PATH tried, the longest path kept, and the

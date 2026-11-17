@@ -1,0 +1,7 @@
+error[ZBX-E0323]: the container's cgroup view could not be mounted
+  cause  the kernel refused a cgroup2 mount in the container's cgroup namespace,
+         on /sys/fs/cgroup
+  fix    look for the policy that denies it:   sudo dmesg | grep -iE 'apparmor|seccomp|selinux|userns'
+         check what this host allows:          zbx doctor
+  more   zbx explain E0323 · rerun with --verbose for the full cause chain
+  docs   https://zigbox.github.io/zigbox/errors/E0323.html

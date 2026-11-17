@@ -147,7 +147,7 @@ pub const HostSettings = struct {
             .aio_max_nr => settings.aio_max_nr,
             .overcommit_memory => settings.overcommit_memory,
             .transparent_hugepage => if (settings.transparent_hugepage) |thp|
-                @intFromEnum(thp)
+                @backingInt(thp)
             else
                 null,
         };
@@ -162,7 +162,7 @@ pub const HostSettings = struct {
             .aio_max_nr => settings.aio_max_nr = new,
             .overcommit_memory => settings.overcommit_memory = new,
             .transparent_hugepage => settings.transparent_hugepage = if (new) |known|
-                @enumFromInt(known)
+                @fromBackingInt(@intCast(known))
             else
                 null,
         }
@@ -284,7 +284,7 @@ pub fn parse_file(setting: HostSetting, contents: []const u8) ?u64 {
     if (setting == .transparent_hugepage) return parse_thp(line);
     const count = parse_count(line) orelse return null;
     if (setting == .overcommit_memory and count >= value_words_max) return null;
-    assert(setting.is_minimum() or count < value_words_max);
+    if (!setting.is_minimum()) assert(count < value_words_max);
     return count;
 }
 
@@ -375,9 +375,9 @@ test "parse_requirement: the brief's three forms" {
     try testing.expect(overcommit.allowed.contains(1));
     try testing.expect(!overcommit.allowed.contains(0));
     const thp = parse_requirement("transparent_hugepage=never,madvise").ok;
-    try testing.expect(thp.allowed.contains(@intFromEnum(Thp.never)));
-    try testing.expect(thp.allowed.contains(@intFromEnum(Thp.madvise)));
-    try testing.expect(!thp.allowed.contains(@intFromEnum(Thp.always)));
+    try testing.expect(thp.allowed.contains(@backingInt(Thp.never)));
+    try testing.expect(thp.allowed.contains(@backingInt(Thp.madvise)));
+    try testing.expect(!thp.allowed.contains(@backingInt(Thp.always)));
     var buffer: [text_bytes_max]u8 = undefined;
     try testing.expectEqualStrings("transparent_hugepage=madvise,never", render_requirement(
         thp,
@@ -426,7 +426,7 @@ test "parse_file: each file's contents, and what is not one" {
     try testing.expectEqual(@as(?u64, null), parse_file(.overcommit_memory, "3\n"));
     try testing.expectEqual(@as(?u64, null), parse_file(.max_map_count, ""));
     try testing.expectEqual(@as(?u64, null), parse_file(.max_map_count, "1 2\n"));
-    const madvise: u64 = @intFromEnum(Thp.madvise);
+    const madvise: u64 = @backingInt(Thp.madvise);
     const thp = HostSetting.transparent_hugepage;
     try testing.expectEqual(@as(?u64, madvise), parse_file(thp, "always [madvise] never\n"));
     try testing.expectEqual(@as(?u64, 0), parse_file(thp, "[always] madvise never\n"));
@@ -456,6 +456,6 @@ test "list_problem and first_miss: one per setting, the first miss in order" {
         map,
         thp,
     }).?);
-    settings.set(.transparent_hugepage, @intFromEnum(Thp.never));
+    settings.set(.transparent_hugepage, @backingInt(Thp.never));
     try testing.expectEqual(@as(?Miss, null), first_miss(&settings, &.{ map, thp }));
 }

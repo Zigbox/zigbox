@@ -294,10 +294,16 @@ const doctor_schema =
     \\"items":{"type":"object","required":["kind","ok","subject","detail"],
     \\"properties":{"kind":{"enum":["spec","device","driver","node","fix"]},
     \\"ok":{"type":"boolean"},"subject":{"type":"string"},"detail":{"type":"string"}}}},
+    \\"host_settings":{"type":"object",
+    \\"description":"Linux: the settings --require-host checks; null: absent or unreadable",
+    \\"properties":{"vm.max_map_count":{"type":["integer","null"]},
+    \\"fs.aio-max-nr":{"type":["integer","null"]},
+    \\"vm.overcommit_memory":{"enum":[0,1,2,null]},
+    \\"transparent_hugepage":{"enum":["always","madvise","never",null]}}},
     \\"checks":{"type":"array","description":"every check, in the order of the text report",
     \\"items":{"type":"object","required":["id","status","detail"],
-    \\"properties":{"id":{"enum":["kernel","userns","cgroup","overlay","subid","seccomp","fuse",
-    \\"net"]},
+    \\"properties":{"id":{"enum":["kernel","userns","cgroup","overlay","subid","seccomp",
+    \\"host-settings","fuse","net"]},
     \\"status":{"enum":["ok","warn","fail"]},"detail":{"type":"string",
     \\"description":"the line of the text report"},
     \\"code":{"type":"string","pattern":"^ZBX-[EW][0-9]{4}$",
@@ -1185,9 +1191,9 @@ test "the doctor schema's id enum is every check the doctor runs, in its order" 
     const checks = parsed.value.object.get("properties").?.object.get("checks").?.object;
     const item = checks.get("items").?.object.get("properties").?.object;
     const ids = item.get("id").?.object.get("enum").?.array.items;
-    const names = @typeInfo(doctor.CheckId).@"enum".field_names;
-    try testing.expectEqual(names.len, ids.len);
-    inline for (names, 0..) |name, index| {
-        try testing.expectEqualStrings(name, ids[index].string);
+    const checks_in_order = std.enums.values(doctor.CheckId);
+    try testing.expectEqual(checks_in_order.len, ids.len);
+    for (checks_in_order, 0..) |id, index| {
+        try testing.expectEqualStrings(id.name(), ids[index].string);
     }
 }

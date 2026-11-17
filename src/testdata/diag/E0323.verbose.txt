@@ -1,0 +1,13 @@
+error[ZBX-E0323]: the container's cgroup view could not be mounted
+  while  starting container zbx-9bc203
+  cause  mounting the container's cgroup read-only on /sys/fs/cgroup failed:
+         operation not permitted (EPERM)
+  cause  the kernel refused a cgroup2 mount in the container's cgroup namespace,
+         on /sys/fs/cgroup
+  name   zbx-9bc203
+  rootfs /srv/alpine
+  step   mount_cgroup (57 of 71)
+  fix    look for the policy that denies it:   sudo dmesg | grep -iE 'apparmor|seccomp|selinux|userns'
+         check what this host allows:          zbx doctor
+  more   zbx explain E0323
+  docs   https://zigbox.github.io/zigbox/errors/E0323.html
