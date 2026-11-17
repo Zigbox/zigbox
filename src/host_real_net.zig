@@ -779,6 +779,8 @@ fn fill_head(head: *net.Head, parsed: http.Client.Response.Head) net.Error!void 
             if (!head.content_range.present) head.content_range.set(header.value);
         } else if (std.ascii.eqlIgnoreCase(header.name, "range")) {
             if (!head.range.present) head.range.set(header.value);
+        } else if (std.ascii.eqlIgnoreCase(header.name, "metadata-flavor")) {
+            if (!head.metadata_flavor.present) head.metadata_flavor.set(header.value);
         }
     }
     if (parsed.content_type) |text| head.content_type.set(text);

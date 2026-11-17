@@ -13,6 +13,7 @@
 const std = @import("std");
 const assert = std.debug.assert;
 const constants = @import("../constants.zig");
+const cloud_json = @import("../cloud/json.zig");
 
 pub const Error = error{Malformed};
 
@@ -32,51 +33,12 @@ pub const EcrToken = struct {
     expiration_s: u64,
 };
 
-/// A field's text between `"name":"` and the next quote, or null if it is not there. A backslash
-/// anywhere in the value makes it null too.
-fn json_string(body: []const u8, comptime name: []const u8) ?[]const u8 {
-    const key = "\"" ++ name ++ "\"";
-    var from: usize = 0;
-    while (std.mem.indexOfPos(u8, body, from, key)) |found| {
-        from = found + key.len;
-        var at = from;
-        while (at < body.len and is_blank(body[at])) at += 1;
-        if (at == body.len or body[at] != ':') continue;
-        at += 1;
-        while (at < body.len and is_blank(body[at])) at += 1;
-        if (at == body.len or body[at] != '"') continue;
-        at += 1;
-        const end = std.mem.indexOfScalarPos(u8, body, at, '"') orelse return null;
-        const value = body[at..end];
-        if (std.mem.indexOfScalar(u8, value, '\\') != null) return null;
-        return value;
-    }
-    return null;
-}
-
-/// A field's number text, `"name":1.7E9`, or null.
-fn json_number(body: []const u8, comptime name: []const u8) ?[]const u8 {
-    const key = "\"" ++ name ++ "\"";
-    const found = std.mem.indexOf(u8, body, key) orelse return null;
-    var at = found + key.len;
-    while (at < body.len and is_blank(body[at])) at += 1;
-    if (at == body.len or body[at] != ':') return null;
-    at += 1;
-    while (at < body.len and is_blank(body[at])) at += 1;
-    const start = at;
-    while (at < body.len and is_number_byte(body[at])) at += 1;
-    if (at == start) return null;
-    return body[start..at];
-}
-
-fn is_blank(byte: u8) bool {
-    return byte == ' ' or byte == '\t' or byte == '\r' or byte == '\n';
-}
-
-fn is_number_byte(byte: u8) bool {
-    return std.ascii.isDigit(byte) or byte == '.' or byte == 'E' or byte == 'e' or byte == '+' or
-        byte == '-';
-}
+// The flat JSON field readers and the timestamp reader moved to `src/cloud/json.zig` (M6d), where
+// Google's sources share them; these names keep every AWS caller as it was.
+const json_string = cloud_json.string_field;
+const json_number = cloud_json.number_field;
+const parse_seconds = cloud_json.parse_seconds;
+pub const parse_timestamp = cloud_json.parse_timestamp;
 
 /// The text of the first `<name>...</name>` in `body`, or null.
 fn xml_element(body: []const u8, comptime name: []const u8) ?[]const u8 {
@@ -115,70 +77,6 @@ pub fn token_valid(text: []const u8) bool {
         return false;
     }
     return true;
-}
-
-/// `2026-11-09T12:00:00Z`, with fractional seconds allowed and dropped, as seconds since the
-/// epoch; null for anything else, or a date before 1970 or after the year 2200.
-pub fn parse_timestamp(text: []const u8) ?u64 {
-    if (text.len < 20) return null;
-    const separators = [_]struct { at: u32, byte: u8 }{
-        .{ .at = 4, .byte = '-' },  .{ .at = 7, .byte = '-' },  .{ .at = 10, .byte = 'T' },
-        .{ .at = 13, .byte = ':' }, .{ .at = 16, .byte = ':' },
-    };
-    for (separators) |separator| {
-        if (text[separator.at] != separator.byte) return null;
-    }
-    const year = digits(text[0..4]) orelse return null;
-    const month = digits(text[5..7]) orelse return null;
-    const day = digits(text[8..10]) orelse return null;
-    const hour = digits(text[11..13]) orelse return null;
-    const minute = digits(text[14..16]) orelse return null;
-    const second = digits(text[17..19]) orelse return null;
-    var at: usize = 19;
-    if (text[at] == '.') {
-        at += 1;
-        const fraction_start = at;
-        while (at < text.len and std.ascii.isDigit(text[at])) at += 1;
-        if (at == fraction_start) return null;
-    }
-    if (at + 1 != text.len or text[at] != 'Z') return null;
-    if (year < 1970 or year > 2200) return null;
-    if (month < 1 or month > 12) return null;
-    if (day < 1 or day > 31) return null;
-    if (hour > 23 or minute > 59 or second > 60) return null;
-    const days = days_from_civil(year, month, day);
-    return days * 86400 + hour * 3600 + minute * 60 + second;
-}
-
-fn digits(text: []const u8) ?u64 {
-    var value: u64 = 0;
-    for (text) |byte| {
-        if (!std.ascii.isDigit(byte)) return null;
-        value = value * 10 + (byte - '0');
-    }
-    return value;
-}
-
-/// Days from 1970-01-01 to a civil date (Howard Hinnant's algorithm), for dates from 1970 on.
-fn days_from_civil(year: u64, month: u64, day: u64) u64 {
-    assert(year >= 1970);
-    assert(month >= 1);
-    assert(month <= 12);
-    const shifted_year = if (month <= 2) year - 1 else year;
-    const era = shifted_year / 400;
-    const year_of_era = shifted_year - era * 400;
-    const month_index = if (month > 2) month - 3 else month + 9;
-    const day_of_year = (153 * month_index + 2) / 5 + day - 1;
-    const day_of_era = year_of_era * 365 + year_of_era / 4 - year_of_era / 100 + day_of_year;
-    return era * 146097 + day_of_era - 719468;
-}
-
-/// A number of seconds, `1.7E9` or `1700000000` or `1700000000.123`, truncated.
-fn parse_seconds(text: []const u8) ?u64 {
-    const value = std.fmt.parseFloat(f64, text) catch return null;
-    if (!(value >= 0)) return null;
-    if (value >= 1 << 40) return null;
-    return @intFromFloat(value);
 }
 
 /// The credentials in an STS `AssumeRoleWithWebIdentity` XML answer.

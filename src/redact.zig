@@ -214,6 +214,8 @@ const token_shapes = [_]Shape{
     .{ .prefix = "ASIA", .length_min = 20 },
     .{ .prefix = "AIza", .length_min = 30 },
     .{ .prefix = "eyJ", .length_min = 30 },
+    // A Google OAuth access token (M6d): STS, IAM Credentials and the metadata server issue them.
+    .{ .prefix = "ya29.", .length_min = 20 },
 };
 
 fn has_token_shape(word: []const u8) bool {
@@ -513,6 +515,32 @@ test "aws: signed requests, token service answers and metadata documents" {
     try expect_redacted(
         "{\"SecretAccessKey\":\"abc\",\"Token\":\"def\"}",
         "{\"SecretAccessKey\":\"[redacted:secret]\",\"Token\":\"[redacted:token]\"}",
+    );
+}
+
+test "google: access tokens, the realm's Basic, the STS form and the token answers" {
+    // Goal: every secret a Google exchange carries goes (M6d): an access token anywhere, the
+    // `oauth2accesstoken` Basic the realm takes, the subject token in STS's form, and the token
+    // in each answer (STS and the metadata server, IAM Credentials). Tokens are fixed fakes.
+    try expect_redacted(
+        "token ya29.FAKEaccess-0123456789abcdef used",
+        "token [redacted:token] used",
+    );
+    try expect_redacted(
+        "Authorization: Basic b2F1dGgyYWNjZXNzdG9rZW46eWEyOS5GQUtF",
+        "Authorization: [redacted:authorization]",
+    );
+    try expect_redacted(
+        "audience=%2F%2Fiam&subject_token=eyJhbGciOiJSUzI1NiJ9.e30.c2ln&scope=x",
+        "audience=%2F%2Fiam&subject_token=[redacted:token]&scope=x",
+    );
+    try expect_redacted(
+        "{\"access_token\":\"ya29.FAKEfederated-0123456789\",\"expires_in\":3599}",
+        "{\"access_token\":\"[redacted:token]\",\"expires_in\":3599}",
+    );
+    try expect_redacted(
+        "{\"accessToken\":\"FAKEimpersonated\",\"expireTime\":\"2026-11-16T13:00:00Z\"}",
+        "{\"accessToken\":\"[redacted:token]\",\"expireTime\":\"2026-11-16T13:00:00Z\"}",
     );
 }
 

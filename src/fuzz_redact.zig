@@ -120,10 +120,11 @@ fn pick_name(random: std.Random) []const u8 {
 
 fn add_context(random: std.Random, builder: *Builder, planted: *Planted) void {
     var scratch: [256]u8 = undefined;
-    const choice = random.uintLessThan(u8, 16);
+    const choice = random.uintLessThan(u8, 17);
     const name = pick_name(random);
     // A token shape is only recognised from its real length up (a GitHub token is 40).
-    const secret = plant(random, planted, choice == 5 or choice == 11, if (choice == 9) 20 else 8);
+    const long = choice == 9 or choice == 16;
+    const secret = plant(random, planted, choice == 5 or choice == 11, if (long) 20 else 8);
     const text = switch (choice) {
         0 => std.fmt.bufPrint(&scratch, "{s}={s}", .{ name, secret }),
         1 => std.fmt.bufPrint(&scratch, "--{s} {s}", .{ name, secret }),
@@ -144,7 +145,8 @@ fn add_context(random: std.Random, builder: *Builder, planted: *Planted) void {
         12 => std.fmt.bufPrint(&scratch, aws_signed_format, .{secret}),
         13 => std.fmt.bufPrint(&scratch, "X-Amz-Security-Token: {s}", .{secret}),
         14 => std.fmt.bufPrint(&scratch, "<SecretAccessKey>{s}</SecretAccessKey>", .{secret}),
-        else => std.fmt.bufPrint(&scratch, "x?X-Amz-Signature={s}&a=b", .{secret}),
+        15 => std.fmt.bufPrint(&scratch, "x?X-Amz-Signature={s}&a=b", .{secret}),
+        else => std.fmt.bufPrint(&scratch, "ya29.{s}", .{secret}),
     } catch return;
     builder.add(text);
 }

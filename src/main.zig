@@ -218,6 +218,9 @@ test {
     _ = @import("aws/sigv4_tests.zig");
     _ = @import("aws/ecr.zig");
     _ = @import("aws/parse.zig");
+    _ = @import("cloud/json.zig");
+    _ = @import("cloud/env.zig");
+    _ = @import("cloud/metadata.zig");
     _ = @import("aws/aws_sim.zig");
     _ = @import("aws/credentials.zig");
     _ = @import("aws/credentials_tests.zig");
@@ -457,4 +460,14 @@ test {
     _ = @import("build/glob.zig");
     _ = @import("fuzz_dockerignore.zig");
     _ = @import("fuzz_dockerfile.zig");
+}
+
+test {
+    _ = @import("google/hosts.zig");
+    _ = @import("google/parse.zig");
+    _ = @import("google/parse_tests.zig");
+    _ = @import("google/credentials.zig");
+    _ = @import("google/google_sim.zig");
+    _ = @import("google/credentials_tests.zig");
+    _ = @import("google_library_tests.zig");
 }

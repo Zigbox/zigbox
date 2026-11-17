@@ -913,6 +913,51 @@ pub const aws_authorization_bytes_max: u32 = 1024;
 /// An AWS error's code name (`AccessDeniedException`), the only part of an error response a
 /// diagnostic may carry.
 pub const aws_error_code_bytes_max: u32 = 64;
+
+// ---- Cloud credentials, shared by AWS and Google (M6d) ------------------------------------
+/// How deep the bounded JSON reader follows nested objects and arrays inside a value it skips.
+/// A credentials file or a token answer is two or three levels deep.
+pub const cloud_json_depth_max: u32 = 16;
+
+// ---- Google (M6d): workload identity federation, the metadata server, Artifact Registry ----
+/// The `external_account` credentials file `GOOGLE_APPLICATION_CREDENTIALS` names (a few hundred
+/// bytes; its `credential_source.headers` can hold a runner's request token of about 1 KiB).
+pub const google_credentials_file_bytes_max: u32 = 16 * 1024;
+/// The subject token (an OIDC JWT from GitHub or GKE is 1 to 2 KiB; STS takes more), whether
+/// read from a file or from a URL, and the answer that carries it from a URL.
+pub const google_subject_token_bytes_max: u32 = 16 * 1024;
+/// An access token (`ya29.` and about 200 to 2000 bytes), from STS, IAM Credentials or the
+/// metadata server.
+pub const google_access_token_bytes_max: u32 = 4 * 1024;
+/// The form that carries the subject token to STS, and the impersonation request's JSON.
+pub const google_request_body_bytes_max: u32 = 64 * 1024;
+/// What STS, IAM Credentials, the metadata server or a subject-token URL answers.
+pub const google_response_bytes_max: u32 = 24 * 1024;
+/// The metadata server: how long a wait for the link-local address may take (a host off GCE
+/// must not be slowed) and the whole exchange, as for AWS's IMDS.
+pub const google_metadata_timeout_ms: u32 = 1_000;
+pub const google_metadata_total_timeout_ms: u32 = 3_000;
+/// The headers `credential_source.headers` may name for a URL subject token.
+pub const google_source_headers_max: u32 = 4;
+/// A service account's email, as named in an impersonation URL.
+pub const google_service_account_bytes_max: u32 = 256;
+/// A credentials file's `type` as it may be shown back (`authorized_user`).
+pub const google_type_name_bytes_max: u32 = 32;
+/// A Google error's code (`invalid_grant`, `PERMISSION_DENIED`, `DENIED`), the only part of an
+/// error response a diagnostic may carry.
+pub const google_error_code_bytes_max: u32 = 64;
+/// An Artifact Registry location (`us`, `europe-west4`, `northamerica-northeast1`).
+pub const google_region_bytes_max: u32 = 32;
+/// An audience, a subject token type, a path or a URL from the credentials file.
+pub const google_field_bytes_max: u32 = 1024;
+/// A JSON subject token's field name (`access_token`, `id_token`).
+pub const google_field_name_bytes_max: u32 = 64;
+/// Access tokens that expire within this many seconds are refused as already expired.
+pub const google_token_margin_s: u32 = 60;
+/// The longest `expires_in` an access token answer may claim (Google issues one hour, up to
+/// twelve with an organisation policy).
+pub const google_token_lifetime_max_s: u32 = 12 * 3600;
+
 /// The CA certificates of the system, parsed once per process: the room for the bundle.
 pub const net_ca_arena_bytes: u32 = 2 * 1024 * 1024;
 /// The JSON result of a resolve: 128 layers of about 150 bytes, and the rest.
@@ -1707,6 +1752,26 @@ comptime {
     assert(aws_region_bytes_max + 16 <= 253);
     assert(aws_account_digits + 9 + aws_region_bytes_max + 14 <= aws_ecr_host_bytes_max);
     assert(aws_error_code_bytes_max < aws_response_bytes_max);
+    assert(cloud_json_depth_max >= 4);
+    // The STS form: the subject token with every byte escaped, the audience and the token type
+    // escaped, and the fixed words.
+    assert(google_subject_token_bytes_max * 3 + google_field_bytes_max * 3 * 2 + 512 <=
+        google_request_body_bytes_max);
+    assert(google_access_token_bytes_max <= net_header_value_bytes_max);
+    // The realm's `Basic` value: base64 of `oauth2accesstoken:` and an access token at its bound.
+    assert(std.base64.standard.Encoder.calcSize("oauth2accesstoken:".len +
+        google_access_token_bytes_max) + "Basic ".len <= net_header_value_bytes_max);
+    assert(google_access_token_bytes_max * 2 <= google_response_bytes_max);
+    assert(google_subject_token_bytes_max <= google_response_bytes_max);
+    assert(google_response_bytes_max <= registry_token_response_bytes_max);
+    assert(google_credentials_file_bytes_max <= google_response_bytes_max);
+    assert(google_metadata_timeout_ms < google_metadata_total_timeout_ms);
+    assert(google_metadata_total_timeout_ms < net_idle_timeout_ms);
+    assert(google_source_headers_max < net_extra_headers_max);
+    assert(google_field_bytes_max <= registry_url_bytes_max);
+    assert(google_error_code_bytes_max < google_response_bytes_max);
+    assert(google_region_bytes_max + "-docker.pkg.dev".len <= registry_host_bytes_max);
+    assert(google_token_margin_s < google_token_lifetime_max_s);
     assert(net_addresses_max > 0);
     assert(registry_layers_max * 160 + 2048 <= pull_output_bytes_max);
     // The last record of a report (a failure or a result) always fits, after the warnings.
