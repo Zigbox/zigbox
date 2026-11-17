@@ -175,6 +175,14 @@ test "masking hides every token shape and every named secret, and nothing else" 
     try testing.expectEqualStrings(clean, m6d.mask_secrets(clean, &.{"opaque-secret-42"}, &out));
     // Inside a word is not the start of a token.
     try testing.expectEqualStrings("xya29.b", m6d.mask_secrets("xya29.b", &.{}, &out));
+    // A named secret is masked wherever it starts.
+    const glued = m6d.mask_secrets("key:opaque-secret-42.", &.{"opaque-secret-42"}, &out);
+    try testing.expectEqualStrings("key:[masked].", glued);
+    // The output never outgrows its bound, even when every run is the shortest shape.
+    const dense = "ya29. ya29. ya29. ya29.";
+    var tight: [2 * dense.len]u8 = undefined;
+    const masked = m6d.mask_secrets(dense, &.{}, &tight);
+    try testing.expectEqualStrings("[masked] [masked] [masked] [masked]", masked);
 }
 
 const refusal_e0560 =
@@ -271,17 +279,24 @@ test "the agent's JSON matches the command line's pull" {
     );
 }
 
-test "the exchange says how many tokens it wrote, and nothing else" {
-    const two = "exchange: wrote 2 tokens (federated, access)\n";
-    try m6d.check_exchange(.{ .stdout = two, .stderr = "" }, 0, true);
+test "the shape check says one line per token, and nothing else" {
+    const two = "shapes: federated token starts with ya29.\n" ++
+        "shapes: access token starts with ya29.\n";
+    try m6d.check_shapes(.{ .stdout = two, .stderr = "" }, 0, true);
     try testing.expectError(
         error.OutputWrong,
-        m6d.check_exchange(.{ .stdout = two, .stderr = "" }, 0, false),
+        m6d.check_shapes(.{ .stdout = two, .stderr = "" }, 0, false),
     );
-    const leaked = "exchange: wrote 2 tokens (federated, access)\nya29.x";
+    const one = "shapes: federated token starts with ya29.\n";
+    try m6d.check_shapes(.{ .stdout = one, .stderr = "" }, 0, false);
+    const leaked = one ++ "ya29.x";
     try testing.expectError(
         error.OutputWrong,
-        m6d.check_exchange(.{ .stdout = leaked, .stderr = "" }, 0, true),
+        m6d.check_shapes(.{ .stdout = leaked, .stderr = "" }, 0, false),
+    );
+    try testing.expectError(
+        error.ExitCodeWrong,
+        m6d.check_shapes(.{ .stdout = one, .stderr = "" }, 1, false),
     );
 }
 
@@ -299,4 +314,5 @@ test "step 5: clean only with enough needles, some files and no hit" {
 
 test {
     _ = @import("m6d_fixture/scan.zig");
+    _ = @import("m6d_fixture/mask.zig");
 }

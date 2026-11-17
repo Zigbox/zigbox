@@ -9,6 +9,7 @@ const checks = @import("checks.zig");
 const checks_m4 = @import("checks_m4.zig");
 const checks_m3 = @import("checks_m3.zig");
 const scan = @import("m6d_fixture/scan.zig");
+const mask = @import("m6d_fixture/mask.zig");
 
 pub const Streams = checks.Streams;
 
@@ -177,11 +178,7 @@ pub fn oidc_request_url(buffer: []u8, request_url: []const u8, provider: []const
     return writer.buffered();
 }
 
-fn is_jwt_byte(byte: u8) bool {
-    const alphanumeric = (byte >= 'a' and byte <= 'z') or (byte >= 'A' and byte <= 'Z') or
-        (byte >= '0' and byte <= '9');
-    return alphanumeric or byte == '-' or byte == '_' or byte == '.';
-}
+const is_jwt_byte = mask.is_jwt_byte;
 
 /// The JWT in the runner's answer, `{"count":..,"value":"<jwt>"}`: three base64url parts.
 pub fn parse_oidc_response(body: []const u8) Error![]const u8 {
@@ -239,68 +236,9 @@ pub fn render_external_account(
     return writer.buffered();
 }
 
-// ---- Masking ---------------------------------------------------------------------------------
-
-const mask_text = "[masked]";
-
-fn is_token_byte(byte: u8) bool {
-    return is_jwt_byte(byte) or byte == '+' or byte == '/' or byte == '=';
-}
-
-/// The length of a token-shaped run at `text[at..]`: `ya29.`, the realm's Basic value, or a JWT
-/// (`eyJ`, two dots, at least 40 bytes); 0 for none.
-fn token_run(text: []const u8, at: usize) usize {
-    assert(at < text.len);
-    const rest = text[at..];
-    var end: usize = 0;
-    while (end < rest.len and is_token_byte(rest[end])) end += 1;
-    const run = rest[0..end];
-    for (scan.shapes) |shape| if (std.mem.startsWith(u8, run, shape)) return end;
-    if (std.mem.startsWith(u8, run, "eyJ")) {
-        if (end >= 40 and std.mem.count(u8, run, ".") == 2) return end;
-    }
-    return 0;
-}
-
-/// Copies `text` to `out` with every token-shaped run and every `secrets` entry replaced by
-/// `[masked]`. The harness prints guest output only through this.
-pub fn mask_secrets(text: []const u8, secrets: []const []const u8, out: []u8) []const u8 {
-    assert(out.len >= text.len + mask_text.len);
-    var writer: std.Io.Writer = .fixed(out);
-    var at: usize = 0;
-    var masked_any = false;
-    outer: while (at < text.len) {
-        // Only at the start of a word: a token never follows a letter or a digit.
-        const start = at == 0 or !std.ascii.isAlphanumeric(text[at - 1]);
-        if (start) {
-            for (secrets) |secret| {
-                if (secret.len == 0) continue;
-                if (!std.mem.startsWith(u8, text[at..], secret)) continue;
-                if (!emit(&writer, mask_text)) break :outer;
-                at += secret.len;
-                masked_any = true;
-                continue :outer;
-            }
-            const run = token_run(text, at);
-            if (run > 0) {
-                if (!emit(&writer, mask_text)) break :outer;
-                at += run;
-                masked_any = true;
-                continue;
-            }
-        }
-        if (!emit(&writer, text[at .. at + 1])) break;
-        at += 1;
-    }
-    const shown = writer.buffered();
-    if (!masked_any) assert(shown.len == text.len);
-    return shown;
-}
-
-fn emit(writer: *std.Io.Writer, bytes: []const u8) bool {
-    writer.writeAll(bytes) catch return false;
-    return true;
-}
+/// Masks every token shape and named secret (m6d_fixture/mask.zig): the guest helper prints
+/// zbx's output through it, so the console, which the job log copies, never carries a token.
+pub const mask_secrets = mask.mask_secrets;
 
 // ---- The steps -------------------------------------------------------------------------------
 
@@ -389,16 +327,18 @@ pub fn check_agent(
     if (!std.mem.eql(u8, doc.tree, cli.tree)) return error.DigestWrong;
 }
 
-/// The helper's exchange: it wrote the tokens step 5 searches for, and said only how many.
-pub fn check_exchange(streams: Streams, status: u8, impersonate: bool) Error!void {
+/// The helper's shape check: the federated token (and, when impersonating, the access token)
+/// starts with `ya29.`, the shape step 5 searches for; it says so in one line per token and
+/// prints nothing else.
+pub fn check_shapes(streams: Streams, status: u8, impersonate: bool) Error!void {
     if (status != 0) return error.ExitCodeWrong;
-    const wanted = if (impersonate)
-        "exchange: wrote 2 tokens (federated, access)"
-    else
-        "exchange: wrote 1 token (federated, which is the access token)";
+    const federated = "shapes: federated token starts with ya29.";
+    const access = "shapes: access token starts with ya29.";
+    const wanted = if (impersonate) federated ++ "\n" ++ access else federated;
     if (!std.mem.eql(u8, std.mem.trim(u8, streams.stdout, " \r\n"), wanted)) {
         return error.OutputWrong;
     }
+    if (streams.stderr.len != 0) return error.OutputWrong;
 }
 
 /// Step 5: the helper's search found none of `needles_min` or more needles in at least one
