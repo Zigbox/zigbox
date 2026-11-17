@@ -1895,8 +1895,8 @@ fn remount_readonly_tree(target: [:0]const u8) host.Error!void {
     try HostReal.check(result);
 }
 
-/// The container's cgroup view. Below the host's /sys, bound with `--net host` or `--net user`,
-/// the host's own cgroup2 is already mounted on `fs/cgroup`, and the kernel refuses the same
+/// The container's cgroup view. Below the host's /sys, bound with `--net host`, the host's own
+/// cgroup2 is already mounted on `fs/cgroup`, and the kernel refuses the same
 /// superblock again on that mount's root (EBUSY; the namespace's root is another dentry of the
 /// one superblock). A small read-only tmpfs covers it first, so the view goes on a mount of
 /// another kind. On a fresh sysfs the cover changes nothing but the mount table.
