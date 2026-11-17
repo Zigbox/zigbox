@@ -1,0 +1,5 @@
+error[ZBX-E0572]: a Google credential service failed
+  cause  the metadata server refused the request (status 500)
+  fix    run the command again; if it repeats, the service or a proxy is at fault
+  more   zbx explain E0572 · rerun with --verbose for the full cause chain
+  docs   https://zigbox.github.io/zigbox/errors/E0572.html

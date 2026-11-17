@@ -469,5 +469,6 @@ test {
     _ = @import("google/credentials.zig");
     _ = @import("google/google_sim.zig");
     _ = @import("google/credentials_tests.zig");
+    _ = @import("google/pull_tests.zig");
     _ = @import("google_library_tests.zig");
 }

@@ -1,0 +1,6 @@
+error[ZBX-E0566]: Google refused to impersonate the service account
+  cause  the federated identity may not impersonate
+         zbx-pull@zbx-demo.iam.gserviceaccount.com
+  fix    grant the pool's principal roles/iam.workloadIdentityUser on the service account
+  more   zbx explain E0566 · rerun with --verbose for the full cause chain
+  docs   https://zigbox.github.io/zigbox/errors/E0566.html

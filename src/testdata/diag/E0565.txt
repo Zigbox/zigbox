@@ -1,0 +1,5 @@
+error[ZBX-E0565]: Google refused the workload identity token exchange
+  cause  sts.googleapis.com refused the token exchange: invalid_grant
+  fix    check the provider's audience and attribute condition against the subject token
+  more   zbx explain E0565 · rerun with --verbose for the full cause chain
+  docs   https://zigbox.github.io/zigbox/errors/E0565.html

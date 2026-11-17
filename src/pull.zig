@@ -40,6 +40,9 @@ const diagnose = @import("registry/diagnose.zig");
 const credentials_mod = @import("aws/credentials.zig");
 const doctor = @import("doctor.zig");
 const ecr_login = @import("registry/ecr_login.zig");
+const google_credentials = @import("google/credentials.zig");
+const google_diagnose = @import("google/diagnose.zig");
+const google_hosts = @import("google/hosts.zig");
 const fs_mod = @import("store/fs.zig");
 const host_mod = @import("host.zig");
 const image_diagnose = @import("image_diagnose.zig");
@@ -87,6 +90,14 @@ pub const Request = struct {
     /// (the library reads no environment). Null for any other registry; a null for an ECR one is
     /// refused (E0527). Only the pull's own call uses them, and the caller wipes them.
     aws: ?*const credentials_mod.Credentials = null,
+    /// The Google access token for an Artifact Registry or gcr.io reference, from
+    /// `google_credentials_resolve`. It goes, as `oauth2accesstoken` Basic, only to a token realm
+    /// on the registry's own host; null pulls anonymously. One already out of date is refused
+    /// before it is sent (E0567). Ignored for any other registry; the caller wipes it.
+    google: ?*const google_credentials.Token = null,
+    /// Asked once, for the token of a credentialed Google host whose realm refused an anonymous
+    /// pull (the command line's metadata server step). Ignored when `google` is given.
+    google_fallback: ?client_mod.RealmFallback = null,
 };
 
 pub const Event = union(enum) {
@@ -208,11 +219,38 @@ pub fn resolve_with(
     ecr_login.login(host, request.aws, workspace.reference.registry(), client, diag) catch {
         return error.Failed;
     };
+    try google_login(host, request, workspace.reference.registry(), client, diag);
     client_mod.resolve(client, &workspace.reference, &workspace.resolved, diag) catch {
         return error.Failed;
     };
     assert(diag.code == null);
     assert(workspace.resolved.layer_count <= constants.registry_layers_max);
+}
+
+/// Gives `client` the Google credential of a credentialed Google host: the caller's token, or the
+/// fallback to ask after an anonymous refusal. Nothing for any other host.
+fn google_login(
+    host: Host,
+    request: *const Request,
+    registry: []const u8,
+    client: *client_mod.Client,
+    diag: *Diag,
+) Error!void {
+    assert(diag.code == null);
+    if (!google_hosts.classify(registry).credentialed()) return;
+    assert(client.credential == .none);
+    const token = request.google orelse {
+        client.realm_fallback = request.google_fallback;
+        return;
+    };
+    assert(token.len > 0);
+    if (token.expired(host.time_now())) {
+        // Refused before it is sent: the registry would only say 401.
+        google_diagnose.token_refused(diag, registry, true);
+        return error.Failed;
+    }
+    client.use_realm_basic(constants.google_realm_user, token.text());
+    assert(client.credential == .realm_basic);
 }
 
 /// Asks the registry what the reference names for the platform, and fetches no layer: the result

@@ -76,6 +76,7 @@ fn ask(
     };
     assert(length > 0);
     client.basic_len = length;
+    client.credential = .ecr_basic;
 }
 
 pub fn failed(

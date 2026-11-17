@@ -37,6 +37,8 @@ pub const registry_host = "us-docker.pkg.dev";
 pub const storage_host = "storage.googleapis.com";
 pub const subject_host = "tokens.example.com";
 pub const metadata_host = "169.254.169.254";
+/// A token service on another host, which a registry's challenge may name (`RealmAt.elsewhere`).
+pub const elsewhere_host = "token.elsewhere.example";
 
 pub const audience = "//iam.googleapis.com/projects/123456789012/locations/global/" ++
     "workloadIdentityPools/zbx-pool/providers/github";
@@ -108,7 +110,13 @@ pub const RegistryFault = enum {
     unavailable,
 };
 
-pub const BlobRedirect = enum { same_host, storage };
+/// Where a blob request is sent: the registry's own downloads path, which serves it; storage
+/// directly; or the downloads path, which sends it on to storage (a chain of two redirects).
+pub const BlobRedirect = enum { same_host, storage, same_host_then_storage };
+
+/// The realm the registry's challenge names: its own `https://<registry>/token`, a token service
+/// on another host (`elsewhere_host`, which refuses anonymously), or its own over plain HTTP.
+pub const RealmAt = enum { own, elsewhere, plain };
 
 pub const GoogleSim = struct {
     /// The time the model believes it is, seconds since the epoch.
@@ -122,6 +130,7 @@ pub const GoogleSim = struct {
     subject: SubjectMode = .ok,
     registry_fault: RegistryFault = .none,
     blob_redirect: BlobRedirect = .same_host,
+    realm_at: RealmAt = .own,
     /// The access token the realm accepts.
     accepted_token: []const u8 = access_token,
     /// The token the metadata server hands out (a test at the token's bound sets a long one).
@@ -130,6 +139,8 @@ pub const GoogleSim = struct {
     /// the response bound).
     sts_answer_bytes: u32 = 0,
     fixture: fixture_mod.Fixture,
+    /// The registry's host: Artifact Registry's unless `init_at` names a gcr.io one.
+    registry_name: []const u8 = registry_host,
     sts_calls: u32 = 0,
     iam_calls: u32 = 0,
     metadata_calls: u32 = 0,
@@ -137,6 +148,10 @@ pub const GoogleSim = struct {
     realm_calls: u32 = 0,
     realm_ok: u32 = 0,
     storage_served: u32 = 0,
+    /// Requests to the registry's downloads path that carried the realm's Bearer.
+    downloads_bearer: u32 = 0,
+    /// Requests to `elsewhere_host`.
+    elsewhere_calls: u32 = 0,
     /// Requests to a host the model does not know.
     stray: u32 = 0,
     /// Requests that carried a credential to a host that must not get it.
@@ -146,10 +161,16 @@ pub const GoogleSim = struct {
     /// The metadata answer, with room for a token one past its bound.
     metadata_scratch: [constants.google_access_token_bytes_max + 128]u8 = undefined,
     location: [256]u8 = undefined,
+    challenge: [512]u8 = undefined,
 
     pub fn init(sim: *GoogleSim) void {
-        sim.* = .{ .fixture = undefined };
-        sim.fixture.init("https://" ++ registry_host, "https://" ++ storage_host);
+        sim.init_at(registry_host);
+    }
+
+    /// As `init`, with the registry at `host` (a gcr.io host, say).
+    pub fn init_at(sim: *GoogleSim, comptime host: []const u8) void {
+        sim.* = .{ .fixture = undefined, .registry_name = host };
+        sim.fixture.init("https://" ++ host, "https://" ++ storage_host);
         assert(sim.fixture.oci.index.len > 0);
         assert(sim.leaked == 0);
     }
@@ -201,12 +222,15 @@ fn answer(
     // An access token travels only inside the realm's Basic value, never as itself.
     if (sends(request, received, access_token)) sim.leaked += 1;
     if (sends(request, received, metadata_token)) sim.leaked += 1;
+    // No credential travels in plain HTTP to any of the model's hosts.
+    if (request.scheme == .http and carries_credential(request)) sim.leaked += 1;
     if (std.mem.eql(u8, request.host, metadata_host)) return metadata(sim, request, served);
     if (std.mem.eql(u8, request.host, parse.sts_host)) return sts(sim, request, received, served);
     if (std.mem.eql(u8, request.host, parse.iam_host)) return iam(sim, request, received, served);
     if (std.mem.eql(u8, request.host, subject_host)) return subject(sim, request, served);
-    if (std.mem.eql(u8, request.host, registry_host)) return registry(sim, request, served);
+    if (std.mem.eql(u8, request.host, sim.registry_name)) return registry(sim, request, served);
     if (std.mem.eql(u8, request.host, storage_host)) return storage(sim, request, served);
+    if (std.mem.eql(u8, request.host, elsewhere_host)) return elsewhere(sim, request, served);
     sim.stray += 1;
     if (carries_credential(request)) sim.leaked += 1;
 }
@@ -397,9 +421,21 @@ fn registry(sim: *GoogleSim, request: *const net.Request, served: *net_sim.Serve
     assert(request.target.len > 0);
     if (std.mem.startsWith(u8, request.target, "/token")) return realm(sim, request, served);
     if (std.mem.startsWith(u8, request.target, downloads_prefix)) {
-        // Served without auth, as Artifact Registry serves its downloads path.
-        if (carries_credential(request)) sim.leaked += 1;
+        // Served without auth, as Artifact Registry serves its downloads path. It is the
+        // registry's own origin, so the realm's Bearer may follow the redirect (the client's
+        // same-origin rule); the realm's Basic or any other `Authorization` may not.
+        if (request.basic.len + request.authorization.len > 0) sim.leaked += 1;
+        if (request.bearer.len > 0) sim.downloads_bearer += 1;
         const digest = request.target[downloads_prefix.len..];
+        if (sim.blob_redirect == .same_host_then_storage) {
+            const format = "https://" ++ storage_host ++ "/cdn/{s}";
+            served.* = .{ .status = 302 };
+            served.location = std.fmt.bufPrint(&sim.location, format, .{digest}) catch {
+                served.* = .{ .status = 404 };
+                return;
+            };
+            return;
+        }
         const target = std.fmt.bufPrint(&sim.scratch, "/cdn/{s}", .{digest}) catch {
             served.* = .{ .status = 404 };
             return;
@@ -412,6 +448,7 @@ fn registry(sim: *GoogleSim, request: *const net.Request, served: *net_sim.Serve
         return;
     }
     fixture_answer(sim, request, request.target, request.bearer, served);
+    if (served.www_authenticate.len > 0) move_realm(sim, served);
     const storage_base = "https://" ++ storage_host ++ "/cdn/";
     const to_storage = std.mem.startsWith(u8, served.location, storage_base);
     const redirected = served.status == 307 and to_storage;
@@ -420,6 +457,42 @@ fn registry(sim: *GoogleSim, request: *const net.Request, served: *net_sim.Serve
     served.status = 302;
     served.location = std.fmt.bufPrint(&sim.location, downloads_prefix ++ "{s}", .{digest}) catch
         unreachable; // A digest is 71 bytes.
+}
+
+/// Rewrites the challenge's realm to where `realm_at` says.
+fn move_realm(sim: *GoogleSim, served: *net_sim.Served) void {
+    assert(served.www_authenticate.len > 0);
+    const realm_of: []const u8 = switch (sim.realm_at) {
+        .own => return,
+        .elsewhere => "https://" ++ elsewhere_host ++ "/token",
+        .plain => "http://",
+    };
+    const prefix = "Bearer realm=\"https://";
+    const header = served.www_authenticate;
+    assert(std.mem.startsWith(u8, header, prefix));
+    // The plain realm keeps the registry's host and path; the other replaces them.
+    const rest = if (sim.realm_at == .plain) header[prefix.len..] else after_realm(header);
+    served.www_authenticate = std.fmt.bufPrint(
+        &sim.challenge,
+        "Bearer realm=\"{s}{s}",
+        .{ realm_of, rest },
+    ) catch unreachable; // The fixture's challenge is short.
+}
+
+/// The challenge from the realm's closing quote on.
+fn after_realm(header: []const u8) []const u8 {
+    const prefix = "Bearer realm=\"";
+    assert(std.mem.startsWith(u8, header, prefix));
+    const end = std.mem.indexOfScalarPos(u8, header, prefix.len, '"') orelse header.len;
+    return header[end..];
+}
+
+/// A token service on another host: it refuses anonymously, as a private realm does, and any
+/// credential that reaches it is a leak.
+fn elsewhere(sim: *GoogleSim, request: *const net.Request, served: *net_sim.Served) void {
+    sim.elsewhere_calls += 1;
+    if (carries_credential(request)) sim.leaked += 1;
+    served.* = .{ .status = 403, .body = registry_error("DENIED") };
 }
 
 /// A credentialed manifest request refused at the origin, when the fault says so.

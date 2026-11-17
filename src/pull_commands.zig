@@ -25,6 +25,7 @@ const import = @import("store/import.zig");
 const lock_file = @import("lock_file.zig");
 const manifest = @import("registry/manifest.zig");
 const pull_aws = @import("pull_aws.zig");
+const pull_google = @import("pull_google.zig");
 const pull_lib = @import("pull.zig");
 const reference_mod = @import("registry/reference.zig");
 const render_diag = @import("diag/render.zig");
@@ -42,6 +43,8 @@ pub const Workspace = struct {
     locking: lock_file.Workspace,
     /// The AWS credentials of an ECR pull; wiped when the command ends.
     aws: pull_aws.Storage,
+    /// The Google access token of an Artifact Registry or gcr.io pull; wiped when the command ends.
+    google: pull_google.Storage,
 };
 
 pub const Args = struct {
@@ -61,7 +64,8 @@ pub const Output = struct {
 /// The request the command line makes: the reference as typed, the platform the macOS zbx sets
 /// in the virtual machine and the mirrors, all read from the environment here and nowhere in the
 /// library.
-/// The AWS credentials are found here, for a private ECR reference only (`pull_aws.zig`); the
+/// The AWS credentials are found here, for a private ECR reference only (`pull_aws.zig`), and the
+/// Google token for an Artifact Registry or gcr.io one (`pull_google.zig`); the
 /// reference in `workspace.library` must already be parsed.
 pub fn request_of(
     host: Host,
@@ -76,11 +80,20 @@ pub fn request_of(
     const aws = pull_aws.credentials_for(host, registry, &workspace.aws, diag) catch {
         return error.Failed;
     };
+    const google = pull_google.token_for(host, registry, &workspace.google, diag) catch {
+        return error.Failed;
+    };
+    const fallback = if (google == null)
+        pull_google.fallback_for(host, registry, &workspace.google)
+    else
+        null;
     return .{
         .reference = text,
         .platform = platform_of(host),
         .mirrors = mirrors orelse "",
         .aws = aws,
+        .google = google,
+        .google_fallback = fallback,
     };
 }
 
@@ -106,6 +119,7 @@ pub fn run_resolve(host: Host, args: Args, workspace: *Workspace, diag: *Diag) E
     assert(@sizeOf(Workspace) > constants.pull_output_bytes_max);
     const library = &workspace.library;
     defer workspace.aws.wipe();
+    defer workspace.google.wipe();
     pull_lib.parse_reference(library, args.reference, diag) catch return error.Failed;
     const request = try request_of(host, args.reference, workspace, diag);
     pull_lib.resolve(host, &request, library, diag) catch return error.Failed;
@@ -132,6 +146,7 @@ pub fn run_pull(
     assert(args.reference.len <= constants.arg_bytes_max);
     const library = &workspace.library;
     defer workspace.aws.wipe();
+    defer workspace.google.wipe();
     pull_lib.parse_reference(library, args.reference, diag) catch return error.Failed;
     try check_lock(host, workspace, diag);
     const request = try request_of(host, args.reference, workspace, diag);

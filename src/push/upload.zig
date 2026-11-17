@@ -564,18 +564,7 @@ fn fetch_token(
     const basic = credentials_mod.encode_basic(credentials, &ws.basic);
     var head: net.Head = .{};
     var sink: net.BufferSink = .{ .buffer = &ws.token_body };
-    const request: net.Request = .{
-        .scheme = url.scheme,
-        .host = url.host,
-        .port = url.port,
-        .target = url.target,
-        .accept = "application/json",
-        .bearer = "",
-        .basic = basic,
-        .body_bytes_max = constants.registry_token_response_bytes_max,
-        .idle_timeout_ms = constants.net_idle_timeout_ms,
-        .total_timeout_ms = constants.net_request_timeout_ms,
-    };
+    const request = auth.realm_request(url, basic, constants.net_request_timeout_ms);
     state.wire.call(&request, &head, sink.sink()) catch |err| {
         const where: diagnose.Target = .{
             .host = url.host,

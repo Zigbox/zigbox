@@ -2148,6 +2148,15 @@ pub const push_token_arena_bytes: u32 = 2 * registry_token_response_bytes_max;
 /// The `user:password` text and its base64 form, which is what `Authorization: Basic` carries.
 pub const push_basic_bytes_max: u32 = (push_credential_bytes_max + 1 + 2) / 3 * 4;
 
+/// The user Artifact Registry takes with an access token as the password, on its token realm.
+pub const google_realm_user = "oauth2accesstoken";
+/// The `Basic` value a pull sends: ECR's authorization token as given, or the base64 of
+/// `oauth2accesstoken:<access token>` for a Google realm, whichever is longer.
+pub const registry_basic_bytes_max: u32 = @max(
+    aws_ecr_token_bytes_max,
+    (google_realm_user.len + 1 + google_access_token_bytes_max + 2) / 3 * 4,
+);
+
 comptime {
     assert(push_chunk_bytes >= pack_manifest_bytes_max);
     assert(push_chunk_bytes >= pack_io_bytes);
@@ -2158,6 +2167,10 @@ comptime {
     assert(push_password_read_bytes > push_credential_bytes_max);
     assert(push_basic_bytes_max > push_credential_bytes_max);
     assert(aws_ecr_token_bytes_max <= push_basic_bytes_max);
+    assert(aws_ecr_token_bytes_max <= registry_basic_bytes_max);
+    assert(std.base64.standard.Encoder.calcSize(google_realm_user.len + 1 +
+        google_access_token_bytes_max) <= registry_basic_bytes_max);
+    assert(registry_basic_bytes_max + "Basic ".len <= net_header_value_bytes_max);
     assert(push_credential_bytes_max < registry_token_bytes_max);
     assert(push_token_arena_bytes > registry_token_response_bytes_max);
     assert(pack_links_max > 0);

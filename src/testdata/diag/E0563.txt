@@ -1,0 +1,6 @@
+error[ZBX-E0563]: the Google credentials file is not one zbx supports
+  cause  /home/ci/gcp.json can't be used: it holds gcloud user credentials
+         (authorized_user)
+  fix    use an external_account file with a credential_source file or HTTPS url
+  more   zbx explain E0563 · rerun with --verbose for the full cause chain
+  docs   https://zigbox.github.io/zigbox/errors/E0563.html

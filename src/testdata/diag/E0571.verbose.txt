@@ -1,0 +1,7 @@
+error[ZBX-E0571]: workforce pools are not supported
+  cause  /home/ci/gcp.json names a workforce pool; zbx supports workload
+         identity pools only
+  var    GOOGLE_APPLICATION_CREDENTIALS
+  fix    use a workload identity pool's provider as the audience
+  more   zbx explain E0571
+  docs   https://zigbox.github.io/zigbox/errors/E0571.html

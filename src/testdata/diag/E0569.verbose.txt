@@ -1,0 +1,7 @@
+error[ZBX-E0569]: the repository does not exist
+  cause  us-docker.pkg.dev has no repository zbx-demo/zbx-demo/nope
+  host   us-docker.pkg.dev
+  repo   zbx-demo/zbx-demo/nope
+  fix    check the project, the repository's name and the region
+  more   zbx explain E0569
+  docs   https://zigbox.github.io/zigbox/errors/E0569.html
