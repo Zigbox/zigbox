@@ -7,9 +7,10 @@
 //! one zbx uses asks nothing of the network: the pull goes anonymously, as 0.5.2's did, and the
 //! file's refusal is raised only when the registry's realm refuses (`fallback_for`). Without the
 //! variable, the pull goes anonymously, and the metadata server is asked once, only when the
-//! realm refuses. The metadata server is never asked while the variable is set. The token is looked up for
-//! every pull, never cached, and wiped when the command ends (`Storage.wipe`). A failure is a
-//! coded diagnostic built from the resolver's trace, never a token or a Google message.
+//! realm refuses. The metadata server is never asked while the variable is set. The token is
+//! looked up for every pull, never cached, and wiped when the command ends (`Storage.wipe`). A
+//! failure is a coded diagnostic built from the resolver's trace, never a token or a Google
+//! message.
 
 const std = @import("std");
 const assert = std.debug.assert;

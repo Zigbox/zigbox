@@ -665,7 +665,8 @@ fn ignore_event(context: *anyopaque, event: pull.Event) void {
 
 test "the library: a caller's token pulls, an expired one is refused before it is sent" {
     // Goal: the library entry as Zigcube calls it: a token pulls; one past its expiry is E0567
-    // with nothing sent, as is an empty one; no token and no fallback is E0560 after the anonymous refusal.
+    // with nothing sent, as is an empty one; no token and no fallback is E0560 after the
+    // anonymous refusal.
     const library = try std.heap.page_allocator.create(Library);
     defer std.heap.page_allocator.destroy(library);
     const world = try World.create();
