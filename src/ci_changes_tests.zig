@@ -11,9 +11,9 @@ const max_paths = 8;
 
 /// Every output the script writes: `code`, the sixteen demos and the packages demo.
 const all_outputs = [_][]const u8{
-    "code",     "demo_m0", "demo_m1",  "demo_m2",  "demo_m3",      "demo_m4",
-    "demo_m5",  "demo_m6", "demo_m6b", "demo_m6d", "demo_m7",      "demo_m8",
-    "demo_m8b", "demo_m9", "demo_m10", "demo_c4",  "demo_s2_lazy", "demo_m8_packages",
+    "code",    "demo_m0",  "demo_m1",  "demo_m2",      "demo_m2b",         "demo_m3", "demo_m4",
+    "demo_m5", "demo_m6",  "demo_m6b", "demo_m6d",     "demo_m7",          "demo_m8", "demo_m8b",
+    "demo_m9", "demo_m10", "demo_c4",  "demo_s2_lazy", "demo_m8_packages",
 };
 
 const Row = struct {
@@ -58,6 +58,69 @@ const rows = [_]Row{
         .paths = &.{"src/testing/vm/main_m2b_probe.zig"},
         .true_outputs = &.{"code"},
     },
+    // The M2b demo: its harness files and numa-probe select demo_m2b alone.
+    .{
+        .paths = &.{ "src/testing/vm/checks_m2b.zig", "src/testing/vm/numa_probe/numa_probe.zig" },
+        .true_outputs = &.{ "code", "demo_m2b" },
+    },
+    // main_m2b.zig imports later demos' checks (its upgrade step): each selects demo_m2b as well
+    // as its own demo and every later one.
+    .{
+        .paths = &.{"src/testing/vm/checks_m3.zig"},
+        .true_outputs = &.{
+            "code",     "demo_m2b", "demo_m3",      "demo_m4", "demo_m5",  "demo_m6",
+            "demo_m6b", "demo_m6d", "demo_m7",      "demo_m8", "demo_m8b", "demo_m9",
+            "demo_m10", "demo_c4",  "demo_s2_lazy",
+        },
+    },
+    .{
+        .paths = &.{"src/testing/vm/checks_m4.zig"},
+        .true_outputs = &.{
+            "code",     "demo_m2b",     "demo_m4", "demo_m5",  "demo_m6", "demo_m6b",
+            "demo_m6d", "demo_m7",      "demo_m8", "demo_m8b", "demo_m9", "demo_m10",
+            "demo_c4",  "demo_s2_lazy",
+        },
+    },
+    .{
+        .paths = &.{"src/testing/vm/checks_upgrade_m5.zig"},
+        .true_outputs = &.{
+            "code",    "demo_m2b", "demo_m5", "demo_m6",  "demo_m6b", "demo_m6d",     "demo_m7",
+            "demo_m8", "demo_m8b", "demo_m9", "demo_m10", "demo_c4",  "demo_s2_lazy",
+        },
+    },
+    .{
+        .paths = &.{"src/testing/vm/checks_upgrade_m6b.zig"},
+        .true_outputs = &.{
+            "code",     "demo_m2b", "demo_m6b", "demo_m6d", "demo_m7",      "demo_m8",
+            "demo_m8b", "demo_m9",  "demo_m10", "demo_c4",  "demo_s2_lazy",
+        },
+    },
+    // The M2b knobs (the policy files, the plan, the child, doctor) reach every VM demo,
+    // demo_m2b among them.
+    .{
+        .paths = &.{"src/runtime/policy/sysctls.zon"},
+        .true_outputs = &.{
+            "code",    "demo_m0",  "demo_m1",  "demo_m2",      "demo_m2b", "demo_m3", "demo_m4",
+            "demo_m5", "demo_m6",  "demo_m6b", "demo_m6d",     "demo_m7",  "demo_m8", "demo_m8b",
+            "demo_m9", "demo_m10", "demo_c4",  "demo_s2_lazy",
+        },
+    },
+    .{
+        .paths = &.{"src/runtime/plan.zig"},
+        .true_outputs = &.{
+            "code",    "demo_m0",  "demo_m1",  "demo_m2",      "demo_m2b", "demo_m3", "demo_m4",
+            "demo_m5", "demo_m6",  "demo_m6b", "demo_m6d",     "demo_m7",  "demo_m8", "demo_m8b",
+            "demo_m9", "demo_m10", "demo_c4",  "demo_s2_lazy",
+        },
+    },
+    .{
+        .paths = &.{"src/doctor.zig"},
+        .true_outputs = &.{
+            "code",    "demo_m0",  "demo_m1",  "demo_m2",      "demo_m2b", "demo_m3", "demo_m4",
+            "demo_m5", "demo_m6",  "demo_m6b", "demo_m6d",     "demo_m7",  "demo_m8", "demo_m8b",
+            "demo_m9", "demo_m10", "demo_c4",  "demo_s2_lazy",
+        },
+    },
     // The release workflow, its own actions and its signing script run after a push to main and
     // in their own test jobs: no demo.
     .{
@@ -81,18 +144,19 @@ const rows = [_]Row{
     .{
         .paths = &.{".github/workflows/ci.yml"},
         .true_outputs = &.{
-            "code",     "demo_m0", "demo_m1",  "demo_m2",  "demo_m3",      "demo_m4",
-            "demo_m5",  "demo_m6", "demo_m6b", "demo_m6d", "demo_m7",      "demo_m8",
-            "demo_m8b", "demo_m9", "demo_m10", "demo_c4",  "demo_s2_lazy", "demo_m8_packages",
+            "code",     "demo_m0", "demo_m1",      "demo_m2",          "demo_m2b",
+            "demo_m3",  "demo_m4", "demo_m5",      "demo_m6",          "demo_m6b",
+            "demo_m6d", "demo_m7", "demo_m8",      "demo_m8b",         "demo_m9",
+            "demo_m10", "demo_c4", "demo_s2_lazy", "demo_m8_packages",
         },
     },
     // The runtime every demo runs on selects every VM demo, not the packages demo.
     .{
         .paths = &.{"src/cli.zig"},
         .true_outputs = &.{
-            "code",     "demo_m0", "demo_m1",  "demo_m2",  "demo_m3",      "demo_m4",
-            "demo_m5",  "demo_m6", "demo_m6b", "demo_m6d", "demo_m7",      "demo_m8",
-            "demo_m8b", "demo_m9", "demo_m10", "demo_c4",  "demo_s2_lazy",
+            "code",    "demo_m0",  "demo_m1",  "demo_m2",      "demo_m2b", "demo_m3", "demo_m4",
+            "demo_m5", "demo_m6",  "demo_m6b", "demo_m6d",     "demo_m7",  "demo_m8", "demo_m8b",
+            "demo_m9", "demo_m10", "demo_c4",  "demo_s2_lazy",
         },
     },
     // The C4 demo: its harness files select demo_c4 alone.
@@ -139,17 +203,17 @@ const rows = [_]Row{
     .{
         .paths = &.{"src/host_real_fuse.zig"},
         .true_outputs = &.{
-            "code",     "demo_m0", "demo_m1",  "demo_m2",  "demo_m3",      "demo_m4",
-            "demo_m5",  "demo_m6", "demo_m6b", "demo_m6d", "demo_m7",      "demo_m8",
-            "demo_m8b", "demo_m9", "demo_m10", "demo_c4",  "demo_s2_lazy",
+            "code",    "demo_m0",  "demo_m1",  "demo_m2",      "demo_m2b", "demo_m3", "demo_m4",
+            "demo_m5", "demo_m6",  "demo_m6b", "demo_m6d",     "demo_m7",  "demo_m8", "demo_m8b",
+            "demo_m9", "demo_m10", "demo_c4",  "demo_s2_lazy",
         },
     },
     .{
         .paths = &.{"src/fuse/lazy_server.zig"},
         .true_outputs = &.{
-            "code",     "demo_m0", "demo_m1",  "demo_m2",  "demo_m3",      "demo_m4",
-            "demo_m5",  "demo_m6", "demo_m6b", "demo_m6d", "demo_m7",      "demo_m8",
-            "demo_m8b", "demo_m9", "demo_m10", "demo_c4",  "demo_s2_lazy",
+            "code",    "demo_m0",  "demo_m1",  "demo_m2",      "demo_m2b", "demo_m3", "demo_m4",
+            "demo_m5", "demo_m6",  "demo_m6b", "demo_m6d",     "demo_m7",  "demo_m8", "demo_m8b",
+            "demo_m9", "demo_m10", "demo_c4",  "demo_s2_lazy",
         },
     },
     .{
@@ -180,6 +244,10 @@ const rows = [_]Row{
     .{
         .paths = &.{"src/trust/x.zig"},
         .true_outputs = &.{ "code", "demo_m8" },
+    },
+    .{
+        .paths = &.{ "docs/demos/m2b.md", "src/testing/vm/checks_m2b.zig" },
+        .true_outputs = &.{ "code", "demo_m2b" },
     },
     // A docs-only change runs no demo: the script's docs rule wins over the demo doc's rule.
     .{

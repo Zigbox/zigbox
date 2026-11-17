@@ -39,6 +39,7 @@ jobs:
       demo_m0: ${{ steps.pick.outputs.demo_m0 }}
       demo_m1: ${{ steps.pick.outputs.demo_m1 }}
       demo_m2: ${{ steps.pick.outputs.demo_m2 }}
+      demo_m2b: ${{ steps.pick.outputs.demo_m2b }}
       demo_m3: ${{ steps.pick.outputs.demo_m3 }}
       demo_m4: ${{ steps.pick.outputs.demo_m4 }}
       demo_m5: ${{ steps.pick.outputs.demo_m5 }}
@@ -312,6 +313,49 @@ jobs:
           key: vm-alpine-${{ hashFiles('src/testing/vm/alpine.zon') }}
       - name: Run the M2 demo
         run: zig build demo-m2 -Daccel=kvm
+
+  # Sibling of demo-m2: the same VM and rootfs. The six steps of the M2b spec (--ulimit,
+  # --shm-size, --sysctl, --require-host, the cgroup view, NUMA with numa-probe), the /dev/shm
+  # OOM check, the --net host cgroup check, the scripted agent and the upgrade test from v0.5.2
+  # (built from a worktree of the tag, so the whole history). See docs/demos/m2b.md.
+  demo-m2b:
+    name: demo-m2b (Ubuntu 24.04 VM, KVM, Alpine rootfs, workload knobs)
+    needs: changes
+    if: ${{ needs.changes.outputs.demo_m2b == 'true' }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      # The whole history: the upgrade test builds the v0.5.2 tag in a git worktree, and a
+      # shallow clone does not have it.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+      - uses: ./.github/actions/setup-zig
+      - name: Install QEMU
+        uses: ./.github/actions/install-apt
+        with:
+          packages: qemu-system-x86 qemu-utils
+      - name: Enable KVM
+        run: |
+          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' | sudo tee /etc/udev/rules.d/99-kvm4all.rules
+          sudo udevadm control --reload-rules
+          sudo udevadm trigger --name-match=kvm
+      # The same cache entry as demo-m0 (same path, same key), so the base image is downloaded
+      # once for both jobs.
+      - name: Cache the VM base image
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: .zig-cache/zbx-vm
+          key: vm-image-${{ hashFiles('src/testing/vm/lib/image.zon') }}
+      # The Alpine minirootfs (3.5 MB), keyed by src/testing/vm/alpine.zon, which holds its
+      # SHA-256. The harness re-verifies the hash on every run, cached or downloaded.
+      - name: Cache the Alpine rootfs
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: .zig-cache/zbx-vm/alpine-*.tar.gz
+          key: vm-alpine-${{ hashFiles('src/testing/vm/alpine.zon') }}
+      - name: Run the M2b demo
+        run: zig build demo-m2b -Daccel=kvm
 
   # Sibling of demo-m2: the same VM and rootfs. First the upgrade test (the M2 binary, built from a
   # worktree of the pinned commit, leaves version 3 run records that this build reads), then the

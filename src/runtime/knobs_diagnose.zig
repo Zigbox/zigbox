@@ -86,13 +86,24 @@ pub fn ulimit_above_hard(
         "echo \"$(id -un) hard {s} {s}\" | sudo tee -a /etc/security/limits.conf",
         .{ @tagName(resource), login_text },
     );
-    diag.fix_with(
-        "or for the user manager, under [Service]:",
-        "sudo systemctl edit user@{d}.service",
-        .{uid},
-    );
+    // The sentence names the unit's line, so the text mode says what to write in the editor.
+    var sentence_buffer: [unit_sentence_bytes_max]u8 = undefined;
+    const sentence = std.fmt.bufPrint(
+        &sentence_buffer,
+        "or for the user manager, add {s}={s} under [Service]:",
+        .{ resource.systemd_property(), asked_text },
+    ) catch unreachable; // Cannot fail: the comptime check on `unit_sentence_bytes_max`.
+    diag.fix_with(sentence, "sudo systemctl edit user@{d}.service", .{uid});
     assert(diag.code.? == .E0311);
     assert(diag.fixes.count > 0);
+}
+
+/// E0311's second fix sentence: its prose, the longest `Limit*=` name and a u64 in decimal.
+const unit_sentence_bytes_max = "or for the user manager, add  under [Service]:".len +
+    "LimitMEMLOCK=".len + 20;
+
+comptime {
+    assert(unit_sentence_bytes_max <= constants.diag_field_bytes_max);
 }
 
 /// A hard limit in the unit `/etc/security/limits.conf` reads it in: KiB for the sizes, rounded
@@ -154,6 +165,8 @@ pub fn shm_invalid(diag: *Diag, text: []const u8, issue: ShmIssue, bound: u64) v
     diag.raise(if (issue == .above_memory) .E0314 else .E0313);
     diag.while_("reading --shm-size", .{});
     diag.context("size", "{s}", .{text});
+    // The limit the size was compared with, in bytes as `size` is.
+    if (issue == .above_memory) diag.context("memory", "{d}", .{bound});
     switch (issue) {
         .not_a_size => diag.cause("'{s}' is not a size: use digits and k, m or g, as in 256m", .{
             text,

@@ -302,6 +302,7 @@ const roots = [_][]const u8{
     "src/testing/vm/main_s2_lazy.zig",
     "src/testing/vm/main_s2_probe.zig",
     "src/testing/vm/main_m2b_probe.zig",
+    "src/testing/vm/main_m2b.zig",
     "src/testing/vm/main_c4.zig",
     "src/testing/vm/main_z7.zig",
     "src/testing/vm/main_m8_packages.zig",
@@ -342,6 +343,7 @@ const linux_only = [_][]const u8{
     "src/testing/vm/main_s2_lazy.zig",
     "src/testing/vm/main_s2_probe.zig",
     "src/testing/vm/main_m2b_probe.zig",
+    "src/testing/vm/main_m2b.zig",
     "src/testing/vm/main_c4.zig",
     "src/testing/vm/main_z7.zig",
     "src/testing/vm/main_m8_packages.zig",
@@ -563,6 +565,11 @@ const demos = [_]struct { step: []const u8, root: []const u8, help: []const u8 }
         .help = "Run the M2 demo: limits, hardening, lifecycle, in the VM (docs/demos/m2.md)",
     },
     .{
+        .step = "demo-m2b",
+        .root = "src/testing/vm/main_m2b.zig",
+        .help = "Run the M2b demo: --ulimit, --shm-size, --sysctl, --require-host, cgroup, NUMA",
+    },
+    .{
         .step = "demo-m3",
         .root = "src/testing/vm/main_m3.zig",
         .help = "Run the M3 demo, as far as it is built: the store and running by digest",
@@ -742,6 +749,7 @@ fn add_harness_imports(
     if (std.mem.eql(u8, step, "demo-m10")) add_gpu_fixtures(b, module);
     if (std.mem.eql(u8, step, "demo-m9")) add_m9_cases(b, module);
     if (std.mem.eql(u8, step, "demo-s2-probe")) add_s2_probe_fixture(b, module);
+    if (std.mem.eql(u8, step, "demo-m2b")) add_numa_probe(b, module);
     if (std.mem.eql(u8, step, "demo-c4")) add_c4_supervisor(b, module);
     if (std.mem.eql(u8, step, "demo-m6d")) add_m6d_helper(b, module);
     if (std.mem.eql(u8, step, "demo-s2-lazy")) add_fuse_kernel_test(b, options, module);
@@ -792,6 +800,25 @@ fn add_s2_probe_fixture(b: *std.Build, harness_module: *std.Build.Module) void {
         }),
     });
     harness_module.addAnonymousImport("fuse_probe", .{
+        .root_source_file = probe.getEmittedBin(),
+    });
+}
+
+/// demo-m2b's `numa-probe` (step 6), static x86_64 with no libc like the guest, embedded in the
+/// harness, which serves it; the guest copies it into the Alpine rootfs.
+fn add_numa_probe(b: *std.Build, harness_module: *std.Build.Module) void {
+    const target = b.resolveTargetQuery(.{ .cpu_arch = .x86_64, .os_tag = .linux });
+    const probe = b.addExecutable(.{
+        .name = "numa-probe",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/testing/vm/numa_probe/numa_probe.zig"),
+            .target = target,
+            .optimize = .ReleaseSafe,
+            .strip = true,
+            .link_libc = false,
+        }),
+    });
+    harness_module.addAnonymousImport("numa_probe", .{
         .root_source_file = probe.getEmittedBin(),
     });
 }
@@ -933,6 +960,7 @@ fn old_commit_of(step: []const u8) ?[]const u8 {
     if (std.mem.eql(u8, step, "demo-m6b")) return releases.m6b_commit;
     if (std.mem.eql(u8, step, "demo-m7")) return releases.m7_commit;
     if (std.mem.eql(u8, step, "demo-m8")) return releases.m8_tag;
+    if (std.mem.eql(u8, step, "demo-m2b")) return releases.m2b_tag;
     return null;
 }
 
