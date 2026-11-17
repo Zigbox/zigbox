@@ -99,7 +99,10 @@ an Alpine minirootfs in `./alpine`.
    The same `numactl` under v0.5.2, recorded by the demo:
    ```
    $ zbx-old run --rootfs ./alpine -- numactl --interleave=all true
-   V052_NUMACTL_OUTPUT
+   set_mempolicy: Operation not permitted
+   setting interleave mask: Operation not permitted
+   $ echo $?
+   1
    ```
 
 The demo uses `--net none` (the default) explicitly in steps 1 to 6 so that no network note
