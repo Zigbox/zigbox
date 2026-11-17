@@ -20,6 +20,12 @@
 //!      property: a push that succeeds leaves the manifest and both blobs in the registry, and
 //!      the manifest was never put before they were there; one that fails is E0555, E0556 or
 //!      another E05xx code, never a crash.
+//!   5. `google`: a resolve from the simulated Artifact Registry with its realm credential, held
+//!      from the start or asked of the fallback after an anonymous refusal, with the realm on the
+//!      registry's host, on another host or in plain HTTP, any of the registry's faults, and
+//!      bodies, requests and reads spoiled by the seed. The credential property: no credential
+//!      reaches a host that must not get it, the fallback is asked once at most and never for a
+//!      realm that may not get its answer, and only the registry's own realm grants a token.
 
 const std = @import("std");
 const assert = std.debug.assert;
@@ -42,6 +48,8 @@ const credentials_mod = @import("push/credentials.zig");
 const upload = @import("push/upload.zig");
 const reference_mod = @import("registry/reference.zig");
 const test_registry = @import("registry/test_registry.zig");
+const google_diagnose = @import("google/diagnose.zig");
+const google_sim = @import("google/google_sim.zig");
 const Diag = @import("diag/diag.zig").Diag;
 
 const input_bytes_max = 4096;
@@ -216,6 +224,71 @@ fn fuzz_resolve(random: std.Random, seed: u64) void {
         assert(std.mem.startsWith(u8, @tagName(code), "E05"));
         assert(diag.last_cause() != null);
     }
+    assert(wire.requests <= 40);
+}
+
+var google: google_sim.GoogleSim = undefined;
+
+/// The realm fallback the fuzzer gives a Google pull: the metadata server's token, or, when the
+/// seed says so, none (as off GCE), with the refusal in `diag`.
+const Fallback = struct {
+    gives: bool,
+    calls: u32 = 0,
+
+    fn call(context: *anyopaque, host: []const u8, diag: *Diag) ?[]const u8 {
+        const fallback: *Fallback = @ptrCast(@alignCast(context));
+        fallback.calls += 1;
+        if (fallback.gives) return google_sim.metadata_token;
+        google_diagnose.none_given(diag, host, false);
+        return null;
+    }
+};
+
+/// A pull from the simulated Artifact Registry with the realm credential: held from the start (as
+/// workload identity gives it) or asked of the fallback after an anonymous refusal. The realm, the
+/// registry's answers and the wire are the seed's; no credential may leak.
+fn fuzz_google(random: std.Random, seed: u64) void {
+    google.init();
+    google.realm_at = random.enumValue(google_sim.RealmAt);
+    google.registry_fault = random.enumValue(google_sim.RegistryFault);
+    const held = random.boolean();
+    var fallback: Fallback = .{ .gives = random.uintLessThan(u8, 4) != 0 };
+    if (!held) google.accepted_token = google_sim.metadata_token;
+    var meddler: Meddler = .{
+        .inner = google.responder(),
+        .random = random,
+        .flip_per_mille = random.uintLessThan(u16, 300),
+    };
+    var wire: net_sim.SimNet = undefined;
+    wire.init(seed, meddler.responder());
+    wire.faults.fail_per_mille = random.uintLessThan(u16, 100);
+    wire.faults.cut_per_mille = random.uintLessThan(u16, 100);
+    wire.faults.chunk_bytes_max = random.intRangeAtMost(u32, 1, 600);
+    var reference: reference_mod.Reference = undefined;
+    const text = google_sim.registry_host ++ "/fixture/cdn:latest";
+    reference_mod.parse(text, &reference) catch unreachable; // A fixed, valid reference.
+    var client = client_mod.Client.init(wire.interface(), &workspace, "x86_64");
+    if (held) {
+        client.use_realm_basic(constants.google_realm_user, google_sim.access_token);
+    } else {
+        client.realm_fallback = .{ .context = &fallback, .call = Fallback.call };
+    }
+    var resolved: manifest.Resolved = undefined;
+    var diag: Diag = undefined;
+    diag.reset();
+    if (client_mod.resolve(&client, &reference, &resolved, &diag)) |_| {
+        const image = google.fixture.image(.cdn);
+        assert(std.mem.eql(u8, &resolved.manifest_digest.text(), &image.amd64.digest));
+        assert(google.realm_at == .own); // Only the registry's own realm grants a token.
+    } else |_| {
+        assert(diag.code != null);
+        assert(diag.last_cause() != null);
+    }
+    client_mod.Workspace.wipe(&workspace);
+    assert(google.leaked == 0); // No credential reached a host that must not get it.
+    assert(google.stray == 0);
+    assert(fallback.calls <= 1); // The fallback is asked once at most.
+    if (held or google.realm_at != .own) assert(fallback.calls == 0);
     assert(wire.requests <= 40);
 }
 
@@ -567,10 +640,11 @@ fn fuzz_upload(random: std.Random, seed: u64) void {
 pub fn fuzz_registry(seed: u64) void {
     var prng = std.Random.Xoshiro256.init(seed);
     const random = prng.random();
-    switch (random.uintLessThan(u8, 4)) {
+    switch (random.uintLessThan(u8, 5)) {
         0 => fuzz_challenge(random),
         1 => fuzz_document(random),
         2 => fuzz_upload(random, seed),
+        3 => fuzz_google(random, seed),
         else => fuzz_resolve(random, seed),
     }
 }

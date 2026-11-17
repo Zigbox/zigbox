@@ -630,6 +630,12 @@ fn fetch_token(
     const ask = client.credential == .none and client.google.credentialed();
     if (refused and ask) {
         if (client.realm_fallback) |fallback| {
+            if (!auth.realm_allowed(origin.host, origin.scheme, url)) {
+                // No token is asked for a realm it would never be sent to.
+                const registry = reference.registry();
+                diagnose.auth_refused(diag, .bad_realm, registry, reference.repository());
+                return error.Failed;
+            }
             // The one fallback, once: the anonymous answer was the registry's no.
             const secret = fallback.call(fallback.context, reference.registry(), diag) orelse {
                 assert(diag.code != null);

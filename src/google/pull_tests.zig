@@ -5,6 +5,7 @@
 
 const std = @import("std");
 const testing = std.testing;
+const assert = std.debug.assert;
 const cli = @import("../cli.zig");
 const codes = @import("../diag/codes.zig");
 const constants = @import("../constants.zig");
@@ -19,7 +20,12 @@ const parse = @import("parse.zig");
 const parse_tests = @import("parse_tests.zig");
 const pull = @import("../pull.zig");
 const sim_run = @import("../runtime/sim_run.zig");
+const lazy_start = @import("../lazy_start.zig");
+const images_mod = @import("../store/images.zig");
+const store_open = @import("../store/open.zig");
 const Diag = @import("../diag/diag.zig").Diag;
+const Store = @import("../store/layout.zig").Store;
+const Warn = @import("../store/namespace.zig").Warn;
 
 const EnvironmentVariable = host_sim.EnvironmentVariable;
 
@@ -101,14 +107,7 @@ const World = struct {
         world.sim.stdout_len = 0;
         world.sim.stderr_len = 0;
         var iterator: sim_run.SliceIterator = .{ .items = args };
-        const storage = command_storage orelse made: {
-            const allocator = std.heap.page_allocator;
-            command_storage = allocator.create(cli.Storage) catch unreachable; // Tests.
-            gc_tables = allocator.alignedAlloc(u8, .@"8", 8 << 20) catch unreachable; // Tests.
-            break :made command_storage.?;
-        };
-        storage.gc_tables = gc_tables.?;
-        return cli.run_with(world.sim.interface(), &iterator, storage);
+        return cli.run_with(world.sim.interface(), &iterator, storage_of());
     }
 
     fn pull_of(world: *World, text: [:0]const u8) u8 {
@@ -192,13 +191,21 @@ const World = struct {
     }
 
     /// The model saw no credential where it must not go, no request to a host it does not know,
-    /// and every request that carried a credential was marked secret and went to Google's
-    /// services or to the registry's own host.
+    /// every request that carried a credential was marked secret and went to Google's services
+    /// or to the registry's own host, and every request with a body went to STS or IAM.
     fn expect_where_sent(world: *const World) !void {
         try testing.expectEqual(@as(u32, 0), world.google.leaked);
         try testing.expectEqual(@as(u32, 0), world.google.stray);
         var index: u32 = 0;
         while (world.wire.logged(index)) |entry| : (index += 1) {
+            if (entry.sent > 0) {
+                // A body is a credential in a pull (STS's form holds the subject token, IAM's
+                // names the account): it goes only to those two, marked secret.
+                try testing.expect(entry.secret);
+                const service = std.mem.eql(u8, entry.host_text(), parse.sts_host) or
+                    std.mem.eql(u8, entry.host_text(), parse.iam_host);
+                try testing.expect(service);
+            }
             if (!entry.credential_sent()) continue;
             const host = entry.host_text();
             // The registry's own bearer token is held as any registry's is; every other
@@ -213,6 +220,18 @@ const World = struct {
         }
     }
 };
+
+/// The command storage the tests share, made on first use.
+fn storage_of() *cli.Storage {
+    const storage = command_storage orelse made: {
+        const allocator = std.heap.page_allocator;
+        command_storage = allocator.create(cli.Storage) catch unreachable; // Tests.
+        gc_tables = allocator.alignedAlloc(u8, .@"8", 8 << 20) catch unreachable; // Tests.
+        break :made command_storage.?;
+    };
+    storage.gc_tables = gc_tables.?;
+    return storage;
+}
 
 fn expect_zero(bytes: []const u8) !void {
     for (bytes) |byte| try testing.expectEqual(@as(u8, 0), byte);
@@ -441,6 +460,100 @@ test "a redirect to storage.googleapis.com gets no credential" {
     try testing.expect(world.google.storage_served > 0);
     try world.expect_where_sent();
     try world.expect_clean();
+}
+
+test "a downloads path that redirects on to storage: the realm's Bearer stops at the registry" {
+    // Goal: the chain blobs -> same-host downloads path -> storage.googleapis.com; the same-host
+    // hop gets the realm's Bearer (the registry's own origin), storage gets nothing.
+    const world = try World.create();
+    defer world.destroy();
+    world.setup(72, &wif_env);
+    world.google.blob_redirect = .same_host_then_storage;
+    try testing.expectEqual(@as(u8, 0), world.pull_of(reference));
+    try testing.expect(world.google.downloads_bearer > 0);
+    try testing.expect(world.google.storage_served > 0);
+    try world.expect_where_sent();
+    try world.expect_clean();
+}
+
+test "a realm on another host or in plain HTTP gets no credential, and no source is asked" {
+    // Goal: the realm's Basic goes only to the registry's own host over HTTPS. Workload identity
+    // (held from the start) and the metadata fallback (asked after a refusal) are each refused
+    // as a bad realm, before the Basic value is sent anywhere or a token is fetched for it.
+    const Case = struct { at: google_sim.RealmAt, fallback: bool, elsewhere_calls: u32 };
+    const cases = [_]Case{
+        .{ .at = .elsewhere, .fallback = false, .elsewhere_calls = 0 },
+        .{ .at = .elsewhere, .fallback = true, .elsewhere_calls = 1 },
+        .{ .at = .plain, .fallback = false, .elsewhere_calls = 0 },
+        .{ .at = .plain, .fallback = true, .elsewhere_calls = 0 },
+    };
+    const world = try World.create();
+    defer world.destroy();
+    for (cases, 0..) |case, index| {
+        world.setup(74 + index, if (case.fallback) &sim_run.env_home else &wif_env);
+        world.google.realm_at = case.at;
+        if (case.fallback) {
+            world.google.metadata = .ok;
+            world.google.accepted_token = google_sim.metadata_token;
+        }
+        try testing.expect(world.pull_of(reference) != 0);
+        try testing.expect(world.stderr_has("error[ZBX-E0507]"));
+        try testing.expectEqual(@as(u32, 0), world.google.metadata_calls);
+        try testing.expectEqual(@as(u32, 0), world.google.realm_calls);
+        try testing.expectEqual(case.elsewhere_calls, world.google.elsewhere_calls);
+        var logged: u32 = 0;
+        while (world.wire.logged(logged)) |entry| : (logged += 1) {
+            try testing.expectEqual(@as(u32, 0), entry.basic_len);
+        }
+        try world.expect_where_sent();
+        try world.expect_clean();
+        try world.expect_wiped();
+    }
+}
+
+/// A lazy start's room (about 160 MiB), static so it is in bss, as `main.zig` keeps it.
+var lazy_workspace: lazy_start.Workspace = undefined;
+var lazy_image: images_mod.Image = undefined;
+
+fn ignore_warning(context: *anyopaque, diag: *const Diag) void {
+    _ = context;
+    assert(diag.code != null);
+}
+
+test "a lazy start keeps no Google token, and no fallback, once its resolve has ended" {
+    // Goal: `zbx run --lazy` (S2's, dormant in a release build but callable here) wipes the
+    // Google token `request_of` found and drops the fallback, whose storage that is, when the
+    // resolve ends: with workload identity, and with the metadata server after a refusal.
+    // Method: `lazy_start.start` as `zbx run --lazy` calls it; the fixture's image has two layers,
+    // so the start ends `whole` right after the resolve.
+    const world = try World.create();
+    defer world.destroy();
+    for ([_]bool{ false, true }, 0..) |fallback, index| {
+        world.setup(80 + index, if (fallback) &sim_run.env_home else &wif_env);
+        if (fallback) {
+            world.google.metadata = .ok;
+            world.google.accepted_token = google_sim.metadata_token;
+        }
+        const host = world.sim.interface();
+        var store: Store = undefined;
+        try testing.expect(store.locate(host));
+        var diag: Diag = undefined;
+        diag.reset();
+        _ = try store_open.check(&store, .create, &diag);
+        const pull_workspace = &storage_of().pull;
+        const warn: Warn = .{ .context = world, .call = ignore_warning };
+        const ws = &lazy_workspace;
+        const outcome =
+            try lazy_start.start(host, pull_workspace, ws, &store, reference, warn, &lazy_image, &diag);
+        try testing.expectEqual(lazy_start.Outcome.whole, outcome);
+        try testing.expectEqual(@as(u32, 1), world.google.realm_ok);
+        try testing.expectEqual(@intFromBool(fallback), world.google.metadata_calls);
+        try testing.expect(lazy_workspace.client.realm_fallback == null);
+        try expect_zero(&pull_workspace.google.token.bytes);
+        lazy_start.wipe(pull_workspace, &lazy_workspace);
+        try world.expect_where_sent();
+        try world.expect_wiped();
+    }
 }
 
 test "mirrors are for Docker Hub only: an Artifact Registry or gcr.io pull asks none" {
