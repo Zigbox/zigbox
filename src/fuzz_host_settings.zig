@@ -11,12 +11,17 @@
 //! - **The check.** It checks a list of requirements against the values read, against an oracle
 //!   written here: no miss passes; the first miss, in the list's order, is ZBX-E0319 with its
 //!   value or ZBX-E0321 when the host has none; a required setting that could not be read is
-//!   ZBX-E0321.
+//!   ZBX-E0321. Some lists carry a repeated setting or a malformed entry: both checks refuse
+//!   those with ZBX-E0320, whatever the files hold.
+//!
+//! Every refused requirement text is also rendered as ZBX-E0320, as the flag's reader does, and
+//! the rendering must be one non-empty, bounded line.
 
 const std = @import("std");
 const assert = std.debug.assert;
 const constants = @import("constants.zig");
 const Diag = @import("diag/diag.zig").Diag;
+const render = @import("diag/render.zig");
 const HostSim = @import("host_sim.zig").HostSim;
 const sim_file = @import("host_sim.zig").File;
 const host_settings = @import("runtime/host_settings.zig");
@@ -28,6 +33,8 @@ const settings_count = host_settings.settings_count;
 
 const text_bytes_max = 96;
 const file_bytes_max = 48;
+/// A list holds one requirement per setting, and one more when a repeat is injected.
+const list_count_max = settings_count + 1;
 
 pub fn fuzz_host_settings(seed: u64) void {
     var prng = std.Random.Xoshiro256.init(seed);
@@ -35,10 +42,10 @@ pub fn fuzz_host_settings(seed: u64) void {
     for (0..4) |_| fuzz_requirement_text(random);
     var reads: check.Reads = undefined;
     read_files(random, &reads);
-    var requirements: [settings_count]HostRequirement = undefined;
-    const count = random_requirements(random, &requirements);
-    check_requirements(&reads, requirements[0..count]);
-    assert(count <= settings_count);
+    var requirements: [list_count_max]HostRequirement = undefined;
+    const list = random_requirements(random, &requirements);
+    check_requirements(&reads, requirements[0..list.count], list.invalid);
+    assert(list.count <= list_count_max);
     assert(reads.len == settings_count);
 }
 
@@ -83,9 +90,40 @@ fn fuzz_requirement_text(random: std.Random) void {
         const text = junk_requirement(random, &storage);
         switch (host_settings.parse_requirement(text)) {
             .ok => |requirement| round_trip(requirement),
-            .problem => |refused| survive_problem(refused.kind, refused.setting),
+            .problem => |refused| {
+                survive_problem(refused.kind, refused.setting);
+                render_problem(text, refused.kind, refused.setting);
+            },
         }
     }
+    // The flag's reader finds a repeat across flags and renders it the same way.
+    const repeated = random_setting(random);
+    var rendered: [host_settings.text_bytes_max]u8 = undefined;
+    const text = host_settings.render_requirement(random_requirement(random, repeated), &rendered);
+    render_problem(text, .repeated, repeated);
+}
+
+/// A refused text, rendered as the flag's reader renders it: ZBX-E0320, with one cause that
+/// is one non-empty, bounded line, and a text rendering whose first line names the code.
+fn render_problem(
+    text: []const u8,
+    kind: host_settings.RequirementProblem,
+    setting: ?HostSetting,
+) void {
+    var diag: Diag = undefined;
+    diag.reset();
+    check.requirement_invalid(&diag, text, kind, setting);
+    assert(diag.code.? == .E0320);
+    const cause = diag.last_cause().?;
+    assert(cause.len > 0);
+    assert(cause.len <= constants.diag_field_bytes_max);
+    assert(std.mem.indexOfScalar(u8, cause, '\n') == null);
+    assert(diag.fixes.count == 1);
+    var buffer: [constants.output_bytes_max]u8 = undefined;
+    const output = render.render(&diag, .text, false, &buffer);
+    const first = output[0 .. std.mem.indexOfScalar(u8, output, '\n') orelse output.len];
+    assert(first.len > 0);
+    assert(std.mem.indexOf(u8, first, "ZBX-E0320") != null);
 }
 
 /// The requirement as a user writes it: the canonical text, or its values in another order
@@ -274,8 +312,15 @@ fn check_read(setting: HostSetting, written: Written, read: check.Read, faulty: 
     }
 }
 
-/// Up to one well-formed requirement per setting, in a random order.
-fn random_requirements(random: std.Random, out: *[settings_count]HostRequirement) u32 {
+const List = struct {
+    count: u32,
+    /// The list has a repeated setting or a malformed entry: ZBX-E0320 whatever the reads.
+    invalid: bool,
+};
+
+/// Up to one well-formed requirement per setting, in a random order; one list in eight then
+/// gets a repeat of one of its settings or a malformed entry, at a random place.
+fn random_requirements(random: std.Random, out: *[list_count_max]HostRequirement) List {
     var order: [settings_count]HostSetting = undefined;
     @memcpy(&order, std.enums.values(HostSetting));
     random.shuffle(HostSetting, &order);
@@ -285,7 +330,35 @@ fn random_requirements(random: std.Random, out: *[settings_count]HostRequirement
     }
     assert(count <= settings_count);
     assert(host_settings.list_problem(out[0..count]) == null);
-    return count;
+    if (random.uintLessThan(u8, 8) != 0) return .{ .count = count, .invalid = false };
+    const injected = if (count > 0 and random.boolean())
+        random_requirement(random, out[random.uintLessThan(u32, count)].setting)
+    else
+        malformed_requirement(random);
+    const place = random.uintAtMost(u32, count);
+    var index = count;
+    while (index > place) : (index -= 1) out[index] = out[index - 1];
+    out[place] = injected;
+    assert(host_settings.list_problem(out[0 .. count + 1]) != null);
+    return .{ .count = count + 1, .invalid = true };
+}
+
+/// A library caller's requirement whose fields do not fit its setting.
+fn malformed_requirement(random: std.Random) HostRequirement {
+    const setting = random_setting(random);
+    var requirement: HostRequirement = .{ .setting = setting };
+    if (setting.is_minimum()) {
+        requirement.allowed = .{ .bits = random.intRangeAtMost(u8, 1, 255) };
+    } else switch (random.uintLessThan(u8, 3)) {
+        0 => {}, // No allowed values.
+        1 => requirement.allowed = .{ .bits = random.intRangeAtMost(u8, 8, 255) },
+        else => {
+            requirement.allowed = .{ .bits = random.intRangeAtMost(u8, 1, 7) };
+            requirement.minimum = random.intRangeAtMost(u64, 1, std.math.maxInt(u64));
+        },
+    }
+    assert(!requirement.well_formed());
+    return requirement;
 }
 
 const Expected = union(enum) { pass, not_met, not_read };
@@ -317,7 +390,12 @@ fn expected_outcome(reads: *const check.Reads, requirements: []const HostRequire
     return .pass;
 }
 
-fn check_requirements(reads: *const check.Reads, requirements: []const HostRequirement) void {
+fn check_requirements(
+    reads: *const check.Reads,
+    requirements: []const HostRequirement,
+    invalid: bool,
+) void {
+    if (invalid) return check_invalid(reads, requirements);
     var diag: Diag = undefined;
     diag.reset();
     const expected = expected_outcome(reads, requirements);
@@ -336,4 +414,27 @@ fn check_requirements(reads: *const check.Reads, requirements: []const HostRequi
     }
     assert(diag.causes.count > 0);
     assert(diag.fixes.count > 0);
+}
+
+/// A list with a repeat or a malformed entry: both checks refuse it with ZBX-E0320 before they
+/// look at any value, so the reads (or a library caller's settings) never matter.
+fn check_invalid(reads: *const check.Reads, requirements: []const HostRequirement) void {
+    assert(requirements.len > 0);
+    assert(requirements.len <= list_count_max);
+    var diag: Diag = undefined;
+    diag.reset();
+    const refused_reads = if (check.check_reads(reads, requirements, &diag)) false else |_| true;
+    assert(refused_reads);
+    assert(diag.code.? == .E0320);
+    assert(diag.causes.count == 1);
+    var settings: host_settings.HostSettings = .{};
+    for (std.enums.values(HostSetting), reads) |setting, read| {
+        if (read == .value) settings.set(setting, read.value);
+    }
+    diag.reset();
+    const checked = check.host_requirements_check(&settings, requirements, &diag);
+    const refused_settings = if (checked) false else |_| true;
+    assert(refused_settings);
+    assert(diag.code.? == .E0320);
+    assert(diag.fixes.count == 1);
 }
