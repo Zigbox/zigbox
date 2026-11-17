@@ -699,7 +699,27 @@ fn verdict_of(scenario: *const Scenario) Verdict {
     if (fault) |found| {
         if (phase_of(found.kind) == .report) return refusal(found.code, found.index, true);
     }
-    // The child's steps in order; its command missing is its last.
+    if (child_verdict(scenario, fault)) |event| return event;
+    if (fault) |found| {
+        if (phase_of(found.kind) == .wait) {
+            return .{
+                .refused = .{
+                    .code = found.code,
+                    .step = found.index,
+                    .begun = true,
+                    .lost = true,
+                    .command_missing = false,
+                    .reached_ids = true,
+                },
+            };
+        }
+    }
+    return .{ .started = final_status(scenario) };
+}
+
+/// The first of the child's steps to be refused, in order: a drawn fault, the `--sysctl`, the
+/// cgroup namespace, then a missing command, which is its last. Null if none is.
+fn child_verdict(scenario: *const Scenario, fault: ?Fault) ?Verdict {
     var child: ?Verdict = null;
     if (fault) |found| {
         if (phase_of(found.kind) == .child) {
@@ -730,22 +750,8 @@ fn verdict_of(scenario: *const Scenario) Verdict {
             child.?.refused.command_missing = !exec_denied_on_the_way(scenario);
         }
     }
-    if (child) |event| return event;
-    if (fault) |found| {
-        if (phase_of(found.kind) == .wait) {
-            return .{
-                .refused = .{
-                    .code = found.code,
-                    .step = found.index,
-                    .begun = true,
-                    .lost = true,
-                    .command_missing = false,
-                    .reached_ids = true,
-                },
-            };
-        }
-    }
-    return .{ .started = final_status(scenario) };
+    if (child) |event| assert(event.refused.step != null);
+    return child;
 }
 
 fn refusal(code: codes.Code, step: ?u32, begun: bool) Verdict {
