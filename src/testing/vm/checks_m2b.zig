@@ -482,7 +482,8 @@ pub fn check_not_running(
     if (code != .integer) return error.RecordWrong;
 }
 
-/// `ps` lists `name`, started by the older zbx with `--net user -p <host>:<container>`, running
+/// `ps` lists `name`, started by the older zbx with `--net user --publish <host>:<container>`,
+/// running
 /// with that one forward.
 pub fn check_old_published(
     arena: Allocator,
@@ -950,6 +951,107 @@ test "check_record_line: one whole line of the record" {
     try testing.expectError(error.RecordWrong, check_record_line(record, ".publish = .{"));
     const devices = check_record_line(record, ".devices = \"/dev/fuse\",");
     try testing.expectError(error.RecordWrong, devices);
+}
+
+/// `text` with its one `old` replaced by `new`, for a test input one value away from recorded.
+fn replaced(arena: Allocator, text: []const u8, old: []const u8, new: []const u8) ![]const u8 {
+    assert(std.mem.count(u8, text, old) == 1);
+    return std.mem.replaceOwned(u8, arena, text, old, new);
+}
+
+test "check_e0311: each context value and each fix wrong on its own" {
+    var arena_state: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    // One value off, in the context only: the sentence keeps the recorded unit.
+    const contexts = [_][2][]const u8{
+        .{ "\"asked\":\"1048577\"", "\"asked\":\"1048578\"" },
+        .{ "\"hard\":\"1048576\"", "\"hard\":\"1048575\"" },
+        .{ "\"unit\":\"LimitNOFILE=1048577\"", "\"unit\":\"LimitNOFILE=1048578\"" },
+    };
+    for (contexts) |context| {
+        const json = try replaced(arena, recorded.e0311_json, context[0], context[1]);
+        const wrong = try parsed_one(arena, json);
+        try testing.expectError(error.DiagnosticWrong, check_e0311(wrong, 1048576, 1000));
+    }
+    const found = try parsed_one(arena, recorded.e0311_json);
+    var fixes = [_]agent_json.Fix{ found.fixes[0], found.fixes[1], found.fixes[1] };
+    var copy = found;
+    copy.fixes = &fixes;
+    try testing.expectError(error.FixWrong, check_e0311(copy, 1048576, 1000));
+    copy.fixes = fixes[0..2];
+    try check_e0311(copy, 1048576, 1000);
+    fixes[0].needs_root = false;
+    try testing.expectError(error.FixWrong, check_e0311(copy, 1048576, 1000));
+    fixes[0] = found.fixes[0];
+    fixes[1].sentence = "or for the user manager, add LimitNOFILE=1048577:";
+    try testing.expectError(error.FixWrong, check_e0311(copy, 1048576, 1000));
+}
+
+test "check_text_refusal: another six-byte word, or the header split over two lines" {
+    const shouted = streams_of("", "Error[ZBX-E0311]: x\n");
+    const refused = check_text_refusal(shouted, 125, "ZBX-E0311", &.{});
+    try testing.expectError(error.RefusalWrong, refused);
+    const split = streams_of("", "error[\nZBX-E0311]: x\n");
+    const broken = check_text_refusal(split, 125, "ZBX-E0311", &.{});
+    try testing.expectError(error.RefusalWrong, broken);
+}
+
+test "check_require_host_pointer: the prefix, the key and the suffix each wrong at its length" {
+    var arena_state: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    const found = try parsed_one(arena, recorded.e0316_json);
+    var fixes = [_]agent_json.Fix{ found.fixes[0], found.fixes[1] };
+    var copy = found;
+    copy.fixes = &fixes;
+    const commands = [_][]const u8{
+        "--require-hosT 'vm.max_map_count>=<value>'",
+        "--require-host 'vm.max_map_counT>=<value>'",
+        "--require-host 'vm.max_map_count>=<valuE>'",
+    };
+    for (commands) |command| {
+        assert(command.len == found.fixes[1].command.?.len);
+        fixes[1].command = command;
+        const pointer = check_require_host_pointer(copy, "vm.max_map_count");
+        try testing.expectError(error.FixWrong, pointer);
+    }
+}
+
+test "check_exit_ulimit: ulimits that are not an object" {
+    var arena_state: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    const line = "{\"container_exit\":{\"reason\":\"exited\",\"code\":0,\"ulimits\":[]}}\n";
+    const exit = try exit_object(arena, streams_of("", line), 0);
+    try testing.expectError(error.JsonWrong, check_exit_ulimit(exit, "nofile", 4096, 8192));
+}
+
+test "check_not_running: containers that are not a list, a running entry with a code" {
+    var arena_state: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    const object = "{\"schema\":\"zbx.ps/1\",\"containers\":{}}";
+    try testing.expectError(error.JsonWrong, check_not_running(arena, object, 0, "m2bold"));
+    const coded = ps_head ++ "{\"name\":\"m2bold\",\"state\":\"running\",\"exit_code\":137}]}";
+    try testing.expectError(error.RecordWrong, check_not_running(arena, coded, 0, "m2bold"));
+}
+
+test "check_old_published: the network, the host port and the container port each wrong" {
+    var arena_state: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    const running = "{\"name\":\"m2bpub\",\"state\":\"running\",\"network\":";
+    const entries = [_][]const u8{
+        "\"none\",\"published\":[{\"host\":18080,\"container\":80}]}]}",
+        "\"user\",\"published\":[{\"host\":18081,\"container\":80}]}]}",
+        "\"user\",\"published\":[{\"host\":18080,\"container\":81}]}]}",
+    };
+    for (entries) |entry| {
+        const stdout = try std.mem.concat(arena, u8, &.{ ps_head, running, entry });
+        const published = check_old_published(arena, stdout, 0, "m2bpub", .{ 18080, 80 });
+        try testing.expectError(error.RecordWrong, published);
+    }
 }
 
 test {
