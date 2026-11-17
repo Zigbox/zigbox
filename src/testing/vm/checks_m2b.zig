@@ -356,15 +356,12 @@ pub fn check_e0311(diagnostic: Diagnostic, hard: u64, uid: u32) Error!void {
     assert(hard > 0);
     assert(hard < std.math.maxInt(u64));
     var buffers: [5][128]u8 = undefined;
-    // Cannot fail: each text is a u64 or u32 and a short constant, well under 128 bytes.
-    const asked = std.fmt.bufPrint(&buffers[0], "{d}", .{hard + 1}) catch unreachable;
-    const own = std.fmt.bufPrint(&buffers[1], "{d}", .{hard}) catch unreachable;
-    const unit = std.fmt.bufPrint(&buffers[2], "LimitNOFILE={s}", .{asked}) catch unreachable;
-    const login = std.fmt.bufPrint(&buffers[3], "echo \"$(id -un) hard nofile {s}\" | " ++
-        "sudo tee -a /etc/security/limits.conf", .{asked}) catch unreachable;
-    const manager = std.fmt.bufPrint(&buffers[4], "sudo systemctl edit user@{d}.service", .{
-        uid,
-    }) catch unreachable;
+    const asked = text_of(&buffers[0], "{d}", .{hard + 1});
+    const own = text_of(&buffers[1], "{d}", .{hard});
+    const unit = text_of(&buffers[2], "LimitNOFILE={s}", .{asked});
+    const login = text_of(&buffers[3], "echo \"$(id -un) hard nofile {s}\" | " ++
+        "sudo tee -a /etc/security/limits.conf", .{asked});
+    const manager = text_of(&buffers[4], "sudo systemctl edit user@{d}.service", .{uid});
     try expect_context(diagnostic, "asked", asked);
     try expect_context(diagnostic, "hard", own);
     try expect_context(diagnostic, "unit", unit);
@@ -374,6 +371,11 @@ pub fn check_e0311(diagnostic: Diagnostic, hard: u64, uid: u32) Error!void {
     const sentence = diagnostic.fixes[1].sentence;
     if (std.mem.indexOf(u8, sentence, unit) == null) return error.FixWrong;
     if (std.mem.indexOf(u8, sentence, "[Service]") == null) return error.FixWrong;
+}
+
+/// `check_e0311`'s expected texts: a u64 or u32 in a short constant, well under 128 bytes.
+fn text_of(buffer: *[128]u8, comptime format: []const u8, args: anytype) []const u8 {
+    return std.fmt.bufPrint(buffer, format, args) catch unreachable; // Sized above.
 }
 
 /// E0316's second fix points at `--require-host` for the refused key, as a template the agent
@@ -606,10 +608,12 @@ test "check_doctor_value: the recorded host-settings line shows the value" {
     const none = check_doctor_value("ok   kernel 6.8.0\n", "vm.max_map_count", "65530");
     try testing.expectError(error.DoctorWrong, none);
     const glued = "ok   host-settings  vm.max_map_count:65530\n";
-    try testing.expectError(error.DoctorWrong, check_doctor_value(glued, "vm.max_map_count", "65530"));
+    const glued_read = check_doctor_value(glued, "vm.max_map_count", "65530");
+    try testing.expectError(error.DoctorWrong, glued_read);
     // The first host-settings line is the doctor's; a later one is not read.
     const two = "ok   host-settings  fs.aio-max-nr 65536\n" ++ recorded.doctor_text;
-    try testing.expectError(error.DoctorWrong, check_doctor_value(two, "vm.max_map_count", "65530"));
+    const two_read = check_doctor_value(two, "vm.max_map_count", "65530");
+    try testing.expectError(error.DoctorWrong, two_read);
 }
 
 test "check_failed_with and check_read_only_write: the recorded refused write" {
@@ -625,7 +629,8 @@ test "check_failed_with and check_read_only_write: the recorded refused write" {
     try testing.expectError(error.OutputWrong, other);
     const both = streams_of("", recorded.read_only ++ recorded.exit_failed);
     try check_read_only_write(arena, both, 1);
-    const denied = streams_of("", "sh: can't create x: Permission denied\n" ++ recorded.exit_failed);
+    const permission = "sh: can't create x: Permission denied\n";
+    const denied = streams_of("", permission ++ recorded.exit_failed);
     try testing.expectError(error.OutputWrong, check_read_only_write(arena, denied, 1));
     const zero = streams_of("", recorded.read_only ++ recorded.exit_ulimit);
     try testing.expectError(error.ExitCodeWrong, check_read_only_write(arena, zero, 0));
@@ -874,8 +879,10 @@ test "doctor_host_value and check_doctor_reads: the recorded zbx.doctor/1" {
 
 test "check_detached and check_stopped: the recorded upgrade lines" {
     try check_detached(streams_of("m2bold\n", ""), 0, "m2bold");
-    try testing.expectError(error.ExitCodeWrong, check_detached(streams_of("m2bold\n", ""), 1, "m2bold"));
-    try testing.expectError(error.OutputWrong, check_detached(streams_of("m2bold2\n", ""), 0, "m2bold"));
+    const failed = check_detached(streams_of("m2bold\n", ""), 1, "m2bold");
+    try testing.expectError(error.ExitCodeWrong, failed);
+    const longer = check_detached(streams_of("m2bold2\n", ""), 0, "m2bold");
+    try testing.expectError(error.OutputWrong, longer);
     try testing.expectError(error.OutputWrong, check_detached(streams_of("", ""), 0, "m2bold"));
     const stopped = streams_of(recorded.stopped, "");
     try check_stopped(stopped, 0, "m2bold");
@@ -938,7 +945,8 @@ test "check_record_line: one whole line of the record" {
     const record = ".{\n    .version = 9,\n    .publish = .{ \"18080:80\" },\n}\n";
     try check_record_line(record, ".publish = .{ \"18080:80\" },");
     try testing.expectError(error.RecordWrong, check_record_line(record, ".publish = .{"));
-    try testing.expectError(error.RecordWrong, check_record_line(record, ".devices = \"/dev/fuse\","));
+    const devices = check_record_line(record, ".devices = \"/dev/fuse\",");
+    try testing.expectError(error.RecordWrong, devices);
 }
 
 test {

@@ -68,31 +68,31 @@ const rows = [_]Row{
     .{
         .paths = &.{"src/testing/vm/checks_m3.zig"},
         .true_outputs = &.{
-            "code",    "demo_m2b", "demo_m3",  "demo_m4", "demo_m5",  "demo_m6",
-            "demo_m6b", "demo_m6d", "demo_m7", "demo_m8",  "demo_m8b", "demo_m9",
+            "code",     "demo_m2b", "demo_m3",      "demo_m4", "demo_m5",  "demo_m6",
+            "demo_m6b", "demo_m6d", "demo_m7",      "demo_m8", "demo_m8b", "demo_m9",
             "demo_m10", "demo_c4",  "demo_s2_lazy",
         },
     },
     .{
         .paths = &.{"src/testing/vm/checks_m4.zig"},
         .true_outputs = &.{
-            "code",    "demo_m2b", "demo_m4", "demo_m5",  "demo_m6", "demo_m6b",
-            "demo_m6d", "demo_m7", "demo_m8", "demo_m8b", "demo_m9", "demo_m10",
+            "code",     "demo_m2b",     "demo_m4", "demo_m5",  "demo_m6", "demo_m6b",
+            "demo_m6d", "demo_m7",      "demo_m8", "demo_m8b", "demo_m9", "demo_m10",
             "demo_c4",  "demo_s2_lazy",
         },
     },
     .{
         .paths = &.{"src/testing/vm/checks_upgrade_m5.zig"},
         .true_outputs = &.{
-            "code",    "demo_m2b", "demo_m5", "demo_m6", "demo_m6b", "demo_m6d", "demo_m7",
-            "demo_m8", "demo_m8b", "demo_m9", "demo_m10", "demo_c4", "demo_s2_lazy",
+            "code",    "demo_m2b", "demo_m5", "demo_m6",  "demo_m6b", "demo_m6d",     "demo_m7",
+            "demo_m8", "demo_m8b", "demo_m9", "demo_m10", "demo_c4",  "demo_s2_lazy",
         },
     },
     .{
         .paths = &.{"src/testing/vm/checks_upgrade_m6b.zig"},
         .true_outputs = &.{
-            "code",    "demo_m2b", "demo_m6b", "demo_m6d", "demo_m7", "demo_m8",
-            "demo_m8b", "demo_m9", "demo_m10", "demo_c4",  "demo_s2_lazy",
+            "code",     "demo_m2b", "demo_m6b", "demo_m6d", "demo_m7",      "demo_m8",
+            "demo_m8b", "demo_m9",  "demo_m10", "demo_c4",  "demo_s2_lazy",
         },
     },
     // The M2b knobs (the policy files, the plan, the child, doctor) reach every VM demo,
