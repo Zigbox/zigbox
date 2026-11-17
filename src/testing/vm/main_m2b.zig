@@ -19,8 +19,8 @@
 //! none and --net user the host's cgroup tree is not reachable at /sys/fs/cgroup (and under
 //! --net user a net.* sysctl survives pasta); the scripted agent runs steps 1 to 5 with
 //! `--output json` and `zbx explain` only; and the upgrade test: v0.5.2 starts three detached
-//! containers (plain and `-p`, record version 9; `--device`, version 10), this zbx lists them
-//! from their records, stops them, and `ps --all` shows none running.
+//! containers (plain and `--publish`, record version 9; `--device`, version 10), this zbx lists
+//! them from their records, stops them, and `ps --all` shows none running.
 //! Every assertion is a function of checks_m2b.zig or checks_m2.zig with a unit test.
 //! `zig build demo-m2b` (KVM) or `zig build demo-m2b -Daccel=tcg`. See docs/demos/m2b.md.
 
@@ -607,8 +607,9 @@ fn agent_view(session: *Session, out: *Io.Writer) !void {
 
 // ---- The upgrade test ------------------------------------------------------------------------
 
-/// v0.5.2 writes run record version 9 for a detached run, with `.publish` when it has `-p`, and
-/// version 10 when it has `--device` (constants.zig and run_record.zig at the tag).
+/// v0.5.2 writes run record version 9 for a detached run, with `.publish` when it has
+/// `--publish`, and version 10 when it has `--device` (constants.zig and run_record.zig at the
+/// tag).
 const record_plain: u32 = 9;
 const record_device: u32 = 10;
 const old_plain = "m2bold";
@@ -618,7 +619,7 @@ const old_names = [_][]const u8{ old_plain, old_published, old_device };
 /// /dev/fuse: a device v0.5.2 does not bind on its own (it reserves /dev/null and the rest).
 const old_starts = [_][]const u8{
     "--net none",
-    "--net user -p 18080:80",
+    "--net user --publish 18080:80",
     "--net none --device /dev/fuse",
 };
 

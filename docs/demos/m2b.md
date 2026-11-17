@@ -124,11 +124,11 @@ mixes into the lines it compares.
   with each. The agent applies E0319's root fix (the harness stands in for the person with
   sudo), runs E0319's second fix (`zbx doctor`, as JSON) to see 262144, and reruns to exit 0.
 - **The upgrade test.** v0.5.2 starts three detached containers (`zbx-old run -d ... -- sleep
-  300`): plain (`m2bold`), with `--net user -p 18080:80` (`m2bpub`) and with `--device
-  /dev/fuse` (`m2bdev`). This `zbx` lists each running with `ps --output json` (`m2bpub` under
-  `user` with its one forward), reads each run record (version 9, 9 with its `.publish` line,
-  and 10 with its `.devices` line), stops each with `zbx stop`, and `ps --all --output json`
-  then lists none of them running.
+  300`): plain (`m2bold`), with `--net user --publish 18080:80` (`m2bpub`; v0.5.2 has no `-p`) and
+  with `--device /dev/fuse` (`m2bdev`). This `zbx` lists each running with `ps --output json`
+  (`m2bpub` under `user` with its one forward), reads each run record (version 9, 9 with its
+  `.publish` line, and 10 with its `.devices` line), stops each with `zbx stop`, and `ps --all
+  --output json` then lists none of them running.
 
 ## Language runtimes, before and after
 
@@ -162,11 +162,11 @@ do the same with a private cgroup namespace.
 - **The view check runs under `--net host`, `--net none` and `--net user`** (slice 3 fix). Under
   `--net user` the demo also reads a `net` sysctl back after pasta has set the network up, so a
   key pasta reset would show there.
-- **The upgrade reads a version-10 record from `--device`, not from `-p`** (slice 3 fix). v0.5.2
-  writes version 10 only for a run with a listener or devices; a `-p` run is version 9 with a
-  `.publish` line. The demo starts both, so it reads a v9 record with a forward and a v10 record.
-  `/dev/fuse` because v0.5.2 binds `/dev/null` and the other standard devices itself and refuses
-  them as `--device`.
+- **The upgrade reads a version-10 record from `--device`, not from `--publish`** (slice 3 fix).
+  v0.5.2 writes version 10 only for a run with a listener or devices; a `--publish` run (v0.5.2 has
+  no `-p`) is version 9 with a `.publish` line. The demo starts both, so it reads a v9 record with a
+  forward and a v10 record. `/dev/fuse` because v0.5.2 binds `/dev/null` and the other standard
+  devices itself and refuses them as `--device`.
 - **ci-changes.sh has no separate rules for the policy files, the plan, the child or doctor**
   (slice 3). They fall through to the rule that selects every demo, `m2b` among them; the table
   test pins that for `sysctls.zon`, `plan.zig` and `doctor.zig`.
