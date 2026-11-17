@@ -543,8 +543,9 @@ test "a lazy start keeps no Google token, and no fallback, once its resolve has 
         const pull_workspace = &storage_of().pull;
         const warn: Warn = .{ .context = world, .call = ignore_warning };
         const ws = &lazy_workspace;
+        const image = &lazy_image;
         const outcome =
-            try lazy_start.start(host, pull_workspace, ws, &store, reference, warn, &lazy_image, &diag);
+            try lazy_start.start(host, pull_workspace, ws, &store, reference, warn, image, &diag);
         try testing.expectEqual(lazy_start.Outcome.whole, outcome);
         try testing.expectEqual(@as(u32, 1), world.google.realm_ok);
         try testing.expectEqual(@intFromBool(fallback), world.google.metadata_calls);
