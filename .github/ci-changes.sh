@@ -3,7 +3,7 @@
 # `name=true|false` lines (to $GITHUB_OUTPUT, or stdout when that is unset):
 #
 #   code      the build, tidy, test, errors-site, fuzz, fuzz-provenance and dbus-live jobs
-#   demo_<d>  one VM demo, <d> in m0 m1 m2 m3 m4 m5 m6 m6b m6d m7 m8 m8b m9 m10 c4 s2_lazy
+#   demo_<d>  one VM demo, <d> in m0 m1 m2 m2b m3 m4 m5 m6 m6b m6d m7 m8 m8b m9 m10 c4 s2_lazy
 #   demo_m8_packages  the four-guest packages demo (demo-m8-packages): the package sources, the
 #             packaging files and the packages harness (not the m8 demo's own rules)
 #
@@ -15,7 +15,7 @@
 # for the package files, the VM guests, the build and the workflow (docs/demos/m8.md).
 set -euo pipefail
 
-demos=(m0 m1 m2 m3 m4 m5 m6 m6b m6d m7 m8 m8b m9 m10 c4 s2_lazy)
+demos=(m0 m1 m2 m2b m3 m4 m5 m6 m6b m6d m7 m8 m8b m9 m10 c4 s2_lazy)
 declare -A want=()
 want_packages=0
 
@@ -75,7 +75,7 @@ classify() {
     # and the site, and tests of the code (they never reach the zbx binary a demo runs).
     docs/demos/m*.md | docs/demos/c4.md)
       suffix=${p#docs/demos/}; suffix=${suffix%.md}
-      case "$suffix" in m0 | m1 | m2 | m3 | m4 | m5 | m6 | m6b | m6d | m7 | m8 | m8b | m9 | m10 | c4) want_one "$suffix" ;; esac
+      case "$suffix" in m0 | m1 | m2 | m2b | m3 | m4 | m5 | m6 | m6b | m6d | m7 | m8 | m8b | m9 | m10 | c4) want_one "$suffix" ;; esac
       return ;;
     # The packages demo: the package sources, the packaging files and their harness. They set
     # no demo but demo-m8-packages.
@@ -94,6 +94,9 @@ classify() {
     # every later one, which repeat its parts. The files named for no demo are shared.
     src/testing/vm/m8b/* | src/testing/vm/*_m8b.zig) want_one m8b; return ;;
     src/testing/vm/*_m10.zig | src/testing/vm/m10_fixture/*) want_one m10; return ;;
+    # M2b's harness and numa-probe. Its knobs (src/runtime/policy/*, the plan, the child,
+    # src/doctor.zig) fall through to want_all, which includes m2b.
+    src/testing/vm/*_m2b.zig | src/testing/vm/numa_probe/*) want_one m2b; return ;;
     src/testing/vm/*_m6d.zig | src/testing/vm/m6d_fixture/*) want_one m6d; return ;;
     src/testing/vm/*_s2_lazy.zig) want_one s2_lazy; return ;;
     # fixture_http.zig is the HTTP server demo-m9's fetch step runs in the guest; no other uses it.
