@@ -64,7 +64,7 @@ classify() {
   esac
   case "$p" in
     # demo-m6d's gate on the owner's Google setup runs in its job alone.
-    .github/m6d-setup.sh) want_one m6d; return ;;
+    .github/actions/m6d-setup/*) want_one m6d; return ;;
     # What the harness, the build or CI itself is made of: every demo.
     build.zig | build.zig.zon | .github/* | vm/* | src/testing/vm/lib/* | \
       src/testing/vm/alpine.zon | src/testing/vm/old_release.zon | src/testing/vm/zbx.lock | \

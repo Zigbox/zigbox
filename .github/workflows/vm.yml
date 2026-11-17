@@ -35,8 +35,16 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0
+      - name: Check the Google setup (vm/m6d-* only)
+        id: setup
+        if: startsWith(github.ref_name, 'vm/m6d-')
+        uses: ./.github/actions/m6d-setup
+        with:
+          fork: 'false'
       - name: Which demo
         id: pick
+        env:
+          M6D_RUN: ${{ steps.setup.outputs.run }}
         run: |
           name="${GITHUB_REF_NAME#vm/}"
           demo="${name%%-*}"
@@ -47,9 +55,7 @@ jobs:
             m8) steps="demo-m8 demo-m8-packages" ;;
             s2lazy) steps="demo-s2-lazy" ;;
             # Without the owner's Google setup, one NOT RUN line and nothing runs.
-            m6d) steps="demo-m6d"
-              GITHUB_OUTPUT="$RUNNER_TEMP/m6d-setup" .github/m6d-setup.sh
-              grep -qx run=true "$RUNNER_TEMP/m6d-setup" || steps="" ;;
+            m6d) steps="demo-m6d"; if [ "$M6D_RUN" != true ]; then steps=""; fi ;;
             all) steps="demo-m0 demo-m1 demo-m2 demo-m3 demo-m4 demo-m5 demo-m6 demo-m6b demo-m7 demo-m8 demo-m8b demo-m9 demo-m10 demo-c4 demo-s2-probe demo-s2-lazy demo-z7" ;;
             *) echo "vm: branch $GITHUB_REF_NAME names no demo (vm/m0..m6-<x>, vm/m6b-<x>, vm/m7-<x>, vm/m8-<x>, vm/m8b-<x>, vm/m9-<x>, vm/m10-<x>, vm/m6d-<x>, vm/c4-<x>, vm/s2-<x>, vm/s2lazy-<x>, vm/z7-<x> or vm/all-<x>)"; exit 1 ;;
           esac

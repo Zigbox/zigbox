@@ -20,7 +20,7 @@ The reasons:
   more than three minutes old, at most `needles_max - shapes.len` times. A token fetched once
   before the VM boots would expire mid-demo.
 - **Neither secret is on a command line or in a shell.** No `-H @file` dance and no `set -x`
-  risk; the gate script (`.github/m6d-setup.sh`) prints only names.
+  risk; the gate (`.github/actions/m6d-setup`) prints only names.
 
 ## The audience is `https://iam.googleapis.com/<provider>`
 

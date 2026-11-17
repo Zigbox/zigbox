@@ -117,7 +117,7 @@ const rows = [_]Row{
     },
     // demo-m6d's setup gate selects demo_m6d alone.
     .{
-        .paths = &.{".github/m6d-setup.sh"},
+        .paths = &.{".github/actions/m6d-setup/action.yml"},
         .true_outputs = &.{ "code", "demo_m6d" },
     },
     // The Google credential code runs in every pull: the demos from m4 on, demo_m6d among them.

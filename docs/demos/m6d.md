@@ -130,11 +130,11 @@ Nothing here is a secret. zbx never asks for or handles a key.
 ## Running it
 
 - **CI.** The `demo-m6d` job in `ci.yml` runs when `.github/ci-changes.sh` selects it: the
-  harness files, `.github/m6d-setup.sh`, and, through `want_from m4`, the registry, pull, Google
+  harness files, `.github/actions/m6d-setup`, and, through `want_from m4`, the registry, pull, Google
   and cloud code.
 - **Scratch branch.** `git push origin HEAD:vm/m6d-<slug>` runs it in `vm.yml`. `vm/all-*` does
   not include it, because without the setup it would only print `NOT RUN`.
-- **Both workflows give the job `id-token: write`.** `.github/m6d-setup.sh` decides first whether
+- **Both workflows give the job `id-token: write`.** `.github/actions/m6d-setup` decides first whether
   it runs. Without a variable, without an OIDC token, or on a fork's pull request, it prints one
   line, adds that line to the job summary, and the job passes:
   ```
@@ -157,7 +157,7 @@ The demo ends with `demo-m6d: PASSED` or `demo-m6d: FAILED at STEP n: <reason>`.
 | Impersonation not granted (`roles/iam.workloadIdentityUser` missing) | E0566: Google refused to impersonate the service account | simulation and golden; live only if the owner breaks the binding by hand |
 | The provider refuses the token (wrong audience, attribute condition) | E0565: Google refused the workload identity token exchange | simulation and golden; a wrong setup shows it live |
 | The repository is denied | E0568, naming the repository and `artifactregistry.repositories.downloadArtifacts` | step 4, live |
-| A fork's pull request | no OIDC token: `NOT RUN: a fork's pull request gets no OIDC token`, job passes | `.github/m6d-setup.sh` |
+| A fork's pull request | no OIDC token: `NOT RUN: a fork's pull request gets no OIDC token`, job passes | `.github/actions/m6d-setup` |
 
 ## By hand on GCE: the metadata server (not run in CI)
 

@@ -753,9 +753,9 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Check the Google setup
         id: setup
-        env:
-          FORK: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository }}
-        run: .github/m6d-setup.sh
+        uses: ./.github/actions/m6d-setup
+        with:
+          fork: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository }}
       - uses: ./.github/actions/setup-zig
         if: steps.setup.outputs.run == 'true'
       - name: Install QEMU
