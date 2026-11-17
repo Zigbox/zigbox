@@ -14,9 +14,10 @@
 //!   4. The slice's knobs by hand (`--ulimit`, `--shm-size`, `--sysctl`, NUMA), as the brief's
 //!      demo steps 1, 2, 3 and 6 run them. Under a binary without the knobs, the flags are
 //!      refused; that output is the "before".
-//! Every line the guest prints starts with `probe:`. The probe judges nothing but whether its
-//! scripts ran: its output is evidence for docs/decisions/, read by a person. Throwaway: the
-//! demo is slice 3's `demo-m2b`. `zig build demo-m2b-probe` (KVM) or `-Daccel=tcg`.
+//! Every line the guest prints starts with `probe:`. The probe judges whether its scripts ran,
+//! whether each `zbx run` of part 3 succeeded, and that the view is the container's own
+//! (`0::/`) and read-only; the rest is evidence for docs/decisions/, read by a person.
+//! Throwaway: the demo is slice 3's `demo-m2b`. `zig build demo-m2b-probe` (KVM) or `-Daccel=tcg`.
 
 const std = @import("std");
 const Io = std.Io;
@@ -335,12 +336,15 @@ const runtimes_script =
     \\  echo "probe: setup: done"; exit 0
     \\fi
     \\N=""; [ "$1" = host ] && N="--net host"; [ "$1" = user ] && N="--net user"
+    \\F=0
     \\for rt in view java go dotnet node; do
     \\  echo "probe: [$1] $rt:"
-    \\  $Z run $N --rootfs $R --memory 256m --cpus 1 -e HOME=/tmp -e DOTNET_NOLOGO=1 \
-    \\    -- sh /m2b/measure.sh $rt 2>&1 | head -45 | sed "s/^/probe: [$1] $rt: /"
+    \\  o=$($Z run $N --rootfs $R --memory 256m --cpus 1 -e HOME=/tmp -e DOTNET_NOLOGO=1 \
+    \\    -- sh /m2b/measure.sh $rt 2>&1); s=$?
+    \\  echo "$o" | head -45 | sed "s/^/probe: [$1] $rt: /"
+    \\  [ $s -eq 0 ] || { echo "probe: [$1] $rt: FAILED, the run exited $s"; F=1; }
     \\done
-    \\echo "probe: runtimes $1: done"
+    \\echo "probe: runtimes $1: done"; exit $F
     \\
 ;
 
@@ -362,7 +366,9 @@ const measure_script =
     \\  grep -E ' - cgroup2? ' /proc/self/mountinfo || echo "mountinfo: no cgroup mount"
     \\  echo "/sys/fs/cgroup: $(ls /sys/fs/cgroup 2>&1 | head -8 | tr '\n' ' ')"
     \\  for f in memory.max cpu.max pids.max; do echo "$f: $(cat /sys/fs/cgroup/$f 2>&1)"; done
-    \\  touch /sys/fs/cgroup/probe 2>&1 | head -1
+    \\  grep -qx '0::/' /proc/self/cgroup || { echo "view: FAILED, not 0::/"; exit 1; }
+    \\  t=$(touch /sys/fs/cgroup/probe 2>&1); echo "touch: $t"
+    \\  echo "$t" | grep -q 'Read-only file system' || { echo "view: FAILED, writable"; exit 1; }
     \\  exit 0 ;;
     \\java) java -XshowSettings:system -version 2>&1 | head -20
     \\  java -XX:+PrintFlagsFinal -version 2>/dev/null |

@@ -1072,6 +1072,7 @@ fn sign_refused_missing(diag: *Diag) void {
 }
 
 const exec_plan = @import("runtime/exec_plan.zig");
+const exec_mod = @import("runtime/exec.zig");
 
 /// The index of the first step of `kind` in the plan of an exec into `prepare_running`'s
 /// container (a scope, every namespace, root), with or without a terminal.
@@ -1084,7 +1085,7 @@ fn exec_step_of(kind: exec_plan.Kind, terminal: bool) u32 {
         .term = null,
         .workdir = "",
         .user = null,
-        .namespaces = 0x3f,
+        .namespaces = exec_mod.all_namespaces, // What `zbx exec` joins.
         .terminal = terminal,
         .cgroup = true,
         .keep_groups = false,

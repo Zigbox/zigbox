@@ -571,8 +571,11 @@ fn network_mounts(
     }
     const cgroup = join(&buffer, root_path, "/sys/fs/cgroup");
     if (table.has(.cgroup2, cgroup) != scoped) return "the cgroup view is not as the scope asks";
+    if (table.has(.cgroup_cover, cgroup) != scoped) return "the cgroup cover is not as asked";
     if (scoped) {
-        const index = table.find(cgroup).?; // `has` found it.
+        // The view is what the container reaches: on top, over the cover.
+        const index = table.top(cgroup).?; // `has` found a mount there.
+        if (table.mounts[index].kind != .cgroup2) return "the cgroup view is not on top";
         if (!table.mounts[index].read_only) return "the cgroup view is writable";
     }
     for ([_][]const u8{ "/etc/hosts", "/etc/resolv.conf", "/etc/hostname" }) |name| {

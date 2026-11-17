@@ -213,12 +213,22 @@ pub const SpawnFlags = struct {
 /// The namespaces `exec` joins (`setns`), in the order it joins them: the user namespace first,
 /// which gives the capabilities the others need (the caller owns it, so joining it needs
 /// none), and the mount namespace last, since it changes the root that paths are read from.
+/// The namespaces an exec'd command joins; `[namespaces_count]` arrays are indexed by kind.
+pub const namespaces_count: u32 = 7;
+
+comptime {
+    assert(std.enums.values(NamespaceKind).len == namespaces_count);
+}
+
 pub const NamespaceKind = enum {
     user,
     ipc,
     uts,
     net,
     pid,
+    /// A scoped container's own (M2b), rooted at its scope: an exec'd command joins it, so it
+    /// sees `0::/` and the read-only view as the container's own command does.
+    cgroup,
     mount,
 
     /// The name of the file in `/proc/<pid>/ns/`.
@@ -229,10 +239,11 @@ pub const NamespaceKind = enum {
             .uts => "uts",
             .net => "net",
             .pid => "pid",
+            .cgroup => "cgroup",
             .mount => "mnt",
         };
         assert(name.len >= 3);
-        assert(name.len <= 4);
+        assert(name.len <= 6);
         return name;
     }
 };
@@ -309,10 +320,15 @@ pub const MountKind = enum {
     /// A fresh sysfs on `target`, read-only: nosuid, nodev, noexec. In a network namespace of the
     /// container's own it shows that namespace's devices, not the host's.
     sysfs,
+    /// A small tmpfs on `target`, read-only: nosuid, nodev, noexec, mode 0555 (M2b). It covers
+    /// `/sys/fs/cgroup` before the cgroup view: below the host's /sys, bound, the host's cgroup2
+    /// is mounted there, and the kernel refuses its superblock again on that mount (EBUSY).
+    /// Mounted in every mode, so the view has one sequence (docs/decisions/
+    /// 2026-11-17-m2b-cgroup-cover.md).
+    cgroup_cover,
     /// A fresh cgroup2 on `target`, read-only: nosuid, nodev, noexec (M2b). In a cgroup namespace
     /// of the caller's own, its root is the cgroup the caller was in when it took the namespace.
-    /// The real host covers `target` with a small read-only tmpfs first: below the host's /sys,
-    /// bound, the host's cgroup2 is mounted there, and the kernel refuses its superblock again.
+    /// Below a bound host /sys it needs `cgroup_cover` on `target` first.
     cgroup2,
     /// An overlayfs mount on `target`. `source` is the mount data (`userxattr,lowerdir=...`):
     /// the kernel reads it as text, so it is the one request whose source is not a path.
@@ -325,6 +341,20 @@ pub const MountKind = enum {
     /// root. `source` is the mount data (`mode=1777,size=<bytes>`), as for the overlay.
     user_tmpfs,
 };
+
+/// Whether a fresh mount of `kind` is read-only from the start. The real host's flags and the
+/// simulator's model both follow it, and a test in `host_real.zig` checks the flags against it,
+/// so a view that becomes writable fails `zig build test` (the container could otherwise rewrite
+/// its own scope's limits through `/sys/fs/cgroup`).
+pub fn mounted_read_only(kind: MountKind) bool {
+    const read_only = switch (kind) {
+        .sysfs, .cgroup_cover, .cgroup2 => true,
+        else => false,
+    };
+    if (kind == .cgroup2) assert(read_only);
+    if (kind == .proc) assert(!read_only);
+    return read_only;
+}
 
 pub const MountRequest = struct {
     kind: MountKind,

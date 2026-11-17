@@ -72,6 +72,10 @@ fn joined(sim: *HostSim, container_pid: u32, pid: u32) ?[]const u8 {
     if (!command.new_ipc) return "not in the container's IPC namespace";
     if (command.new_net != container.new_net) return "not in the container's network";
     if (command.pid_namespace != container_pid) return "not in the container's PID namespace";
+    if (command.new_cgroup != container.new_cgroup) return "not in the container's cgroup ns";
+    if (command.new_cgroup) {
+        if (!command.cgroup_rooted_in_scope) return "its cgroup ns is rooted outside the scope";
+    }
     if (!command.root.?.eql(container.root.?.slice())) return "not in the container's root";
     if (!command.in_scope) return "not in the container's cgroup";
     if (!command.in_scope_before_run) return "put in the cgroup after it ran";
@@ -115,6 +119,31 @@ test "exec joins the container's namespaces and cgroup and gains nothing it lack
     const exit = exec.wait(&exec_handle);
     try testing.expectEqual(@as(?u8, 0), exit.code());
     try testing.expect(!exec_handle.container_ended);
+    try testing.expectEqual(@as(u32, 0), exec_open(&sim));
+}
+
+test "exec into a container without a cgroup namespace of its own leaves the command in zbx's" {
+    // Goal: a container started by a release before M2b slice 2 took no cgroup namespace; exec
+    // into it still works and joins every other namespace, as `--net host` skips the network.
+    // Method: start a container, take its cgroup namespace away in the model (as the older
+    // release left it), exec, and check the command joined the rest and is in no namespace of
+    // its own. The parent opened no handle for it, so the joiner skipped that join.
+    var sim: HostSim = undefined;
+    sim_run.init(&sim, 2);
+    const container_pid = try start_container(&sim, 2, default_spec());
+    const container = sim.world.find_process(container_pid).?;
+    try testing.expect(container.new_cgroup);
+    container.new_cgroup = false;
+    container.cgroup_rooted_in_scope = false;
+    var diag: Diag = undefined;
+    diag.reset();
+    const spec = exec_spec(&.{"/bin/sh"});
+    try exec.start(sim.interface(), &spec, .{}, &exec_handle, &diag);
+    const pid = exec_handle.pid.?;
+    try expect_joined(&sim, container_pid, pid);
+    try testing.expect(!sim.world.find_process(pid).?.new_cgroup);
+    const exit = exec.wait(&exec_handle);
+    try testing.expectEqual(@as(?u8, 0), exit.code());
     try testing.expectEqual(@as(u32, 0), exec_open(&sim));
 }
 
@@ -297,7 +326,7 @@ test "every step that fails is one coded diagnostic, and nothing is left behind"
         .term = null,
         .workdir = "",
         .user = .{ .uid = 1000, .gid = 1000 },
-        .namespaces = 0x3f,
+        .namespaces = 0x7f,
         .terminal = true,
         .cgroup = true,
         .keep_groups = false,

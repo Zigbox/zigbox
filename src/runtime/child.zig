@@ -187,7 +187,7 @@ fn run_step(child: *const Context, step: *const Step, state: *State) Error!void 
         .send_fuse => try send_fuse(child, state),
         .mount_sysfs => try mount(host, .sysfs, target, null),
         .unshare_cgroup => try host.unshare_cgroup(),
-        .mount_cgroup => try mount(host, .cgroup2, target, null),
+        .mount_cgroup => try mount_cgroup_view(host, target),
         .create_etc_file => try host.create_file(target, true),
         .stage_etc_file => try host.write_file_mode(target, plan.text(step.source), 0o644),
         .bind_etc_file, .bind_device, .bind_user_device => try bind_file(host, plan, step),
@@ -350,6 +350,16 @@ fn make_parents(host: Host, path: [:0]const u8) host_mod.Error!void {
         prefix[at] = 0;
         if (at > 1) try host.make_directory(prefix[0..at :0], true);
     }
+}
+
+/// The cgroup view: the cover first, then the read-only cgroup2 on it (`host_mod.MountKind`).
+/// Both are one step, not tolerant: a failure after the cover is E0323, never a container
+/// without a view.
+fn mount_cgroup_view(host: Host, target: [:0]const u8) host_mod.Error!void {
+    assert(target.len > 0);
+    assert(std.mem.endsWith(u8, target, "/sys/fs/cgroup"));
+    try mount(host, .cgroup_cover, target, null);
+    try mount(host, .cgroup2, target, null);
 }
 
 fn mount(

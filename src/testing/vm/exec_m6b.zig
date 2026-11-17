@@ -4,7 +4,8 @@
 //!   1. `exec` writes a file into the writable mount; on the host it is the user's.
 //!   2. A syscall the container's filter refuses (`unshare -U`) and a capability it lacks
 //!      (`mount`) fail in an exec exactly as in a run of the same image.
-//!   3. The exec'd command is in the container's cgroup (its scope) and held to its `--pids`.
+//!   3. The exec'd command is in the container's cgroup namespace (`0::/`, rooted at its scope)
+//!      and held to its `--pids`.
 //!   4. The command's exit code is zbx's; a value of `-e` is in no byte of the bundle, which
 //!      notes the exec.
 //!   5. Under `script` (a terminal on zbx's input and output), the command has a terminal.
@@ -118,8 +119,9 @@ fn in_the_cgroup(session: *Session, out: *Io.Writer) !void {
     try out.print(title, .{H.demo_name});
     _ = try ok(session, out, zn ++ " run -d --name ex2 --pids 2 alpine -- sleep 1000");
     const cgroup = try ok(session, out, zn ++ " exec ex2 -- cat /proc/self/cgroup" ++ no_input);
-    checks.check_cgroup(cgroup.streams.stdout, "zbx-ex2.scope") catch |err| {
-        return fail_step(out, step_name, "expected the command in the container's scope", err);
+    checks.check_cgroup(cgroup.streams.stdout) catch |err| {
+        const why = "expected the command in the container's cgroup namespace, at 0::/";
+        return fail_step(out, step_name, why, err);
     };
     const fork = zn ++ " exec ex2 -- sh -c 'sleep 1 & wait'" ++ no_input;
     const forked = try common.run_shown(session, out, fork);

@@ -1592,7 +1592,7 @@ comptime {
     assert(sim_nodes_max >= 64);
     assert(sim_mounts_max >= container_devices_count + 8);
     // The worst run's mounts: the root, /proc, /dev, M1's devices, /dev/shm and /dev/pts, /sys,
-    // /tmp and /run, two /etc files and twice the staging of a state volume or other mount, and
+    // /tmp and /run, the cgroup view and its cover, three /etc files and twice the staging of a state volume or other mount, and
     // `--device`s. The simulator's table holds them all.
     assert(sim_mounts_max >= 24 + container_devices_count + state_volumes_max + mounts_max +
         run_devices_max);
