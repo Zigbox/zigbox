@@ -2889,7 +2889,8 @@ test "cgroup view: below the host's /sys, bound, only over the cover" {
     const table = &world.tables[world.processes[0].table];
     var sys: SimPath = .{};
     try testing.expect(sys.set("/root/sys"));
-    try testing.expect(table.add(.{ .target = sys, .kind = .bind_tree, .own_pid_namespace = false }));
+    const bound_sys: Mount = .{ .target = sys, .kind = .bind_tree, .own_pid_namespace = false };
+    try testing.expect(table.add(bound_sys));
     try testing.expectEqual(@as(?u16, errno_busy), world.mount(view));
     try testing.expect(!table.has(.cgroup2, target));
     try testing.expectEqual(@as(?u16, null), world.mount(cover));
@@ -2898,6 +2899,10 @@ test "cgroup view: below the host's /sys, bound, only over the cover" {
     try testing.expectEqual(@as(?host.MountKind, .cgroup2), table.mounts[top].kind);
     try testing.expect(table.mounts[top].read_only);
     try testing.expect(table.mounts[table.find(target).?].read_only); // The cover, below it.
-    const elsewhere: host.MountRequest = .{ .kind = .cgroup_cover, .target = "/root/fs/cgroup", .source = null };
+    const elsewhere: host.MountRequest = .{
+        .kind = .cgroup_cover,
+        .target = "/root/fs/cgroup",
+        .source = null,
+    };
     try testing.expectEqual(@as(?u16, errno_noent), world.mount(elsewhere));
 }

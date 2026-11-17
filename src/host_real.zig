@@ -1555,7 +1555,7 @@ pub const HostReal = struct {
         const self = from_context(context);
         assert(pid > 1);
         var path: [48:0]u8 = undefined;
-        // Cannot fail: "/proc/" and "/ns/" and a name of at most six bytes, and a pid of ten digits.
+        // Cannot fail: "/proc/", "/ns/", a name of at most six bytes and a pid of ten digits.
         const target = std.fmt.bufPrintSentinel(&path, "/proc/{d}/ns/{s}", .{
             pid, kind.file_name(),
         }, 0) catch unreachable; // Same bound as above.
