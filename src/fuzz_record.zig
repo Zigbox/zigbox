@@ -258,7 +258,9 @@ fn random_knobs(random: std.Random, out: *Knobs, isolated: bool) void {
     if (random.uintLessThan(u8, 3) != 0) return;
     for (std.enums.values(knobs.Resource)) |resource| {
         if (random.boolean()) continue;
-        const hard = if (random.boolean()) knobs.unlimited else random.int(u64) -| 1;
+        // nofile has no unlimited: the kernel refuses it, and so does a record.
+        const unlimited = resource != .nofile and random.boolean();
+        const hard = if (unlimited) knobs.unlimited else random.int(u64) -| 1;
         const soft = if (random.boolean()) hard else random.uintAtMost(u64, hard);
         out.rlimits.set(resource, .{ .soft = soft, .hard = hard });
     }

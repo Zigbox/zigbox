@@ -42,4 +42,5 @@ defaults and limits; this file records the choices it left to the slice. The con
     below the processes that user already runs makes the next fork or `setuid` fail with
     EAGAIN. E0312's explanation says so.
   - A `--shm-size` that is not a whole number of pages is rounded up by tmpfs, not refused;
-    the help text says so. Refusing it would change a bound the brief fixes.
+    the help text has no room for the note (it keeps 512 bytes of its buffer free). Refusing
+    it would change a bound the brief fixes.

@@ -124,7 +124,7 @@ const help_text =
     \\  --pids <n>      limit on processes and threads
     \\  --cpus <n>      CPU limit, in CPUs: 0.5 is half of one
     \\  --ulimit <r>=<n>[:<n>]  limit nofile, nproc, memlock or stack (repeatable)
-    \\  --shm-size <size>  /dev/shm's size, rounded up to a page (default 64m)
+    \\  --shm-size <size>  /dev/shm's size (default 64m)
     \\  --sysctl <k>=<v>  set an allowed sysctl (repeatable; zbx explain E0316)
     \\  --read-only     mount the root read-only, with a tmpfs at /tmp and /run
     \\  --net <mode>    none (the default: a network of its own, only lo), host (share the host's)
@@ -6230,7 +6230,7 @@ test "snapshot: run and ps JSON with every knob are the checked-in documents, va
     sim_run.init(&sim, 6);
     const args = [_][]const u8{ "run", "--output", "json", "--rootfs", sim_run.rootfs_path } ++
         [_][]const u8{ "--ulimit", "nofile=4096:8192", "--shm-size", "256m" } ++
-        [_][]const u8{ "--sysctl", "net.core.somaxconn=4096", "--", "/bin/true" };
+        [_][]const u8{ "--sysctl", "net.core.somaxconn=4096", "--", "/bin/sh", "-c", "true" };
     try testing.expectEqual(@as(u8, 0), command_line(&sim, &args));
     const run_want = @embedFile("testdata/run_knobs.json.txt");
     try testing.expectEqualStrings(run_want, sim.stderr());
