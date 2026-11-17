@@ -34,6 +34,7 @@ const render = @import("diag/render.zig");
 const diag_fuzz = @import("fuzz_diag.zig");
 const plan_mod = @import("runtime/plan.zig");
 const records = @import("runtime/records.zig");
+const knobs = @import("runtime/knobs.zig");
 const sim_run = @import("runtime/sim_run.zig");
 const repeat = @import("test_util.zig").repeat;
 
@@ -42,6 +43,24 @@ const HostSim = host_sim.HostSim;
 const CommandShape = enum { shell_path, shell_bare, shell_args, missing_path, missing_bare };
 
 const NameShape = enum { none, valid, invalid };
+
+/// The M2b knobs of the run: `--ulimit nofile=1024:4096`, a `--sysctl`, both, or neither.
+const KnobsChoice = enum {
+    none,
+    ulimit,
+    sysctl,
+    both,
+
+    fn has_ulimit(choice: KnobsChoice) bool {
+        return choice == .ulimit or choice == .both;
+    }
+
+    fn has_sysctl(choice: KnobsChoice) bool {
+        return choice == .sysctl or choice == .both;
+    }
+};
+
+const knob_rlimit: knobs.Rlimit = .{ .soft = 1024, .hard = 4096 };
 
 /// The user's bus when the run begins (what the probe finds).
 const BusShape = enum { fine, no_socket, no_systemd, auth_rejected, no_environment };
@@ -270,11 +289,29 @@ const Scenario = struct {
     net: NetChoice,
     env: EnvChoice,
     mounts: MountsChoice,
+    knobs: KnobsChoice,
+    /// The kernel refuses the value of the `--sysctl` (EINVAL), as it does one out of range.
+    sysctl_refused: bool,
 
     /// Whether the probe finds a bus: the run then has a scope and the plan a step for it. A
     /// stale inherited address is not permission trouble, so nothing falls back from it.
     fn scoped(scenario: *const Scenario) bool {
         return scenario.bus == .fine and scenario.inherited != .stale;
+    }
+
+    /// The `--sysctl` of the run: a net key in a network of the container's own, an IPC key
+    /// with `--net host`, where a net key is refused.
+    fn sysctl(scenario: *const Scenario) knobs.Sysctl {
+        assert(scenario.knobs.has_sysctl());
+        if (scenario.net == .host) return .{ .key = "kernel.shmmax", .value = "1048576" };
+        return .{ .key = "net.core.somaxconn", .value = "8192" };
+    }
+
+    /// The resource limits the run sets.
+    fn rlimits(scenario: *const Scenario) knobs.Rlimits {
+        var limits: knobs.Rlimits = .{};
+        if (scenario.knobs.has_ulimit()) limits.set(.nofile, knob_rlimit);
+        return limits;
     }
 
     /// The stop fault that can matter: only a scope that stays is ever stopped.
@@ -403,10 +440,12 @@ fn random_cgroup(random: std.Random, scenario: *Scenario) void {
     scenario.pids_hit = random.uintLessThan(u8, 6) == 0;
     scenario.keeper_fork_fails = random.uintLessThan(u8, 10) == 0;
     scenario.keeper_dies = random.uintLessThan(u8, 5) == 0;
+    scenario.knobs = if (random.boolean()) .none else random.enumValue(KnobsChoice);
+    scenario.sysctl_refused = scenario.knobs.has_sysctl() and random.uintLessThan(u8, 4) == 0;
     // Scope cleanup and inherited-address faults are drawn only where nothing else is failing,
     // so that every warning and every connection of the run can be accounted for.
     const calm = scenario.fault_step == null and scenario.step_fault == .none and
-        scenario.helper_fails == null;
+        scenario.helper_fails == null and !scenario.sysctl_refused;
     scenario.read_only = random.uintLessThan(u8, 4) == 0;
     scenario.net = random.enumValue(NetChoice);
     scenario.env = if (random.boolean()) .none else random.enumValue(EnvChoice);
@@ -437,6 +476,24 @@ fn random_cgroup(random: std.Random, scenario: *Scenario) void {
     if (calm and scenario.bus != .no_environment and random.uintLessThan(u8, 4) == 0) {
         scenario.inherited = random.enumValue(Inherited);
     }
+    aim_fault_at_knob(random, scenario);
+}
+
+/// A drawn fault lands on one of a hundred indexes, so the one or two knob steps of a plan are
+/// rarely hit: a third of the faults of a scenario with a knob are moved onto a knob's step.
+fn aim_fault_at_knob(random: std.Random, scenario: *Scenario) void {
+    if (scenario.fault_step == null) return;
+    if (scenario.knobs == .none) return;
+    if (random.uintLessThan(u8, 3) != 0) return;
+    const kind: plan_mod.Kind = switch (scenario.knobs) {
+        .none => unreachable, // Returned above: a scenario with no knob has no knob step.
+        .ulimit => .set_rlimit,
+        .sysctl => .write_sysctl,
+        .both => if (random.boolean()) .set_rlimit else .write_sysctl,
+    };
+    assert(scenario.knobs != .none);
+    scenario.fault_step = index_of(scenario, kind);
+    assert(kind_at(scenario, scenario.fault_step.?) == kind);
 }
 
 fn random_limit(random: std.Random, table: []const LimitText) ?LimitText {
@@ -495,7 +552,12 @@ fn prepare_project(sim: *HostSim) void {
 }
 
 fn plan_for(plan: *plan_mod.Plan, scenario: *const Scenario) void {
-    sim_run.sample_plan_mounts(
+    var sysctl_storage: [1]knobs.Sysctl = undefined;
+    const sysctls: []const knobs.Sysctl = if (scenario.knobs.has_sysctl()) blk: {
+        sysctl_storage[0] = scenario.sysctl();
+        break :blk &sysctl_storage;
+    } else &.{};
+    sim_run.sample_plan_knobs(
         plan,
         scenario.full,
         scenario.scoped(),
@@ -507,6 +569,8 @@ fn plan_for(plan: *plan_mod.Plan, scenario: *const Scenario) void {
             .writable => &sample_writable,
             else => &.{},
         },
+        scenario.rlimits(),
+        sysctls,
     );
 }
 
@@ -604,6 +668,11 @@ fn verdict_of(scenario: *const Scenario) Verdict {
                 child.?.refused.command_missing = err == error.NotFound;
             }
         }
+    }
+    if (scenario.sysctl_refused) {
+        const at = index_of(scenario, .write_sysctl);
+        const sooner = if (child) |event| at < event.refused.step.? else true;
+        if (sooner) child = refusal(.E0318, at, true);
     }
     if (scenario.command == .missing_path or scenario.command == .missing_bare) {
         const exec = index_of(scenario, .exec);
@@ -707,6 +776,8 @@ fn step_failure(scenario: *const Scenario, kind: plan_mod.Kind) ?codes.Code {
         .set_no_new_privs, .install_seccomp => return .E0208,
         .make_tmp_dir, .mount_tmp, .make_run_dir, .mount_run, .remount_readonly => return .E0209,
         .mount_overlay => return .E0425,
+        .set_rlimit => return .E0312,
+        .write_sysctl => return .E0318,
         // The steps that may fail: skipped with a note.
         .mount_pts, .make_sys_dir, .bind_sys, .remount_sys, .mount_sysfs => return null,
         .make_etc_dir, .create_etc_file, .stage_etc_file => return null,
@@ -845,7 +916,7 @@ fn preload(sim: *HostSim, scenario: *const Scenario) void {
     sim.world.add_node(sim_run.runs_path, .dir);
     const damaged = sim.world.write_file(sim_run.runs_path ++ "/damaged.zon", "garbage");
     assert(damaged == null);
-    const future_text = ".{\n    .version = 12,\n    .name = \"future\",\n    .started = 5,\n}\n";
+    const future_text = ".{\n    .version = 13,\n    .name = \"future\",\n    .started = 5,\n}\n";
     assert(sim.world.write_file(sim_run.runs_path ++ "/future.zon", future_text) == null);
     if (scenario.preloaded == .few_unreadable) return;
     for (0..constants.runs_max - 1) |number| {
@@ -940,6 +1011,7 @@ pub fn fuzz_run(seed: u64) void {
     sim.gid_value = scenario.gid;
     sim.world.command_exit = scenario.command_exit;
     sim.world.devpts_refused = scenario.devpts_refused;
+    sim.world.sysctl_refused = scenario.sysctl_refused;
     sim.world.disk_full = false;
     sim.world.helper_fails_with = scenario.helper_fails;
     sim.world.script = .{ 0, 0, 0, 0, 0, 0, 0, 0 };
@@ -1038,6 +1110,14 @@ fn command_line(scenario: *const Scenario, args: *Words) usize {
     push_limit(args, &count, "--memory", scenario.memory);
     push_limit(args, &count, "--pids", scenario.pids);
     push_limit(args, &count, "--cpus", scenario.cpus);
+    if (scenario.knobs.has_ulimit()) push_pair(args, &count, "--ulimit", "nofile=1024:4096");
+    if (scenario.knobs.has_sysctl()) {
+        const text = if (scenario.net == .host)
+            "kernel.shmmax=1048576"
+        else
+            "net.core.somaxconn=8192";
+        push_pair(args, &count, "--sysctl", text);
+    }
     if (scenario.image) {
         push(args, &count, image_argument());
     } else if (scenario.rootfs == .empty) {
@@ -1461,12 +1541,28 @@ fn check_refused(
 }
 
 /// The version 2 fields of a record: why the run ended, the limits, the scope, not detached.
+/// A record with a knob is version 12 and keeps it; one without is plain.
+fn check_record_knobs(scenario: *const Scenario, parsed: *const records.Parsed) void {
+    if (scenario.knobs == .none) {
+        assert(parsed.version == constants.record_version_plain);
+    } else {
+        assert(parsed.version == constants.record_version);
+    }
+    assert(std.meta.eql(parsed.rlimits, scenario.rlimits()));
+    assert(parsed.sysctls_count == @intFromBool(scenario.knobs.has_sysctl()));
+    if (scenario.knobs.has_sysctl()) {
+        const sysctl = parsed.sysctl_at(0);
+        assert(std.mem.eql(u8, sysctl.key, scenario.sysctl().key));
+        assert(std.mem.eql(u8, sysctl.value, scenario.sysctl().value));
+    }
+}
+
 fn check_record_v2(
     scenario: *const Scenario,
     verdict: *const Verdict,
     parsed: *const records.Parsed,
 ) void {
-    assert(parsed.version == constants.record_version_plain);
+    check_record_knobs(scenario, parsed);
     const reason: records.EndReason = switch (verdict.*) {
         .refused => .none,
         .started => |status| if (scenario.counts_as_oom())
@@ -1552,4 +1648,23 @@ fn check_record(sim: *const HostSim, scenario: *const Scenario, verdict: *const 
     check_record_v2(scenario, verdict, &parsed);
     assert(parsed.ids.? == if (scenario.full) records.IdsMode.full else records.IdsMode.single);
     assert(parsed.ended != null);
+}
+
+test "run fuzzer: aimed faults reach E0312 and E0318, and those seeds pass" {
+    var seen_rlimit: ?u64 = null;
+    var seen_sysctl: ?u64 = null;
+    var seed: u64 = 0;
+    while (seed < 4000) : (seed += 1) {
+        var prng = std.Random.Xoshiro256.init(seed);
+        const scenario = random_scenario(prng.random());
+        const verdict = verdict_of(&scenario);
+        if (verdict != .refused) continue;
+        if (verdict.refused.code == .E0312 and seen_rlimit == null) seen_rlimit = seed;
+        if (verdict.refused.code == .E0318 and seen_sysctl == null) seen_sysctl = seed;
+        if (seen_rlimit != null and seen_sysctl != null) break;
+    }
+    try std.testing.expect(seen_rlimit != null);
+    try std.testing.expect(seen_sysctl != null);
+    fuzz_run(seen_rlimit.?);
+    fuzz_run(seen_sysctl.?);
 }

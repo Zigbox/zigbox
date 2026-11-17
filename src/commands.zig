@@ -13,6 +13,7 @@ const diagnose = @import("runtime/diagnose.zig");
 const lifecycle = @import("runtime/lifecycle.zig");
 const records = @import("runtime/records.zig");
 const spec_mod = @import("runtime/spec.zig");
+const knobs = @import("runtime/knobs.zig");
 const run = @import("runtime/run.zig");
 const schemas = @import("schemas.zig");
 const Diag = @import("diag/diag.zig").Diag;
@@ -176,7 +177,7 @@ fn ps_json(host: Host, entries: []const lifecycle.Entry, all: bool, diag: *Diag)
     assert(entries.len <= constants.runs_max + constants.scopes_listed_max);
     assert(diag.code == null);
     try write(host, "{\"schema\":\"zbx.ps/1\",\"containers\":[", diag);
-    var buffer: [constants.output_bytes_max]u8 = undefined;
+    var buffer: [constants.output_bytes_max + knobs_json_bytes_max]u8 = undefined;
     var first = true;
     for (entries) |*entry| {
         if (!shown(entry, all)) continue;
@@ -245,13 +246,8 @@ fn entry_json(writer: *std.Io.Writer, entry: *const lifecycle.Entry) std.Io.Writ
         try json_string(writer, pair[1]);
         try writer.writeByte('}');
     }
-    try writer.writeAll("],\"limits\":{\"memory_bytes\":");
-    try optional_number(writer, record.limits.memory_bytes);
-    try writer.writeAll(",\"pids\":");
-    try optional_number(writer, record.limits.pids);
-    try writer.writeAll(",\"cpu_millis\":");
-    try optional_number(writer, record.limits.cpu_millis);
-    try writer.writeAll("}");
+    try writer.writeAll("]");
+    try limits_json(writer, &record.limits);
     try network_json(writer, record);
     if (record.listen) |listen| {
         var storage: [spec_mod.listen_text_bytes_max]u8 = undefined;
@@ -261,8 +257,94 @@ fn entry_json(writer: *std.Io.Writer, entry: *const lifecycle.Entry) std.Io.Writ
         const format = ",\"lazy\":{{\"local_percent\":{d},\"fetched_bytes\":{d},\"errors\":{d}}}";
         try writer.print(format, .{ lazy.local_percent, lazy.fetched_bytes(), lazy.errors });
     }
+    try knobs_record_json(writer, record);
     try devices_json(writer, record);
     try writer.writeAll("}");
+}
+
+/// `,"limits":{...}`: each cgroup limit, null when unset, and `shm_bytes` only when set (M2b).
+fn limits_json(writer: *std.Io.Writer, limits: *const spec_mod.Limits) std.Io.Writer.Error!void {
+    assert(writer.buffer.len > 0);
+    if (limits.shm_bytes) |shm_bytes| assert(shm_bytes > 0);
+    try writer.writeAll(",\"limits\":{\"memory_bytes\":");
+    try optional_number(writer, limits.memory_bytes);
+    try writer.writeAll(",\"pids\":");
+    try optional_number(writer, limits.pids);
+    try writer.writeAll(",\"cpu_millis\":");
+    try optional_number(writer, limits.cpu_millis);
+    if (limits.shm_bytes) |shm_bytes| try writer.print(",\"shm_bytes\":{d}", .{shm_bytes});
+    try writer.writeAll("}");
+}
+
+/// The record's knobs, as `knobs_json` writes them.
+fn knobs_record_json(
+    writer: *std.Io.Writer,
+    record: *const records.Parsed,
+) std.Io.Writer.Error!void {
+    assert(record.sysctls_count <= constants.sysctls_max);
+    assert(record.rlimits.problem() == null);
+    var sysctls: [constants.sysctls_max]spec_mod.Sysctl = undefined;
+    for (sysctls[0..record.sysctls_count], 0..) |*sysctl, index| {
+        sysctl.* = record.sysctl_at(@intCast(index));
+    }
+    try knobs_json(writer, &record.rlimits, sysctls[0..record.sysctls_count]);
+}
+
+/// The longest `knobs_json`: four limits of two 20-digit numbers, and every sysctl with the longest
+/// key and a value of printable ASCII, which escapes to at most twice its length.
+pub const knobs_json_bytes_max: u32 = 16 + knobs.resources_count * 80 + 16 +
+    constants.sysctls_max * (24 + knobs.key_bytes_max + 2 * constants.sysctl_value_bytes_max);
+
+/// The members M2b added to a container, each only when set:
+/// `"ulimits":{"nofile":{"soft":4096,"hard":"unlimited"}}` (each `--ulimit`, `"unlimited"` for no
+/// bound) and `"sysctls":[{"key":"net.core.somaxconn","value":"8192"}]` (each `--sysctl`, in the
+/// order given). Shared by `ps` and `run`.
+pub fn knobs_json(
+    writer: *std.Io.Writer,
+    rlimits: *const spec_mod.Rlimits,
+    sysctls: []const spec_mod.Sysctl,
+) std.Io.Writer.Error!void {
+    assert(rlimits.problem() == null);
+    assert(sysctls.len <= constants.sysctls_max);
+    const start = writer.end;
+    if (rlimits.count() > 0) {
+        try writer.writeAll(",\"ulimits\":{");
+        var first = true;
+        for (std.enums.values(knobs.Resource)) |resource| {
+            const limit = rlimits.get(resource) orelse continue;
+            if (!first) try writer.writeByte(',');
+            first = false;
+            try writer.print("\"{s}\":{{\"soft\":", .{@tagName(resource)});
+            try limit_json(writer, limit.soft);
+            try writer.writeAll(",\"hard\":");
+            try limit_json(writer, limit.hard);
+            try writer.writeByte('}');
+        }
+        try writer.writeByte('}');
+    }
+    if (sysctls.len > 0) {
+        try writer.writeAll(",\"sysctls\":[");
+        for (sysctls, 0..) |sysctl, index| {
+            if (index > 0) try writer.writeByte(',');
+            try writer.writeAll("{\"key\":");
+            try json_string(writer, sysctl.key);
+            try writer.writeAll(",\"value\":");
+            try json_string(writer, sysctl.value);
+            try writer.writeByte('}');
+        }
+        try writer.writeByte(']');
+    }
+    assert(writer.end - start <= knobs_json_bytes_max);
+}
+
+fn limit_json(writer: *std.Io.Writer, value: u64) std.Io.Writer.Error!void {
+    assert(writer.buffer.len > 0);
+    if (value == knobs.unlimited) {
+        try writer.writeAll("\"unlimited\"");
+    } else {
+        assert(value < knobs.unlimited);
+        try writer.print("{d}", .{value});
+    }
 }
 
 /// `"devices":[{"asked":"/dev/dri/renderD128","path":"/dev/dri/renderD128"}]` for a run with
@@ -455,4 +537,41 @@ fn report_stop(
         writer.writeByte('\n') catch unreachable; // Same.
     }
     try write(host, writer.buffered(), diag);
+}
+
+const testing = std.testing;
+
+test "knobs_json: each knob only when set, unlimited as a word, values escaped, the worst fits" {
+    // Goal: `ps` and `run` say the knobs as zbx.ps/1 and zbx.run/1 describe them, and the
+    // longest list fits `knobs_json_bytes_max` (REVIEW.md: every bound is tested at the bound).
+    // Method: none set, then two of each, then every limit and sysctl at its widest.
+    var buffer: [knobs_json_bytes_max]u8 = undefined;
+    var writer = std.Io.Writer.fixed(&buffer);
+    try knobs_json(&writer, &.{}, &.{});
+    try testing.expectEqualStrings("", writer.buffered());
+    var rlimits: spec_mod.Rlimits = .{};
+    rlimits.set(.stack, .{ .soft = 8 << 20, .hard = knobs.unlimited });
+    rlimits.set(.nofile, .{ .soft = 4096, .hard = 8192 });
+    const sysctls = [_]spec_mod.Sysctl{
+        .{ .key = "net.core.somaxconn", .value = "8192" },
+        .{ .key = "kernel.sem", .value = "1 \"2\" 3\\" },
+    };
+    try knobs_json(&writer, &rlimits, &sysctls);
+    const expected = ",\"ulimits\":{\"nofile\":{\"soft\":4096,\"hard\":8192}," ++
+        "\"stack\":{\"soft\":8388608,\"hard\":\"unlimited\"}}," ++
+        "\"sysctls\":[{\"key\":\"net.core.somaxconn\",\"value\":\"8192\"}," ++
+        "{\"key\":\"kernel.sem\",\"value\":\"1 \\\"2\\\" 3\\\\\"}]";
+    try testing.expectEqualStrings(expected, writer.buffered());
+    const most = knobs.unlimited - 1;
+    for (std.enums.values(knobs.Resource)) |resource| {
+        rlimits.set(resource, .{ .soft = most, .hard = most });
+    }
+    const quotes: [constants.sysctl_value_bytes_max]u8 = @splat('"');
+    // The longest key in every entry: an upper bound on any list of real keys.
+    const long_key: [knobs.key_bytes_max]u8 = @splat('k');
+    const longest: spec_mod.Sysctl = .{ .key = &long_key, .value = &quotes };
+    const worst: [constants.sysctls_max]spec_mod.Sysctl = @splat(longest);
+    writer = std.Io.Writer.fixed(&buffer);
+    try knobs_json(&writer, &rlimits, &worst);
+    try testing.expect(writer.end <= knobs_json_bytes_max);
 }

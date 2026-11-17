@@ -1,0 +1,11 @@
+error[ZBX-E0311]: --ulimit is above your own hard limit
+  while  checking --ulimit memlock
+  cause  --ulimit memlock asks for a hard limit of 67108864, above your own,
+         8388608; a rootless run can't raise it
+  asked  67108864
+  hard   8388608
+  unit   LimitMEMLOCK=67108864
+  fix    raise it for logins (then log in again):    echo "$(id -un) hard memlock 65536" | sudo tee -a /etc/security/limits.conf
+         or for the user manager, under [Service]:   sudo systemctl edit user@1000.service
+  more   zbx explain E0311
+  docs   https://zigbox.github.io/zigbox/errors/E0311.html

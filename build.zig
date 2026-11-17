@@ -300,6 +300,7 @@ const roots = [_][]const u8{
     "src/testing/vm/main_m10.zig",
     "src/testing/vm/main_s2_lazy.zig",
     "src/testing/vm/main_s2_probe.zig",
+    "src/testing/vm/main_m2b_probe.zig",
     "src/testing/vm/main_c4.zig",
     "src/testing/vm/main_z7.zig",
     "src/testing/vm/main_m8_packages.zig",
@@ -338,6 +339,7 @@ const linux_only = [_][]const u8{
     "src/testing/vm/main_m10.zig",
     "src/testing/vm/main_s2_lazy.zig",
     "src/testing/vm/main_s2_probe.zig",
+    "src/testing/vm/main_m2b_probe.zig",
     "src/testing/vm/main_c4.zig",
     "src/testing/vm/main_z7.zig",
     "src/testing/vm/main_m8_packages.zig",
@@ -616,6 +618,11 @@ const demos = [_]struct { step: []const u8, root: []const u8, help: []const u8 }
         .step = "demo-s2-probe",
         .root = "src/testing/vm/main_s2_probe.zig",
         .help = "Run the S2 probe: a no-libc FUSE server under a userxattr overlay, as a user",
+    },
+    .{
+        .step = "demo-m2b-probe",
+        .root = "src/testing/vm/main_m2b_probe.zig",
+        .help = "Run the M2b probe: NUMA calls, sysctl namespaces, runtimes under a scope",
     },
     .{
         .step = "demo-c4",

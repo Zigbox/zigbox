@@ -90,6 +90,11 @@ fn guest_command(init: std.process.Init.Minimal) ?u8 {
 }
 
 test {
+    // The run fuzzer's own test: its aimed faults reach the knob steps' codes.
+    _ = @import("fuzz_run.zig");
+}
+
+test {
     // Pull every module's tests into this test binary.
     _ = @import("constants.zig");
     _ = @import("host.zig");
@@ -269,6 +274,7 @@ test {
     // and the runs that use it, in the simulator.
     _ = @import("runtime/pasta.zig");
     _ = @import("runtime/net_tests.zig");
+    _ = @import("runtime/knobs_tests.zig");
     _ = @import("runtime/listen_tests.zig");
     _ = @import("runtime/hosts_file_tests.zig");
     // CI path selection (`.github/ci-changes.sh`).

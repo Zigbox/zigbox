@@ -8,14 +8,17 @@
 // profile gates calls behind (policy/capabilities.zon keeps twelve). So what is missing is what
 // those capabilities would have opened: mount and umount, unshare and setns, pivot_root, reboot,
 // kexec, module loading, bpf, perf_event_open, keyctl, userfaultfd, process_vm_readv, the
-// clock setters, swapon and the NUMA calls that change a policy. Differences from Docker, all
+// clock setters, swapon and the NUMA calls that move pages. Differences from Docker, all
 // deliberate:
 //   - 64-bit syscalls only: the 32-bit variants (socketcall, ipc, *64 and *32 names) have no
 //     entry because the filter refuses the 32-bit architecture altogether.
 //   - io_uring is absent, as in current Docker profiles.
 //   - mknod is listed, as in Docker, and the kernel refuses devices without CAP_MKNOD.
-//   - get_mempolicy is allowed: Docker allows it only with CAP_SYS_NICE, but it only reads the
-//     process's own NUMA policy, and mongod asks for it at startup.
+//   - get_mempolicy, set_mempolicy, set_mempolicy_home_node and mbind are allowed: Docker allows
+//     them only with CAP_SYS_NICE, but they read or set the NUMA policy of the process's own
+//     memory, and the kernel still demands CAP_SYS_NICE for the one privileged flag
+//     (MPOL_MF_MOVE_ALL). move_pages and migrate_pages stay out (M2b, measured in
+//     docs/decisions/2026-11-16-m2b-numa-syscalls.md).
 //
 // The list grows from real failures: the weekly top-20 run (docs/demos/m4.md) runs the twenty
 // most-pulled images and names every syscall an image was refused. What it found so far is
@@ -52,11 +55,12 @@
         },
         .{
             .name = "memory",
-            .why = "Address space management: what every program, and every libc's allocator, does. get_mempolicy only reads the NUMA policy of the process's own memory, and mongod and some allocators ask at startup (found by the top-20 run); set_mempolicy, mbind and the other calls that change it stay out, as in Docker, for want of CAP_SYS_NICE.",
+            .why = "Address space management: what every program, and every libc's allocator, does. The NUMA policy calls act on the process's own memory: get_mempolicy reads it (mongod and some allocators ask at startup, found by the top-20 run); set_mempolicy, set_mempolicy_home_node and mbind set it, which MySQL and MariaDB do with innodb_numa_interleave (else mbind: Operation not permitted), numactl --interleave does for MongoDB, and ClickHouse does at startup. Docker allows these only with CAP_SYS_NICE; zbx allows them without, because the kernel still demands CAP_SYS_NICE for the one flag that touches other processes' pages (MPOL_MF_MOVE_ALL), which the container does not hold. move_pages and migrate_pages stay out: they can act on another process's pages, Docker and containerd refuse them too, and no measured server calls them.",
             .syscalls = .{
-                "brk",          "mmap",       "mprotect",  "munmap",        "mremap",    "madvise",          "mincore",       "mlock",
-                "mlock2",       "munlock",    "mlockall",  "munlockall",    "msync",     "remap_file_pages", "membarrier",    "memfd_create",
-                "memfd_secret", "pkey_alloc", "pkey_free", "pkey_mprotect", "readahead", "modify_ldt",       "get_mempolicy",
+                "brk",                     "mmap",       "mprotect",  "munmap",        "mremap",    "madvise",          "mincore",       "mlock",
+                "mlock2",                  "munlock",    "mlockall",  "munlockall",    "msync",     "remap_file_pages", "membarrier",    "memfd_create",
+                "memfd_secret",            "pkey_alloc", "pkey_free", "pkey_mprotect", "readahead", "modify_ldt",       "get_mempolicy", "set_mempolicy",
+                "set_mempolicy_home_node", "mbind",
             },
         },
         .{

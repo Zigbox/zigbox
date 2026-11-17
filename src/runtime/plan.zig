@@ -18,6 +18,7 @@ const assert = std.debug.assert;
 const constants = @import("../constants.zig");
 const netfiles = @import("netfiles.zig");
 const spec = @import("spec.zig");
+const knobs = @import("knobs.zig");
 
 /// The environment a run passes: the image's, `-e`s and the CDI devices' variables, and slack.
 const envp_count_max = constants.environment_count_max + constants.env_vars_count_max +
@@ -248,6 +249,14 @@ pub const Kind = enum {
     detach_old_root,
     enter_new_root,
     seal_descriptors,
+    /// The sysctls of `--sysctl` (M2b), one step each (`Step.index` is its place in the list):
+    /// the value written to `/proc/sys/<key>` beneath the container's own /proc, once it is the
+    /// root. Before the capabilities are restricted: a namespaced sysctl needs CAP_NET_ADMIN or
+    /// CAP_SYS_ADMIN over the namespace's user namespace, which the child holds until then.
+    write_sysctl,
+    /// The resource limits of `--ulimit` (M2b), one step per resource set (`Step.index` is the
+    /// `knobs.Resource`): after the mounts, before the capabilities and the filter.
+    set_rlimit,
     /// The hardening, in the order the kernel needs it: capabilities first (dropping the bounding
     /// set needs CAP_SETPCAP), then `no_new_privs` (a filter needs it once CAP_SYS_ADMIN is
     /// gone), and the filter last, so that it is the last thing the child does but `execve`.
@@ -450,6 +459,13 @@ pub const Input = struct {
     hostname: ?[]const u8 = null,
     /// The file mode creation mask the command starts with; null leaves the caller's.
     umask: ?u16 = null,
+    /// The size of the container's `/dev/shm` (`--shm-size`), at least `shm_bytes_min`.
+    shm_bytes: u64 = constants.shm_bytes_default,
+    /// The resource limits set in the child (`--ulimit`); a null one is inherited.
+    rlimits: knobs.Rlimits = .{},
+    /// The sysctls written in the child (`--sysctl`), each a key of the allowlist; `net` keys only
+    /// with a network namespace of the container's own (`knobs.list_problem` passed).
+    sysctls: []const knobs.Sysctl = &.{},
     /// The port of the TCP listener on the container's loopback that is handed to the caller
     /// (`--listen`, M8b); only with `network` `none`.
     listen: ?u16 = null,
@@ -527,6 +543,9 @@ pub const Overlay = struct {
 
 const empty_text: Text = .{ .offset = 0, .len = 0 };
 
+/// The longest `/dev/shm` mount data: "mode=1777,size=" and a u64 in decimal.
+pub const shm_data_bytes_max: u32 = constants.shm_data_bytes_max;
+
 pub const Plan = struct {
     steps: [constants.plan_steps_max]Step,
     count: u32,
@@ -555,6 +574,13 @@ pub const Plan = struct {
     scope_limits: spec.Limits,
     /// What the container can reach, and the text of the three generated /etc files.
     network: spec.Network,
+    /// The `/dev/shm` tmpfs's mount data: its mode and its size in bytes.
+    shm_data: Text,
+    /// The resource limits the child sets, one `set_rlimit` step each; a null one is inherited.
+    rlimits: knobs.Rlimits,
+    /// The sysctls the child writes, one `write_sysctl` step each (path in `target`, value in
+    /// `source`).
+    sysctl_count: u32,
     etc_texts: [3]Text,
     /// A plan with `--net user` starts pasta: its path, its log (empty: none) and the forwards.
     has_pasta: bool,
@@ -636,6 +662,12 @@ pub const Plan = struct {
         plan.has_user = if (input.user) |user| user.uid != 0 or user.gid != 0 else false;
         plan.user_uid = if (input.user) |user| user.uid else 0;
         plan.user_gid = if (input.user) |user| user.gid else 0;
+        plan.rlimits = input.rlimits;
+        assert(plan.rlimits.problem() == null);
+        plan.sysctl_count = @intCast(input.sysctls.len);
+        assert(plan.sysctl_count <= constants.sysctls_max);
+        assert(knobs.list_problem(input.sysctls, input.network.isolated()) == null);
+        assert(input.shm_bytes >= constants.shm_bytes_min);
         plan.paths_len = 0;
         plan.strings_len = 0;
         plan.candidates_count = 0;
@@ -645,6 +677,7 @@ pub const Plan = struct {
         plan.name = plan.add_text(&.{input.name});
         plan.hostname_ref = plan.add_text(&.{input.hostname_text()});
         plan.workdir = plan.add_text(&.{input.workdir});
+        plan.shm_data = plan.add_shm_data(input.shm_bytes);
         plan.build_etc_texts(input);
         plan.build_scope(input);
         plan.build_pasta(input);
@@ -724,7 +757,7 @@ pub const Plan = struct {
         const given_hosts: u32 = if (plan.hosts_file) 2 else 0; // The hosts file's stage/unstage.
         const user_devices = user_device_steps_count * plan.device_count;
         return plan.cdi_steps() + base + scope + read_only + extras + pasta + state +
-            plan.mount_steps + listener + user_devices + lazy - given_hosts;
+            plan.mount_steps + listener + user_devices + lazy + plan.knob_steps() - given_hosts;
     }
 
     /// The steps the CDI devices add: the nodes (one), the mounts (two), ldconfig (one).
@@ -1095,6 +1128,7 @@ pub const Plan = struct {
         plan.push_cdi_moves();
         if (plan.has_workdir) plan.push(.enter_workdir, plan.workdir, empty_text, 0);
         plan.push(.seal_descriptors, empty_text, empty_text, 0);
+        plan.push_knobs(input.sysctls);
         plan.push(.restrict_capabilities, empty_text, empty_text, 0);
         plan.push(.clear_ambient, empty_text, empty_text, 0);
         if (plan.has_user) plan.push(.set_user, empty_text, empty_text, 0);
@@ -1106,6 +1140,41 @@ pub const Plan = struct {
         assert(plan.steps[plan.count - 1].kind == .exec);
         // The parent's tail remains.
         assert(plan.count == plan.steps_expected() - plan.tail_count());
+    }
+
+    /// The sysctls, then the resource limits: after the new root is entered (the sysctls are
+    /// written beneath the container's own /proc) and before the capabilities are restricted.
+    fn push_knobs(plan: *Plan, sysctls: []const knobs.Sysctl) void {
+        assert(sysctls.len == plan.sysctl_count);
+        const start = plan.count;
+        for (sysctls, 0..) |sysctl, index| {
+            var buffer: [knobs.proc_path_bytes_max]u8 = undefined;
+            const path = plan.add_text(&.{knobs.proc_path(sysctl.key, &buffer)});
+            plan.push(.write_sysctl, path, plan.add_text(&.{sysctl.value}), @intCast(index));
+        }
+        for (std.enums.values(knobs.Resource)) |resource| {
+            if (plan.rlimits.get(resource) == null) continue;
+            plan.push(.set_rlimit, empty_text, empty_text, @backingInt(resource));
+        }
+        assert(plan.count == start + plan.knob_steps());
+    }
+
+    /// The steps the knobs add: one per sysctl and one per resource limit set.
+    pub fn knob_steps(plan: *const Plan) u32 {
+        assert(plan.sysctl_count <= constants.sysctls_max);
+        return plan.sysctl_count + plan.rlimits.count();
+    }
+
+    /// The `/dev/shm` mount data: mode 1777 and the size in bytes, which tmpfs rounds up to whole
+    /// pages.
+    fn add_shm_data(plan: *Plan, shm_bytes: u64) Text {
+        assert(shm_bytes >= constants.shm_bytes_min);
+        var buffer: [shm_data_bytes_max]u8 = undefined;
+        const format = "mode=1777,size={d}";
+        // The buffer holds the fixed text and the longest u64 in decimal, so it cannot be short.
+        const data = std.fmt.bufPrint(&buffer, format, .{shm_bytes}) catch unreachable;
+        assert(data.len > "mode=1777,size=".len);
+        return plan.add_text(&.{data});
     }
 
     /// The CDI nodes bound below the rootfs's /dev, after the user's devices.
@@ -1317,7 +1386,7 @@ pub const Plan = struct {
         const shm = plan.add_text(&.{ rootfs, "/dev/shm" });
         const pts = plan.add_text(&.{ rootfs, "/dev/pts" });
         plan.push(.make_shm_dir, shm, empty_text, 0);
-        plan.push(.mount_shm, shm, empty_text, 0);
+        plan.push(.mount_shm, shm, plan.shm_data, 0);
         plan.push(.make_pts_dir, pts, empty_text, 0);
         plan.push(.mount_pts, pts, empty_text, 0);
     }
@@ -1683,6 +1752,8 @@ pub fn describe(step: *const Step, buffer: []u8) []const u8 {
         .detach_old_root => "unmounting the old root",
         .enter_new_root => "changing to the new root",
         .seal_descriptors => "closing the descriptors the command must not inherit",
+        .write_sysctl => "writing a --sysctl beneath the container's /proc/sys",
+        .set_rlimit => "setting a --ulimit resource limit",
         .exec => "starting the command",
         .create_device_file => "creating the mount point /dev/",
         .bind_device => "bind-mounting /dev/",
@@ -2345,4 +2416,49 @@ test "a tree's mount points are in the net layer, a directory's in the rootfs" {
     const bind_at = index_of(&plan, .bind_rootfs).?;
     try testing.expectEqual(Kind.make_etc_dir, plan.steps[bind_at + 1].kind);
     try testing.expectEqualStrings("/srv/alpine/etc", plan.text(plan.steps[bind_at + 1].target));
+}
+
+test "the knobs add a step per sysctl and per limit, after /proc and before the capabilities" {
+    // Goal: M2b's plan steps (brief items 1, 2 and 4). Method: a plan without knobs has none and
+    // mounts /dev/shm at the default size; one with two sysctls and two limits has four steps
+    // more, each in its place, and the size asked for.
+    var plan: Plan = undefined;
+    var input = test_input(&.{"sh"});
+    plan.build(&input);
+    const plain = plan.count;
+    try testing.expect(index_of(&plan, .write_sysctl) == null);
+    try testing.expect(index_of(&plan, .set_rlimit) == null);
+    const shm = plan.steps[index_of(&plan, .mount_shm).?];
+    try testing.expectEqualStrings("mode=1777,size=67108864", plan.text(shm.source));
+    const sysctls = [_]knobs.Sysctl{
+        .{ .key = "net.core.somaxconn", .value = "8192" },
+        .{ .key = "kernel.shmmax", .value = "68719476736" },
+    };
+    input.network = .none;
+    input.sysctls = &sysctls;
+    input.shm_bytes = 256 << 20;
+    input.rlimits.nofile = .{ .soft = 4096, .hard = 8192 };
+    input.rlimits.stack = .{ .soft = knobs.unlimited, .hard = knobs.unlimited };
+    plan.build(&input);
+    try testing.expectEqual(plain + 4, plan.count);
+    const first = index_of(&plan, .write_sysctl).?;
+    try testing.expect(index_of(&plan, .mount_proc).? < first);
+    try testing.expect(index_of(&plan, .enter_new_root).? < first);
+    try testing.expectEqualStrings(
+        "/proc/sys/net/core/somaxconn",
+        plan.text(plan.steps[first].target),
+    );
+    try testing.expectEqualStrings("8192", plan.text(plan.steps[first].source));
+    const second = plan.steps[first + 1];
+    try testing.expectEqualStrings("/proc/sys/kernel/shmmax", plan.text(second.target));
+    try testing.expectEqual(@as(u8, 1), plan.steps[first + 1].index);
+    // The limits follow, in the order of `knobs.Resource`, then the capabilities are dropped.
+    try testing.expectEqual(Kind.set_rlimit, plan.steps[first + 2].kind);
+    try testing.expectEqual(@backingInt(knobs.Resource.nofile), plan.steps[first + 2].index);
+    try testing.expectEqual(@backingInt(knobs.Resource.stack), plan.steps[first + 3].index);
+    try testing.expectEqual(Kind.restrict_capabilities, plan.steps[first + 4].kind);
+    for (plan.steps[first .. first + 4]) |step| try testing.expect(!step.tolerant);
+    const sized = plan.steps[index_of(&plan, .mount_shm).?];
+    try testing.expectEqualStrings("mode=1777,size=268435456", plan.text(sized.source));
+    plan.check();
 }

@@ -14,6 +14,11 @@ const mounts_mod = @import("mounts.zig");
 const cdi_mod = @import("cdi.zig");
 const devices_mod = @import("devices.zig");
 const constants = @import("../constants.zig");
+pub const knobs = @import("knobs.zig");
+
+pub const Rlimit = knobs.Rlimit;
+pub const Rlimits = knobs.Rlimits;
+pub const Sysctl = knobs.Sysctl;
 
 /// A key and a value kept in the run record, for whoever started the container to find it by.
 pub const Label = struct {
@@ -29,7 +34,11 @@ pub const Limits = struct {
     pids: ?u32 = null,
     /// Thousandths of a CPU: 500 is half of one.
     cpu_millis: ?u32 = null,
+    /// The size of the container's `/dev/shm`. Null: `shm_bytes_default`. Not a cgroup limit
+    /// (`any` does not count it): its pages are charged to `memory_bytes` when that is set.
+    shm_bytes: ?u64 = null,
 
+    /// Whether a cgroup limit is set (and so the run needs a scope).
     pub fn any(limits: Limits) bool {
         const result = limits.memory_bytes != null or limits.pids != null or
             limits.cpu_millis != null;
@@ -401,6 +410,11 @@ pub const Spec = struct {
     /// The file mode creation mask the command starts with (M7: a build step's is 022, so what
     /// it writes does not depend on the caller's). Null: the caller's, inherited.
     umask: ?u16 = null,
+    /// Resource limits set in the container (`--ulimit`). A null one is inherited, as before.
+    rlimits: Rlimits = .{},
+    /// Sysctls of the container's own namespaces (`--sysctl`), at most `sysctls_max`, each a key
+    /// of `policy/sysctls.zon`; `net.*` keys need a network namespace of the container's own.
+    sysctls: []const Sysctl = &.{},
 };
 
 /// Null if `path` can be a working directory: absolute, no NUL, no ".." part, and short.
@@ -625,6 +639,12 @@ test "env_names_problem: a repeat, a bad name and one past the count" {
 
 const testing = std.testing;
 const repeat = @import("../test_util.zig").repeat;
+
+test {
+    _ = @import("knobs.zig");
+    _ = @import("knobs_check.zig");
+    _ = @import("knobs_diagnose.zig");
+}
 
 test "name_problem accepts hostname labels and refuses everything else, at the boundaries" {
     // Goal: the exact set of valid names. Method: the longest and shortest valid names, one byte

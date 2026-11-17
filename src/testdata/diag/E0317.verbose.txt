@@ -1,0 +1,8 @@
+error[ZBX-E0317]: a --sysctl net.* key with --net host
+  while  reading --sysctl
+  cause  with --net host the container shares the host's network namespace, so
+         net.core.somaxconn would change the host
+  sysctl net.core.somaxconn
+  fix    drop --net host, so the container has a network of its own
+  more   zbx explain E0317
+  docs   https://zigbox.github.io/zigbox/errors/E0317.html

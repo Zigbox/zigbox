@@ -1,0 +1,5 @@
+error[ZBX-E0313]: a --shm-size is not valid
+  cause  '256q' is not a size: use digits and k, m or g, as in 256m
+  fix    a valid size looks like this:   zbx run --rootfs ./alpine --shm-size 256m -- /bin/sh
+  more   zbx explain E0313 · rerun with --verbose for the full cause chain
+  docs   https://zigbox.github.io/zigbox/errors/E0313.html

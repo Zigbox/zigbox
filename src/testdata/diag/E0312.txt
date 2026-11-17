@@ -1,0 +1,7 @@
+error[ZBX-E0312]: can't check or set a --ulimit
+  cause  the limit passed zbx's check against your own, so a security policy or
+         a change to your limits since is the usual reason
+  fix    check your limits:             ulimit -a -H
+         check what this host allows:   zbx doctor
+  more   zbx explain E0312 · rerun with --verbose for the full cause chain
+  docs   https://zigbox.github.io/zigbox/errors/E0312.html

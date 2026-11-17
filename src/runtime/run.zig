@@ -47,6 +47,7 @@ const Diag = @import("../diag/diag.zig").Diag;
 const codes = @import("../diag/codes.zig");
 const render = @import("../diag/render.zig");
 const diagnose = @import("diagnose.zig");
+const knobs_check = @import("knobs_check.zig");
 const doctor = @import("../doctor.zig");
 const ids = @import("ids.zig");
 const logfile = @import("logfile.zig");
@@ -291,6 +292,10 @@ pub const Handle = struct {
     notes_count: u32,
     /// The limits the run was started with, for the exit report and the record.
     limits: spec_mod.Limits,
+    /// The workload knobs (`--ulimit`, `--sysctl`; they point into the `Spec`), for the exit
+    /// report and the record. `--shm-size` is `limits.shm_bytes`.
+    rlimits: spec_mod.Rlimits,
+    sysctls: []const spec_mod.Sysctl,
     /// What the container could reach, for the exit report.
     network: spec_mod.Network,
     /// The host's ports forwarded to the container's (`--publish`), for the exit report.
@@ -418,6 +423,8 @@ pub fn init_handle(
     handle.record_warned = false;
     handle.notes_count = 0;
     handle.limits = container.limits;
+    handle.rlimits = container.rlimits;
+    handle.sysctls = container.sysctls;
     handle.network = container.network;
     handle.publish_count = 0;
     handle.listen = container.listen;
@@ -461,6 +468,7 @@ pub fn start(
     try check_command(container, diag);
     try check_root(host, container, options, handle, diag);
     try check_limits(container.limits, diag);
+    try check_knobs(host, container, diag);
     try check_listen(container, diag);
     try check_hosts_file(host, container, diag);
     try check_network(host, container, handle, diag);
@@ -731,6 +739,9 @@ fn build_plan(
         .keep_groups = handle.effective.len > 0,
         .hostname = container.hostname,
         .umask = container.umask,
+        .shm_bytes = container.limits.shm_bytes orelse constants.shm_bytes_default,
+        .rlimits = container.rlimits,
+        .sysctls = container.sysctls,
     };
     handle.plan.build(&input);
     assert(handle.plan.count == handle.plan.steps_expected());
@@ -1224,6 +1235,20 @@ fn check_limits(limits: spec_mod.Limits, diag: *Diag) Error!void {
     return error.StartFailed;
 }
 
+/// The workload knobs (`--ulimit`, `--shm-size`, `--sysctl`), against the caller's own limits,
+/// the host's memory and the run's network.
+fn check_knobs(host: Host, container: *const Spec, diag: *Diag) Error!void {
+    assert(diag.code == null);
+    assert(container.sysctls.len <= std.math.maxInt(u32));
+    knobs_check.check(host, .{
+        .rlimits = container.rlimits,
+        .sysctls = container.sysctls,
+        .shm_bytes = container.limits.shm_bytes,
+        .memory_bytes = container.limits.memory_bytes,
+        .isolated = container.network.isolated(),
+    }, diag) catch return error.StartFailed;
+}
+
 /// Decides whether this run has a scope. It has one if the user's systemd manager answers; if
 /// it does not, a run with a limit is refused (a limit nobody enforces is worse than none) and
 /// a run without goes on, warning once, as M1 did.
@@ -1652,6 +1677,8 @@ fn save_record(handle: *Handle, exit: records.Exit, ended: ?u64, why: ?*const Di
         .user = handle.user,
         .binding = handle.binding,
         .lazy = if (handle.lazy) |*lazy| lazy.record_now() else null,
+        .rlimits = handle.rlimits,
+        .sysctls = handle.sysctls,
         .diagnostic = if (why) |found| diagnostic_json(found, &json) else "",
     };
     records.save(handle.host, &dir, &view) catch |err| {

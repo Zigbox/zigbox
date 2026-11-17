@@ -7,6 +7,7 @@ const assert = std.debug.assert;
 const linux = std.os.linux;
 const bpf = @import("runtime/bpf.zig");
 const capabilities = @import("runtime/capabilities.zig");
+const knobs = @import("runtime/knobs.zig");
 const constants = @import("constants.zig");
 const host = @import("host.zig");
 const host_real_fs = @import("host_real_fs.zig");
@@ -140,6 +141,9 @@ pub const HostReal = struct {
         .clear_ambient = clear_ambient,
         .no_new_privs = no_new_privs,
         .set_user = set_user,
+        .get_rlimit = get_rlimit,
+        .set_rlimit = set_rlimit,
+        .write_sysctl = write_sysctl,
         .install_seccomp = install_seccomp,
         .exec = exec,
         .gid = gid,
@@ -224,7 +228,7 @@ pub const HostReal = struct {
         // Descriptor 0 is standard input (`--password-stdin`), which no open_read produced.
         if (handle != 0) assert(self.opened_now() > 0);
         assert(buffer.len > 0);
-        assert(buffer.len <= constants.file_bytes_max);
+        assert(buffer.len <= constants.record_file_bytes_max); // A run record is the largest read.
         const descriptor: i32 = @intCast(handle);
         const result = linux.read(descriptor, buffer.ptr, buffer.len);
         try check(result);
@@ -598,6 +602,15 @@ pub const HostReal = struct {
                 linux.MS.NOSUID | linux.MS.NODEV | linux.MS.NOEXEC,
                 @intFromPtr(bind_source.?), // The mount data; `Host.mount` asserted it is set.
             ),
+            // `/dev/shm`: the plan's data gives the mode and the size (`--shm-size`, by default
+            // `constants.shm_bytes_default`).
+            .shm_tmpfs => linux.mount(
+                "tmpfs",
+                target,
+                "tmpfs",
+                linux.MS.NOSUID | linux.MS.NODEV | linux.MS.NOEXEC,
+                @intFromPtr(bind_source.?), // The mount data; `Host.mount` asserted it is set.
+            ),
             .overlay => linux.mount(
                 "overlay",
                 target,
@@ -605,7 +618,7 @@ pub const HostReal = struct {
                 0,
                 @intFromPtr(bind_source.?), // The mount data; `Host.mount` asserted it is set.
             ),
-            .proc, .sysfs, .dev_tmpfs, .shm_tmpfs, .devpts, .tmp_tmpfs, .run_tmpfs => blk: {
+            .proc, .sysfs, .dev_tmpfs, .devpts, .tmp_tmpfs, .run_tmpfs => blk: {
                 const fresh = fresh_filesystem(request.kind);
                 const data = @intFromPtr(fresh.data.ptr);
                 break :blk linux.mount(fresh.source, target, fresh.type, fresh.flags, data);
@@ -957,6 +970,57 @@ pub const HostReal = struct {
         if (!keep_groups) try check(linux.syscall2(.setgroups, 0, 0));
         try check(linux.setresgid(group_id, group_id, group_id));
         try check(linux.setresuid(user_id, user_id, user_id));
+    }
+
+    fn rlimit_resource(resource: knobs.Resource) linux.rlimit_resource {
+        const result: linux.rlimit_resource = switch (resource) {
+            .nofile => .NOFILE,
+            .nproc => .NPROC,
+            .memlock => .MEMLOCK,
+            .stack => .STACK,
+        };
+        assert(@backingInt(result) < 16);
+        return result;
+    }
+
+    fn get_rlimit(context: *anyopaque, resource: knobs.Resource) host.Error!knobs.Rlimit {
+        _ = from_context(context);
+        var limit: linux.rlimit = undefined;
+        try check(linux.prlimit(0, rlimit_resource(resource), null, &limit));
+        assert(limit.cur <= limit.max);
+        return .{ .soft = limit.cur, .hard = limit.max };
+    }
+
+    fn set_rlimit(
+        context: *anyopaque,
+        resource: knobs.Resource,
+        value: knobs.Rlimit,
+    ) host.Error!void {
+        _ = from_context(context);
+        assert(value.soft <= value.hard);
+        assert(linux.RLIM.INFINITY == knobs.unlimited);
+        const limit: linux.rlimit = .{ .cur = value.soft, .max = value.hard };
+        try check(linux.prlimit(0, rlimit_resource(resource), &limit, null));
+    }
+
+    /// One `write`: a sysctl reads its value from the first write at offset 0, so a short write
+    /// would set a cut value. A partial count is reported as EINVAL, as the kernel would for a
+    /// value it does not take whole.
+    fn write_sysctl(context: *anyopaque, path: [:0]const u8, value: []const u8) host.Error!void {
+        _ = from_context(context);
+        assert(value.len > 0);
+        assert(value.len <= constants.sysctl_value_bytes_max);
+        const flags: linux.O = .{ .ACCMODE = .WRONLY, .CLOEXEC = true, .NOFOLLOW = true };
+        const opened = linux.open(path.ptr, flags, 0);
+        try check(opened);
+        const descriptor: i32 = @intCast(opened);
+        defer _ = linux.close(descriptor);
+        const count = linux.write(descriptor, value.ptr, value.len);
+        try check(count);
+        if (count == value.len) return;
+        const invalid: isize = -@as(isize, @backingInt(linux.E.INVAL));
+        try check(@bitCast(invalid)); // A short write: the kernel took a cut value.
+        unreachable; // `check` fails on an errno.
     }
 
     fn install_seccomp(context: *anyopaque, program: []const bpf.Insn) host.Error!void {
@@ -1843,12 +1907,6 @@ fn fresh_filesystem(kind: host.MountKind) Fresh {
             .type = "tmpfs",
             .flags = ms.NOSUID | ms.STRICTATIME,
             .data = "mode=755,size=65536k",
-        },
-        .shm_tmpfs => .{
-            .source = "tmpfs",
-            .type = "tmpfs",
-            .flags = ms.NOSUID | ms.NODEV | ms.NOEXEC,
-            .data = "mode=1777,size=65536k",
         },
         .tmp_tmpfs => .{
             .source = "tmpfs",

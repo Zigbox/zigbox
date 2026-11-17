@@ -22,6 +22,7 @@ const lock_commands = @import("lock_commands.zig");
 const panic = @import("diag/panic.zig");
 const render = @import("diag/render.zig");
 const diagnose = @import("runtime/diagnose.zig");
+const knobs_diagnose = @import("runtime/knobs_diagnose.zig");
 const image_mod = @import("runtime/image.zig");
 const lazy_server_mod = @import("fuse/lazy_server.zig");
 const lazy_lines = @import("lazy_lines.zig");
@@ -80,8 +81,7 @@ const help_text =
     \\commands:
     \\  run             run a command in a container whose root is a tree or a directory (see below)
     \\  bundle          collect a redacted diagnostic bundle for a run (see below)
-    \\  doctor          check that this host can run zbx (a diagnostic per failing check;
-    \\                  --output json: the report as a document, see zbx schema doctor)
+    \\  doctor          check that this host can run zbx (--output json: zbx schema doctor)
     \\  ps              list the containers (--all: the ones that ended too)
     \\  stop <name>     stop a container: SIGTERM, then SIGKILL after --grace
     \\  logs <name>     show what a container wrote to its output and error (see below)
@@ -104,8 +104,7 @@ const help_text =
     \\  import          write a zbx.build.zon from a Dockerfile, running nothing (see below)
     \\  inspect <id>    print a build result: its tree and the config it runs with
     \\  schema <cmd>    print the JSON schema of a command's output
-    \\  explain <code>  explain a diagnostic code offline, for example E0001 (--output json: a
-    \\                  document, see zbx schema explain)
+    \\  explain <code>  explain a diagnostic code offline, as E0001 (zbx schema explain)
     \\  help            show this text
     \\  --version       print the version
     \\
@@ -124,13 +123,16 @@ const help_text =
     \\  --memory <size> memory limit: 128m, 1g (needs the systemd user manager)
     \\  --pids <n>      limit on processes and threads
     \\  --cpus <n>      CPU limit, in CPUs: 0.5 is half of one
+    \\  --ulimit <r>=<n>[:<n>]  limit nofile, nproc, memlock or stack (repeatable)
+    \\  --shm-size <size>  /dev/shm's size (default 64m)
+    \\  --sysctl <k>=<v>  set an allowed sysctl (repeatable; zbx explain E0316)
     \\  --read-only     mount the root read-only, with a tmpfs at /tmp and /run
     \\  --net <mode>    none (the default: a network of its own, only lo), host (share the host's)
     \\                  or user (through pasta: apt install passt)
     \\  --publish <h:c> forward TCP port h here to port c inside (repeatable; --net user)
     \\  --listen <addr:port>  a TCP listener on the container's loopback (127.0.0.1, --net none),
     \\                  handed to the caller over --listen-send
-    \\  --listen-send <fd>  the inherited Unix socket the listener goes over (SCM_RIGHTS)
+    \\  --listen-send <fd>  the inherited Unix socket the listener goes over
     \\  --hosts-file <path>  this file, read-only, as /etc/hosts (--net none only)
     \\  -e <name>[=<value>]  set a variable in the container, over the image's (repeatable): with
     \\                  =<value> that value, without it zbx's own (an error if unset there).
@@ -319,8 +321,8 @@ const help_text =
     \\  --output json   write each failure to stderr as one JSON object per line
     \\
     \\exit codes: 0 ok, 1 usage error, 2 this host cannot run zbx, 3 an external service, 70 a bug
-    \\run and exec exit with the command's own exit code, or 128 plus the signal that killed it, and
-    \\keeps its own failures out of that range: 125 zbx failed before the command started,
+    \\run and exec exit with the command's code (128 plus a killing signal); zbx's own failures:
+    \\125 zbx failed before the command started,
     \\126 the command could not be run, 127 the command was not found
     \\
 ;
@@ -442,6 +444,14 @@ pub const RunArgs = struct {
     user: ?[]const u8 = null,
     /// `exec`: `--workdir` as typed (checked when the exec starts, E0005).
     workdir: ?[]const u8 = null,
+    /// `--ulimit`, parsed as each was read (a bad one, or one named twice, is E0310 there).
+    rlimits: runtime_spec.Rlimits = .{},
+    /// `--shm-size` as typed, read by `limits_of`.
+    shm_size: ?[]const u8 = null,
+    /// `--sysctl`, each checked for its form as it was read (E0315); the allowlist and the
+    /// network are checked when the run starts.
+    sysctls: [constants.sysctls_max]runtime_spec.Sysctl = undefined,
+    sysctls_count: u32 = 0,
     /// `logs`: `--follow`, `--tail` and `--stream` as typed (checked as they were read, E0219).
     follow: bool = false,
     tail: ?[]const u8 = null,
@@ -465,6 +475,11 @@ pub const RunArgs = struct {
     pub fn state_slice(run_args: *const RunArgs) []const volume.Mount {
         assert(run_args.state_count <= constants.state_volumes_max);
         return run_args.state[0..run_args.state_count];
+    }
+
+    pub fn sysctls_slice(run_args: *const RunArgs) []const runtime_spec.Sysctl {
+        assert(run_args.sysctls_count <= constants.sysctls_max);
+        return run_args.sysctls[0..run_args.sysctls_count];
     }
 
     pub fn publish_slice(run_args: *const RunArgs) []const runtime_spec.Publish {
@@ -498,9 +513,12 @@ const RunOption = enum {
     tail,
     stream,
     workdir,
+    ulimit,
+    shm_size,
+    sysctl,
 
     fn flag(option: RunOption) []const u8 {
-        assert(@backingInt(option) <= 22);
+        assert(@backingInt(option) <= 25);
         assert(@tagName(option).len > 0);
         return switch (option) {
             .rootfs => "--rootfs",
@@ -526,6 +544,9 @@ const RunOption = enum {
             .tail => "--tail",
             .stream => "--stream",
             .workdir => "--workdir",
+            .ulimit => "--ulimit",
+            .shm_size => "--shm-size",
+            .sysctl => "--sysctl",
         };
     }
 };
@@ -775,7 +796,7 @@ fn import_option_of(argument: []const u8) ?Token {
 /// `--rootfs`, `--rootfs=x` and the other value options of `run`, or null.
 fn run_option_of(argument: []const u8) ?Token {
     assert(argument.len <= constants.arg_bytes_max);
-    assert(std.enums.values(RunOption).len == 23);
+    assert(std.enums.values(RunOption).len == 26);
     inline for (comptime std.enums.values(RunOption)) |option| {
         const flag = comptime option.flag();
         if (std.mem.eql(u8, argument, flag)) return .{ .run_option_next = option };
@@ -1905,6 +1926,36 @@ fn check_gc_args(diag: *Diag, gc_args: *const GcArgs, invocation: *Invocation) P
     invocation.store.trash = gc_args.trash;
 }
 
+/// Where a run option that takes one value keeps it; the repeatable ones are taken above.
+fn run_slot(run_args: *RunArgs, option: RunOption) *?[]const u8 {
+    assert(option != .publish);
+    assert(option != .ulimit);
+    return switch (option) {
+        .rootfs => &run_args.rootfs,
+        .name => &run_args.name,
+        .memory => &run_args.memory,
+        .pids => &run_args.pids,
+        .cpus => &run_args.cpus,
+        .timeout => &run_args.timeout,
+        .grace => &run_args.grace,
+        .net => &run_args.net,
+        .publish => unreachable, // Repeatable: `take_publish` above.
+        .listen => unreachable, // `take_listen` above.
+        .listen_send => &run_args.listen_send,
+        .hosts_file => &run_args.hosts_file,
+        .state => unreachable, // Repeatable: `take_state` above.
+        .tmpfs, .bind, .secret, .mount => unreachable, // Repeatable: `take_mount` above.
+        .device => unreachable, // Repeatable: `take_device` above.
+        .gpu => unreachable, // `take_gpu` above.
+        .user => &run_args.user,
+        .tail => &run_args.tail,
+        .stream => &run_args.stream,
+        .workdir => &run_args.workdir,
+        .shm_size => &run_args.shm_size,
+        .ulimit, .sysctl => unreachable, // Repeatable: `take_ulimit` and `take_sysctl` above.
+    };
+}
+
 /// Reads one value option of `run` and its value (inline, or the next argument). A value that
 /// is missing, or is the `--` that starts the command, is `ZBX-E0005`; giving the same option
 /// twice is `ZBX-E0003`, since one of them would be silently ignored.
@@ -1944,28 +1995,9 @@ fn take_run_option(
     if (option == .mount) return take_mount(diag, run_args, .mount, value);
     if (option == .device) return take_device(diag, run_args, value);
     if (option == .gpu) return take_gpu(diag, run_args, value);
-    const slot = switch (option) {
-        .rootfs => &run_args.rootfs,
-        .name => &run_args.name,
-        .memory => &run_args.memory,
-        .pids => &run_args.pids,
-        .cpus => &run_args.cpus,
-        .timeout => &run_args.timeout,
-        .grace => &run_args.grace,
-        .net => &run_args.net,
-        .publish => unreachable, // Repeatable: `take_publish` above.
-        .listen => unreachable, // `take_listen` above.
-        .listen_send => &run_args.listen_send,
-        .hosts_file => &run_args.hosts_file,
-        .state => unreachable, // Repeatable: `take_state` above.
-        .tmpfs, .bind, .secret, .mount => unreachable, // Repeatable: `take_mount` above.
-        .device => unreachable, // Repeatable: `take_device` above.
-        .gpu => unreachable, // `take_gpu` above.
-        .user => &run_args.user,
-        .tail => &run_args.tail,
-        .stream => &run_args.stream,
-        .workdir => &run_args.workdir,
-    };
+    if (option == .ulimit) return take_ulimit(diag, run_args, value);
+    if (option == .sysctl) return take_sysctl(diag, run_args, value);
+    const slot = run_slot(run_args, option);
     if (slot.* != null) return unexpected_argument(diag, command, argument);
     if (option == .user) {
         if (user_problem(value)) |reason| return bad_user(diag, value, reason);
@@ -2179,6 +2211,48 @@ fn take_listen(
         },
     }
     assert(run_args.listen != null);
+}
+
+/// One `--ulimit`: parsed now, so that the diagnostic quotes the value that is wrong.
+fn take_ulimit(diag: *Diag, run_args: *RunArgs, value: []const u8) ParseError!void {
+    assert(diag.code == null);
+    assert(run_args.rlimits.count() <= runtime_spec.knobs.resources_count);
+    const parsed = switch (runtime_spec.knobs.parse_ulimit(value)) {
+        .ok => |ulimit| ulimit,
+        .problem => |problem| {
+            knobs_diagnose.ulimit_invalid(diag, value, problem);
+            return error.BadOptionValue;
+        },
+    };
+    if (run_args.rlimits.get(parsed.resource) != null) {
+        knobs_diagnose.ulimit_invalid(diag, value, .repeated);
+        return error.BadOptionValue;
+    }
+    run_args.rlimits.set(parsed.resource, parsed.limit);
+    assert(run_args.rlimits.get(parsed.resource) != null);
+}
+
+/// One `--sysctl`: its form now (E0315); the allowlist and the network when the run starts.
+fn take_sysctl(diag: *Diag, run_args: *RunArgs, value: []const u8) ParseError!void {
+    assert(diag.code == null);
+    assert(run_args.sysctls_count <= constants.sysctls_max);
+    const parsed = switch (runtime_spec.knobs.parse_sysctl(value)) {
+        .ok => |sysctl| sysctl,
+        .problem => |problem| {
+            const shown: runtime_spec.Sysctl = .{ .key = value, .value = "" };
+            const at: runtime_spec.knobs.ListProblem = .{
+                .malformed = .{ .index = 0, .problem = problem },
+            };
+            knobs_diagnose.sysctl_invalid(diag, &.{shown}, at);
+            return error.BadOptionValue;
+        },
+    };
+    if (run_args.sysctls_count == constants.sysctls_max) {
+        knobs_diagnose.sysctl_invalid(diag, &.{parsed}, .too_many);
+        return error.BadOptionValue;
+    }
+    run_args.sysctls[run_args.sysctls_count] = parsed;
+    run_args.sysctls_count += 1;
 }
 
 /// One `--publish`: parsed now, so that the diagnostic quotes the value that is wrong.
@@ -4000,6 +4074,8 @@ fn run_container(
         .user = prepared.user,
         .network = network_of(&given),
         .publish = given.publish_slice(),
+        .rlimits = given.rlimits,
+        .sysctls = given.sysctls_slice(),
         .listen = given.listen,
         .hosts_file = given.hosts_file orelse "",
         .state = given.state_slice(),
@@ -4504,6 +4580,12 @@ fn limits_of(given: *const RunArgs, diag: *Diag) RunError!runtime_spec.Limits {
             return error.StartFailed;
         };
     }
+    if (given.shm_size) |text| {
+        limits.shm_bytes = runtime_spec.knobs.parse_size(text) orelse {
+            knobs_diagnose.shm_invalid(diag, text, .not_a_size, 0);
+            return error.StartFailed;
+        };
+    }
     assert(runtime_spec.limits_problem(limits) == null);
     return limits;
 }
@@ -4722,7 +4804,7 @@ fn print_started(
     const pid = fields.next() orelse "0";
     const scope = fields.next() orelse "-";
     const tree = fields.next() orelse "-";
-    var buffer: [constants.path_bytes_max * 6 + 1024]u8 = undefined;
+    var buffer: [constants.path_bytes_max * 6 + 1024 + commands.knobs_json_bytes_max]u8 = undefined;
     var writer = std.Io.Writer.fixed(&buffer);
     // Cannot fail: the fields are bounded names and a number, in 512 bytes.
     if (options.output == .json) {
@@ -4737,6 +4819,7 @@ fn print_started(
         }
         writer.writeAll(",\"detached\":true") catch unreachable; // Same.
         write_reach(&writer, container);
+        write_knobs(&writer, container.limits.shm_bytes, &container.rlimits, container.sysctls);
         writer.writeAll("}}\n") catch unreachable; // Same.
         append_ran(&writer, ran, tree);
     } else {
@@ -4769,6 +4852,21 @@ fn write_reach(writer: *std.Io.Writer, container: *const runtime_spec.Spec) void
     writer.writeAll("]") catch unreachable; // Same.
     // The mounts and the user are in the buffer the caller sized for six times a path.
     if (!write_writable(writer, container.mounts, container.user)) unreachable;
+}
+
+/// The members M2b added to a run's `container` object, each only when set: `"shm_bytes"`
+/// (`--shm-size`), `"ulimits"` and `"sysctls"` (see `commands.knobs_json`). Additive.
+fn write_knobs(
+    writer: *std.Io.Writer,
+    shm_bytes: ?u64,
+    rlimits: *const runtime_spec.Rlimits,
+    sysctls: []const runtime_spec.Sysctl,
+) void {
+    assert(sysctls.len <= constants.sysctls_max);
+    assert(writer.buffer.len - writer.end >= commands.knobs_json_bytes_max + 32);
+    // Cannot fail: the callers' buffers keep `knobs_json_bytes_max` and a number spare.
+    if (shm_bytes) |bytes| writer.print(",\"shm_bytes\":{d}", .{bytes}) catch unreachable;
+    commands.knobs_json(writer, rlimits, sysctls) catch unreachable; // Same bound.
 }
 
 /// A `bug` from a run that got as far as having a name gets a redacted bundle, and the bug
@@ -4835,7 +4933,7 @@ fn report_outcome(
 ) void {
     assert(handle.status == .stopped);
     assert(reason.code() != null);
-    var buffer: [constants.output_bytes_max]u8 = undefined;
+    var buffer: [constants.output_bytes_max + commands.knobs_json_bytes_max]u8 = undefined;
     var writer = std.Io.Writer.fixed(&buffer);
     const timed_out = runtime.timed_out(handle);
     if (options.output == .json) {
@@ -4850,6 +4948,9 @@ fn report_outcome(
         }
         writer.end -= 3;
         write_published(&writer, handle.publish_slice());
+        writer.end -= 3;
+        write_knobs(&writer, handle.limits.shm_bytes, &handle.rlimits, handle.sysctls);
+        writer.writeAll("}}\n") catch unreachable; // The knobs' room is in the buffer.
         append_writable(&writer, handle.mounts, handle.user);
         if (timed_out) {
             writer.end -= 3;
@@ -5802,6 +5903,9 @@ const Reach = struct {
     publish: []const runtime_spec.Publish = &.{},
     env: []const runtime_spec.Label = &.{},
     env_names: []const []const u8 = &.{},
+    rlimits: runtime_spec.Rlimits = .{},
+    sysctls: []const runtime_spec.Sysctl = &.{},
+    shm_bytes: ?u64 = null,
 };
 
 fn running_container_with(sim: *HostSim, name: []const u8, reach: Reach) !void {
@@ -5817,6 +5921,9 @@ fn running_container_with(sim: *HostSim, name: []const u8, reach: Reach) !void {
         .publish = reach.publish,
         .env = reach.env,
         .env_names = reach.env_names,
+        .rlimits = reach.rlimits,
+        .sysctls = reach.sysctls,
+        .limits = .{ .shm_bytes = reach.shm_bytes },
     };
     const options: runtime.StartOptions = .{ .detached = true };
     try runtime.start(sim.interface(), &container, options, &test_storage.handle, &diag);
@@ -6111,6 +6218,45 @@ test "run --timeout stops the container when its time is up and says so" {
         [_][]const u8{ "--timeout", "2000", "--" } ++ sleeping;
     try testing.expectEqual(@as(u8, 143), command_line(&sim, &json));
     try testing.expect(std.mem.indexOf(u8, sim.stderr(), "\"timed_out\":true") != null);
+}
+
+test "snapshot: run and ps JSON with every knob are the checked-in documents, valid JSON" {
+    // Goal: the review of #178 found the knobs spliced into the exit line by hand (`end -= 3`)
+    // with no test of the whole document, so a field inserted before them could make every
+    // knobbed run's JSON invalid unseen. Method: a run with all three knobs and `ps` of a
+    // running one; each document is byte for byte the checked-in text, parses as JSON, and
+    // carries the knobs where `zbx.run/1` and `zbx.ps/1` say.
+    var sim: HostSim = undefined;
+    sim_run.init(&sim, 6);
+    const args = [_][]const u8{ "run", "--output", "json", "--rootfs", sim_run.rootfs_path } ++
+        [_][]const u8{ "--ulimit", "nofile=4096:8192", "--shm-size", "256m" } ++
+        [_][]const u8{ "--sysctl", "net.core.somaxconn=4096", "--", "/bin/sh", "-c", "true" };
+    try testing.expectEqual(@as(u8, 0), command_line(&sim, &args));
+    const run_want = @embedFile("testdata/run_knobs.json.txt");
+    try testing.expectEqualStrings(run_want, sim.stderr());
+    const run_json = try parse_json(sim.stderr());
+    defer run_json.deinit();
+    const exit = run_json.value.object.get("container_exit").?.object;
+    try testing.expectEqual(@as(i64, 256 << 20), exit.get("shm_bytes").?.integer);
+    try testing.expect(exit.get("ulimits") != null);
+    try testing.expect(exit.get("sysctls") != null);
+
+    const sysctls = [_]runtime_spec.Sysctl{.{ .key = "net.core.somaxconn", .value = "4096" }};
+    var rlimits: runtime_spec.Rlimits = .{};
+    rlimits.set(.memlock, .{ .soft = 1 << 20, .hard = 8 << 20 });
+    const reach: Reach = .{ .rlimits = rlimits, .sysctls = &sysctls, .shm_bytes = 128 << 20 };
+    try running_container_with(&sim, "db-1", reach);
+    sim.stdout_len = 0;
+    try testing.expectEqual(@as(u8, 0), command_line(&sim, &.{ "ps", "--output", "json" }));
+    const ps_want = @embedFile("testdata/ps_knobs.json.txt");
+    try testing.expectEqualStrings(ps_want, sim.stdout());
+    const ps_json = try parse_json(sim.stdout());
+    defer ps_json.deinit();
+    const one = ps_json.value.object.get("containers").?.array.items[0].object;
+    try testing.expect(one.get("ulimits") != null);
+    try testing.expect(one.get("sysctls") != null);
+    const limits = one.get("limits").?.object;
+    try testing.expectEqual(@as(i64, 128 << 20), limits.get("shm_bytes").?.integer);
 }
 
 var policy_files: @import("store/fs_sim.zig").SimFs = undefined;
@@ -6463,6 +6609,71 @@ test "parse: --publish at its bound of sixteen, and one past it" {
     args[over + 1] = "sh";
     const refused = try parse_case(args[0 .. over + 2], &invocation);
     try testing.expectEqual(@as(?codes.Code, .E0600), refused);
+}
+
+test "parse: --ulimit, --shm-size and --sysctl, each refusal its code, and not for exec" {
+    // Goal: M2b's flags on the command line. Method: a run with each parses into the spec; a bad
+    // form is refused as it is read (E0310, E0313, E0315), a resource or a seventeenth sysctl
+    // past the bound too; exec takes none of them (E0004).
+    var invocation: Invocation = undefined;
+    const good = [_][]const u8{ "run", "--rootfs", "r", "--ulimit", "nofile=1024:65536" } ++
+        [_][]const u8{ "--ulimit=stack=unlimited", "--shm-size", "256m" } ++
+        [_][]const u8{ "--sysctl", "net.core.somaxconn=8192", "--", "sh" };
+    try testing.expect(try parse_case(&good, &invocation) == null);
+    const nofile = invocation.run.rlimits.get(.nofile).?;
+    try testing.expectEqual(runtime_spec.knobs.Rlimit{ .soft = 1024, .hard = 65536 }, nofile);
+    try testing.expect(invocation.run.rlimits.get(.stack) != null);
+    try testing.expect(invocation.run.rlimits.get(.nproc) == null);
+    try testing.expectEqualStrings("256m", invocation.run.shm_size.?);
+    try testing.expectEqual(@as(usize, 1), invocation.run.sysctls_slice().len);
+    try testing.expectEqualStrings("8192", invocation.run.sysctls_slice()[0].value);
+    const refused = [_]struct { args: []const []const u8, code: codes.Code }{
+        .{ .args = &.{ "--ulimit", "nofile" }, .code = .E0310 },
+        .{ .args = &.{ "--ulimit", "core=1" }, .code = .E0310 },
+        .{ .args = &.{ "--ulimit", "nofile=x" }, .code = .E0310 },
+        .{ .args = &.{ "--ulimit", "nofile=2:1" }, .code = .E0310 },
+        .{ .args = &.{ "--ulimit", "nofile=1", "--ulimit", "nofile=2" }, .code = .E0310 },
+        .{ .args = &.{ "--sysctl", "net.core.somaxconn" }, .code = .E0315 },
+        .{ .args = &.{ "--sysctl", "=1" }, .code = .E0315 },
+        .{ .args = &.{ "--sysctl", "kernel.sem=" }, .code = .E0315 },
+        .{ .args = &.{ "--shm-size", "256m", "--shm-size", "1g" }, .code = .E0003 },
+    };
+    for (refused) |case| {
+        var args: [10][]const u8 = undefined;
+        args[0] = "run";
+        args[1] = "--rootfs";
+        args[2] = "r";
+        @memcpy(args[3..][0..case.args.len], case.args);
+        args[3 + case.args.len] = "--";
+        args[4 + case.args.len] = "sh";
+        const found = try parse_case(args[0 .. 5 + case.args.len], &invocation);
+        testing.expectEqual(case.code, found.?) catch |err| {
+            std.debug.print("refused: {s}\n", .{case.args[1]});
+            return err;
+        };
+    }
+    var many: [3 + 2 * (constants.sysctls_max + 1) + 2][]const u8 = undefined;
+    many[0] = "run";
+    many[1] = "--rootfs";
+    many[2] = "r";
+    for (0..constants.sysctls_max + 1) |index| {
+        many[3 + 2 * index] = "--sysctl";
+        many[4 + 2 * index] = "net.core.somaxconn=1";
+    }
+    const full = 3 + 2 * constants.sysctls_max;
+    many[full] = "--";
+    many[full + 1] = "sh";
+    try testing.expect(try parse_case(many[0 .. full + 2], &invocation) == null);
+    try testing.expectEqual(@as(u32, constants.sysctls_max), invocation.run.sysctls_count);
+    many[full] = "--sysctl";
+    many[full + 1] = "net.core.somaxconn=1";
+    many[many.len - 2] = "--";
+    many[many.len - 1] = "sh";
+    try testing.expectEqual(@as(?codes.Code, .E0315), try parse_case(&many, &invocation));
+    for ([_][]const u8{ "--ulimit", "--shm-size", "--sysctl" }) |flag_text| {
+        const args = [_][]const u8{ "exec", "web", flag_text, "nofile=1", "--", "sh" };
+        try testing.expectEqual(@as(?codes.Code, .E0004), try parse_case(&args, &invocation));
+    }
 }
 
 test "a --user value is held to its bound, and to USER or USER:GROUP" {

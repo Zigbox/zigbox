@@ -1,0 +1,48 @@
+// The sysctls a container may set with `--sysctl` (M2b, docs/briefs/M2b-workload-knobs.md,
+// item 4): only keys that belong to a namespace the container has of its own, so a write
+// changes the container's value and never the host's. Any key not named here is a host setting
+// and is refused (ZBX-E0316); `--require-host` checks a host setting instead of setting it.
+//
+// The references are Kubernetes' safe set and its "unsafe but namespaced" set. Every key here
+// passed a check on the VM's kernel (Ubuntu 24.04, 6.8.0-147) from an unprivileged user
+// namespace: the write succeeded inside a fresh ipc or net namespace, read back, and left the
+// host's value alone, and pasta kept every net value. All 28 passed
+// (docs/decisions/2026-11-16-m2b-sysctl-keys.md, VM run 43931483466). A key that fails that
+// check does not belong here. No key outside the ipc and net namespaces is ever added.
+//
+// `namespace` is the namespace the key belongs to: `ipc` keys are the container's own on every
+// run (it always has an ipc namespace), `net` keys only when it has its own network namespace,
+// so `--net host` refuses them (ZBX-E0317). Not `*_next_id`: those exist for checkpoint and
+// restore, which zbx does not do. Reviewing this file is reviewing what a container may tune.
+.{
+    .keys = .{
+        .{ .key = "kernel.shmmax", .namespace = "ipc", .why = "The largest System V shared memory segment: PostgreSQL before 9.3, Oracle and SAP size theirs with it." },
+        .{ .key = "kernel.shmall", .namespace = "ipc", .why = "The total System V shared memory, in pages, that the segments may use." },
+        .{ .key = "kernel.shmmni", .namespace = "ipc", .why = "How many System V shared memory segments may exist." },
+        .{ .key = "kernel.shm_rmid_forced", .namespace = "ipc", .why = "Removes a segment when its last user detaches, so a crashed process does not leak one." },
+        .{ .key = "kernel.msgmax", .namespace = "ipc", .why = "The largest System V message." },
+        .{ .key = "kernel.msgmnb", .namespace = "ipc", .why = "The most bytes one System V message queue holds." },
+        .{ .key = "kernel.msgmni", .namespace = "ipc", .why = "How many System V message queues may exist." },
+        .{ .key = "kernel.sem", .namespace = "ipc", .why = "The System V semaphore limits; PostgreSQL and Oracle installers ask for larger ones." },
+        .{ .key = "fs.mqueue.msg_max", .namespace = "ipc", .why = "The most messages a POSIX message queue holds." },
+        .{ .key = "fs.mqueue.msgsize_max", .namespace = "ipc", .why = "The largest POSIX queue message." },
+        .{ .key = "fs.mqueue.queues_max", .namespace = "ipc", .why = "How many POSIX message queues may exist." },
+        .{ .key = "fs.mqueue.msg_default", .namespace = "ipc", .why = "The capacity of a POSIX queue opened without attributes." },
+        .{ .key = "fs.mqueue.msgsize_default", .namespace = "ipc", .why = "The message size of a POSIX queue opened without attributes." },
+        .{ .key = "net.ipv4.ip_local_port_range", .namespace = "net", .why = "The ports outgoing connections take; busy proxies widen it (Kubernetes' safe set)." },
+        .{ .key = "net.ipv4.ip_local_reserved_ports", .namespace = "net", .why = "Ports kept out of that range for a service that listens on them (Kubernetes' safe set)." },
+        .{ .key = "net.ipv4.ip_unprivileged_port_start", .namespace = "net", .why = "Lets a process that is not root inside listen below 1024 (Kubernetes' safe set)." },
+        .{ .key = "net.ipv4.ping_group_range", .namespace = "net", .why = "The groups that may open ICMP echo sockets, as ids inside the container (Kubernetes' safe set)." },
+        .{ .key = "net.ipv4.tcp_syncookies", .namespace = "net", .why = "SYN cookies when the accept queue overflows (Kubernetes' safe set)." },
+        .{ .key = "net.ipv4.tcp_keepalive_time", .namespace = "net", .why = "Idle time before TCP keepalives start; databases behind NAT shorten it (Kubernetes' safe set)." },
+        .{ .key = "net.ipv4.tcp_keepalive_intvl", .namespace = "net", .why = "The interval between keepalive probes (Kubernetes' safe set)." },
+        .{ .key = "net.ipv4.tcp_keepalive_probes", .namespace = "net", .why = "Keepalive probes before a connection is dropped (Kubernetes' safe set)." },
+        .{ .key = "net.ipv4.tcp_fin_timeout", .namespace = "net", .why = "How long an orphaned connection stays in FIN-WAIT-2 (Kubernetes' safe set)." },
+        .{ .key = "net.ipv4.tcp_rmem", .namespace = "net", .why = "TCP receive buffer sizes (Kubernetes' safe set)." },
+        .{ .key = "net.ipv4.tcp_wmem", .namespace = "net", .why = "TCP send buffer sizes (Kubernetes' safe set)." },
+        .{ .key = "net.core.somaxconn", .namespace = "net", .why = "The longest accept queue a listen may ask for: Redis, nginx and Node servers ask for more than the default." },
+        .{ .key = "net.ipv4.tcp_max_syn_backlog", .namespace = "net", .why = "Half-open connections kept per listener under a burst of connects." },
+        .{ .key = "net.ipv4.tcp_tw_reuse", .namespace = "net", .why = "Reuses TIME-WAIT sockets for new outgoing connections, for clients that open many." },
+        .{ .key = "net.ipv6.conf.all.disable_ipv6", .namespace = "net", .why = "Turns IPv6 off for a program that misbehaves with it." },
+    },
+}

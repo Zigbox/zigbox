@@ -13,6 +13,7 @@ const sim_world = @import("../sim_world.zig");
 const capabilities = @import("capabilities.zig");
 const plan_mod = @import("plan.zig");
 const spec_mod = @import("spec.zig");
+const knobs = @import("knobs.zig");
 
 const cli = @import("../cli.zig");
 const records = @import("records.zig");
@@ -56,6 +57,8 @@ const common_files = [_]host_sim.File{
     .{ .path = rootfs_path, .content = "", .mode = 0o040755 },
     .{ .path = regular_file_path, .content = "", .mode = 0o100644 },
     .{ .path = "/etc/passwd", .content = "alice:x:1000:1000::/home/alice:/bin/bash\n" },
+    // 8 GiB: the bound of a --shm-size without --memory.
+    .{ .path = "/proc/meminfo", .content = "MemTotal:        8388608 kB\nMemFree: 1 kB\n" },
     .{ .path = "/proc/sys/user/max_user_namespaces", .content = "63488\n" },
     // The root of a cgroup v2 hierarchy that offers the controllers a limit needs, as on any
     // host with systemd. `init_hybrid` takes it away.
@@ -208,6 +211,27 @@ pub fn sample_plan_mounts(
     sample_plan_listen(plan, full, scoped, read_only, image, network, mounts, null);
 }
 
+/// Like `sample_plan_mounts`, with the M2b knobs: the limits and sysctls the child sets.
+pub fn sample_plan_knobs(
+    plan: *plan_mod.Plan,
+    full: bool,
+    scoped: bool,
+    read_only: bool,
+    image: bool,
+    network: spec_mod.Network,
+    mounts: []const plan_mod.MountInput,
+    rlimits: knobs.Rlimits,
+    sysctls: []const knobs.Sysctl,
+) void {
+    assert(rlimits.problem() == null);
+    assert(knobs.list_problem(sysctls, network.isolated()) == null);
+    const mapping: plan_mod.Mapping = if (full) sample_mapping else .single;
+    var input = sample_input(mapping, scoped, read_only, image, network, mounts, null);
+    input.rlimits = rlimits;
+    input.sysctls = sysctls;
+    plan.build(&input);
+}
+
 /// Like `sample_plan_mounts`, for a run that hands a listener on (`listen`, a port) or not.
 pub fn sample_plan_listen(
     plan: *plan_mod.Plan,
@@ -219,13 +243,45 @@ pub fn sample_plan_listen(
     mounts: []const plan_mod.MountInput,
     listen: ?u16,
 ) void {
-    const mapping: plan_mod.Mapping = if (full) .{ .full = .{
-        .newuidmap = "/usr/bin/newuidmap",
-        .newgidmap = "/usr/bin/newgidmap",
-        .uid_start = 100000,
-        .gid_start = 100000,
-    } } else .single;
-    plan.build(&.{
+    const mapping: plan_mod.Mapping = if (full) sample_mapping else .single;
+    const input = sample_input(mapping, scoped, read_only, image, network, mounts, listen);
+    plan.build(&input);
+}
+
+/// The index of the first step of `kind` in the plan of a run with `--ulimit nofile=...` and
+/// `--sysctl net.core.somaxconn=...`, for a full id mapping (M2b).
+pub fn step_index_knobs(kind: plan_mod.Kind) u32 {
+    assert(plan_mod.side_of(kind) == .child);
+    var plan: plan_mod.Plan = undefined;
+    var input = sample_input(sample_mapping, true, false, false, .none, &.{}, null);
+    input.rlimits.set(.nofile, .{ .soft = 1024, .hard = 4096 });
+    input.sysctls = &.{.{ .key = "net.core.somaxconn", .value = "8192" }};
+    plan.build(&input);
+    for (plan.steps[0..plan.count], 0..) |step, index| {
+        if (step.kind == kind) return @intCast(index);
+    }
+    unreachable; // Each kind asked for is in a plan with a limit and a sysctl.
+}
+
+const sample_mapping: plan_mod.Mapping = .{ .full = .{
+    .newuidmap = "/usr/bin/newuidmap",
+    .newgidmap = "/usr/bin/newgidmap",
+    .uid_start = 100000,
+    .gid_start = 100000,
+} };
+
+fn sample_input(
+    mapping: plan_mod.Mapping,
+    scoped: bool,
+    read_only: bool,
+    image: bool,
+    network: spec_mod.Network,
+    mounts: []const plan_mod.MountInput,
+    listen: ?u16,
+) plan_mod.Input {
+    assert(rootfs_path.len > 0);
+    assert(mounts.len <= constants.sim_mounts_max);
+    return .{
         .rootfs = rootfs_path,
         .name = "oracle",
         .command = &.{"/bin/sh"},
@@ -250,7 +306,7 @@ pub fn sample_plan_listen(
             .work = if (read_only) null else "/state/work",
             .empty = if (read_only) "/state/empty" else null,
         } else null,
-    });
+    };
 }
 
 /// The index of the first step of `kind` in a read-only plan for a full id mapping.

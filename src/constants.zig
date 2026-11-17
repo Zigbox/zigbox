@@ -52,11 +52,14 @@ pub const output_bytes_max: u32 = 16 * 1024;
 pub const path_bytes_max: u32 = 4095;
 /// Largest single file read through the host: bounds every /proc, /sys and /etc read.
 pub const file_bytes_max: u32 = 64 * 1024;
+/// Largest run record read through the host (`Host.read_record`, M2b): only run records, whose
+/// worst case with every knob set passes `file_bytes_max`, take a buffer this large.
+pub const record_file_bytes_max: u32 = 80 * 1024;
 /// Consecutive EINTR results tolerated for one operation before it is reported as failed.
 pub const eintr_retries_max: u32 = 16;
 /// Upper bound on read calls for one file. Every call that is not EOF makes progress of at least
 /// one byte, so this covers the worst case of one-byte short reads plus the final EOF probe.
-pub const read_calls_max: u32 = file_bytes_max + 1;
+pub const read_calls_max: u32 = record_file_bytes_max + 1;
 /// Upper bound on write calls for one message, by the same argument.
 pub const write_calls_max: u32 = output_bytes_max + 1;
 /// Size of a utsname field in the kernel ABI, including the terminating NUL.
@@ -309,7 +312,7 @@ pub const etc_stage_hosts = ".zbx-hosts";
 pub const etc_stage_resolv = ".zbx-resolv";
 pub const etc_stage_hostname = ".zbx-hostname";
 /// Steps in a plan. The plan's own comptime check proves the count it builds is below this.
-pub const plan_steps_max: u32 = 232;
+pub const plan_steps_max: u32 = 252;
 
 // User-mode networking through pasta (M5 slice 3; docs/demos/m5.md settles each fact below
 // against the pasta that Ubuntu 24.04 ships, 0.0~git20240220.1e6f92b).
@@ -484,22 +487,51 @@ pub const limit_cpu_millis_max: u32 = 1_024_000;
 /// The longest value of a limit flag.
 pub const limit_text_bytes_max: u32 = 24;
 
+// The workload knobs (M2b, docs/briefs/M2b-workload-knobs.md; bounds by the supervisor,
+// 2026-11-16, recorded in docs/decisions/2026-11-16-m2b-knob-bounds.md).
+/// The size of the container's `/dev/shm` without `--shm-size`: 64 MiB, as before M2b and as
+/// Docker's default.
+pub const shm_bytes_default: u64 = 64 << 20;
+/// The smallest `--shm-size`: one page of the smaller page size of the two targets (4 KiB). The
+/// largest is `--memory`, or without it the host's `MemTotal`, checked at the run.
+pub const shm_bytes_min: u64 = 4 << 10;
+/// The room for `/proc/meminfo`, read for `MemTotal`: about 1.5 KiB on 6.x kernels.
+pub const meminfo_bytes_max: u32 = 8 << 10;
+/// `--sysctl` given at most this many times.
+pub const sysctls_max: u32 = 16;
+/// The longest value of one `--sysctl`: printable ASCII, written to `/proc/sys` in one write.
+pub const sysctl_value_bytes_max: u32 = 256;
+/// The room for a sysctl's path below the container's `/proc/sys`, with its NUL: `knobs.zig`
+/// asserts at comptime that the longest key on the allowlist fits.
+pub const sysctl_proc_path_bytes_max: u32 = 64;
+/// The longest `/dev/shm` mount data, "mode=1777,size=" and a u64 in decimal.
+pub const shm_data_bytes_max: u32 = "mode=1777,size=".len + 20;
+/// The resource limits `--ulimit` sets (nofile, nproc, memlock, stack): `knobs.zig` asserts it.
+pub const ulimit_resources_count: u32 = 4;
+
 // Run records (slice 2).
 /// Records kept; the oldest is deleted when a run would make it more.
 pub const runs_max: u32 = 32;
-/// The version `zbx` writes. A record with a higher one is skipped, not misread.
-pub const record_version: u32 = 11;
+/// The version `zbx` writes. A record with a higher one is skipped, not misread. Version 12 (M2b)
+/// adds the workload knobs (`.limit_shm`, `.ulimits`, `.sysctls`), written only for a run that
+/// set one, so a run without them leaves the bytes it did before.
+pub const record_version: u32 = 12;
+/// What a record with a workload knob is written as, and only such a record (M2b).
+pub const record_version_knobs: u32 = 12;
 /// What a record without a listener is written as: a run that never asked for `--listen` leaves
 /// the same bytes it did before version 10 (which only added `.listen`).
 pub const record_version_plain: u32 = 9;
 /// What a record with a listener or a device, and no `.lazy`, is written as (S2 added `.lazy` in
 /// version 11, written only for a lazy run, as M10 did for `.listen`).
 pub const record_version_listen: u32 = 10;
+/// What a lazy run's record with no M2b knob is written as (S2 added `.lazy` in version 11).
+pub const record_version_lazy: u32 = 11;
 /// One record. The command is cut to `record_command_bytes_max` and says so.
-pub const record_bytes_max: u32 = 64 * 1024;
-// Every reader of a record reads a file of at most `file_bytes_max`, so a record is never larger.
+pub const record_bytes_max: u32 = 80 * 1024;
+// Every reader of a run record reads it through `Host.read_record`, so a record is never larger.
 comptime {
-    assert(record_bytes_max <= file_bytes_max);
+    assert(record_bytes_max <= record_file_bytes_max);
+    assert(file_bytes_max < record_file_bytes_max);
 }
 pub const record_command_bytes_max: u32 = 2048;
 pub const labels_count_max: u32 = 8;
@@ -1382,6 +1414,10 @@ comptime {
     assert(dbus_call_timeout_ms < dbus_job_timeout_ms);
     assert(scope_prefix.len + container_name_bytes_max + scope_suffix.len == scope_name_bytes_max);
     assert(limit_memory_bytes_min < limit_memory_bytes_max);
+    assert(shm_bytes_min <= shm_bytes_default);
+    assert(shm_bytes_default <= limit_memory_bytes_max);
+    assert(shm_bytes_default % (1 << 10) == 0); // Whole KiB: the mount option says size=<n>k.
+    assert(sysctl_value_bytes_max < arg_bytes_max);
     assert(limit_pids_min < limit_pids_max);
     assert(limit_pids_max + scope_keeper_tasks > limit_pids_max); // Cannot overflow a u32.
     assert(scope_keeper_tasks == 1);
@@ -1402,6 +1438,7 @@ comptime {
     assert(cdi_spec_bytes_max < file_bytes_max);
     assert(file_bytes_max <= std.math.maxInt(u32) / 2); // Offsets and lengths fit in u32.
     assert(read_calls_max > file_bytes_max);
+    assert(read_calls_max > record_file_bytes_max);
     assert(write_calls_max > output_bytes_max);
     assert(eintr_retries_max > 0);
     assert(uname_field_bytes <= std.math.maxInt(u8));
@@ -1536,7 +1573,11 @@ comptime {
         state_volume_path_bytes_max + rootfs_bytes_max + 2 * 20 + 6);
     // Each device: its path below the rootfs and its host path, with their NULs.
     const device_paths = run_devices_max * (rootfs_bytes_max + 2 * device_path_bytes_max + 8);
-    assert(paths_needed + state_paths + device_paths <= plan_paths_bytes_max);
+    // Each sysctl: its path below /proc/sys and its value, with their NULs; and the `/dev/shm`
+    // mount data with its NUL.
+    const knob_paths = sysctls_max * (sysctl_proc_path_bytes_max + sysctl_value_bytes_max + 2) +
+        shm_data_bytes_max + 1;
+    assert(paths_needed + state_paths + device_paths + knob_paths <= plan_paths_bytes_max);
     assert(plan_steps_max <= std.math.maxInt(u8)); // The failure record names a step in a byte.
     assert(id_map_line_bytes_max >= "0 4294967295 1\n".len);
     assert(sync_record_bytes == 4);
@@ -1598,7 +1639,10 @@ comptime {
     assert(state_path_bytes_max > "/zbx/runs/".len + dir_name_bytes_max + 64);
     assert(record_version >= 1);
     assert(record_version_plain + 1 == record_version_listen);
-    assert(record_version_listen + 1 == record_version);
+    assert(record_version_listen + 1 == record_version_lazy);
+    assert(record_version_lazy + 1 == record_version);
+    assert(record_version_lazy + 1 == record_version_knobs);
+    assert(record_version_knobs <= record_version);
     assert(bundle_stage_bytes_max + 16 * 1024 <= bundle_gz_bytes_max);
     assert(bundle_gz_bytes_max <= write_bytes_max);
     assert(bundle_file_bytes_max * 2 < bundle_stage_bytes_max);
@@ -1652,7 +1696,9 @@ comptime {
     assert(state_holders_max > 0);
     // A plan with every volume: each has seven steps, eight when read-only; and every other
     // mount, at most six, and the CDI devices at most four (`plan.cdi_steps_count_max`).
-    assert(80 + state_volumes_max * 8 + mounts_max * 6 + 2 * run_devices_max + 4 <= plan_steps_max);
+    // The knobs (M2b) add a step per sysctl and per resource limit, of which there are four.
+    assert(80 + state_volumes_max * 8 + mounts_max * 6 + 2 * run_devices_max + 4 +
+        sysctls_max + ulimit_resources_count <= plan_steps_max);
     assert(plan_steps_max <= std.math.maxInt(u8));
     // The stage names end in one digit; a mount's value and options fit their buffers.
     assert(mounts_max <= 10);

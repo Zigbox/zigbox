@@ -43,6 +43,7 @@ const spec_mod = @import("spec.zig");
 const volume = @import("../state/volume.zig");
 const mounts_mod = @import("mounts.zig");
 const devices_mod = @import("devices.zig");
+const knobs = @import("knobs.zig");
 
 const Host = host_mod.Host;
 
@@ -130,7 +131,20 @@ pub const View = struct {
     /// Version 11: what a lazy run (`zbx run --lazy`, S2) fetched; null for any other run, which
     /// then writes no line.
     lazy: ?Lazy = null,
+    /// Version 12: the workload knobs, `--ulimit` and `--sysctl` (`--shm-size` is
+    /// `limits.shm_bytes`). A run that set none writes no line for them, and an older version.
+    rlimits: spec_mod.Rlimits = .{},
+    sysctls: []const spec_mod.Sysctl = &.{},
 };
+
+/// Whether a run set an M2b knob, and so its record is version 12.
+fn has_knobs(view: *const View) bool {
+    assert(view.sysctls.len <= constants.sysctls_max);
+    const result = view.limits.shm_bytes != null or view.rlimits.count() > 0 or
+        view.sysctls.len > 0;
+    if (view.sysctls.len > 0) assert(result);
+    return result;
+}
 
 /// A lazy run's fetching, as its record keeps it (`.lazy`) and `ps`/`inspect` JSON shows it.
 pub const Lazy = struct {
@@ -197,8 +211,10 @@ pub fn render(view: *const View, buffer: *[constants.record_bytes_max]u8) []cons
     // A record without a listener stays at the plain version, byte for byte as before M8b.
     const plain = constants.record_version_plain;
     const has_new = view.listen != null or view.devices.len > 0;
-    const version = if (view.lazy != null)
-        constants.record_version
+    const version = if (has_knobs(view))
+        constants.record_version_knobs
+    else if (view.lazy != null)
+        constants.record_version_lazy
     else if (has_new) constants.record_version_listen else plain;
     write_format(&writer, "    .version = {d},\n", .{version});
     write_bytes(&writer, "    .name = ");
@@ -285,7 +301,73 @@ fn write_network_fields(writer: *std.Io.Writer, view: *const View) void {
     write_listen(writer, view.listen);
     write_devices(writer, view.devices);
     write_lazy(writer, view.lazy);
+    write_knobs(writer, view);
 }
+
+/// The lines version 12 added, each only for a knob the run set: `.limit_shm = 268435456,`,
+/// `.ulimits = "nofile=4096:8192 stack=8388608:unlimited",` (one string, as `--ulimit` takes
+/// each, so that the bundle's redactor never reads two strings in a row), and
+/// `.sysctls = .{ "net.core.somaxconn=4096" },` (a value may hold a space, so one string each;
+/// a key is on the allowlist and never a secret's name).
+fn write_knobs(writer: *std.Io.Writer, view: *const View) void {
+    assert(view.rlimits.problem() == null);
+    assert(knobs.list_problem(view.sysctls, view.network.isolated()) == null);
+    if (view.limits.shm_bytes) |shm_bytes| {
+        assert(shm_bytes >= constants.shm_bytes_min);
+        if (view.limits.memory_bytes) |memory_bytes| assert(shm_bytes <= memory_bytes);
+        write_format(writer, "    .limit_shm = {d},\n", .{shm_bytes});
+    }
+    if (view.rlimits.count() > 0) {
+        var storage: [ulimits_text_bytes_max]u8 = undefined;
+        write_bytes(writer, "    .ulimits = \"");
+        write_bytes(writer, ulimits_text(&view.rlimits, &storage));
+        write_bytes(writer, "\",\n");
+    }
+    if (view.sysctls.len == 0) return;
+    write_bytes(writer, "    .sysctls = .{");
+    for (view.sysctls, 0..) |sysctl, index| {
+        var storage: [sysctl_text_bytes_max]u8 = undefined;
+        const text = std.fmt.bufPrint(&storage, "{s}={s}", .{ sysctl.key, sysctl.value }) catch
+            unreachable; // Cannot fail: a key on the list and a value within its bound.
+        write_bytes(writer, if (index == 0) " " else ", ");
+        write_string(writer, text);
+    }
+    write_bytes(writer, " },\n");
+}
+
+/// `name=soft:hard` for each limit set, in `Resource` order, space-separated; `unlimited` for
+/// no bound. `knobs.parse_ulimit` reads each back as the same limit.
+pub fn ulimits_text(
+    rlimits: *const spec_mod.Rlimits,
+    buffer: *[ulimits_text_bytes_max]u8,
+) []const u8 {
+    assert(rlimits.problem() == null);
+    var writer = std.Io.Writer.fixed(buffer);
+    for (std.enums.values(knobs.Resource)) |resource| {
+        const limit = rlimits.get(resource) orelse continue;
+        if (writer.end > 0) writer.writeByte(' ') catch unreachable; // Sized for all four.
+        writer.print("{s}=", .{@tagName(resource)}) catch unreachable; // Same.
+        write_rlimit_value(&writer, limit.soft);
+        writer.writeByte(':') catch unreachable; // Same.
+        write_rlimit_value(&writer, limit.hard);
+    }
+    assert((writer.end > 0) == (rlimits.count() > 0));
+    return writer.buffered();
+}
+
+fn write_rlimit_value(writer: *std.Io.Writer, value: u64) void {
+    assert(writer.buffer.len == ulimits_text_bytes_max);
+    if (value == knobs.unlimited) {
+        writer.writeAll("unlimited") catch unreachable; // Sized for all four at their widest.
+    } else {
+        writer.print("{d}", .{value}) catch unreachable; // Same.
+    }
+}
+
+/// Four `name=soft:hard`, each number at its widest (20 digits), and the spaces.
+pub const ulimits_text_bytes_max = knobs.resources_count * ("memlock=".len + 2 * 20 + 2);
+const sysctl_text_bytes_max = knobs.key_bytes_max + 1 + constants.sysctl_value_bytes_max;
+const sysctls_bytes_max = constants.sysctls_max * (sysctl_text_bytes_max + 1);
 
 const lazy_format = "    .lazy = .{{ .sources = {d}, .demand_bytes = {d}, .fill_bytes = {d}, " ++
     ".errors = {d}, .local_percent = {d} }},\n";
@@ -483,8 +565,13 @@ comptime {
         constants.lazy_sources_max, std.math.maxInt(u64), std.math.maxInt(u64),
         std.math.maxInt(u64),       100,
     });
+    // Version 12: the shm size, the ulimits (never escaped) and each sysctl with its quotes and
+    // separator. A value is printable ASCII (`knobs.form_problem`), so a byte escapes to at most
+    // two (a quote or a backslash).
+    const knob_lines = 64 + ulimits_text_bytes_max + 32 +
+        constants.sysctls_max * (knobs.key_bytes_max + 2 * constants.sysctl_value_bytes_max + 8);
     const total = strings + command + labels + diagnostic + scope + store + network + state +
-        mounts + user + binding + listen + devices + lazy + 512;
+        mounts + user + binding + listen + devices + lazy + knob_lines + 512;
     assert(total <= constants.record_bytes_max);
 }
 
@@ -557,6 +644,25 @@ pub const Parsed = struct {
     devices_len: u16,
     /// Version 11: what a lazy run fetched; null for any other run or an older record.
     lazy: ?Lazy,
+    /// Version 12: the `--ulimit`s (none for an older record or a run without); `--shm-size` is
+    /// `limits.shm_bytes`.
+    rlimits: spec_mod.Rlimits,
+    /// Version 12: the `--sysctl`s, each `key=value` followed by a NUL.
+    sysctls: [sysctls_bytes_max]u8,
+    sysctls_len: u16,
+    sysctls_count: u8,
+
+    /// The `index`th `--sysctl`; its strings point into this record.
+    pub fn sysctl_at(parsed: *const Parsed, index: u32) spec_mod.Sysctl {
+        assert(index < parsed.sysctls_count);
+        assert(parsed.sysctls_len > 0);
+        var parts = std.mem.splitScalar(u8, parsed.sysctls[0..parsed.sysctls_len], 0);
+        var at: u32 = 0;
+        while (parts.next()) |text| : (at += 1) {
+            if (at == index) return knobs.parse_sysctl(text).ok; // `parse_sysctls` checked each.
+        }
+        unreachable; // The count says it is there.
+    }
 
     /// The `--device` paths the run asked for, as one string.
     pub fn devices_text(parsed: *const Parsed) []const u8 {
@@ -736,7 +842,7 @@ fn parse_exit(value: []const u8) ?Exit {
 /// Reads a record. `Newer` for a version this zbx does not know; `Malformed` for anything that
 /// is not a record this reader understands. Never reads past `text`, never allocates.
 pub fn parse(text: []const u8, out: *Parsed) ParseError!void {
-    assert(text.len <= constants.file_bytes_max);
+    assert(text.len <= constants.record_bytes_max);
     out.version = 0;
     out.name_len = 0;
     out.rootfs_len = 0;
@@ -771,6 +877,9 @@ pub fn parse(text: []const u8, out: *Parsed) ParseError!void {
     out.listen = null;
     out.devices_len = 0;
     out.lazy = null;
+    out.rlimits = .{};
+    out.sysctls_len = 0;
+    out.sysctls_count = 0;
     var has_reason = false;
     var have_start = false;
     var opened = false;
@@ -800,6 +909,40 @@ pub fn parse(text: []const u8, out: *Parsed) ParseError!void {
     if (spec_mod.name_problem(out.name_slice()) != null) return error.Malformed;
     try check_network_fields(out);
     try check_mounts(out);
+    try check_knobs(out);
+}
+
+/// What `render` asserts about the version 12 fields: a `/dev/shm` of at least a page and not
+/// above `--memory`, and sysctls that `--sysctl` takes for the run's network.
+fn check_knobs(out: *const Parsed) ParseError!void {
+    assert(out.sysctls_count <= constants.sysctls_max);
+    assert(out.rlimits.problem() == null); // `parse_ulimits` refused soft above hard.
+    // Render writes version 12 exactly when a knob is set, so a knob in an older version, or a
+    // version 12 record without one, is not a record any zbx wrote.
+    const knobbed = out.limits.shm_bytes != null or out.rlimits.count() > 0 or
+        out.sysctls_count > 0;
+    if (knobbed) {
+        if (out.version < constants.record_version_knobs) return error.Malformed;
+    } else {
+        if (out.version == constants.record_version_knobs) return error.Malformed;
+    }
+    if (out.rlimits.nofile) |nofile| {
+        // `--ulimit` refuses an unlimited nofile, so no run that started has one.
+        if (nofile.hard == knobs.unlimited) return error.Malformed;
+    }
+    if (out.limits.shm_bytes) |shm_bytes| {
+        if (shm_bytes < constants.shm_bytes_min) return error.Malformed;
+        if (out.limits.memory_bytes) |memory_bytes| {
+            if (shm_bytes > memory_bytes) return error.Malformed;
+        }
+    }
+    if (out.sysctls_count == 0) return;
+    // A record that does not say the network cannot say which keys its namespace allowed.
+    const network = out.network orelse return error.Malformed;
+    var list: [constants.sysctls_max]spec_mod.Sysctl = undefined;
+    for (0..out.sysctls_count) |at| list[at] = out.sysctl_at(@intCast(at));
+    const sysctls = list[0..out.sysctls_count];
+    if (knobs.list_problem(sysctls, network.isolated()) != null) return error.Malformed;
 }
 
 /// What `render` asserts about the mounts: the state volumes and the other mounts together are a
@@ -931,6 +1074,8 @@ fn parse_scope_field(key: []const u8, value: []const u8, out: *Parsed) ?bool {
     if (std.mem.eql(u8, key, "listen")) return parse_listen_field(value, out);
     if (std.mem.eql(u8, key, "devices")) return parse_devices(value, out);
     if (std.mem.eql(u8, key, "lazy")) return parse_lazy(value, out);
+    if (std.mem.eql(u8, key, "ulimits")) return parse_ulimits(value, out);
+    if (std.mem.eql(u8, key, "sysctls")) return parse_sysctls(value, out);
     if (std.mem.eql(u8, key, "command")) return parse_command(value, out);
     if (std.mem.eql(u8, key, "labels")) return parse_labels(value, out);
     return parse_limit_field(key, value, out);
@@ -952,7 +1097,90 @@ fn parse_limit_field(key: []const u8, value: []const u8, out: *Parsed) ?bool {
         out.limits.cpu_millis = parse_limit(u32, value) orelse return false;
         return true;
     }
+    if (std.mem.eql(u8, key, "limit_shm")) {
+        // Written only when set: `null` is not a value render writes.
+        // Digits only, as render writes it: `parseInt` would also take `+` and `_`.
+        if (value.len > 20) return false;
+        for (value) |digit| if (!std.ascii.isDigit(digit)) return false;
+        out.limits.shm_bytes = std.fmt.parseUnsigned(u64, value, 10) catch return false;
+        return true;
+    }
     return null;
+}
+
+/// `"nofile=4096:8192 stack=8388608:unlimited"`: what `ulimits_text` writes, each name once. A
+/// value `--ulimit` would refuse is not a record this version wrote.
+fn parse_ulimits(value: []const u8, out: *Parsed) bool {
+    assert(value.len <= constants.record_bytes_max);
+    out.rlimits = .{}; // A repeated field: the later one wins.
+    var text: [ulimits_text_bytes_max]u8 = undefined;
+    const length = parse_string(value, &text) orelse return false;
+    if (length == 0) return false; // Render writes no line for no limit.
+    var parts = std.mem.splitScalar(u8, text[0..length], ' ');
+    while (parts.next()) |part| {
+        const found = parse_rlimit(part) orelse return false;
+        if (out.rlimits.get(found.resource) != null) return false;
+        out.rlimits.set(found.resource, found.limit);
+    }
+    assert(out.rlimits.count() > 0);
+    // Only what render writes: the same text back (both values, digits, the resources' order).
+    var again: [ulimits_text_bytes_max]u8 = undefined;
+    return std.mem.eql(u8, ulimits_text(&out.rlimits, &again), text[0..length]);
+}
+
+/// One `name=soft:hard` as `ulimits_text` writes it. Not `knobs.parse_ulimit`: a limit given with
+/// a unit (`stack=17179869183g`) is written in bytes, which can be more digits than a flag takes.
+fn parse_rlimit(text: []const u8) ?knobs.Ulimit {
+    assert(text.len <= ulimits_text_bytes_max);
+    const equals = std.mem.indexOfScalar(u8, text, '=') orelse return null;
+    const resource = std.meta.stringToEnum(knobs.Resource, text[0..equals]) orelse return null;
+    const values = text[equals + 1 ..];
+    const colon = std.mem.indexOfScalar(u8, values, ':') orelse return null;
+    const soft = parse_rlimit_value(values[0..colon]) orelse return null;
+    const hard = parse_rlimit_value(values[colon + 1 ..]) orelse return null;
+    if (soft > hard) return null;
+    return .{ .resource = resource, .limit = .{ .soft = soft, .hard = hard } };
+}
+
+/// `unlimited`, or the digits of a number below it.
+fn parse_rlimit_value(text: []const u8) ?u64 {
+    assert(text.len <= ulimits_text_bytes_max);
+    if (std.mem.eql(u8, text, "unlimited")) return knobs.unlimited;
+    if (text.len == 0 or text.len > 20) return null;
+    for (text) |digit| if (!std.ascii.isDigit(digit)) return null;
+    const value = std.fmt.parseUnsigned(u64, text, 10) catch return null; // Past 2^64.
+    if (value == knobs.unlimited) return null; // Render writes that as `unlimited`.
+    assert(value < knobs.unlimited);
+    return value;
+}
+
+/// `.{ "net.core.somaxconn=4096", ... }`: each a `--sysctl` of good form, kept NUL-separated.
+/// Only the form render writes: `.{ `, strings apart by `, `, then ` }`. Whether the list suits
+/// the run's network is `check_knobs`'s, once every field is read.
+fn parse_sysctls(value: []const u8, out: *Parsed) bool {
+    assert(value.len <= constants.record_bytes_max);
+    out.sysctls_len = 0; // A repeated field: the later one wins.
+    out.sysctls_count = 0;
+    if (!std.mem.startsWith(u8, value, ".{ ")) return false;
+    var at: usize = ".{ ".len;
+    while (true) {
+        if (at >= value.len or value[at] != '"') return false;
+        const found = next_literal(value, at) orelse return false;
+        if (out.sysctls_count == constants.sysctls_max) return false;
+        const room = out.sysctls[out.sysctls_len..];
+        assert(room.len >= sysctl_text_bytes_max + 1); // Sized for `sysctls_max` of them.
+        const length = parse_string(found.literal, room[0..sysctl_text_bytes_max]) orelse
+            return false;
+        if (knobs.parse_sysctl(room[0..length]) != .ok) return false;
+        room[length] = 0;
+        out.sysctls_len += @intCast(length + 1);
+        out.sysctls_count += 1;
+        const rest = value[found.next..];
+        if (std.mem.eql(u8, rest, " }")) break;
+        if (!std.mem.startsWith(u8, rest, ", ")) return false;
+        at = found.next + ", ".len;
+    }
+    return out.sysctls_count > 0; // Render writes no line for none.
 }
 
 /// The next string literal of `text` from `at`: its slice including the quotes, and where to go
@@ -1559,7 +1787,7 @@ pub fn load(host: Host, dir: *const Dir, name: []const u8, out: *Parsed) LoadErr
     var path_storage: [constants.state_path_bytes_max + 80]u8 = undefined;
     const path = record_path(dir, name, &path_storage);
     var bytes: [constants.record_bytes_max]u8 = undefined;
-    const content = host.read_file(path, &bytes) catch |err| {
+    const content = host.read_record(path, &bytes) catch |err| {
         return if (err == error.NotFound) error.NotFound else error.Unreadable;
     };
     parse(content, out) catch |err| return if (err == error.Newer) error.Newer else error.Damaged;
@@ -1590,7 +1818,7 @@ fn started_of(host: Host, dir: *const Dir, file_name: []const u8, skipped: *Skip
     const path = std.fmt.bufPrint(&path_storage, format, .{ dir.path[0..dir.len], file_name }) catch
         return 0;
     var bytes: [constants.record_bytes_max]u8 = undefined;
-    const content = host.read_file(path, &bytes) catch {
+    const content = host.read_record(path, &bytes) catch {
         skipped.note(file_name, .unreadable);
         return 0;
     };
@@ -1717,7 +1945,7 @@ test "older, newer and damaged records: the reader accepts, skips or refuses exa
     try parse(twice, &parsed);
     try testing.expectEqual(@as(u8, 2), parsed.command_words);
     try testing.expectEqualStrings("c", parsed.command_word(1));
-    const newer = ".{\n    .version = 12,\n    .name = \"x\",\n    .started = 5,\n}\n";
+    const newer = ".{\n    .version = 13,\n    .name = \"x\",\n    .started = 5,\n}\n";
     try testing.expectError(error.Newer, parse(newer, &parsed));
     const bad = [_][]const u8{
         "",
@@ -1822,7 +2050,7 @@ test "pruning keeps the newest runs_max, deletes the oldest first, and counts wh
     }
     const prefix = "/home/alice/.local/state/zbx/runs/";
     const legacy = ".{\n    .name = \"legacy\",\n    .started = 500,\n}\n";
-    const future = ".{\n    .version = 12,\n    .name = \"future\",\n    .started = 600,\n}\n";
+    const future = ".{\n    .version = 13,\n    .name = \"future\",\n    .started = 600,\n}\n";
     try testing.expect(sim.world.write_file(prefix ++ "legacy.zon", legacy) == null);
     try testing.expect(sim.world.write_file(prefix ++ "damaged.zon", "not a record") == null);
     try testing.expect(sim.world.write_file(prefix ++ "future.zon", future) == null);
@@ -2313,6 +2541,169 @@ test "version 8 keeps the user and the writable mounts; a version 7 record reads
     try testing.expectEqual(@as(u8, 1), parsed.state_count);
 }
 
+/// A version 11 record (a lazy run) as S2 wrote it: rendered by the version 11 path, which this
+/// version leaves as it was.
+const record_written_by_s2 =
+    \\.{
+    \\    .version = 11,
+    \\    .name = "lazy-1",
+    \\    .rootfs = "/srv/alpine",
+    \\    .command = .{ "/bin/sh", "-c", "sleep 60" },
+    \\    .command_truncated = false,
+    \\    .labels = .{ },
+    \\    .started = 1760000000,
+    \\    .ended = 1760000042,
+    \\    .exit = .{ .exited = 0 },
+    \\    .ids = .full,
+    \\    .reason = .exited,
+    \\    .detached = false,
+    \\    .timed_out = false,
+    \\    .scope = "",
+    \\    .pid = 0,
+    \\    .supervisor = 0,
+    \\    .limit_memory = null,
+    \\    .limit_pids = null,
+    \\    .limit_cpu_millis = null,
+    \\    .tree = "",
+    \\    .upper = "",
+    \\    .network = .user,
+    \\    .publish = .{ },
+    \\    .env_names = "",
+    \\    .state = "",
+    \\    .mounts = "",
+    \\    .user = "0:0",
+    \\    .binding = "none",
+    \\    .lazy = .{ .sources = 2, .demand_bytes = 1048576, .fill_bytes = 4194304, .errors = 0,
+++ " .local_percent = 87 },\n" ++
+    \\    .zbx = "0.6.0",
+    \\}
+    \\
+;
+
+test "version 12 keeps the knobs; a version 11 record, as S2 wrote it, reads with none" {
+    // Goal: `--shm-size`, `--ulimit` and `--sysctl` round-trip, only a record with a knob is
+    // version 12, the version before reads with no knob (REVIEW.md: real old text), and a knob
+    // line render could not have written is refused. Method: render and parse; then edits.
+    var parsed: Parsed = undefined;
+    try parse(record_written_by_s2, &parsed);
+    try testing.expectEqual(@as(u32, 11), parsed.version);
+    try testing.expectEqual(@as(u32, 0), parsed.rlimits.count());
+    try testing.expectEqual(@as(u8, 0), parsed.sysctls_count);
+    try testing.expectEqual(@as(?u64, null), parsed.limits.shm_bytes);
+    try testing.expectEqual(@as(u8, 87), parsed.lazy.?.local_percent);
+    var view: View = sample_view();
+    view.network = .user;
+    view.limits = .{ .memory_bytes = 1 << 30, .shm_bytes = 64 << 20 };
+    view.rlimits.set(.nofile, .{ .soft = 4096, .hard = 8192 });
+    view.rlimits.set(.stack, .{ .soft = 8 << 20, .hard = knobs.unlimited });
+    const sysctls = [_]spec_mod.Sysctl{
+        .{ .key = "net.core.somaxconn", .value = "8192" },
+        .{ .key = "kernel.sem", .value = "250 32000 \"32\" 128\\" },
+    };
+    view.sysctls = &sysctls;
+    var buffer: [constants.record_bytes_max]u8 = undefined;
+    const text = render(&view, &buffer);
+    try testing.expect(std.mem.indexOf(u8, text, "    .version = 12,\n") != null);
+    try testing.expect(std.mem.indexOf(u8, text, "    .limit_shm = 67108864,\n") != null);
+    const ulimits_line = "    .ulimits = \"nofile=4096:8192 stack=8388608:unlimited\",\n";
+    try testing.expect(std.mem.indexOf(u8, text, ulimits_line) != null);
+    const sysctls_line = "    .sysctls = .{ \"net.core.somaxconn=8192\", " ++
+        "\"kernel.sem=250 32000 \\\"32\\\" 128\\\\\" },\n";
+    try testing.expect(std.mem.indexOf(u8, text, sysctls_line) != null);
+    try parse(text, &parsed);
+    try testing.expectEqual(@as(u32, constants.record_version), parsed.version);
+    try testing.expectEqual(view.limits, parsed.limits);
+    try testing.expectEqual(view.rlimits, parsed.rlimits);
+    try testing.expectEqual(@as(u8, 2), parsed.sysctls_count);
+    try testing.expectEqualStrings("net.core.somaxconn", parsed.sysctl_at(0).key);
+    try testing.expectEqualStrings(sysctls[1].value, parsed.sysctl_at(1).value);
+    try expect_malformed_edits(text, ulimits_line, &bad_ulimits);
+    try expect_malformed_edits(text, sysctls_line, &bad_sysctls);
+    try expect_malformed_edits(text, "    .limit_shm = 67108864,\n", &bad_shm);
+    try expect_malformed_edits(text, "    .network = .user,\n", &.{"    .network = .host,\n"});
+    // A knob is written only at version 12: an older version with one was not written by zbx.
+    const older = [_][]const u8{ "    .version = 11,\n", "    .version = 9,\n" };
+    try expect_malformed_edits(text, "    .version = 12,\n", &older);
+    // Without a knob, a lazy run's record stays version 11, which a release before reads.
+    view.limits = .{};
+    view.rlimits = .{};
+    view.sysctls = &.{};
+    view.lazy = .{
+        .sources = 1,
+        .demand_bytes = 0,
+        .fill_bytes = 0,
+        .errors = 0,
+        .local_percent = 0,
+    };
+    const lazy_text = render(&view, &buffer);
+    try parse(lazy_text, &parsed);
+    try testing.expectEqual(@as(u32, constants.record_version_lazy), parsed.version);
+    // And version 12 is written only with a knob: one without any was not written by zbx.
+    const knobless = [_][]const u8{"    .version = 12,\n"};
+    try expect_malformed_edits(lazy_text, "    .version = 11,\n", &knobless);
+}
+
+const bad_ulimits = [_][]const u8{
+    "    .ulimits = \"\",\n",
+    "    .ulimits = \"nofile=4096\",\n",
+    "    .ulimits = \"nofile=8192:4096\",\n",
+    "    .ulimits = \"stack=8388608:unlimited nofile=4096:8192\",\n",
+    "    .ulimits = \"nofile=4096:8192 nofile=4096:8192\",\n",
+    "    .ulimits = \"nofile=4096:8192 stack=8m:unlimited\",\n",
+    "    .ulimits = \"nofile=4096:8192  stack=8388608:unlimited\",\n",
+    "    .ulimits = \"nofile=04096:8192\",\n",
+    "    .ulimits = \"nofile=4096:18446744073709551615\",\n",
+    "    .ulimits = \"nofile=4096:18446744073709551616\",\n",
+    "    .ulimits = \"core=1:1\",\n",
+    "    .ulimits = 4096,\n",
+    "    .ulimits = \"nofile=4096:unlimited\",\n",
+};
+
+const bad_sysctls = [_][]const u8{
+    "    .sysctls = .{ },\n",
+    "    .sysctls = .{ \"kernel.hostname=x\" },\n",
+    "    .sysctls = .{ \"net.core.somaxconn\" },\n",
+    "    .sysctls = .{ \"net.core.somaxconn=\" },\n",
+    "    .sysctls = .{ \"net.core.somaxconn=\\x01\" },\n",
+    "    .sysctls = .{ \"net.core.somaxconn=1\", \"net.core.somaxconn=2\" },\n",
+    "    .sysctls = \"net.core.somaxconn=1\",\n",
+    "    .sysctls = .{ \"kernel.shmmax=1\", \"kernel.shmall=1\", \"kernel.shmmni=1\", " ++
+        "\"kernel.shm_rmid_forced=1\", \"kernel.msgmax=1\", \"kernel.msgmnb=1\", " ++
+        "\"kernel.msgmni=1\", \"kernel.sem=1\", \"fs.mqueue.msg_max=1\", " ++
+        "\"fs.mqueue.msgsize_max=1\", \"fs.mqueue.queues_max=1\", " ++
+        "\"fs.mqueue.msg_default=1\", \"fs.mqueue.msgsize_default=1\", " ++
+        "\"net.core.somaxconn=1\", \"net.ipv4.tcp_syncookies=1\", " ++
+        "\"net.ipv4.tcp_fin_timeout=1\", \"net.ipv4.tcp_rmem=1\" },\n",
+};
+
+const bad_shm = [_][]const u8{
+    "    .limit_shm = 4095,\n",
+    "    .limit_shm = 1073741825,\n",
+    "    .limit_shm = null,\n",
+    "    .limit_shm = \"64m\",\n",
+    "    .limit_shm = +67108864,\n",
+    "    .limit_shm = 67_108_864,\n",
+    "    .limit_shm = 99999999999999999999,\n",
+};
+
+/// Each edit of `line` in `text` is refused as Malformed.
+fn expect_malformed_edits(text: []const u8, line: []const u8, edits: []const []const u8) !void {
+    assert(std.mem.indexOf(u8, text, line) != null);
+    assert(edits.len > 0);
+    for (edits) |edit| {
+        var edited: [constants.record_bytes_max]u8 = undefined;
+        const size = std.mem.replacementSize(u8, text, line, edit);
+        _ = std.mem.replace(u8, text, line, edit, &edited);
+        var parsed: Parsed = undefined;
+        parse(edited[0..size], &parsed) catch |err| {
+            try testing.expectEqual(error.Malformed, err);
+            continue;
+        };
+        std.debug.print("accepted: {s}\n", .{edit});
+        return error.TestUnexpectedResult;
+    }
+}
+
 /// The longest of everything a record holds, in storage the caller keeps: strings of bytes the
 /// writer escapes to four (0xff), the most labels, forwards, names, volumes and mounts.
 const Worst = struct {
@@ -2336,6 +2727,9 @@ const Worst = struct {
     scope: [constants.scope_name_bytes_max]u8,
     tree: [constants.store_digest_text_bytes]u8,
     upper: [constants.containers_path_bytes_max]u8,
+    /// The longest keys on the list, each with a value of quotes, which the writer escapes to two.
+    sysctl_values: [constants.sysctls_max][constants.sysctl_value_bytes_max]u8,
+    sysctls: [constants.sysctls_max]spec_mod.Sysctl,
 
     fn fill(worst: *Worst) void {
         worst.name = @splat('n');
@@ -2383,6 +2777,27 @@ const Worst = struct {
         worst.scope = @splat('s');
         worst.tree = @splat(0xff);
         worst.upper = @splat(0xff);
+        worst.fill_sysctls();
+    }
+
+    fn fill_sysctls(worst: *Worst) void {
+        var entries = knobs.allowlist;
+        const longer = struct {
+            fn than(_: void, a: knobs.Entry, b: knobs.Entry) bool {
+                return a.key.len > b.key.len;
+            }
+        }.than;
+        std.mem.sort(knobs.Entry, &entries, {}, longer);
+        assert(entries.len >= constants.sysctls_max);
+        assert(entries[0].key.len == knobs.key_bytes_max);
+        for (&worst.sysctls, &worst.sysctl_values, entries[0..constants.sysctls_max]) |
+            *sysctl,
+            *value,
+            entry,
+        | {
+            value.* = @splat('"');
+            sysctl.* = .{ .key = entry.key, .value = value };
+        }
     }
 
     fn view(worst: *const Worst) View {
@@ -2398,7 +2813,19 @@ const Worst = struct {
             .ids = .full,
             .zbx_version = &worst.version,
             .diagnostic = &worst.diagnostic,
-            .limits = .{ .memory_bytes = std.math.maxInt(u64), .pids = most, .cpu_millis = most },
+            .limits = .{
+                .memory_bytes = std.math.maxInt(u64),
+                .pids = most,
+                .cpu_millis = most,
+                .shm_bytes = std.math.maxInt(u64),
+            },
+            .rlimits = .{
+                .nofile = .{ .soft = knobs.unlimited - 1, .hard = knobs.unlimited - 1 },
+                .nproc = .{ .soft = knobs.unlimited - 1, .hard = knobs.unlimited - 1 },
+                .memlock = .{ .soft = knobs.unlimited - 1, .hard = knobs.unlimited - 1 },
+                .stack = .{ .soft = knobs.unlimited - 1, .hard = knobs.unlimited - 1 },
+            },
+            .sysctls = &worst.sysctls,
             .scope = &worst.scope,
             .detached = true,
             .timed_out = true,
@@ -2438,4 +2865,64 @@ test "a record with every field at its bound renders whole and reads back" {
     try testing.expectEqual(@as(u8, constants.publish_count_max), parsed.publish_count);
     try testing.expectEqual(@as(u8, constants.run_env_count_max), parsed.env_names_count);
     try testing.expectEqual(@as(?spec_mod.User, view.user), parsed.user);
+    try testing.expectEqual(@as(u8, constants.sysctls_max), parsed.sysctls_count);
+    try testing.expectEqual(view.rlimits, parsed.rlimits);
+}
+
+var bound_host: @import("../host_real.zig").HostReal = .{};
+
+/// A runs directory in /tmp for the test below, NUL-terminated.
+fn bound_dir(dir: *Dir) !void {
+    dir.path = @splat(0);
+    const pid = std.os.linux.getpid();
+    const text = try std.fmt.bufPrint(&dir.path, "/tmp/zbx-record-bound-{d}", .{pid});
+    dir.len = @intCast(text.len);
+    dir.existing_len = dir.len;
+    const made = std.os.linux.mkdir(dir.text(), 0o700);
+    try testing.expectEqual(std.os.linux.E.SUCCESS, std.os.linux.errno(made));
+}
+
+/// Writes `length` bytes of `x` as the record of `name`, then loads it.
+fn load_sized(dir: *const Dir, name: []const u8, length: u32, out: *Parsed) LoadError!void {
+    assert(length <= constants.record_bytes_max + 1);
+    const host = bound_host.interface();
+    const filler = struct {
+        var bytes: [constants.record_bytes_max + 1]u8 = @splat('x');
+    };
+    var path_storage: [constants.state_path_bytes_max + 80]u8 = undefined;
+    // Cannot fail: the test's names are short and its directory is in /tmp.
+    host.write_file(record_path(dir, name, &path_storage), filler.bytes[0..length]) catch
+        unreachable;
+    return load(host, dir, name, out);
+}
+
+test "a run record is read whole up to record_bytes_max, on a real kernel, and refused past it" {
+    // Goal: run records are read through their own path (`Host.read_record`), sized for the
+    // largest record, while every other file keeps `file_bytes_max` (REVIEW.md: a bound is
+    // tested at the bound and one byte past it). Method: save the worst record to /tmp and load
+    // it back; then a file of exactly `record_bytes_max` bytes is read (and is no record), and
+    // one byte more is unreadable.
+    var dir: Dir = undefined;
+    try bound_dir(&dir);
+    defer _ = std.os.linux.rmdir(dir.text());
+    const host = bound_host.interface();
+    worst_record.fill();
+    const view = worst_record.view();
+    // Both files are removed before the directory, even when a step below fails.
+    var storage: [constants.state_path_bytes_max + 80]u8 = undefined;
+    defer _ = std.os.linux.unlink(record_path(&dir, view.name, &storage));
+    var at_storage: [constants.state_path_bytes_max + 80]u8 = undefined;
+    defer _ = std.os.linux.unlink(record_path(&dir, "at-bound", &at_storage));
+    try save(host, &dir, &view);
+    var parsed: Parsed = undefined;
+    try load(host, &dir, view.name, &parsed);
+    try testing.expectEqual(@as(u8, constants.sysctls_max), parsed.sysctls_count);
+    var bytes: [constants.record_bytes_max]u8 = undefined;
+    // The worst record is larger than any other file the host reads: it needs its own path.
+    try testing.expect(render(&view, &bytes).len > constants.file_bytes_max);
+
+    const at = load_sized(&dir, "at-bound", constants.record_bytes_max, &parsed);
+    try testing.expectError(error.Damaged, at);
+    const past = load_sized(&dir, "at-bound", constants.record_bytes_max + 1, &parsed);
+    try testing.expectError(error.Unreadable, past);
 }

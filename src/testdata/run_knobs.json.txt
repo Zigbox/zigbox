@@ -1,0 +1,1 @@
+{"container_exit":{"reason":"exited","code":0,"network":"none","published":[],"shm_bytes":268435456,"ulimits":{"nofile":{"soft":4096,"hard":8192}},"sysctls":[{"key":"net.core.somaxconn","value":"4096"}],"writable_mounts":[],"user":{"uid":0,"gid":0}},"ran":{"kind":"rootfs","path":"/srv/alpine"}}

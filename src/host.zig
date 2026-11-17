@@ -17,6 +17,7 @@
 
 const std = @import("std");
 const bpf = @import("runtime/bpf.zig");
+const knobs = @import("runtime/knobs.zig");
 const store_fs = @import("store/fs.zig");
 const registry_net = @import("registry/net.zig");
 const assert = std.debug.assert;
@@ -287,7 +288,8 @@ pub const MountKind = enum {
     proc,
     /// The container's `/dev`: tmpfs, mode 0755, nosuid.
     dev_tmpfs,
-    /// `/dev/shm`: tmpfs, mode 1777, nosuid, nodev, noexec.
+    /// `/dev/shm`: tmpfs, nosuid, nodev, noexec; `source` is the mount data, its mode (1777)
+    /// and its size (`--shm-size`, M2b).
     shm_tmpfs,
     /// `/dev/pts`: a private devpts instance whose ptmx is mode 0666.
     devpts,
@@ -556,6 +558,19 @@ pub const VTable = struct {
     /// Looks at a device node on the host for `--device` (M10): what it is, who owns it, and
     /// whether the caller may open it for reading and writing, and is in its group.
     device_node: *const fn (context: *anyopaque, path: [:0]const u8) Error!DeviceNode,
+    /// The calling process's soft and hard limit of `resource` (`prlimit64`, reading).
+    get_rlimit: *const fn (context: *anyopaque, resource: knobs.Resource) Error!knobs.Rlimit,
+    /// Sets the calling process's limits of `resource` (`prlimit64` on itself). A hard limit
+    /// above the current one needs CAP_SYS_RESOURCE in the initial user namespace: EPERM.
+    set_rlimit: *const fn (
+        context: *anyopaque,
+        resource: knobs.Resource,
+        limit: knobs.Rlimit,
+    ) Error!void,
+    /// Writes `value` to a file under `/proc/sys` that exists, in one write and without creating
+    /// or truncating it (a sysctl takes its whole value from one write). The kernel's EINVAL is a
+    /// value it refused.
+    write_sysctl: *const fn (context: *anyopaque, path: [:0]const u8, value: []const u8) Error!void,
     /// Installs a seccomp filter (`seccomp(SECCOMP_SET_MODE_FILTER)`). Needs `no_new_privs` first.
     install_seccomp: *const fn (context: *anyopaque, program: []const bpf.Insn) Error!void,
     /// Replaces the process. Returns only on failure in the real host; the simulator returns
@@ -704,6 +719,21 @@ pub const Host = struct {
     pub fn read_file(host: Host, path: []const u8, buffer: []u8) Error![]u8 {
         assert(buffer.len > 0);
         assert(buffer.len <= constants.file_bytes_max);
+        return host.read_whole(path, buffer);
+    }
+
+    /// Reads a whole run record, as `read_file` does, into a buffer of up to
+    /// `record_file_bytes_max` (M2b): a record with every knob set is larger than any other file
+    /// the host reads, and only records get the larger buffer.
+    pub fn read_record(host: Host, path: []const u8, buffer: []u8) Error![]u8 {
+        assert(buffer.len > constants.file_bytes_max);
+        assert(buffer.len <= constants.record_file_bytes_max);
+        return host.read_whole(path, buffer);
+    }
+
+    fn read_whole(host: Host, path: []const u8, buffer: []u8) Error![]u8 {
+        assert(buffer.len > 0);
+        assert(buffer.len <= constants.record_file_bytes_max);
         var path_z: PathZ = undefined;
         const path_sentinel = try path_z.init(path);
 
@@ -1022,7 +1052,9 @@ pub const Host = struct {
         assert(request.target.len > 0);
         assert(request.target[request.target.len] == 0);
         switch (request.kind) {
-            .bind_tree, .bind_file, .overlay, .move, .user_tmpfs => assert(request.source != null),
+            .bind_tree, .bind_file, .overlay, .move, .user_tmpfs, .shm_tmpfs => {
+                assert(request.source != null);
+            },
             else => assert(request.source == null),
         }
         try host.vtable.mount(host.context, request);
@@ -1213,6 +1245,28 @@ pub const Host = struct {
         assert(@intFromPtr(host.vtable) != 0);
         assert(@intFromPtr(host.context) != 0);
         try host.vtable.no_new_privs(host.context);
+        assert(host.vtable.last_errno(host.context) == 0);
+    }
+
+    pub fn get_rlimit(host: Host, resource: knobs.Resource) Error!knobs.Rlimit {
+        const result = try host.vtable.get_rlimit(host.context, resource);
+        assert(result.soft <= result.hard); // The kernel never holds a soft limit above the hard.
+        assert(host.vtable.last_errno(host.context) == 0);
+        return result;
+    }
+
+    pub fn set_rlimit(host: Host, resource: knobs.Resource, limit: knobs.Rlimit) Error!void {
+        assert(limit.soft <= limit.hard);
+        try host.vtable.set_rlimit(host.context, resource, limit);
+        assert(host.vtable.last_errno(host.context) == 0);
+    }
+
+    pub fn write_sysctl(host: Host, path: [:0]const u8, value: []const u8) Error!void {
+        assert(std.mem.startsWith(u8, path, knobs.proc_path_prefix));
+        assert(path.len <= knobs.proc_path_bytes_max);
+        assert(value.len > 0);
+        assert(value.len <= constants.sysctl_value_bytes_max);
+        try host.vtable.write_sysctl(host.context, path, value);
         assert(host.vtable.last_errno(host.context) == 0);
     }
 

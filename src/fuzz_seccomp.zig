@@ -224,4 +224,26 @@ fn check_shipped(random: std.Random) void {
     assert(bpf.verify(program) == null);
     for (arches) |*one| check_arch(random, program, arches, one);
     check_foreign(random, program, arches);
+    check_named(random, program);
+}
+
+/// The named corpus: calls whose verdict a review decided (docs/decisions/
+/// 2026-11-16-m2b-numa-syscalls.md), each asked with a random first argument, so that a policy
+/// edit that drops or adds one fails here as well as in the unit tests.
+const named_allowed = [_][]const u8{
+    "get_mempolicy", "mbind", "set_mempolicy", "set_mempolicy_home_node", "fchmodat2",
+};
+const named_denied = [_][]const u8{ "move_pages", "migrate_pages", "mount", "unshare" };
+
+fn check_named(random: std.Random, program: []const Insn) void {
+    const X64 = std.os.linux.syscalls.X64;
+    const Arm64 = std.os.linux.syscalls.Arm64;
+    inline for (named_allowed ++ named_denied, 0..) |name, index| {
+        const expected = if (index < named_allowed.len) allow else eperm;
+        const argument = random.int(u64);
+        const x64: u32 = @intCast(@backingInt(@field(X64, name)));
+        const arm64: u32 = @intCast(@backingInt(@field(Arm64, name)));
+        assert(ask(program, seccomp.audit_x86_64, x64, argument) == expected);
+        assert(ask(program, seccomp.audit_aarch64, arm64, argument) == expected);
+    }
 }
