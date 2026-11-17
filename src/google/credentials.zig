@@ -175,7 +175,7 @@ pub const Token = struct {
     /// token is expired.
     pub fn expired(token: *const Token, now_s: u64) bool {
         if (token.len == 0) return true;
-        return token.expiration_s <= now_s + constants.google_token_margin_s;
+        return token.expiration_s <= now_s +| constants.google_token_margin_s;
     }
 
     fn set(token: *Token, source: Source, value: []const u8, expiration_s: u64) void {
@@ -301,12 +301,12 @@ fn accept(now_s: u64, answer: parse.AccessToken, token: *Token, state: *State) v
     assert(parse.access_token_valid(answer.token));
     if (answer.relative) assert(answer.expires <= constants.google_token_lifetime_max_s);
     if (!answer.relative) {
-        if (answer.expires > now_s + constants.google_token_lifetime_max_s) {
+        if (answer.expires > now_s +| constants.google_token_lifetime_max_s) {
             state.* = .malformed;
             return;
         }
     }
-    const expiration_s = if (answer.relative) now_s + answer.expires else answer.expires;
+    const expiration_s = if (answer.relative) now_s +| answer.expires else answer.expires;
     token.set(.workload_identity, answer.token, expiration_s);
     if (token.expired(now_s)) {
         token.wipe();
@@ -541,7 +541,7 @@ fn metadata_server(
         trace.metadata = .malformed;
         return;
     };
-    token.set(.metadata, answer.token, now_s + answer.expires);
+    token.set(.metadata, answer.token, now_s +| answer.expires);
     if (token.expired(now_s)) {
         token.wipe();
         trace.metadata = .expired;

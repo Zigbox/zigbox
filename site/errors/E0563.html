@@ -76,7 +76,7 @@ footer{border-top:1px solid var(--line);padding-block:24px;color:var(--muted);
 <p class="summary">the Google credentials file is not one zbx supports</p>
 <dl class="facts"><div><dt>Kind</dt><dd>error</dd></div><div><dt>Blame</dt><dd>user</dd></div><div><dt>Exit code</dt><dd>1</dd></div></dl>
 <h2>What it means</h2>
-<p>GOOGLE_APPLICATION_CREDENTIALS names a file zbx does not use. zbx reads an external_account file (workload identity federation) whose subject token comes from a file or an HTTPS url, exchanged at sts.googleapis.com, and optionally impersonating a service account through iamcredentials.googleapis.com. It does not use gcloud's user credentials (authorized_user), executable, AWS or certificate sources, a plain-HTTP url, another token_url or universe_domain, or a value written with JSON escapes. The message names what the file has.</p>
+<p>GOOGLE_APPLICATION_CREDENTIALS names a file zbx does not use. zbx reads an external_account file (workload identity federation) whose subject token comes from a file or an HTTPS url, exchanged at sts.googleapis.com, and optionally impersonating a service account through iamcredentials.googleapis.com. It does not use gcloud's user credentials (authorized_user), executable, AWS or certificate sources, a plain-HTTP url, another token_url or universe_domain, or a value written with JSON escapes. The message names what the file has. A public image still pulls: zbx names the file only when the registry refuses the anonymous pull.</p>
 <h2>Offline</h2>
 <p>The same text, without a network:</p>
 <pre class="term">zbx explain E0563</pre>

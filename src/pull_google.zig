@@ -2,9 +2,12 @@
 //! reference, find the access token and hand it to the library's pull. For any other host it does
 //! nothing and reads nothing.
 //!
-//! With `GOOGLE_APPLICATION_CREDENTIALS` set, workload identity federation is asked up front and
-//! its answer is the answer. Without it, the pull goes anonymously, and the metadata server is
-//! asked once, only when the registry's realm refuses (`fallback_for`). The token is looked up for
+//! With `GOOGLE_APPLICATION_CREDENTIALS` naming an `external_account` file, workload identity
+//! federation is asked up front and its answer is the answer. A file that cannot be read or is not
+//! one zbx uses asks nothing of the network: the pull goes anonymously, as 0.5.2's did, and the
+//! file's refusal is raised only when the registry's realm refuses (`fallback_for`). Without the
+//! variable, the pull goes anonymously, and the metadata server is asked once, only when the
+//! realm refuses. The metadata server is never asked while the variable is set. The token is looked up for
 //! every pull, never cached, and wiped when the command ends (`Storage.wipe`). A failure is a
 //! coded diagnostic built from the resolver's trace, never a token or a Google message.
 
@@ -27,6 +30,9 @@ pub const Storage = struct {
     trace: credentials_mod.Trace,
     /// The host the fallback asks through; set by `fallback_for`.
     host: host_mod.Host,
+    /// The credentials file was refused before any request (`trace` says why): the refusal is
+    /// raised by the fallback, only if the anonymous pull is refused. Set by `token_for`.
+    file_deferred: bool,
 
     pub fn wipe(storage: *Storage) void {
         storage.workspace.wipe();
@@ -38,7 +44,8 @@ pub const Storage = struct {
 
 /// The token for a pull from `registry` when workload identity is set up: null when the host is
 /// not a credentialed Google host or `GOOGLE_APPLICATION_CREDENTIALS` is not set (nothing was
-/// asked), the token in `storage` when it is.
+/// asked), or when its file cannot be read or is not one zbx uses (`file_deferred`); the token in
+/// `storage` when it is.
 pub fn token_for(
     host: host_mod.Host,
     registry: []const u8,
@@ -47,6 +54,7 @@ pub fn token_for(
 ) Error!?*const credentials_mod.Token {
     assert(diag.code == null);
     assert(registry.len > 0);
+    storage.file_deferred = false;
     if (!hosts.classify(registry).credentialed()) return null;
     const env = credentials_mod.Env.from_host(host, &storage.pairs);
     if (env.get(credentials_mod.credentials_variable) == null) return null;
@@ -60,6 +68,12 @@ pub fn token_for(
         &storage.token,
         &storage.trace,
     ) catch {
+        if (file_refused(&storage.trace)) {
+            // Nothing was sent anywhere: a public image still pulls anonymously.
+            assert(storage.token.len == 0);
+            storage.file_deferred = true;
+            return null;
+        }
         const path = env.get(credentials_mod.credentials_variable) orelse "";
         workload_failed(registry, path, &storage.trace, diag);
         return error.Failed;
@@ -68,8 +82,17 @@ pub fn token_for(
     return &storage.token;
 }
 
-/// The metadata server step, for a credentialed Google host without workload identity: asked by
-/// the client once, after the realm refused an anonymous pull. Null for any other host.
+/// Whether workload identity failed on the credentials file itself, before any request.
+fn file_refused(trace: *const credentials_mod.Trace) bool {
+    return switch (trace.workload_identity) {
+        .unreadable, .unsupported => true,
+        else => false,
+    };
+}
+
+/// The step after an anonymous refusal, for a credentialed Google host without a token: asked by
+/// the client once, after the realm refused. The file's refusal when `token_for` deferred one,
+/// otherwise the metadata server. Null for any other host. Called after `token_for`.
 pub fn fallback_for(
     host: host_mod.Host,
     registry: []const u8,
@@ -78,7 +101,20 @@ pub fn fallback_for(
     assert(registry.len > 0);
     if (!hosts.classify(registry).credentialed()) return null;
     storage.host = host;
+    if (storage.file_deferred) return .{ .context = storage, .call = file_refusal };
     return .{ .context = storage, .call = metadata_token };
+}
+
+/// The deferred refusal of the credentials file: no token, and the file's code in `diag`.
+fn file_refusal(context: *anyopaque, registry: []const u8, diag: *Diag) ?[]const u8 {
+    assert(diag.code == null);
+    const storage: *Storage = @ptrCast(@alignCast(context));
+    assert(storage.file_deferred);
+    assert(file_refused(&storage.trace));
+    const env = credentials_mod.Env.from_host(storage.host, &storage.pairs);
+    const path = env.get(credentials_mod.credentials_variable) orelse "";
+    workload_failed(registry, path, &storage.trace, diag);
+    return null;
 }
 
 fn metadata_token(context: *anyopaque, registry: []const u8, diag: *Diag) ?[]const u8 {

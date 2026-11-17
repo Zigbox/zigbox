@@ -68,7 +68,8 @@ pub const Credential = enum { none, ecr_basic, realm_basic };
 /// Asked at most once per pull, when a Google registry's realm refuses an anonymous token
 /// request and the pull holds no credential: the access token to send to the realm as
 /// `oauth2accesstoken`, in the caller's storage, or null with the refusal in `diag`. The CLI asks
-/// the metadata server here (`pull_google.zig`).
+/// the metadata server here, or raises the refusal of a credentials file it deferred so a public
+/// image still pulls anonymously (`pull_google.zig`).
 pub const RealmFallback = struct {
     context: *anyopaque,
     call: *const fn (context: *anyopaque, registry: []const u8, diag: *Diag) ?[]const u8,
