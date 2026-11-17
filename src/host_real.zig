@@ -596,6 +596,7 @@ pub const HostReal = struct {
             .move => linux.mount(bind_source, target, null, linux.MS.MOVE, 0),
             .remount_readonly => return remount_readonly(request.target),
             .remount_readonly_tree => return remount_readonly_tree(request.target),
+            .cgroup2 => return mount_cgroup2(request.target),
             .user_tmpfs => linux.mount(
                 "tmpfs",
                 target,
@@ -619,7 +620,7 @@ pub const HostReal = struct {
                 0,
                 @intFromPtr(bind_source.?), // The mount data; `Host.mount` asserted it is set.
             ),
-            .proc, .sysfs, .cgroup2, .dev_tmpfs, .devpts, .tmp_tmpfs, .run_tmpfs => blk: {
+            .proc, .sysfs, .dev_tmpfs, .devpts, .tmp_tmpfs, .run_tmpfs => blk: {
                 const fresh = fresh_filesystem(request.kind);
                 const data = @intFromPtr(fresh.data.ptr);
                 break :blk linux.mount(fresh.source, target, fresh.type, fresh.flags, data);
@@ -1892,6 +1893,23 @@ fn remount_readonly_tree(target: [:0]const u8) host.Error!void {
     );
     if (linux.errno(result) == .NOSYS) return remount_readonly(target);
     try HostReal.check(result);
+}
+
+/// The container's cgroup view. Below the host's /sys, bound with `--net host` or `--net user`,
+/// the host's own cgroup2 is already mounted on `fs/cgroup`, and the kernel refuses the same
+/// superblock again on that mount's root (EBUSY; the namespace's root is another dentry of the
+/// one superblock). A small read-only tmpfs covers it first, so the view goes on a mount of
+/// another kind. On a fresh sysfs the cover changes nothing but the mount table.
+fn mount_cgroup2(target: [:0]const u8) host.Error!void {
+    assert(target.len > 0);
+    const ms = linux.MS;
+    const cover_flags = ms.RDONLY | ms.NOSUID | ms.NODEV | ms.NOEXEC;
+    try HostReal.check(linux.mount("tmpfs", target.ptr, "tmpfs", cover_flags, @intFromPtr(
+        @as([*:0]const u8, "mode=555,size=4k"),
+    )));
+    const fresh = fresh_filesystem(.cgroup2);
+    const data = @intFromPtr(fresh.data.ptr);
+    try HostReal.check(linux.mount(fresh.source, target.ptr, fresh.type, fresh.flags, data));
 }
 
 fn fresh_filesystem(kind: host.MountKind) Fresh {

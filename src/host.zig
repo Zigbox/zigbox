@@ -311,6 +311,8 @@ pub const MountKind = enum {
     sysfs,
     /// A fresh cgroup2 on `target`, read-only: nosuid, nodev, noexec (M2b). In a cgroup namespace
     /// of the caller's own, its root is the cgroup the caller was in when it took the namespace.
+    /// The real host covers `target` with a small read-only tmpfs first: below the host's /sys,
+    /// bound, the host's cgroup2 is mounted there, and the kernel refuses its superblock again.
     cgroup2,
     /// An overlayfs mount on `target`. `source` is the mount data (`userxattr,lowerdir=...`):
     /// the kernel reads it as text, so it is the one request whose source is not a path.
