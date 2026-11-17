@@ -269,7 +269,13 @@ fn scan_roots(io: Io, secrets: []const u8, excludes: []const u8, roots: []const 
     return 1;
 }
 
-fn scan_root(io: Io, root: []const u8, secrets: []const u8, excludes: []const u8, tally: *Tally) void {
+fn scan_root(
+    io: Io,
+    root: []const u8,
+    secrets: []const u8,
+    excludes: []const u8,
+    tally: *Tally,
+) void {
     assert(root.len > 0);
     var dir = Io.Dir.openDirAbsolute(io, root, .{ .iterate = true }) catch {
         say("SKIP {s} (not opened)", .{root});

@@ -188,7 +188,9 @@ const References = struct {
         assert(project.len > 0);
         return .{
             .gar_host = config.gar_registry[0..slash],
-            .gar = try std.mem.concat(arena, u8, &.{ config.gar_registry, "/zbx-demo/hello:latest" }),
+            .gar = try std.mem.concat(arena, u8, &.{
+                config.gar_registry, "/zbx-demo/hello:latest",
+            }),
             .gcr = try std.mem.concat(arena, u8, &.{ config.gcr_registry, "/hello:latest" }),
             .denied = try std.mem.concat(arena, u8, &.{
                 config.gar_registry, "/zbx-denied/hello:latest",
@@ -448,7 +450,7 @@ test "the wrapper fits a put_file, and the longest command fits the console" {
     // Goal: the variables' bound (`value_bytes_max`) keeps every command under the console's
     // limit with room for run_split's redirection. Method: build the longest command with
     // references made from values at the bound.
-    try std.testing.expect(wrapper_script.len <= limits.put_file_bytes_max);
+    try std.testing.expect(wrapper_script.len <= @import("zigbox_vm").limits.put_file_bytes_max);
     const value: [checks.value_bytes_max]u8 = @splat('a');
     var reference: [checks.value_bytes_max + 64]u8 = undefined;
     const longest = try std.fmt.bufPrint(&reference, "{s}/zbx-denied/hello:latest", .{&value});

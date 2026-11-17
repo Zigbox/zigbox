@@ -9,6 +9,10 @@ const checks_m4 = @import("checks_m4.zig");
 fn rep(comptime byte: u8, comptime count: usize) [count]u8 {
     return @splat(byte);
 }
+fn stdout_only(text: []const u8) m6d.Streams {
+    return .{ .stdout = text, .stderr = "" };
+}
+
 const hex_a = rep('a', 64);
 const hex_b = rep('b', 64);
 const hex_c = rep('c', 64);
@@ -216,8 +220,8 @@ test "step 1: E0560, exit 2, naming the sources" {
 
 test "step 2: hello, and the lock holding the reference and digest" {
     try m6d.check_hello(.{ .stdout = "hello\n", .stderr = "" }, 0);
-    try testing.expectError(error.OutputWrong, m6d.check_hello(.{ .stdout = "hi", .stderr = "" }, 0));
-    try testing.expectError(error.ExitCodeWrong, m6d.check_hello(.{ .stdout = "", .stderr = "" }, 1));
+    try testing.expectError(error.OutputWrong, m6d.check_hello(stdout_only("hi"), 0));
+    try testing.expectError(error.ExitCodeWrong, m6d.check_hello(stdout_only(""), 1));
     const digest = "sha256:" ++ hex_a;
     const reference = "us-docker.pkg.dev/p/zbx-demo/hello:latest";
     const lock = "{\"images\":{\"" ++ reference ++ "\":\"" ++ digest ++ "\"}}";
@@ -303,13 +307,13 @@ test "the shape check says one line per token, and nothing else" {
 test "step 5: clean only with enough needles, some files and no hit" {
     const clean = "needles 6\nfiles 41 bytes 90210 skipped 0\nscan: clean\n";
     try m6d.check_scan(.{ .stdout = clean, .stderr = "" }, 0, 5);
-    try testing.expectError(error.SecretFound, m6d.check_scan(.{ .stdout = clean, .stderr = "" }, 0, 7));
+    try testing.expectError(error.SecretFound, m6d.check_scan(stdout_only(clean), 0, 7));
     const empty = "needles 6\nfiles 0 bytes 0 skipped 0\nscan: clean\n";
-    try testing.expectError(error.SecretFound, m6d.check_scan(.{ .stdout = empty, .stderr = "" }, 0, 5));
+    try testing.expectError(error.SecretFound, m6d.check_scan(stdout_only(empty), 0, 5));
     const hit = "needles 6\nfiles 41 bytes 9 skipped 0\nHIT /home/demo/x needle=2 offset=7\n" ++
         "scan: FOUND 1\n";
-    try testing.expectError(error.SecretFound, m6d.check_scan(.{ .stdout = hit, .stderr = "" }, 1, 5));
-    try testing.expectError(error.SecretFound, m6d.check_scan(.{ .stdout = clean, .stderr = "" }, 1, 5));
+    try testing.expectError(error.SecretFound, m6d.check_scan(stdout_only(hit), 1, 5));
+    try testing.expectError(error.SecretFound, m6d.check_scan(stdout_only(clean), 1, 5));
 }
 
 test {
