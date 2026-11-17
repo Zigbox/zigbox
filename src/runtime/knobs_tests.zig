@@ -253,3 +253,83 @@ test "a library caller's unlimited nofile is E0310, as the flag's is" {
     try testing.expect(std.mem.indexOf(u8, cause, "fs.nr_open") != null);
     try testing.expect(sim.world.processes[1].state == .unused);
 }
+
+const host_settings = @import("host_settings.zig");
+
+/// A host with a full range of ids whose vm.max_map_count is Ubuntu's default; it has no THP.
+const settings_files = sim_run.files ++ [_]host_sim.File{
+    .{ .path = host_settings.HostSetting.max_map_count.path(), .content = "65530\n" },
+};
+
+const map_count_met = [_]host_settings.HostRequirement{
+    .{ .setting = .max_map_count, .minimum = 65530 },
+};
+const map_count_unmet = [_]host_settings.HostRequirement{
+    .{ .setting = .max_map_count, .minimum = 262144 },
+};
+const thp_any = [_]host_settings.HostRequirement{
+    .{ .setting = .transparent_hugepage, .allowed = .{ .bits = 0b111 } },
+};
+
+test "--require-host met: the run starts as it would without it" {
+    // Goal: the positive space of the preflight. Method: a host whose vm.max_map_count equals
+    // the minimum; the command runs and the host is left as it was.
+    var sim: HostSim = undefined;
+    sim_run.start(&sim, 60, &settings_files);
+    const before = sim_run.baseline(&sim);
+    var container = knob_spec();
+    container.host_requirements = &map_count_met;
+    var diag: Diag = undefined;
+    diag.reset();
+    try run.start(sim.interface(), &container, .{}, handle_get(), &diag);
+    try testing.expect(diag.code == null);
+    try testing.expect(sim.world.processes[1].execd);
+    try testing.expect(sim.world.bus.connections > 0);
+    _ = run.wait(handle_get());
+    try no_leak(&sim, &before);
+}
+
+test "--require-host refused (E0319, E0321): no bus, no scope, no process, nothing left" {
+    // Goal: the preflight runs before the scope and any process, so a refused run leaves
+    // nothing to clean up. A preflight moved after `prepare_scope` would probe the user's bus,
+    // and one moved later would start a scope or spawn the child. Method: a minimum above the
+    // host's value (E0319, naming the setting and both values) and a setting the host does not
+    // expose (E0321); each is refused with no connection to the bus, no scope, no cgroup, no
+    // process and nothing written.
+    const Refused = struct {
+        requirements: []const host_settings.HostRequirement,
+        code: codes.Code,
+        says: []const u8,
+    };
+    const refused_cases = [_]Refused{
+        .{
+            .requirements = &map_count_unmet,
+            .code = .E0319,
+            .says = "vm.max_map_count is 65530, needs >=262144",
+        },
+        .{ .requirements = &thp_any, .code = .E0321, .says = "transparent_hugepage" },
+    };
+    for (refused_cases, 0..) |case, index| {
+        var sim: HostSim = undefined;
+        sim_run.start(&sim, 61 + index, &settings_files);
+        const before = sim_run.baseline(&sim);
+        var container = knob_spec();
+        container.limits.memory_bytes = 64 << 20; // A scoped run, with a limit to enforce.
+        container.host_requirements = case.requirements;
+        var diag: Diag = undefined;
+        diag.reset();
+        const result = run.start(sim.interface(), &container, .{}, handle_get(), &diag);
+        try testing.expectError(error.StartFailed, result);
+        try testing.expectEqual(case.code, diag.code.?);
+        const said = std.mem.indexOf(u8, diag.headline.slice(), case.says) != null or
+            std.mem.indexOf(u8, diag.last_cause().?, case.says) != null;
+        if (!said) std.debug.print("case {d}: {s}\n", .{ index, diag.last_cause().? });
+        try testing.expect(said);
+        try testing.expectEqual(@as(u32, 0), sim.world.bus.connections);
+        try testing.expectEqual(@as(u32, 0), sim.world.bus.scopes_started);
+        try testing.expectEqual(@as(u32, 0), sim.world.bus.scope_count());
+        try testing.expect(sim.world.processes[1].state == .unused);
+        try testing.expectEqual(@as(u32, 0), sim.world.written_count);
+        try no_leak(&sim, &before);
+    }
+}

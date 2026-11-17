@@ -6729,6 +6729,48 @@ test "parse: --ulimit, --shm-size and --sysctl, each refusal its code, and not f
     }
 }
 
+test "parse: a setting --require-host names twice is E0320, the fifth flag included" {
+    // Goal: one requirement per setting, found across flags as they are read. Method: two
+    // settings parse in order; the same setting again, with another value, is E0320 whose cause
+    // says it is required twice; and five copies of one flag are E0320 at the second, never an
+    // overflow of the four slots at the fifth.
+    var invocation: Invocation = undefined;
+    const good = [_][]const u8{ "run", "--rootfs", "r", "--require-host" } ++
+        [_][]const u8{ "vm.max_map_count>=262144", "--require-host" } ++
+        [_][]const u8{ "transparent_hugepage=never,madvise", "--", "sh" };
+    try testing.expect(try parse_case(&good, &invocation) == null);
+    const requirements = invocation.run.host_requirements_slice();
+    try testing.expectEqual(@as(usize, 2), requirements.len);
+    try testing.expectEqual(host_settings.HostSetting.max_map_count, requirements[0].setting);
+    try testing.expectEqual(@as(u64, 262144), requirements[0].minimum);
+    const again = [_][]const u8{ "run", "--rootfs", "r", "--require-host" } ++
+        [_][]const u8{ "vm.max_map_count>=262144", "--require-host" } ++
+        [_][]const u8{ "vm.max_map_count>=1", "--", "sh" };
+    var diag: Diag = undefined;
+    diag.reset();
+    try testing.expectError(error.BadOptionValue, parse(&again, &invocation, &diag));
+    try testing.expectEqual(codes.Code.E0320, diag.code.?);
+    const cause = diag.last_cause().?;
+    try testing.expectEqualStrings(
+        "vm.max_map_count is required twice: give one requirement per setting",
+        cause,
+    );
+    var five: [3 + 2 * 5 + 2][]const u8 = undefined;
+    five[0] = "run";
+    five[1] = "--rootfs";
+    five[2] = "r";
+    for (0..5) |index| {
+        five[3 + 2 * index] = "--require-host";
+        five[4 + 2 * index] = "vm.max_map_count>=1";
+    }
+    five[five.len - 2] = "--";
+    five[five.len - 1] = "sh";
+    diag.reset();
+    try testing.expectError(error.BadOptionValue, parse(&five, &invocation, &diag));
+    try testing.expectEqual(codes.Code.E0320, diag.code.?);
+    try testing.expect(std.mem.indexOf(u8, diag.last_cause().?, "required twice") != null);
+}
+
 test "a --user value is held to its bound, and to USER or USER:GROUP" {
     // Goal: `user_value_bytes_max` is the longest value, at the bound and one past (REVIEW.md),
     // and the forms are Docker's. Method: 256 bytes, 257 bytes, and one value per rule.
