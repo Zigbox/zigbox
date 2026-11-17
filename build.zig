@@ -293,6 +293,7 @@ const roots = [_][]const u8{
     "src/testing/vm/main_m5.zig",
     "src/testing/vm/main_m6.zig",
     "src/testing/vm/main_m6b.zig",
+    "src/testing/vm/main_m6d.zig",
     "src/testing/vm/main_m7.zig",
     "src/testing/vm/main_m8.zig",
     "src/testing/vm/main_m8b.zig",
@@ -332,6 +333,7 @@ const linux_only = [_][]const u8{
     "src/testing/vm/main_m5.zig",
     "src/testing/vm/main_m6.zig",
     "src/testing/vm/main_m6b.zig",
+    "src/testing/vm/main_m6d.zig",
     "src/testing/vm/main_m7.zig",
     "src/testing/vm/main_m8.zig",
     "src/testing/vm/main_m8b.zig",
@@ -585,6 +587,11 @@ const demos = [_]struct { step: []const u8, root: []const u8, help: []const u8 }
         .help = "Run the M6b demo: the dev loop (mount, exec, logs), upgrade from M6",
     },
     .{
+        .step = "demo-m6d",
+        .root = "src/testing/vm/main_m6d.zig",
+        .help = "Run the M6d demo: Artifact Registry and gcr.io pulls through GitHub's WIF",
+    },
+    .{
         .step = "demo-m7",
         .root = "src/testing/vm/main_m7.zig",
         .help = "Run the M7 demo: zbx build, the six steps, two VMs, upgrade from 0.2.0",
@@ -735,6 +742,7 @@ fn add_harness_imports(
     if (std.mem.eql(u8, step, "demo-m9")) add_m9_cases(b, module);
     if (std.mem.eql(u8, step, "demo-s2-probe")) add_s2_probe_fixture(b, module);
     if (std.mem.eql(u8, step, "demo-c4")) add_c4_supervisor(b, module);
+    if (std.mem.eql(u8, step, "demo-m6d")) add_m6d_helper(b, module);
     if (std.mem.eql(u8, step, "demo-s2-lazy")) add_fuse_kernel_test(b, options, module);
 }
 
@@ -814,6 +822,36 @@ fn add_c4_supervisor(b: *std.Build, harness_module: *std.Build.Module) void {
     });
     harness_module.addAnonymousImport("c4_supervisor", .{
         .root_source_file = supervisor.getEmittedBin(),
+    });
+}
+
+/// demo-m6d's guest helper (the library path, the masking and the secret scan): a program that
+/// links the `zigbox` module, built for the guest (x86_64, static, no libc) and served to it.
+fn add_m6d_helper(b: *std.Build, harness_module: *std.Build.Module) void {
+    const target = b.resolveTargetQuery(.{ .cpu_arch = .x86_64, .os_tag = .linux });
+    const options = b.addOptions();
+    options.addOption([]const u8, "version", "0.0.0-demo");
+    const library = b.createModule(.{
+        .root_source_file = b.path("src/zigbox.zig"),
+        .target = target,
+        .optimize = .ReleaseSafe,
+        .link_libc = false,
+        .imports = &.{.{ .name = "build_options", .module = options.createModule() }},
+    });
+    const helper = b.addExecutable(.{
+        .name = "m6d-helper",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/testing/vm/m6d_fixture/helper.zig"),
+            .target = target,
+            .optimize = .ReleaseSafe,
+            .link_libc = false,
+            // Stripped, to fit the harness's 8 MiB body (`http_body_bytes_max`).
+            .strip = true,
+            .imports = &.{.{ .name = "zigbox", .module = library }},
+        }),
+    });
+    harness_module.addAnonymousImport("m6d_helper", .{
+        .root_source_file = helper.getEmittedBin(),
     });
 }
 
