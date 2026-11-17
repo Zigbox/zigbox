@@ -185,6 +185,17 @@ pub fn refusal(arena: Allocator, streams: Streams, status: u8, code: []const u8)
     return all[0];
 }
 
+/// The summary `zbx explain` gives for the diagnostic's code. A code whose instance sets a
+/// headline (E0319: "vm.max_map_count is 65530, needs >=262144") carries the instance's text in
+/// its summary, and explain gives the catalog's; every other code carries the catalog's own. The
+/// harness cannot import the catalog, so a drift in it fails the demo here.
+pub fn explain_summary(diagnostic: Diagnostic) []const u8 {
+    if (std.mem.eql(u8, diagnostic.code, "ZBX-E0319")) return summary_e0319;
+    return diagnostic.summary;
+}
+
+const summary_e0319 = "a host setting is not what --require-host asks";
+
 /// The string `key` of the diagnostic's context.
 pub fn context_text(diagnostic: Diagnostic, key: []const u8) Error![]const u8 {
     if (diagnostic.context != .object) return error.DiagnosticWrong;
@@ -436,6 +447,17 @@ test "the agent reads a refusal's fields: the host value, the needed value, the 
     try testing.expectError(error.DiagnosticWrong, other);
     const status = refusal(arena, streams_of("", e0319_json), 0, "ZBX-E0319");
     try testing.expectError(error.ExitCodeWrong, status);
+}
+
+test "explain_summary: the catalog's summary for a headline code, the diagnostic's otherwise" {
+    var arena_state: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    const found = try refusal(arena, streams_of("", e0319_json), 125, "ZBX-E0319");
+    try testing.expectEqualStrings(summary_e0319, explain_summary(found));
+    var other = found;
+    other.code = "ZBX-E0316";
+    try testing.expectEqualStrings(found.summary, explain_summary(other));
 }
 
 test "the agent reads the knobs back from container_exit" {

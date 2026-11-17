@@ -422,12 +422,15 @@ fn extra_host_tree(session: *Session, out: *Io.Writer, timer: *H.Timer) !void {
 
 // ---- The scripted agent ----------------------------------------------------------------------
 
-/// `zbx explain <code> --output json` agrees with the diagnostic the agent got.
+/// `zbx explain <code> --output json` agrees with the diagnostic the agent got, except for the
+/// summary of a code whose instance sets a headline (`checks.explain_summary`).
 fn explain(session: *Session, out: *Io.Writer, diagnostic: agent_json.Diagnostic) !void {
     const command = try format(session, zbx ++ " explain {s} --output json", .{diagnostic.code});
     const result = try split(session, out, command);
     const arena = session.scratch_allocator();
-    agent_json.check_explain(arena, result.streams, result.status, diagnostic) catch |err| {
+    var expected = diagnostic;
+    expected.summary = checks.explain_summary(diagnostic);
+    agent_json.check_explain(arena, result.streams, result.status, expected) catch |err| {
         return fail_step(out, "AGENT", "expected explain to agree", err);
     };
 }
