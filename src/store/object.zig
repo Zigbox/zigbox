@@ -28,6 +28,7 @@ const host_mod = @import("../host.zig");
 const digest_mod = @import("digest.zig");
 const fs_mod = @import("fs.zig");
 const layout = @import("layout.zig");
+const owners_mod = @import("owners.zig");
 const xattrs = @import("xattrs.zig");
 
 const Digest = digest_mod.Digest;
@@ -319,18 +320,23 @@ fn copy_to(
     }
     if (reader.size != content.size) return error.Changed;
     if (!reader.finish(scratch).eql(content.hash)) return error.Changed;
-    apply(fs, output, attrs, failure) catch return error.StoreFailed;
+    apply(fs, output, attrs, &store.owners, failure) catch return error.StoreFailed;
 }
 
 /// The attributes, in the order the kernel needs: a change of owner clears setuid and the file
 /// capability, so the owner first, then the mode, then the attributes.
-pub fn apply(fs: fs_mod.Fs, fd: fs_mod.Fd, attrs: Attrs, failure: *Failure) host_mod.Error!void {
+/// `owners` says where the writer stands (`owners.zig`): outside the store's namespace the
+/// container's ids are written as the host ids the namespace maps them to.
+pub fn apply(
+    fs: fs_mod.Fs,
+    fd: fs_mod.Fd,
+    attrs: Attrs,
+    owners: *const owners_mod.Owners,
+    failure: *Failure,
+) host_mod.Error!void {
     assert(attrs.mode <= 0o7777);
     assert(xattrs.validate(attrs.xattrs) == .none);
-    fs.set_owner(fd, attrs.uid, attrs.gid) catch |err| {
-        fail(failure, fs, err);
-        return err;
-    };
+    try apply_owner(fs, fd, attrs, owners, failure);
     fs.set_mode(fd, attrs.mode) catch |err| {
         fail(failure, fs, err);
         return err;
@@ -350,6 +356,40 @@ pub fn apply(fs: fs_mod.Fs, fd: fs_mod.Fd, attrs: Attrs, failure: *Failure) host
         return err;
     };
     fs.fsync(fd) catch |err| {
+        fail(failure, fs, err);
+        return err;
+    };
+}
+
+/// The owner of a file this process just created. Inside the namespace, the container's ids as
+/// they are. Outside it (the lazy resolver's slots, which have threads and so cannot enter it),
+/// each is mapped to its host id; the file is already the user's own, so container root needs no
+/// change, and any other id is a change only `CAP_CHOWN` may make: the kernel decides.
+fn apply_owner(
+    fs: fs_mod.Fs,
+    fd: fs_mod.Fd,
+    attrs: Attrs,
+    owners: *const owners_mod.Owners,
+    failure: *Failure,
+) host_mod.Error!void {
+    var uid = attrs.uid;
+    var gid = attrs.gid;
+    switch (owners.*) {
+        .inside => {},
+        .outside => |*map| {
+            const host_uid = owners_mod.host_of(map, .uid, uid);
+            const host_gid = owners_mod.host_of(map, .gid, gid);
+            if (host_uid == null or host_gid == null) {
+                // An id the namespace cannot show: inside, the write would fail the same way.
+                failure.* = .{ .err = error.AccessDenied, .errno = 0 };
+                return error.AccessDenied;
+            }
+            if (host_uid.? == map.uid and host_gid.? == map.gid) return;
+            uid = host_uid.?;
+            gid = host_gid.?;
+        },
+    }
+    fs.set_owner(fd, uid, gid) catch |err| {
         fail(failure, fs, err);
         return err;
     };

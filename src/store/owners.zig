@@ -1,7 +1,7 @@
 //! Which ids the store's files show to the process that reads them, and how to get back from
 //! those to the ids a container sees, which are the ids an object id commits to.
 //!
-//! Every store write runs in the namespace child (`namespace.zig`), so the store records the
+//! Store writes run in the namespace child (`namespace.zig`), so the store records the
 //! container's ids. A reader in that same namespace sees them as they are (`inside`). A reader
 //! outside it, such as Zigcube's peer server, which has threads and so cannot enter the
 //! namespace, sees the host ids the kernel mapped them to (`outside`) and must map each one back
@@ -9,6 +9,11 @@
 //! writes: the container's root to the user's own id, and, with the full map, ids 1 to
 //! `subid_range_min` to the user's subordinate range. A host id the map does not reach has no
 //! container id; it is refused, never guessed.
+//!
+//! One writer is outside too: the lazy resolver's slots (threads, in `zbx run --lazy`'s parent)
+//! complete objects. It writes each owner as its host id (`host_of`, used by `object.apply`):
+//! container root is the user's own id, which needs no change; any other id needs `CAP_CHOWN`
+//! (`decisions/2026-11-18-s2-lazy-owner-outside.md`).
 
 const std = @import("std");
 const assert = std.debug.assert;
@@ -77,7 +82,47 @@ pub fn container_ids(owners: *const Owners, uid: u32, gid: u32) ?[2]u32 {
     }
 }
 
+/// The host id that the container id `id` of the kind `kind` maps to, or null if the map does
+/// not reach it. The inverse of `container_id`.
+pub fn host_of(map: *const Map, kind: Kind, id: u32) ?u32 {
+    const own = switch (kind) {
+        .uid => map.uid,
+        .gid => map.gid,
+    };
+    if (id == 0) return own;
+    const range = map.range orelse return null;
+    if (id > constants.subid_range_min) return null;
+    const start: u64 = switch (kind) {
+        .uid => range.uid_start,
+        .gid => range.gid_start,
+    };
+    const host = start + id - 1;
+    if (host > std.math.maxInt(u32) - 1) return null; // (uid_t)-1 is "no change", never an id.
+    return @intCast(host);
+}
+
 const testing = std.testing;
+
+test "host_of is container_id's inverse, and reaches no further than it does" {
+    // Goal: a write from outside the namespace records the ids a read from outside maps back.
+    // Method: both maps, root and a user; every edge of the range both ways.
+    const range: Range = .{ .uid_start = 100000, .gid_start = 300000 };
+    const one: Map = .{ .uid = 1000, .gid = 1001, .range = null };
+    try testing.expectEqual(@as(?u32, 1000), host_of(&one, .uid, 0));
+    try testing.expectEqual(@as(?u32, 1001), host_of(&one, .gid, 0));
+    try testing.expectEqual(@as(?u32, null), host_of(&one, .uid, 1));
+    for ([_]u32{ 1000, 0 }) |own| {
+        const map: Map = .{ .uid = own, .gid = own, .range = range };
+        for ([_]u32{ 0, 1, 42, constants.subid_range_min }) |id| {
+            const uid = host_of(&map, .uid, id).?;
+            const gid = host_of(&map, .gid, id).?;
+            try testing.expectEqual(@as(?u32, id), container_id(&map, .uid, uid));
+            try testing.expectEqual(@as(?u32, id), container_id(&map, .gid, gid));
+        }
+        try testing.expectEqual(@as(?u32, 100041), host_of(&map, .uid, 42));
+        try testing.expectEqual(@as(?u32, null), host_of(&map, .uid, constants.subid_range_min + 1));
+    }
+}
 
 test "the one-id map reaches only the user's own ids, as the container's root" {
     // Goal: rootless with no subordinate range. Method: the user's ids map to 0; the id one

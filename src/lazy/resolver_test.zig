@@ -906,6 +906,36 @@ test "resolver: a read that arrives mid-fill is served before the next fill requ
     resolver.slot_finish(fill_slot, &work, arrived + idle);
 }
 
+test "resolver: outside the store's namespace, the put that completes an object lands it" {
+    // Goal: in demo-s2 the slots (threads, so in the parent, outside the store's namespace) ran
+    // as a user without `CAP_CHOWN`, and every put that completed an object failed on its
+    // change of owner to container root. Each one-chunk object, and each object's last chunk,
+    // was read only after a round (`lazy_down_fail_ms`), from its partial chunk: the lazy start
+    // took 10.8 s. And the fill never made an object whole.
+    // Method: the store's owners `outside`, the user's own ids 0:0 (the ids `SimFs` creates
+    // files with); the file system refuses every change of owner. One object of one chunk and
+    // one of two are read at one time: each read is served and each object is whole.
+    setup(&.{ 10, 2 * chunk_bytes });
+    fixture.files.faults.owner_gate = .{ .context = &fixture, .in_new_user_namespace = outside };
+    fixture.store.owners = .{ .outside = .{ .uid = 0, .gid = 0, .range = null } };
+    try open_resolver(0, true, false);
+    defer close_resolver();
+    try expect_true_read(0, 0, 0);
+    try expect_true_read(1, 0, 0);
+    try expect_true_read(1, 1, 0);
+    for (fixture.objects[0..2]) |*object| {
+        try testing.expect(land_mod.object_is_whole(&fixture.store, &object.wanted));
+    }
+    try testing.expectEqual(@as(u32, 2), fixture.resolver.schedule.report.objects_local);
+    try testing.expectEqual(@as(u32, 3), fixture.registry.calls.load(.monotonic));
+}
+
+/// `SimFs`'s owner gate for a process outside any new user namespace.
+fn outside(context: *anyopaque) bool {
+    assert(@intFromPtr(context) != 0);
+    return false;
+}
+
 test "resolver: objects_local counts each whole object once and never goes down" {
     // Goal: with the fill off, `objects_local` counts an object whole at init, counts an
     // object once when its last chunk lands, and does not drop when a gc removes an object.

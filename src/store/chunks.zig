@@ -391,7 +391,7 @@ fn build_file(
     if (written != wanted.size or !whole.final().eql(wanted.content)) {
         return discard_and_refuse(store, wanted);
     }
-    object.apply(fs, output, wanted.attrs, failure) catch return error.StoreFailed;
+    object.apply(fs, output, wanted.attrs, &store.owners, failure) catch return error.StoreFailed;
 }
 
 fn discard_and_refuse(store: *Store, wanted: *const Wanted) Error {
