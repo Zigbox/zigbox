@@ -889,9 +889,11 @@ const lazy_cases = [_]Case{
     .{ .code = .E1203, .args = &.{}, .direct = lazy_unavailable, .exit = 1 },
     .{ .code = .E1206, .args = &.{}, .direct = lazy_store_full, .exit = 1 },
     .{ .code = .E1207, .args = &.{}, .direct = lazy_too_large, .exit = 1 },
-    // 0.5.2 refuses `--lazy` at parse time (E0004), so E1208 is built directly, as the parse
-    // would with `-Dlazy-start` (docs/decisions/2026-11-16-0.5.2-s2-dormant.md).
-    .{ .code = .E1208, .args = &.{}, .direct = lazy_flag_refused, .exit = 125 },
+    .{
+        .code = .E1208,
+        .args = &.{ "run", "--lazy", "--rootfs", "/srv/alpine", "--", "/bin/sh" },
+        .exit = 125,
+    },
 };
 
 fn lazy_out_of_memory(diag: *Diag) void {
@@ -921,10 +923,6 @@ fn lazy_unavailable(diag: *Diag) void {
 fn lazy_store_full(diag: *Diag) void {
     const object = Digest.parse("b3:" ++ test_util.repeat('5', 64)).?;
     lazy_diagnose.store_full(diag, object, 3);
-}
-
-fn lazy_flag_refused(diag: *Diag) void {
-    lazy_diagnose.flag_refused(diag, "--rootfs");
 }
 
 fn lazy_too_large(diag: *Diag) void {

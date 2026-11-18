@@ -1024,11 +1024,12 @@ test "push --dry-run prints the digest an export prints, and refuses without --d
     try testing.expect(std.mem.indexOf(u8, sim.stderr(), "ZBX-E0550") != null);
 }
 
-test "export and push --dry-run write layer writer 1, with no lazy index (0.5.2)" {
-    // Goal: 0.5.2 keeps lazy start dormant, so an image packed for export or push has 0.5.1's
-    // bytes (docs/decisions/2026-11-16-0.5.2-s2-dormant.md). Method: export a tree and read
-    // the manifest blob: it names writer 1 and has no lazy-index annotation; push --dry-run
-    // prints the same digest, so it packs the same bytes.
+test "export and push --dry-run write layer writer 2, with its lazy index" {
+    // Goal: S2 turns writer 2 back on after 0.5.2 and 0.5.3 shipped it dormant
+    // (docs/decisions/2026-11-16-0.5.2-s2-dormant.md), so an image packed for export or push
+    // can start lazily. Method: export a tree and read the manifest blob: it names writer 2,
+    // not writer 1, and has the lazy-index annotation; push --dry-run prints the same digest,
+    // so it packs the same bytes.
     start();
     try testing.expectEqual(@as(u8, 0), try command(&.{ "store", "import", "/src" }));
     var buffer: [80]u8 = undefined;
@@ -1040,8 +1041,10 @@ test "export and push --dry-run write layer writer 1, with no lazy index (0.5.2)
     const blob = try std.fmt.bufPrint(&path, "/export-a/blobs/sha256/{s}", .{manifest[7..]});
     const text = files.content_of(blob).?;
     const writer_1 = "\"" ++ constants.pack_annotation_writer ++ "\":\"1\"";
-    try testing.expect(std.mem.indexOf(u8, text, writer_1) != null);
-    try testing.expect(std.mem.indexOf(u8, text, constants.pack_annotation_lazy_index) == null);
+    const writer_2 = "\"" ++ constants.pack_annotation_writer ++ "\":\"2\"";
+    try testing.expect(std.mem.indexOf(u8, text, writer_2) != null);
+    try testing.expect(std.mem.indexOf(u8, text, writer_1) == null);
+    try testing.expect(std.mem.indexOf(u8, text, constants.pack_annotation_lazy_index) != null);
     try testing.expectEqual(@as(u8, 0), try command(&.{ "push", "--dry-run", tree }));
     try testing.expectEqualStrings(&manifest, try printed_oci_digest());
 }

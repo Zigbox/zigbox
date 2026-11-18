@@ -26,15 +26,14 @@ const builtin = @import("builtin");
 const Io = std.Io;
 const constants = @import("../constants.zig");
 
-/// The newest layer writer version the packer knows. Release 0.5.2 does not write it by
-/// default: see `release_writer_version`.
+/// The newest layer writer version the packer knows, and the one it writes by default.
 pub const layer_writer_version = constants.layer_writer_version;
 
 /// The layer writer a pack writes when its caller names none, and the one `zbx push`, `push
-/// --dry-run` and `store export --oci` write. 0.5.2 keeps lazy start (S2) dormant, for library
-/// callers too: writer 1, 0.5.1's bytes (docs/decisions/2026-11-16-0.5.2-s2-dormant.md). 0.6.0
-/// sets this back to `layer_writer_version`.
-pub const release_writer_version: u32 = 1;
+/// --dry-run` and `store export --oci` write: writer 2, with the lazy index. 0.5.2 and 0.5.3
+/// wrote writer 1 (docs/decisions/2026-11-16-0.5.2-s2-dormant.md); S2 turns writer 2 back on.
+/// The name stays because library callers read it.
+pub const release_writer_version: u32 = layer_writer_version;
 
 comptime {
     assert(release_writer_version >= 1);
@@ -129,8 +128,8 @@ pub const Input = struct {
     settings: *const images.Settings,
     /// The labels of a build result; an image's own are not kept.
     labels: ?*const result_mod.Config,
-    /// The layer writer version to write: 1 (`release_writer_version`, the default in 0.5.2)
-    /// or `layer_writer_version`.
+    /// The layer writer version to write: `release_writer_version` (writer 2) by default, or 1
+    /// for 0.5.1's bytes.
     writer_version: u32 = release_writer_version,
 };
 

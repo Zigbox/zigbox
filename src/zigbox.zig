@@ -238,8 +238,8 @@ pub const push = struct {
     pub const source = @import("push/source.zig");
     pub const Workspace = pack.Workspace;
     pub const Input = pack.Input;
-    /// Writer 1 in 0.5.2, the default of `Input.writer_version`: lazy start (S2) is dormant in
-    /// this release, so a library pack writes 0.5.1's bytes unless its caller asks for writer 2.
+    /// The default of `Input.writer_version`: writer 2, with the lazy index (writer 1 in 0.5.2
+    /// and 0.5.3, when lazy start was dormant). A caller can still ask for writer 1.
     pub const release_writer_version = pack.release_writer_version;
     pub const Packed = pack.Packed;
     pub const Exported = export_mod.Exported;

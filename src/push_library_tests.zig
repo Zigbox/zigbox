@@ -94,8 +94,8 @@ const Caller = struct {
         var made: zigbox.push.Packed = undefined;
         var failure: zigbox.push.pack.Failure = undefined;
         try zigbox.push.pack.pack(&caller.store, &caller.packing, input, &made, &failure);
-        // A caller that names no writer gets the release's, writer 1 in 0.5.2 (S2 dormant).
-        try testing.expectEqual(@as(u32, 1), zigbox.push.release_writer_version);
+        // A caller that names no writer gets the release's: writer 2, with the lazy index.
+        try testing.expectEqual(@as(u32, 2), zigbox.push.release_writer_version);
         try testing.expectEqual(zigbox.push.release_writer_version, made.writer_version);
         var exported: zigbox.push.Exported = undefined;
         var export_failure: zigbox.push.export_mod.Failure = undefined;

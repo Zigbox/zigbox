@@ -30,7 +30,7 @@ pub const Workspace = struct {
 };
 
 /// The layer writer that push, `push --dry-run` and export use: the packer's release writer,
-/// writer 1 in 0.5.2 (docs/decisions/2026-11-16-0.5.2-s2-dormant.md).
+/// writer 2 with its lazy index (writer 1 in 0.5.2 and 0.5.3).
 pub const release_writer_version = pack.release_writer_version;
 
 comptime {
