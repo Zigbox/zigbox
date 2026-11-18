@@ -250,8 +250,8 @@ fn run_all(
     for (images, 0..) |entry, index| {
         if (!is_selected(only, entry.ref)) continue;
         const pair = try try_both(session, out, arena, entry, traced);
-        floating.add(pair.floating.verdict);
-        pinned.add(pair.pinned.verdict);
+        floating.add(pair.floating.side.verdict);
+        pinned.add(pair.pinned.side.verdict);
         pairs[index] = pair;
     }
     try out.print("\ntop20: results ({s}, pinned on {s})\n", .{ list.date, list.pinned_date });
@@ -271,7 +271,7 @@ fn run_all(
 }
 
 /// One run of an image: its result line and verdict.
-const Outcome = struct { line: []const u8, verdict: checks_top20.Verdict };
+const Outcome = struct { line: []const u8, side: checks_top20.Side };
 
 /// Both runs of one image and the line that compares them.
 const Pair = struct { floating: Outcome, pinned: Outcome, compare: []const u8 };
@@ -296,8 +296,8 @@ fn try_both(
     var buffer: [512]u8 = undefined;
     const line = try checks_top20.format_compare(&buffer, .{
         .ref = entry.ref,
-        .floating = floating.verdict,
-        .pinned = pinned.verdict,
+        .floating = floating.side,
+        .pinned = pinned.side,
         .tag = tag,
         .now = now,
     });
@@ -348,7 +348,7 @@ fn try_one(
             try out.print(note, .{pulled_as});
         }
     }
-    return .{ .line = line, .verdict = result.verdict };
+    return .{ .line = line, .side = .{ .verdict = result.verdict, .pulled = result.pulled } };
 }
 
 /// The two files the container's output goes to. They are the demo user's, as a terminal or a

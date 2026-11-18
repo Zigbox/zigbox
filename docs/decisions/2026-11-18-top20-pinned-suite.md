@@ -30,7 +30,10 @@ the same images pinned by digest can: a digest names content that never changes.
 - **The comparison.** One `top20-compare:` line per image: both verdicts, `tag=same|moved|unknown`
   and a class: `ok`, `known`, `upstream image moved` (the tag fails, the pin does not),
   `runtime regression` (both fail), `runtime regression (pinned only)`, and `flaky (same content,
-  different results)` when the tag still names the pin and the two runs disagree. A moved tag's
+  different results)` when the tag still names the pin and the two runs disagree. A class never
+  claims more than was seen: a failure whose pull fetched nothing is `not pulled (registry)`, and
+  two results that differ with the tag unresolved are `undetermined (tag not resolved)`, since
+  only `moved` shows that the content changed (review of PR #186). A moved tag's
   line ends with its current digest, the start of a refresh. The workflow puts these lines first
   in the job summary.
 - **What fails the job.** A `fail` in either list. The canary keeps failing as it did; a pinned

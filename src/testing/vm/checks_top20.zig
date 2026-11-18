@@ -248,7 +248,9 @@ pub fn tag_of(now: ?[]const u8, pinned: []const u8) Tag {
 /// What a floating and a pinned result say together. A failure of the floating tag alone, while
 /// the pin runs, is the image's change upstream; a failure of the pin is the runtime's, since the
 /// pin's content has not changed since it last passed. The same content judged two ways is
-/// neither: the run is not repeatable.
+/// neither: the run is not repeatable. A class never claims more than was observed: a failure
+/// with nothing pulled is the registry's, not the runtime's, and when the resolve did not say
+/// where the tag points, a moved image cannot be told from a flaky run.
 pub const Change = enum {
     ok,
     known,
@@ -256,6 +258,8 @@ pub const Change = enum {
     regression,
     regression_pinned,
     flaky,
+    not_pulled,
+    undetermined,
 
     pub fn text(change: Change) []const u8 {
         return switch (change) {
@@ -265,27 +269,55 @@ pub const Change = enum {
             .regression => "runtime regression",
             .regression_pinned => "runtime regression (pinned only)",
             .flaky => "flaky (same content, different results)",
+            .not_pulled => "not pulled (registry)",
+            .undetermined => "undetermined (tag not resolved)",
         };
     }
 };
 
-pub fn classify(floating: Verdict, pinned: Verdict, tag: Tag) Change {
-    if (floating == .fail) {
-        if (pinned == .fail) return .regression;
-        return if (tag == .same) .flaky else .upstream_moved;
+/// One run's verdict, and whether its pull fetched the image.
+pub const Side = struct { verdict: Verdict, pulled: bool };
+
+pub fn classify(floating: Side, pinned: Side, tag: Tag) Change {
+    if (failed_unpulled(floating)) return .not_pulled;
+    if (failed_unpulled(pinned)) return .not_pulled;
+    if (floating.verdict == .fail) {
+        if (pinned.verdict == .fail) return .regression;
+        return by_tag(tag, .upstream_moved);
     }
-    if (pinned == .fail) return if (tag == .same) .flaky else .regression_pinned;
-    if (floating == pinned) return if (floating == .pass) .ok else .known;
+    if (pinned.verdict == .fail) return by_tag(tag, .regression_pinned);
+    if (floating.verdict == pinned.verdict) {
+        return if (floating.verdict == .pass) .ok else .known;
+    }
     // A pass on one and a known reason on the other: the two contents behave differently.
-    return if (tag == .same) .flaky else .upstream_moved;
+    return by_tag(tag, .upstream_moved);
 }
 
-/// One image's comparison: the floating reference, both verdicts, where the tag points and its
+/// A failure whose pull fetched nothing: a 429, a network error, or a digest no longer served.
+/// A run that did not pull but has a known reason is `known`, not this.
+fn failed_unpulled(side: Side) bool {
+    if (side.pulled) return false;
+    return side.verdict == .fail;
+}
+
+/// Two results that differ mean `moved` only when the tag moved; with the same index they are
+/// one content judged two ways, and with the tag unresolved nothing tells the two apart.
+fn by_tag(tag: Tag, moved: Change) Change {
+    assert(moved != .flaky);
+    assert(moved != .undetermined);
+    return switch (tag) {
+        .same => .flaky,
+        .moved => moved,
+        .unknown => .undetermined,
+    };
+}
+
+/// One image's comparison: the floating reference, both runs, where the tag points and its
 /// current index digest when the resolve gave one.
 pub const Compare = struct {
     ref: []const u8,
-    floating: Verdict,
-    pinned: Verdict,
+    floating: Side,
+    pinned: Side,
     tag: Tag,
     now: ?[]const u8,
 };
@@ -298,8 +330,8 @@ pub fn format_compare(buffer: []u8, compare: Compare) std.fmt.BufPrintError![]co
     const change = classify(compare.floating, compare.pinned, compare.tag);
     const head = try std.fmt.bufPrint(buffer, "{s} | floating={s} | pinned={s} | tag={s} | {s}", .{
         compare.ref,
-        @tagName(compare.floating),
-        @tagName(compare.pinned),
+        @tagName(compare.floating.verdict),
+        @tagName(compare.pinned.verdict),
         @tagName(compare.tag),
         change.text(),
     });
@@ -524,20 +556,36 @@ test "the floating tag's index digest is read from the resolve's JSON" {
 }
 
 test "floating against pinned tells an image that moved from a runtime regression" {
-    // Goal: the class of every pair of verdicts. Method: each pair, with the tag moved, the same
-    // or unknown where that changes the answer.
-    try testing.expectEqual(Change.ok, classify(.pass, .pass, .moved));
-    try testing.expectEqual(Change.known, classify(.known, .known, .same));
-    try testing.expectEqual(Change.upstream_moved, classify(.fail, .pass, .moved));
-    try testing.expectEqual(Change.upstream_moved, classify(.fail, .known, .unknown));
-    try testing.expectEqual(Change.flaky, classify(.fail, .pass, .same));
-    try testing.expectEqual(Change.regression, classify(.fail, .fail, .moved));
-    try testing.expectEqual(Change.regression, classify(.fail, .fail, .same));
-    try testing.expectEqual(Change.regression_pinned, classify(.pass, .fail, .moved));
-    try testing.expectEqual(Change.regression_pinned, classify(.known, .fail, .unknown));
-    try testing.expectEqual(Change.flaky, classify(.pass, .fail, .same));
-    try testing.expectEqual(Change.upstream_moved, classify(.known, .pass, .moved));
-    try testing.expectEqual(Change.flaky, classify(.pass, .known, .same));
+    // Goal: the class of every pair of runs, and that no class claims more than was seen: an
+    // unresolved tag never reads as moved, and a failure that pulled nothing never reads as a
+    // regression. Method: each pair, with the tag moved, the same or unknown where that changes
+    // the answer, and each side unpulled.
+    const pass: Side = .{ .verdict = .pass, .pulled = true };
+    const known: Side = .{ .verdict = .known, .pulled = true };
+    const fail: Side = .{ .verdict = .fail, .pulled = true };
+    const unpulled: Side = .{ .verdict = .fail, .pulled = false };
+    const known_unpulled: Side = .{ .verdict = .known, .pulled = false };
+    try testing.expectEqual(Change.ok, classify(pass, pass, .moved));
+    try testing.expectEqual(Change.known, classify(known, known, .same));
+    try testing.expectEqual(Change.upstream_moved, classify(fail, pass, .moved));
+    try testing.expectEqual(Change.undetermined, classify(fail, known, .unknown));
+    try testing.expectEqual(Change.flaky, classify(fail, pass, .same));
+    try testing.expectEqual(Change.regression, classify(fail, fail, .moved));
+    try testing.expectEqual(Change.regression, classify(fail, fail, .same));
+    try testing.expectEqual(Change.regression, classify(fail, fail, .unknown));
+    try testing.expectEqual(Change.regression_pinned, classify(pass, fail, .moved));
+    try testing.expectEqual(Change.undetermined, classify(known, fail, .unknown));
+    try testing.expectEqual(Change.flaky, classify(pass, fail, .same));
+    try testing.expectEqual(Change.upstream_moved, classify(known, pass, .moved));
+    try testing.expectEqual(Change.undetermined, classify(known, pass, .unknown));
+    try testing.expectEqual(Change.flaky, classify(pass, known, .same));
+    // A 429 on both pulls, or a digest the Hub no longer serves, is the registry's.
+    try testing.expectEqual(Change.not_pulled, classify(unpulled, unpulled, .unknown));
+    try testing.expectEqual(Change.not_pulled, classify(pass, unpulled, .same));
+    try testing.expectEqual(Change.not_pulled, classify(unpulled, pass, .unknown));
+    try testing.expectEqual(Change.not_pulled, classify(unpulled, fail, .moved));
+    // An image known not to pull keeps its known reason.
+    try testing.expectEqual(Change.known, classify(known_unpulled, known_unpulled, .unknown));
 }
 
 test "the comparison line names the class, and the tag's digest when it moved" {
@@ -546,8 +594,8 @@ test "the comparison line names the class, and the tag's digest when it moved" {
     const other = "sha256:" ++ "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
     const moved: Compare = .{
         .ref = "nginx:latest",
-        .floating = .fail,
-        .pinned = .pass,
+        .floating = .{ .verdict = .fail, .pulled = true },
+        .pinned = .{ .verdict = .pass, .pulled = true },
         .tag = .moved,
         .now = other,
     };
@@ -557,7 +605,7 @@ test "the comparison line names the class, and the tag's digest when it moved" {
         try format_compare(&buffer, moved),
     );
     var same = moved;
-    same.floating = .pass;
+    same.floating.verdict = .pass;
     same.tag = .same;
     try testing.expectEqualStrings(
         "nginx:latest | floating=pass | pinned=pass | tag=same | ok",
@@ -566,7 +614,7 @@ test "the comparison line names the class, and the tag's digest when it moved" {
     var unknown = moved;
     unknown.tag = .unknown;
     unknown.now = null;
-    unknown.pinned = .fail;
+    unknown.pinned.verdict = .fail;
     try testing.expectEqualStrings(
         "nginx:latest | floating=fail | pinned=fail | tag=unknown | runtime regression",
         try format_compare(&buffer, unknown),
