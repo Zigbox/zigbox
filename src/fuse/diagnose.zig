@@ -143,8 +143,12 @@ pub fn chunk_lied(diag: *Diag, source: []const u8, object: Digest, chunk: u32) v
     assert(diag.code == null);
     diag.raise(.W1202);
     diag.while_("fetching a chunk of a lazily started image", .{});
-    diag.cause("{s} sent bytes that do not match chunk {d}'s hash; none were used", .{
+    // The object is in the cause, not only in the context: the plain rendering shows no
+    // context, and the cause is what tells a reader which file to suspect. At most 192 bytes
+    // with a 52-byte source name, so it fits `diag_field_bytes_max`.
+    diag.cause("{s} sent bytes for {s} that do not match chunk {d}'s hash; none were used", .{
         source,
+        object.text(),
         chunk,
     });
     diag.context("object", "{s}", .{object.text()});
