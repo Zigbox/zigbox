@@ -312,7 +312,11 @@ jobs:
             /src/constants.zig
           sparse-checkout-cone-mode: false
       - uses: ./.release-tools/.github/actions/setup-gh
+      # No toolchain cache here either: this job holds contents: write, so the toolchain that
+      # renders the evidence is downloaded and checked against its SHA-256 on every run.
       - uses: ./.release-tools/.github/actions/setup-zig
+        with:
+          cache: 'false'
       # The CI evidence table (docs/releases/automation.md, "The evidence table"): the GitHub
       # Actions API's own record of every job and step of the release commit's `ci` run and of
       # the jobs of this run that `draft` needs, rendered by src/release_evidence.zig, which refuses anything but passed, expected
