@@ -1,5 +1,6 @@
 error[ZBX-E1201]: lazy start is not possible on this host
-  cause  this host has too little free memory for its chunk buffers and tables
-  fix    run it without --lazy, which reads the whole image first
+  cause  /dev/fuse is not openable: this user may not open it
+  fix    give users read and write on /dev/fuse (the fuse udev rule, mode 0666)
+         or run it without --lazy, which reads the whole image first
   more   zbx explain E1201 · rerun with --verbose for the full cause chain
   docs   https://zigbox.github.io/zigbox/errors/E1201.html

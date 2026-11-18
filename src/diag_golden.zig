@@ -878,11 +878,17 @@ const build_cases = [_]Case{
     .{ .code = .W0803, .args = &.{}, .direct = build_pin_warned, .warning = true, .exit = 0 },
 };
 
-/// The lazy start's codes (fuse/diagnose.zig). E1201's memory cause, E1202's catalog check and
-/// E1207 need a real server, which the simulated run does not build: their goldens are the
+/// The lazy start's codes (fuse/diagnose.zig). E1201 is a lazy run on a host where this user
+/// may not open `/dev/fuse`, refused before anything starts. E1202's catalog check and E1207
+/// need a real server, which the simulated run does not build: their goldens are the
 /// diagnostics as `fuse/diagnose.zig` builds them.
 const lazy_cases = [_]Case{
-    .{ .code = .E1201, .args = &.{}, .direct = lazy_out_of_memory, .exit = 1 },
+    .{
+        .code = .E1201,
+        .args = &.{ "run", "--lazy", "alpine", "--", "/bin/sh" },
+        .prepare = prepare_fuse_denied,
+        .exit = 125,
+    },
     .{ .code = .W1201, .args = &.{}, .direct = lazy_no_index, .warning = true, .exit = 0 },
     .{ .code = .E1202, .args = &.{}, .direct = lazy_index_disagrees, .exit = 1 },
     .{ .code = .W1202, .args = &.{}, .direct = lazy_lied, .warning = true, .exit = 0 },
@@ -896,9 +902,10 @@ const lazy_cases = [_]Case{
     },
 };
 
-fn lazy_out_of_memory(diag: *Diag) void {
-    const tree_digest = Digest.parse("b3:" ++ test_util.repeat('7', 64)).?;
-    lazy_diagnose.out_of_memory(diag, tree_digest);
+/// A container host where `/dev/fuse` is there and this user may not open it (EACCES).
+fn prepare_fuse_denied(sim: *HostSim) void {
+    sim_run.init(sim, 1);
+    sim.world.fuse_device_errno = 13;
 }
 
 fn lazy_index_disagrees(diag: *Diag) void {

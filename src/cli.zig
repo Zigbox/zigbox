@@ -4072,7 +4072,7 @@ fn run_container(
     // A `--mount` outside the project is refused before an image is pulled for the run.
     const spec_mounts = try resolve_writable(host, &given, storage, diag);
     // Before the image is looked for: a lazy start from a registry fetches its index.
-    if (given.lazy) try check_lazy(&given, invocation, diag);
+    if (given.lazy) try check_lazy(host, &given, invocation, diag);
     // A lazy start from a registry holds its token for the run: wiped on every way out of it.
     defer if (given.lazy) lazy_start.wipe(&storage.pull, lazy_workspace);
     var prepared: run_image.Prepared = .{
@@ -4470,12 +4470,26 @@ const RefusingLazy = struct {
 
 /// `--lazy` serves an image's tree: `--rootfs` (no tree) is refused. A detached run is served
 /// by its supervisor.
-fn check_lazy(given: *const RunArgs, invocation: *const Invocation, diag: *Diag) RunError!void {
+/// `--lazy`'s refusals, before anything of the run starts (no index fetched, no process made):
+/// a run of a directory (E1208), and a host where this user cannot open `/dev/fuse` (E1201).
+/// The kernel's refusal of the mount itself shows only in the setup child, also as E1201.
+fn check_lazy(
+    host: Host,
+    given: *const RunArgs,
+    invocation: *const Invocation,
+    diag: *Diag,
+) RunError!void {
     assert(given.lazy);
     assert(diag.code == null);
-    if (invocation.operand != null) return;
-    lazy_diagnose.flag_refused(diag, "--rootfs");
-    return error.StartFailed;
+    if (invocation.operand == null) {
+        lazy_diagnose.flag_refused(diag, "--rootfs");
+        return error.StartFailed;
+    }
+    host.open_fuse_device() catch |err| {
+        lazy_diagnose.device_refused(diag, err, host.last_errno());
+        return error.StartFailed;
+    };
+    assert(diag.code == null);
 }
 
 /// `--listen-send` names an open Unix stream socket of this process, before anything starts
@@ -5651,6 +5665,8 @@ test "run -d --lazy is taken; only --rootfs is refused with E1208" {
     // Goal: S2 slice 6: a detached lazy run is no longer refused. Method: `check_lazy` passes
     // `-d` with an image and refuses `--rootfs`. The supervisor's serving needs the real FUSE
     // server: the VM demo runs it.
+    var sim: HostSim = undefined;
+    sim.init(1, &.{});
     var diag: Diag = undefined;
     const lines = [_][]const []const u8{
         &.{ "run", "-d", "--lazy", "alpine", "--", "/bin/sh" },
@@ -5660,9 +5676,71 @@ test "run -d --lazy is taken; only --rootfs is refused with E1208" {
         diag.reset();
         var invocation: Invocation = undefined;
         try parse(line, &invocation, &diag);
-        const checked = check_lazy(&invocation.run, &invocation, &diag);
+        const checked = check_lazy(sim.interface(), &invocation.run, &invocation, &diag);
         if (image) try checked else try testing.expectError(error.StartFailed, checked);
         try testing.expectEqual(@as(?codes.Code, if (image) null else .E1208), diag.code);
+    }
+}
+
+test "run --lazy where /dev/fuse does not open is refused with E1201 naming why" {
+    // Goal: the S2 demo's step 8: `--lazy` on a host where this user cannot open `/dev/fuse` is
+    // E1201 before anything starts, its cause saying whether the device is missing or denied.
+    // Method: the model's device fails with each errno; `check_lazy` raises E1201 with the cause
+    // for it, and opens nothing. A device that opens passes, so the check is not vacuous.
+    var sim: HostSim = undefined;
+    const Case = struct { errno: u16, cause: ?[]const u8 };
+    const cases = [_]Case{
+        .{ .errno = 0, .cause = null },
+        .{ .errno = 13, .cause = "/dev/fuse is not openable: this user may not open it" },
+        .{ .errno = 1, .cause = "/dev/fuse is not openable: this user may not open it" },
+        .{ .errno = 2, .cause = "/dev/fuse is missing: the fuse module is not loaded" },
+        .{ .errno = 19, .cause = "/dev/fuse is missing: the fuse module is not loaded" },
+        .{ .errno = 12, .cause = "/dev/fuse could not be opened" },
+    };
+    for (cases) |case| {
+        sim.init(2, &.{});
+        sim.world.fuse_device_errno = case.errno;
+        var diag: Diag = undefined;
+        diag.reset();
+        var invocation: Invocation = undefined;
+        try parse(&.{ "run", "--lazy", "alpine", "--", "/bin/sh" }, &invocation, &diag);
+        const checked = check_lazy(sim.interface(), &invocation.run, &invocation, &diag);
+        try testing.expectEqual(@as(u32, 0), sim.open_count());
+        const cause = case.cause orelse {
+            try checked;
+            try testing.expectEqual(@as(?codes.Code, null), diag.code);
+            continue;
+        };
+        try testing.expectError(error.StartFailed, checked);
+        try testing.expectEqual(@as(?codes.Code, .E1201), diag.code);
+        try testing.expectEqualStrings(cause, diag.last_cause().?);
+        try testing.expectEqual(@as(u32, 2), diag.causes.count);
+    }
+}
+
+test "a lazy run where /dev/fuse is denied starts nothing and exits with E1201" {
+    // Goal: the refusal is whole-run: a lazy run of a pulled image on a host whose `/dev/fuse`
+    // this user may not open ends with one E1201 line and no process made. Method: the pulled
+    // image of the token test, the model's device denied (EACCES); the run fails, stderr names
+    // the cause and the code, and no process slot changed state.
+    const pull_tests = @import("pull_tests.zig");
+    const reference = @import("registry/test_registry.zig").TestRegistry.reference(.open);
+    var world: pull_tests.World = undefined;
+    pull_tests.project_world(&world, 43, "web-1");
+    const pulled = pull_tests.run_text(&world, &.{ "zbx", "pull", reference });
+    try testing.expectEqual(@as(u8, 0), pulled);
+    // The pull may have used process slots; the run must change none of them.
+    var states: [constants.sim_processes_max]@TypeOf(world.sim.world.processes[0].state) =
+        undefined;
+    for (&states, &world.sim.world.processes) |*state, *process| state.* = process.state;
+    world.sim.world.fuse_device_errno = 13;
+    const ran = pull_tests.run_text(&world, &.{ "zbx", "run", "--lazy", reference, "--", "sh" });
+    try testing.expectEqual(@as(u8, 125), ran);
+    const stderr = world.sim.stderr();
+    try testing.expect(std.mem.indexOf(u8, stderr, "error[ZBX-E1201]") != null);
+    try testing.expect(std.mem.indexOf(u8, stderr, "/dev/fuse is not openable") != null);
+    for (&states, &world.sim.world.processes) |state, *process| {
+        try testing.expectEqual(state, process.state);
     }
 }
 
