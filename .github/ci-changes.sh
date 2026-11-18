@@ -3,7 +3,7 @@
 # `name=true|false` lines (to $GITHUB_OUTPUT, or stdout when that is unset):
 #
 #   code      the build, tidy, test, errors-site, fuzz, fuzz-provenance and dbus-live jobs
-#   demo_<d>  one VM demo, <d> in m0 m1 m2 m2b m3 m4 m5 m6 m6b m6d m7 m8 m8b m9 m10 c4 s2_lazy
+#   demo_<d>  one VM demo, <d> in m0 m1 m2 m2b m3 m4 m5 m6 m6b m6d m7 m8 m8b m9 m10 c4 s2_lazy s2
 #   demo_m8_packages  the four-guest packages demo (demo-m8-packages): the package sources, the
 #             packaging files and the packages harness (not the m8 demo's own rules)
 #
@@ -15,7 +15,7 @@
 # for the package files, the VM guests, the build and the workflow (docs/demos/m8.md).
 set -euo pipefail
 
-demos=(m0 m1 m2 m2b m3 m4 m5 m6 m6b m6d m7 m8 m8b m9 m10 c4 s2_lazy)
+demos=(m0 m1 m2 m2b m3 m4 m5 m6 m6b m6d m7 m8 m8b m9 m10 c4 s2_lazy s2)
 declare -A want=()
 want_packages=0
 
@@ -105,6 +105,8 @@ classify() {
     src/testing/vm/checks_upgrade_m6b.zig) want_one m2b; want_from m6b; return ;;
     src/testing/vm/*_m6d.zig | src/testing/vm/m6d_fixture/*) want_one m6d; return ;;
     src/testing/vm/*_s2_lazy.zig) want_one s2_lazy; return ;;
+    # demo-s2's harness: the disk-backed registry, the fixture generator and the script.
+    src/testing/vm/*_s2.zig | src/testing/vm/s2/*) want_one s2; return ;;
     # fixture_http.zig is the HTTP server demo-m9's fetch step runs in the guest; no other uses it.
     src/testing/vm/m9_* | src/testing/vm/*_m9.zig | src/testing/vm/fixture_http.zig) \
       want_one m9; return ;;
@@ -129,7 +131,7 @@ classify() {
     # reach the demos from m4 on as well as S2's.
     src/fuse/lazy_server.zig | src/host_real_fuse.zig) want_all; return ;;
     src/lazy/*) want_from m4; return ;;
-    src/fuse/*) want_one s2_lazy; return ;;
+    src/fuse/*) want_one s2_lazy; want_one s2; return ;;
     src/trust/* | src/push/*) want_one m8; return ;;
     # Every pull asks the Google credential code whether a reference is Artifact Registry's.
     src/registry/* | src/pull*.zig | src/lock_*.zig | src/google/* | src/cloud/*) want_from m4; return ;;
