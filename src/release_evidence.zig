@@ -684,3 +684,40 @@ test "a cell escapes the table's separator" {
     try write_cell(&out, "a|b\nc");
     try testing.expectEqualStrings("a\\|b c", out.buffered());
 }
+
+test "jobs and steps at their bounds pass, one past refuses" {
+    // Goal: `release_evidence_jobs_max` jobs and `release_evidence_steps_max` steps are read, one
+    // more of either refuses. Method: synthetic listings of each length.
+    var diagnostic: Diagnostic = .{};
+    const run: Run = .{
+        .id = 1,
+        .head_sha = "s",
+        .status = "completed",
+        .html_url = "u",
+        .created_at = "t",
+    };
+    const gate = gate_of("ci", "s", "", "");
+    const step: Step = .{ .name = "Run the demo", .conclusion = "success" };
+    var steps: [constants.release_evidence_steps_max + 1]Step = @splat(step);
+    const job: Job = .{
+        .name = "j",
+        .status = "completed",
+        .conclusion = "success",
+        .html_url = "u",
+        .head_sha = "s",
+        .run_id = 1,
+        .steps = steps[0..constants.release_evidence_steps_max],
+    };
+    var all: [constants.release_evidence_jobs_max + 1]Job = @splat(job);
+    const at_max: Jobs = .{ .total_count = all.len - 1, .jobs = all[0 .. all.len - 1] };
+    try check_jobs(&at_max, &run, &gate, &diagnostic);
+    const past_max: Jobs = .{ .total_count = all.len, .jobs = &all };
+    try testing.expectError(error.Refused, check_jobs(&past_max, &run, &gate, &diagnostic));
+    try testing.expectEqualStrings("ci: run 1 has 101 jobs, above 100", diagnostic.text);
+
+    try testing.expectEqual(Label.passed, try classify(&job, "ci", &diagnostic));
+    var long = job;
+    long.steps = &steps;
+    try testing.expectError(error.Refused, classify(&long, "ci", &diagnostic));
+    try testing.expectEqualStrings("ci: job 'j' has 129 steps, above 128", diagnostic.text);
+}
