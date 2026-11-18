@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <title>ZBX-E1203 · Zigbox</title>
-<meta name="description" content="a chunk could not be fetched in time: the read got EIO">
+<meta name="description" content="a chunk could not be fetched: the read got EIO">
 <link rel="canonical" href="https://zigbox.github.io/zigbox/errors/E1203.html">
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Familjen+Grotesk:wght@500;700&amp;family=IBM+Plex+Sans:wght@400;500;600&amp;family=IBM+Plex+Mono:wght@400;500&amp;display=swap">
@@ -73,7 +73,7 @@ footer{border-top:1px solid var(--line);padding-block:24px;color:var(--muted);
 <main class="wrap">
 <p class="eyebrow">Diagnostic code</p>
 <h1>ZBX-E1203</h1>
-<p class="summary">a chunk could not be fetched in time: the read got EIO</p>
+<p class="summary">a chunk could not be fetched: the read got EIO</p>
 <dl class="facts"><div><dt>Kind</dt><dd>error</dd></div><div><dt>Blame</dt><dd>external</dd></div><div><dt>Exit code</dt><dd>3</dd></div></dl>
 <h2>What it means</h2>
 <p>zbx run --lazy fetches the chunks of the image's files as they are read. No source gave this chunk within the read's deadline, so the process that read it got an input/output error (EIO). The cause says what each source did. The container goes on; reading the file again tries again.</p>

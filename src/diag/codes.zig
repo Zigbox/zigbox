@@ -5146,7 +5146,7 @@ pub const registry = [_]Entry{
         .code = .E1203,
         .severity = .@"error",
         .blame = .external,
-        .summary = "a chunk could not be fetched in time: the read got EIO",
+        .summary = "a chunk could not be fetched: the read got EIO",
         .explanation =
         \\zbx run --lazy fetches the chunks of the image's files as they are read.
         \\No source gave this chunk within the read's deadline, so the process that

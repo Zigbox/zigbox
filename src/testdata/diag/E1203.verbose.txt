@@ -1,4 +1,4 @@
-error[ZBX-E1203]: a chunk could not be fetched in time: the read got EIO
+error[ZBX-E1203]: a chunk could not be fetched: the read got EIO
   while  fetching a chunk of a lazily started image
   cause  chunk 3 could not be fetched within 30 s; the reading process got EIO
          (registry: timed out)

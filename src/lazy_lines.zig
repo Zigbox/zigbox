@@ -263,7 +263,7 @@ test "E1203 after a lie names it, and says no deadline passed" {
         .sources_count = 1,
         .names = &names,
     };
-    const head = "error[ZBX-E1203]: a chunk could not be fetched in time: the read got EIO\n" ++
+    const head = "error[ZBX-E1203]: a chunk could not be fetched: the read got EIO\n" ++
         "  cause  no source sent bytes that match chunk 3's hash; the reading process got\n";
     const tail = "  fix    tell the owner of the source that sent wrong bytes\n" ++
         "  more   zbx explain E1203 · rerun with --verbose for the full cause chain\n" ++
