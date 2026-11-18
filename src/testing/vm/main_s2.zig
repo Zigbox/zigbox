@@ -501,7 +501,8 @@ const script_netcut =
     \\  t0=$(now); with n $Z exec cut -- sha256sum /data/e.bin > /tmp/s2-e2.out 2>&1
     \\  ms=$(( $(now) - t0 )); rec cut_recover_ms $ms
     \\  grep -q "^$HE " /tmp/s2-e2.out && [ $ms -lt 10000 ] &&
-    \\    ok "back up: the expected hash in $ms ms" || fail "the hash in 10 s" "$ms ms: $(last /tmp/s2-e2.out)"
+    \\    ok "back up: the expected hash in $ms ms" ||
+    \\    fail "the hash in 10 s" "$ms ms: $(last /tmp/s2-e2.out)"
     \\  with n $Z stop cut > /dev/null 2>&1
     \\  finish
     \\}
