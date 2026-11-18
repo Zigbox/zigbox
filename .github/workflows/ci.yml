@@ -898,7 +898,9 @@ jobs:
     needs: changes
     if: ${{ needs.changes.outputs.demo_s2 == 'true' }}
     runs-on: ubuntu-24.04
-    timeout-minutes: 45
+    # Run 416 (vm/s2-slice6): 32 min in all, about 6 to set up and 25 for the demo (prep 9 of
+    # them); the steps' own bounds add up to more (prep 25 min, step 4's wait 5 min).
+    timeout-minutes: 60
     steps:
       # The whole history: step 9 builds the release before S2 in a git worktree, and a shallow
       # clone does not have its tag.

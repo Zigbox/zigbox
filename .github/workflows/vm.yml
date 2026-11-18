@@ -25,7 +25,9 @@ jobs:
   demo:
     name: ${{ github.ref_name }}
     runs-on: ubuntu-24.04
-    timeout-minutes: 60
+    # One demo fits an hour. vm/s2-* took 32 min (run 416), with step bounds that add up to more;
+    # vm/all-* ran demo-m0 to demo-m10 in 58 min, and demo-c4 to demo-z7 come after them.
+    timeout-minutes: ${{ startsWith(github.ref_name, 'vm/all-') && 180 || (startsWith(github.ref_name, 'vm/s2-') && 75 || 60) }}
     # demo-m6d's Google setup: repository variables, not secrets (docs/demos/m6d.md).
     env:
       ZBX_GAR_PROVIDER: ${{ vars.ZBX_GAR_PROVIDER }}
