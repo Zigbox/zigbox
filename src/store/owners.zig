@@ -120,7 +120,8 @@ test "host_of is container_id's inverse, and reaches no further than it does" {
             try testing.expectEqual(@as(?u32, id), container_id(&map, .gid, gid));
         }
         try testing.expectEqual(@as(?u32, 100041), host_of(&map, .uid, 42));
-        try testing.expectEqual(@as(?u32, null), host_of(&map, .uid, constants.subid_range_min + 1));
+        const past = constants.subid_range_min + 1;
+        try testing.expectEqual(@as(?u32, null), host_of(&map, .uid, past));
     }
 }
 
