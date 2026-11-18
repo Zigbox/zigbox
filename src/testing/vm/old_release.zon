@@ -23,4 +23,7 @@
     // The same for `demo-m8`: the latest tag, v0.3.1. Its `zbx` has no trust commands; this `zbx`
     // has to read its store, lock, run record and build cache.
     .m8_tag = "v0.3.1",
+    // The same for `demo-m2b`: v0.5.2, the release before M2b. Its `zbx` starts a detached
+    // container (a version-9 run record); this `zbx` lists it, stops it and reads its record.
+    .m2b_tag = "v0.5.2",
 }

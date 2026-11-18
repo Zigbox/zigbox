@@ -76,7 +76,7 @@ footer{border-top:1px solid var(--line);padding-block:24px;color:var(--muted);
 <p class="summary">workforce pools are not supported</p>
 <dl class="facts"><div><dt>Kind</dt><dd>error</dd></div><div><dt>Blame</dt><dd>user</dd></div><div><dt>Exit code</dt><dd>1</dd></div></dl>
 <h2>What it means</h2>
-<p>The external_account file's audience is a workforce identity pool (for people signing in through an identity provider). zbx supports workload identity pools, for machines and CI. Use a workload identity pool's provider.</p>
+<p>The external_account file's audience is a workforce identity pool (for people signing in through an identity provider). zbx supports workload identity pools, for machines and CI. Use a workload identity pool's provider. A public image still pulls: zbx names the file only when the registry refuses the anonymous pull.</p>
 <h2>Offline</h2>
 <p>The same text, without a network:</p>
 <pre class="term">zbx explain E0571</pre>

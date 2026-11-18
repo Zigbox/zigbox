@@ -1102,7 +1102,10 @@ fn parse_limit_field(key: []const u8, value: []const u8, out: *Parsed) ?bool {
         // Digits only, as render writes it: `parseInt` would also take `+` and `_`.
         if (value.len > 20) return false;
         for (value) |digit| if (!std.ascii.isDigit(digit)) return false;
-        out.limits.shm_bytes = std.fmt.parseUnsigned(u64, value, 10) catch return false;
+        if (value.len > 1 and value[0] == '0') return false; // Render writes no leading zero.
+        const shm_bytes = std.fmt.parseUnsigned(u64, value, 10) catch return false;
+        if (shm_bytes < constants.shm_bytes_min) return false; // Render asserts the bound.
+        out.limits.shm_bytes = shm_bytes;
         return true;
     }
     return null;
@@ -2683,6 +2686,7 @@ const bad_shm = [_][]const u8{
     "    .limit_shm = \"64m\",\n",
     "    .limit_shm = +67108864,\n",
     "    .limit_shm = 67_108_864,\n",
+    "    .limit_shm = 067108864,\n",
     "    .limit_shm = 99999999999999999999,\n",
 };
 

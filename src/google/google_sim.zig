@@ -131,6 +131,9 @@ pub const GoogleSim = struct {
     registry_fault: RegistryFault = .none,
     blob_redirect: BlobRedirect = .same_host,
     realm_at: RealmAt = .own,
+    /// The repository is public: the realm grants an anonymous token request, as Artifact Registry
+    /// and gcr.io do for a public image.
+    public: bool = false,
     /// The access token the realm accepts.
     accepted_token: []const u8 = access_token,
     /// The token the metadata server hands out (a test at the token's bound sets a long one).
@@ -516,6 +519,11 @@ fn realm(sim: *GoogleSim, request: *const net.Request, served: *net_sim.Served) 
     }
     var storage_buffer: [128]u8 = undefined;
     const right = sim.basic_text(&storage_buffer);
+    if (request.basic.len == 0 and sim.public) {
+        sim.realm_ok += 1;
+        fixture_answer(sim, request, request.target, "", served);
+        return;
+    }
     if (request.basic.len == 0) {
         // Anonymous: a private repository, or a missing one, is denied.
         served.* = .{ .status = 403, .body = registry_error("DENIED") };
