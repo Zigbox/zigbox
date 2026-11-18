@@ -290,12 +290,20 @@ const script_common = "set -u\nU='" ++ H.as_demo ++ "'\n" ++
     \\rec() { echo "s2: recorded $1 $2"; }
     \\ctl() { curl -fsS "http://127.0.0.1:5000/control/$1"; }
     \\now() { date +%s%3N; }
-    \\# `with <store> <command...>`: the command as demo, its store under $H/<store>.
-    \\with() { s=$1; shift; $U XDG_DATA_HOME=$H/$s "$@"; }
+    \\# `with <store> <command...>`: the command as demo, its store under $H/<store>, run from
+    \\# that directory: zbx writes zbx.lock in the working directory, which must be demo's.
+    \\with() { s=$1; shift; ( cd "$H/$s" && $U XDG_DATA_HOME=$H/$s "$@" ); }
     \\fresh() { rm -rf "$H/$1"; install -d -o demo -g demo "$H/$1"; }
     \\# The word after word $2 in the line $1: `word "$(ctl counter)" served`.
     \\word() { echo "$1" | tr ' ' '\n' | grep -A1 -x "$2" | sed -n 2p; }
-    \\last() { tail -n "${2:-3}" "$1" | tr '\n' '|' | cut -c1-400; }
+    \\# The last diagnostic of file $1 without its `more` and `docs` lines (its code, cause and
+    \\# fix), else its last $2 lines (3), on one line.
+    \\last() {
+    \\  awk -v n="${2:-3}" '{ l[NR] = $0 } /(error|warning)\[ZBX-/ { e = NR }
+    \\    END { s = e ? e : NR - n + 1; if (s < 1) s = 1
+    \\      for (i = s; i <= NR; i++) if (!e || l[i] !~ /^  (more|docs) /) print l[i] }' "$1" |
+    \\    tr '\n' '|' | cut -c1-400
+    \\}
     \\show() { sed -n "1,${2:-12}p" "$1" | sed "s/^/s2: $STEP: | /"; }
     \\eio() { grep -Eq 'Input/output error|I/O error' "$1"; }
     \\finish() { [ $FAILED = 0 ] && echo "s2: $STEP: done"; exit $FAILED; }
@@ -509,9 +517,11 @@ const script_refusals =
     \\  install -m 755 $Z /usr/local/bin/zbx-s2
     \\  mode=$(stat -c %a /dev/fuse); group=$(stat -c %G /dev/fuse)
     \\  chgrp demo /dev/fuse; chmod 660 /dev/fuse
-    \\  runuser -u s2other -- env HOME=/home/s2other XDG_RUNTIME_DIR=/run/user/$ou \
-    \\    XDG_DATA_HOME=/home/s2other/d /usr/local/bin/zbx-s2 run --lazy $IMG -- true \
-    \\    > /tmp/s2-r3.out 2>&1; st=$?
+    \\  # zbx makes the store under XDG_DATA_HOME, which must exist; it runs from there.
+    \\  rm -rf /home/s2other/d; install -d -o s2other -g s2other /home/s2other/d
+    \\  ( cd /home/s2other/d && runuser -u s2other -- env HOME=/home/s2other \
+    \\    XDG_RUNTIME_DIR=/run/user/$ou XDG_DATA_HOME=/home/s2other/d \
+    \\    /usr/local/bin/zbx-s2 run --lazy $IMG -- true ) > /tmp/s2-r3.out 2>&1; st=$?
     \\  chgrp "$group" /dev/fuse; chmod "$mode" /dev/fuse; grep -m 1 E1201 /tmp/s2-r3.out
     \\  [ $st != 0 ] && grep -q E1201 /tmp/s2-r3.out && ok "/dev/fuse denied: E1201" ||
     \\    fail "E1201" "exit $st: $(last /tmp/s2-r3.out)"
@@ -520,8 +530,10 @@ const script_refusals =
     \\
 ;
 
-/// Step 9, in one store: the old release's run is listed and stopped by this `zbx`; this
-/// `zbx`'s lazy run is skipped by the old `zbx ps` with W0203 (its record is a newer version).
+/// Step 9, in one store: the old release's run is listed and stopped by this `zbx`. This `zbx`'s
+/// lazy run writes a record of a version the old release does not know (11): the old `zbx ps`
+/// leaves it out without a word (v0.5.1 warns W0203 only when it prunes), and the old `zbx stop`
+/// refuses it with E0402, "from a newer zbx", the old release's newer-version refusal.
 const script_upgrade =
     \\upgrade() {
     \\  fresh u; install -d -o demo -g demo $H/u/root
@@ -537,11 +549,20 @@ const script_upgrade =
     \\  with u $Z stop old1 > /tmp/s2-u3.out 2>&1 && ok "this zbx stops it" ||
     \\    fail "stop old1" "$(last /tmp/s2-u3.out)"
     \\  with u $Z run -d --lazy --name lz $IMG -- sleep 600 > /tmp/s2-u4.out 2>&1 ||
-    \\    fail "a lazy run in the same store" "$(last /tmp/s2-u4.out)"
-    \\  with u $O ps > /tmp/s2-u5.out 2>&1; grep -m 1 W0203 /tmp/s2-u5.out
-    \\  grep -q W0203 /tmp/s2-u5.out && ! grep -qw lz /tmp/s2-u5.out &&
-    \\    ok "the old zbx ps skips the lazy record: W0203" || fail "W0203" "$(last /tmp/s2-u5.out)"
-    \\  with u $Z stop lz > /dev/null 2>&1
+    \\    { fail "a lazy run in the same store" "$(last /tmp/s2-u4.out)"; finish; }
+    \\  with u $Z ps > /tmp/s2-u5.out 2>&1
+    \\  grep -w lz /tmp/s2-u5.out | grep -qw running && ok "this zbx ps shows lz running" ||
+    \\    fail "lz runs" "$(last /tmp/s2-u5.out 4)"
+    \\  with u $O ps --all > /tmp/s2-u6.out 2>&1; st=$?
+    \\  [ $st = 0 ] && grep -q '^NAME' /tmp/s2-u6.out && ! grep -qw lz /tmp/s2-u6.out &&
+    \\    ok "the old zbx ps --all leaves the lazy record out" ||
+    \\    fail "the old ps leaves lz out" "exit $st: $(last /tmp/s2-u6.out 4)"
+    \\  with u $O stop lz > /tmp/s2-u7.out 2>&1; st=$?; grep -m 1 E0402 /tmp/s2-u7.out
+    \\  [ $st != 0 ] && grep -q E0402 /tmp/s2-u7.out && grep -q 'newer zbx' /tmp/s2-u7.out &&
+    \\    ok "the old zbx stop lz: E0402, a record from a newer zbx" ||
+    \\    fail "E0402 from a newer zbx" "exit $st: $(last /tmp/s2-u7.out)"
+    \\  with u $Z stop lz > /tmp/s2-u8.out 2>&1 && ok "this zbx stops lz" ||
+    \\    fail "stop lz" "$(last /tmp/s2-u8.out)"
     \\  finish
     \\}
     \\
