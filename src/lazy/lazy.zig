@@ -142,7 +142,8 @@ pub const Catalog = struct {
 
 pub const ReadError = error{
     /// No source gave verified bytes before the read's deadline (`lazy_read_deadline_ms`, or
-    /// `lazy_down_fail_ms` when every source it needs is down). An `E1203` event was logged.
+    /// `lazy_down_fail_ms` when every source it needs is down), or, at once, every source sent
+    /// wrong bytes for the object (`Outcome.lied`, `lied_before`). An `E1203` event was logged.
     /// The FUSE reply is `EIO`.
     Unavailable,
     /// The store's disk is too full to keep the chunk (`lazy_store_free_bytes_min`). An `E1206`
@@ -190,6 +191,9 @@ pub const Outcome = enum(u8) {
     lied,
     /// Down and not due for a probe: not asked.
     down,
+    /// Sent wrong bytes for this object before (here or for another reader), so not asked
+    /// again: the reason it was not asked, which `not_tried` would hide.
+    lied_before,
 
     pub fn text(outcome: Outcome) []const u8 {
         return switch (outcome) {
@@ -199,6 +203,7 @@ pub const Outcome = enum(u8) {
             .failed => "failed",
             .lied => "sent wrong bytes",
             .down => "down",
+            .lied_before => "sent wrong bytes for this file before, not asked again",
         };
     }
 };

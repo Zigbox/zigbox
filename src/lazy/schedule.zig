@@ -377,7 +377,25 @@ pub const Schedule = struct {
             .sources_count = schedule.sources_count,
             .names = &schedule.names,
         };
+        if (kind == .unavailable) schedule.name_liars(object, &schedule.events[at].outcomes);
         schedule.events_count += 1;
+    }
+
+    /// A source that lied about `object` is never asked for it again, so its outcome in a later
+    /// read's `E1203` would read "not asked" (or the outcome of a try before the lie). Say why.
+    fn name_liars(
+        schedule: *const Schedule,
+        object: lazy.ObjectIndex,
+        outcomes: *[sources_max]lazy.Outcome,
+    ) void {
+        assert(object < schedule.objects.len);
+        assert(schedule.sources_count <= sources_max);
+        const bad = schedule.objects[object].bad;
+        var source: u8 = 0;
+        while (source < schedule.sources_count) : (source += 1) {
+            if (bad & bit(source) == 0) continue;
+            if (outcomes[source] != .lied) outcomes[source] = .lied_before;
+        }
     }
 
     pub fn pop_event(schedule: *Schedule) ?lazy.Event {

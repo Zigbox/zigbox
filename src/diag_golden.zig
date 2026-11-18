@@ -924,7 +924,7 @@ fn lazy_lied(diag: *Diag) void {
 
 fn lazy_unavailable(diag: *Diag) void {
     const object = Digest.parse("b3:" ++ test_util.repeat('5', 64)).?;
-    lazy_diagnose.chunk_unavailable(diag, object, 3, "registry: timed out");
+    lazy_diagnose.chunk_unavailable(diag, object, 3, .deadline, "registry: timed out");
 }
 
 fn lazy_store_full(diag: *Diag) void {

@@ -5155,6 +5155,11 @@ pub const registry = [_]Entry{
         \\
         \\Check the network and the registry. Run the image without --lazy to
         \\read it all before the container starts.
+        \\
+        \\A source that sent bytes that do not match a chunk's hash (W1202) is not
+        \\asked for that file again in this run. When every source has done so, the
+        \\read fails at once, the cause says no source sent matching bytes, and
+        \\reading again does not help: tell the owner of the source.
         ,
     },
     .{

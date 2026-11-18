@@ -859,6 +859,42 @@ test "resolver: a lie on a job that ends after its read's deadline is still name
     for (&resolver.schedule.pending) |*entry| try testing.expect(entry.state == .free);
 }
 
+test "resolver: a source that lied about an object is named so in each later read's E1203" {
+    // Goal: the `unavailable` event of the read that was lied to says `lied`, and that of a
+    // later read of the same object, which never asks the source again, says `lied_before`
+    // rather than `not_tried` ("not asked"); both fail at once, with no deadline passed.
+    // Method: one lying peer and a two-chunk object; read chunk 0 (one job, a lie), then
+    // chunk 1, both at 1 ms; the peer is asked once.
+    setup(&.{2 * chunk_bytes});
+    fixture.peers[0].behaviour = .lying;
+    fixture.peers[0].misbehave_calls = misbehave_always;
+    try open_resolver(1, false, false);
+    defer close_resolver();
+    const resolver = &fixture.resolver;
+    var out: [chunk_bytes]u8 = @splat(0);
+    const step = resolver.read_begin(0, 0, &out, 0);
+    try testing.expectEqual(schedule_mod.Result.lied, try one_job());
+    const first = resolver.read_poll(step.wait, &out, 1);
+    try testing.expectEqual(lazy.ReadError.Unavailable, first.failed);
+    const again = resolver.read_begin(0, 1, &out, 1);
+    const later = resolver.read_poll(again.wait, &out, 1);
+    try testing.expectEqual(lazy.ReadError.Unavailable, later.failed);
+    resolver.drain_events();
+    try testing.expectEqual(@as(u32, 1), events_of(.lied, "peer a"));
+    try testing.expectEqual(@as(u32, 2), events_of(.unavailable, ""));
+    const expected = [2]lazy.Outcome{ .lied, .lied_before };
+    var seen: u32 = 0;
+    for (fixture.events[0..fixture.events_count.load(.monotonic)]) |*event| {
+        if (event.kind != .unavailable) continue;
+        try testing.expectEqual(seen, event.chunk);
+        try testing.expectEqual(@as(u8, 1), event.sources_count);
+        try testing.expectEqual(expected[seen], event.outcomes[0]);
+        seen += 1;
+    }
+    try testing.expectEqual(@as(u32, 2), seen);
+    try testing.expectEqual(@as(u32, 1), fixture.peers[0].calls.load(.monotonic));
+}
+
 test "resolver: a read that arrives mid-fill is served before the next fill request" {
     // Goal: the supervisor's condition on `lazy_fill_idle_ms` (S2 slice 6): the fill takes no
     // request until no reader has asked for `lazy_fill_idle_ms`; a read that arrives while a fill

@@ -99,11 +99,27 @@ pub fn describe(diag: *Diag, given: *const lazy.Event) void {
         .unavailable => {
             var buffer: [tried_bytes_max]u8 = undefined;
             const tried = tried_text(&buffer, given);
-            lazy_diagnose.chunk_unavailable(diag, given.id, given.chunk, tried);
+            const why = unavailable_why(given);
+            lazy_diagnose.chunk_unavailable(diag, given.id, given.chunk, why, tried);
         },
         .store_full => lazy_diagnose.store_full(diag, given.id, given.chunk),
     }
     assert(diag.code != null);
+}
+
+/// Why a read gave up: every source lied about the object (it failed at once, as none is
+/// left to ask), else its deadline passed.
+pub fn unavailable_why(given: *const lazy.Event) lazy_diagnose.Unavailable {
+    assert(given.kind == .unavailable);
+    assert(given.sources_count <= constants.lazy_sources_max);
+    if (given.sources_count == 0) return .deadline;
+    for (given.outcomes[0..given.sources_count]) |outcome| {
+        switch (outcome) {
+            .lied, .lied_before => {},
+            .not_tried, .not_found, .timed_out, .failed, .down => return .deadline,
+        }
+    }
+    return .lied;
 }
 
 /// What each source did: "registry: timed out; peer 10.0.0.3: not found". Cut at the buffer.
@@ -226,6 +242,51 @@ test "the sources tried, in order" {
     given.sources_count = 1;
     given.outcomes[0] = .timed_out;
     try testing.expectEqualStrings("registry: timed out", tried_text(&buffer, &given));
+}
+
+test "E1203 after a lie names it, and says no deadline passed" {
+    // Goal: a read that failed because every source lied about the object (S2 demo step 6, a
+    // registry that flips a byte) shows a cause and a fix that say so, never "within 30 s" or
+    // "registry: not asked". A mixed failure still names the deadline.
+    // Method: render the `unavailable` event as the run does, for the read that was lied to
+    // and for a later read of the same object, and compare the default text; then one source
+    // that timed out beside the liar.
+    const names: [constants.lazy_sources_max][]const u8 = .{ "registry", "peer 10.0.0.3" } ++
+        @as([constants.lazy_sources_max - 2][]const u8, @splat(""));
+    var given: lazy.Event = .{
+        .kind = .unavailable,
+        .object = 0,
+        .id = lazy.Digest.parse("b3:" ++ @import("test_util.zig").repeat('5', 64)).?,
+        .chunk = 3,
+        .source = "",
+        .outcomes = @splat(.not_tried),
+        .sources_count = 1,
+        .names = &names,
+    };
+    const head = "error[ZBX-E1203]: a chunk could not be fetched in time: the read got EIO\n" ++
+        "  cause  no source sent bytes that match chunk 3's hash; the reading process got\n";
+    const tail = "  fix    tell the owner of the source that sent wrong bytes\n" ++
+        "  more   zbx explain E1203 · rerun with --verbose for the full cause chain\n" ++
+        "  docs   https://zigbox.github.io/zigbox/errors/E1203.html\n";
+    given.outcomes[0] = .lied;
+    try expect_rendered(&given, head ++ "         EIO (registry: sent wrong bytes)\n" ++ tail);
+    given.outcomes[0] = .lied_before;
+    try expect_rendered(&given, head ++
+        "         EIO (registry: sent wrong bytes for this file before, not asked again)\n" ++
+        tail);
+    given.sources_count = 2;
+    given.outcomes[1] = .timed_out;
+    try testing.expectEqual(lazy_diagnose.Unavailable.deadline, unavailable_why(&given));
+    given.outcomes[1] = .lied;
+    try testing.expectEqual(lazy_diagnose.Unavailable.lied, unavailable_why(&given));
+}
+
+fn expect_rendered(given: *const lazy.Event, expected: []const u8) !void {
+    var diag: Diag = undefined;
+    diag.reset();
+    describe(&diag, given);
+    var buffer: [constants.output_bytes_max]u8 = undefined;
+    try testing.expectEqualStrings(expected, render.render(&diag, .text, false, &buffer));
 }
 
 test "lines past the bound are counted, not shown" {

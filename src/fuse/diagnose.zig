@@ -238,19 +238,47 @@ pub fn chunk_lied(diag: *Diag, source: []const u8, object: Digest, chunk: u32) v
     diag.fix(.{ .sentence = "nothing to do here: the next source is asked; tell its owner" });
 }
 
-/// ZBX-E1203: no source gave chunk `chunk` of `object` within `lazy_read_deadline_ms`: the
-/// reading process got `EIO`. `tried` is what each source did, already rendered.
-pub fn chunk_unavailable(diag: *Diag, object: Digest, chunk: u32, tried: []const u8) void {
+/// Why no source gave a chunk, for `E1203`'s cause.
+pub const Unavailable = enum {
+    /// None gave it within `lazy_read_deadline_ms` (or `lazy_down_fail_ms` while all are down).
+    deadline,
+    /// Every source sent bytes that do not match its hash, for this read or an earlier one,
+    /// and is not asked for the file again: the read failed at once, no deadline passed.
+    lied,
+};
+
+/// ZBX-E1203: no source gave chunk `chunk` of `object`: the reading process got `EIO`. `tried`
+/// is what each source did, already rendered.
+pub fn chunk_unavailable(
+    diag: *Diag,
+    object: Digest,
+    chunk: u32,
+    why: Unavailable,
+    tried: []const u8,
+) void {
     assert(tried.len > 0);
     assert(diag.code == null);
     diag.raise(.E1203);
     diag.while_("fetching a chunk of a lazily started image", .{});
-    diag.cause(
-        "chunk {d} could not be fetched within {d} s; the reading process got EIO ({s})",
-        .{ chunk, constants.lazy_read_deadline_ms / 1000, tried },
-    );
+    switch (why) {
+        .deadline => diag.cause(
+            "chunk {d} could not be fetched within {d} s; the reading process got EIO ({s})",
+            .{ chunk, constants.lazy_read_deadline_ms / 1000, tried },
+        ),
+        .lied => diag.cause(
+            "no source sent bytes that match chunk {d}'s hash; the reading process got EIO ({s})",
+            .{ chunk, tried },
+        ),
+    }
     diag.context("object", "{s}", .{object.text()});
-    diag.fix(.{ .sentence = "check the network and the registry, then read the file again" });
+    switch (why) {
+        .deadline => diag.fix(.{
+            .sentence = "check the network and the registry, then read the file again",
+        }),
+        // Reading again does not help: this run asks no source that lied about the file.
+        .lied => diag.fix(.{ .sentence = "tell the owner of the source that sent wrong bytes" }),
+    }
+    assert(diag.code == .E1203);
 }
 
 /// ZBX-E1206: the store's disk is too full to keep fetched chunks: the read got `EIO`.
