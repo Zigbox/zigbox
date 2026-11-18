@@ -305,9 +305,11 @@ jobs:
           ref: ${{ github.workflow_sha }}
           path: .release-tools
           persist-credentials: false
-          # The evidence renderer comes from the workflow's commit too, with its one import.
+          # The evidence renderer comes from the workflow's commit too, with its one import, and
+          # so does this workflow file, which the release run's evidence is checked against.
           sparse-checkout: |
             /.github/actions/
+            /.github/workflows/release.yml
             /src/release_evidence.zig
             /src/constants.zig
           sparse-checkout-cone-mode: false
@@ -319,10 +321,11 @@ jobs:
           cache: 'false'
       # The CI evidence table (docs/releases/automation.md, "The evidence table"): the GitHub
       # Actions API's own record of every job and step of the release commit's `ci` run and of
-      # the jobs of this run that `draft` needs, rendered by src/release_evidence.zig, which refuses anything but passed, expected
-      # failure observed or skipped. gh reads the token from GH_TOKEN in the environment; it is
-      # never printed and never on a command line. The notes are the release document, then
-      # the table.
+      # the jobs of this run that `draft` needs, rendered by src/release_evidence.zig, which
+      # refuses anything but passed, expected failure observed or skipped, a ci job that ci.yml
+      # defines and the run lacks, and a workflow file that sets continue-on-error. gh reads the
+      # token from GH_TOKEN in the environment; it is never printed and never on a command line.
+      # The notes are the release document, then the table.
       - name: Render the CI evidence
         run: |
           set -euo pipefail
@@ -331,6 +334,11 @@ jobs:
           # ci: the newest push run at the release commit, every job. The Mac gate is this
           # run's own mac-check, not mac.yml (docs/releases/automation.md), so the release run
           # itself is the second gate, limited to the jobs this one needs, which have ended.
+          # Each gate is checked against the workflow file its run ran: ci.yml at the release
+          # commit (this checkout), release.yml at the workflow's commit. A skipped job or step
+          # refuses unless the job is allowed here, with its reason, which the table shows
+          # (docs/decisions/2026-11-18-release-skip-allowlist.md).
+          M6D="demo-m6d (Ubuntu 24.04 VM, KVM, Artifact Registry and gcr.io through WIF)"
           gh api -X GET "repos/$GITHUB_REPOSITORY/actions/workflows/ci.yml/runs" \
             -f head_sha="$SHA" -f event=push -f per_page=100 > "$dir/ci-runs.json"
           id=$(jq -r '.workflow_runs | sort_by(.created_at) | last | .id // empty' \
@@ -343,9 +351,11 @@ jobs:
             -f per_page=100 > "$dir/release-jobs.json"
           zig run .release-tools/src/release_evidence.zig -- \
             --product "$GITHUB_REPOSITORY@$SHA" \
-            --gate ci "$dir/ci-runs.json" "$dir/ci-jobs.json" \
-            --current release "$dir/release-run.json" "$dir/release-jobs.json" \
+            --gate ci .github/workflows/ci.yml "$dir/ci-runs.json" "$dir/ci-jobs.json" \
+            --current release .release-tools/.github/workflows/release.yml \
+            "$dir/release-run.json" "$dir/release-jobs.json" \
             "plan the release,macOS gates (hosted),the tap and the site are reachable" \
+            --allow-skip "$M6D" "Google WIF is not set up yet" \
             > "$dir/table.md"
           { cat "docs/releases/$VERSION.md"; echo; cat "$dir/table.md"; } > "$dir/notes.md"
           cat "$dir/table.md" >> "$GITHUB_STEP_SUMMARY"
@@ -1040,9 +1050,12 @@ jobs:
           f=src/release_evidence
           zig run src/release_evidence.zig -- \
             --product Zigbox/zigbox@87498d04ea854cfbe7114699556a43866a0fcbc4 \
-            --gate ci "$f/0.5.3-ci-runs.json" "$f/0.5.3-ci-jobs.json" \
-            --current release "$f/0.5.3-release-run.json" "$f/0.5.3-release-jobs.json" \
+            --gate ci "$f/0.5.3-ci.yml" "$f/0.5.3-ci-runs.json" "$f/0.5.3-ci-jobs.json" \
+            --current release "$f/0.5.3-release.yml" \
+            "$f/0.5.3-release-run.json" "$f/0.5.3-release-jobs.json" \
             "plan the release,macOS gates (hosted),the tap and the site are reachable" \
+            --allow-skip "demo-m6d (Ubuntu 24.04 VM, KVM, Artifact Registry and gcr.io through WIF)" \
+            "Google WIF is not set up yet" \
             > "$RUNNER_TEMP/table.md"
           diff -u "$f/0.5.3-table.md" "$RUNNER_TEMP/table.md"
       - name: Sign with a throwaway key

@@ -1,0 +1,31 @@
+# Scratch only (PR #186 review): records how the Actions jobs API reports a continue-on-error
+# step that failed. Never merged.
+name: coe-probe
+on:
+  push:
+    branches: ['vm/coe-**']
+permissions:
+  contents: write
+jobs:
+  probe:
+    name: continue-on-error probe
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - name: Fails, continue-on-error
+        continue-on-error: true
+        run: "false"
+      - name: Succeeds
+        run: "true"
+      - name: Skipped
+        if: ${{ false }}
+        run: "true"
+  delete:
+    name: delete the scratch branch
+    needs: probe
+    if: always()
+    runs-on: ubuntu-24.04
+    steps:
+      - env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh api -X DELETE "repos/$GITHUB_REPOSITORY/git/refs/heads/$GITHUB_REF_NAME"

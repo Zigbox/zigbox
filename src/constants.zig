@@ -49,6 +49,9 @@ pub const release_evidence_jobs_max: u32 = 100;
 pub const release_evidence_steps_max: u32 = 128;
 /// The rendered table: a row is under 600 bytes, so this holds every job of every gate.
 pub const release_evidence_output_bytes_max: u32 = 512 * 1024;
+/// Jobs allowed to be skipped (`--allow-skip`), each with its reason; every other skip refuses
+/// (docs/decisions/2026-11-18-release-skip-allowlist.md).
+pub const release_evidence_skips_allowed_max: u32 = 8;
 
 // Command line.
 /// Arguments after the program name. Far above anything a milestone needs; a bound, not a goal.
@@ -1422,6 +1425,8 @@ comptime {
     assert(release_evidence_parse_bytes_max >= 2 * 2 * release_evidence_input_bytes_max);
     assert(release_evidence_jobs_max == 100);
     assert(release_evidence_steps_max >= 16);
+    assert(release_evidence_skips_allowed_max >= 1);
+    assert(release_evidence_skips_allowed_max <= release_evidence_jobs_max);
     assert(release_evidence_output_bytes_max >=
         600 * release_evidence_gates_max * release_evidence_jobs_max);
 

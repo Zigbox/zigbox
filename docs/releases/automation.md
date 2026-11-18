@@ -120,12 +120,21 @@ std only; [the decision](../decisions/2026-11-18-release-evidence-table.md)), wh
 from the workflow's commit with `zig run`, after `gh api` has fetched:
 
 - `ci`: the newest `push` run of `ci.yml` at the release commit, and all of its jobs with their
-  steps. It must be a completed success at that commit, and the job listing must be the whole of
-  that run's.
+  steps. It must be a completed success at that commit, the job listing must be the whole of
+  that run's, and every job that `ci.yml` at the release commit defines must be in it exactly
+  once, by the name the API gives it (its `name:`, else its id), so a dropped or renamed job
+  refuses instead of leaving one row fewer. A job whose name the renderer cannot predict from
+  the file (a matrix, a reusable workflow, an expression in the name) refuses too.
 - `release`: this run's own `plan the release`, `macOS gates (hosted)` and `the tap and the site
   are reachable` jobs, the ones `draft` needs. The Mac gate is `mac-check`, not `mac.yml`, so the
   release does not wait for `mac.yml` and the table does not either. Each named job must be in
-  the run and completed.
+  the run exactly once and completed.
+
+Both workflow files, `ci.yml` at the release commit and `release.yml` at the workflow's commit,
+are read, and one that sets `continue-on-error` to anything but `false` refuses the table: the
+API reports a step that failed under `continue-on-error` as `success`, so its job would read
+`passed`. A probe recorded that (run 44380683397, on a scratch branch, never merged;
+`src/release_evidence/continue-on-error*`).
 
 It opens with the product commit (`owner/repo@sha`) and the dependency commit (`none` for
 Zigbox; Zigcube's names the Zigbox commit it pins), then one row per job: its run link and
@@ -134,13 +143,16 @@ attempt, its job link, and one label.
 | Label | Meaning |
 |---|---|
 | passed | the job succeeded and every step it holds ran and succeeded |
-| expected failure observed | the job succeeded, and a step failed under `continue-on-error`; the step is named |
-| skipped | the job was skipped, or a step of it was (a skipped step outranks a failed one); the steps are named |
+| expected failure observed | the job succeeded and the API reports a step of it as failed; the step is named. `continue-on-error` never gives this (see above), and no recorded run has |
+| skipped (allowed: reason) | the job was skipped, or a step of it was (a skipped step outranks a failed one); the steps are named. Only a job on the allow-list `release.yml` passes (`--allow-skip`, [the decision](../decisions/2026-11-18-release-skip-allowlist.md)) may be skipped, and the row gives its reason; any other skip refuses the table |
 
-`Set up job`, `Complete job` and `Post ...` steps are housekeeping and are not counted. Anything
-else refuses the table, and with it the draft: a failed or cancelled job, a cancelled step, a run
-that did not succeed or is of another commit, a short job listing. 0.5.3 is the example: its
-`demo-m6d` job was green with every demo step skipped, and its row says `skipped` and names them
+`Set up job`, `Complete job` and `Post X` after a step `X` of the same job are housekeeping and
+are not counted; a `Post ...` step with no such `X` is counted. Anything else refuses the table,
+and with it the draft: a failed or cancelled job, a cancelled step, a job that succeeded with no
+step of its own, a run that did not succeed or is of another commit, a short job listing, a
+missing or repeated job. 0.5.3 is the example: its
+`demo-m6d` job was green with every demo step skipped, and its row says `skipped (allowed: ...)`
+and names them
 (`src/release_evidence/0.5.3-table.md`, rendered from the API's recorded answers for 0.5.3 by the
 unit test and by the `test` job). The table is also written to the draft job's step summary.
 
