@@ -76,6 +76,8 @@ const FakeSource = struct {
 const FakeRange = struct {
     short: bool,
     calls: std.atomic.Value(u32),
+    /// The bytes asked for, over every call.
+    asked: std.atomic.Value(u64),
 };
 
 const Fixture = struct {
@@ -127,7 +129,7 @@ fn setup(sizes: []const u32) void {
         };
         source.* = .{ .context = peer, .name = name, .fetch = peer_fetch, .lied = peer_lied };
     }
-    fixture.registry = .{ .short = false, .calls = .init(0) };
+    fixture.registry = .{ .short = false, .calls = .init(0), .asked = .init(0) };
 }
 
 fn make_objects(sizes: []const u32) void {
@@ -266,6 +268,7 @@ fn range_fetch(context: *anyopaque, offset: u64, out: []u8, timeout_ms: u32) laz
     assert(timeout_ms > 0);
     assert(out.len > 0);
     _ = range.calls.fetchAdd(1, .monotonic);
+    _ = range.asked.fetchAdd(out.len, .monotonic);
     if (offset >= fixture.blob_len) return error.Failed;
     const length: usize = @min(out.len, fixture.blob_len - offset);
     @memcpy(out[0..length], fixture.blob[@intCast(offset)..][0..length]);
@@ -1137,4 +1140,59 @@ test "resolver: a short answer is a failed fetch, never a lie" {
     try testing.expectEqual(@as(u8, 0), fixture.resolver.objects[0].bad);
     try testing.expectEqual(@as(u32, 0), events_of(.lied, ""));
     try testing.expectEqual(@as(u32, 1), fixture.registry.calls.load(.monotonic));
+}
+
+test "resolver: a range does not fetch again the chunks at its ends that are already local" {
+    // Goal: readahead queues a chunk again after it landed (the schedule does not look in the
+    // store); a range job that begins or ends with such a chunk asks the registry for the
+    // missing chunks alone, so no byte is fetched twice (demo-s2 step 5).
+    // Method: chunk 1 lands; readahead entries for chunks 1, 2 and 3 coalesce into one job;
+    // the registry is asked for chunks 2 and 3 only.
+    setup(&.{4 * chunk_bytes});
+    try open_resolver(0, true, false);
+    defer close_resolver();
+    const resolver = &fixture.resolver;
+    var out: [chunk_bytes]u8 = @splat(0);
+    _ = resolver.read_begin(0, 1, &out, 0);
+    try testing.expectEqual(schedule_mod.Result.landed, try one_job());
+    const first = fixture.locations[fixture.firsts[0] + 1];
+    try testing.expectEqual(@as(u64, first.length), fixture.registry.asked.load(.monotonic));
+    for (1..4) |chunk| {
+        const ask: schedule_mod.Ask = .{ .purpose = .readahead, .began_ms = 0 };
+        try testing.expect(resolver.schedule.request(0, @intCast(chunk), ask, 0) != null);
+    }
+    var work: Work = undefined;
+    try testing.expect(resolver.slot_take(0, &work, 0));
+    try testing.expectEqual(@as(u8, 3), work.job.count);
+    resolver.slot_fetch(0, &work);
+    resolver.slot_finish(0, &work, 0);
+    resolver.drain_events();
+    const results = [_]schedule_mod.Result{ .local, .landed, .landed };
+    try testing.expectEqualSlices(schedule_mod.Result, &results, work.results[0..3]);
+    const second = fixture.locations[fixture.firsts[0] + 2].length;
+    const third = fixture.locations[fixture.firsts[0] + 3].length;
+    const asked = fixture.registry.asked.load(.monotonic);
+    try testing.expectEqual(@as(u64, first.length) + second + third, asked);
+    try testing.expectEqual(@as(u64, second) + third, work.sent);
+}
+
+test "resolver threads: stop waits for the fetches in flight, and the report counts their bytes" {
+    // Goal: `stop` returns only once every fetch in flight has been answered and counted, so a
+    // report made after it holds every byte the sources sent: the summary of a lazy run, made
+    // after `lazy_server`'s `ended` stops the resolver, agrees with the registry's count.
+    // Method: the fill alone over the registry; stop once it has asked, then compare the bytes
+    // the registry was asked for (it answers every ask whole) with the report's.
+    setup(&.{ 4 * chunk_bytes, 4 * chunk_bytes, 3 * chunk_bytes });
+    try open_resolver(0, true, true);
+    try fixture.resolver.start(Scaled.io());
+    var waited: u32 = 0;
+    while (fixture.registry.calls.load(.monotonic) == 0 and waited < wait_real_ms_max) {
+        nap();
+        waited += 1;
+    }
+    fixture.resolver.stop();
+    try testing.expect(fixture.registry.calls.load(.monotonic) > 0);
+    const report = fixture.resolver.report();
+    try testing.expectEqual(fixture.registry.asked.load(.monotonic), report.source_bytes[0]);
+    close_resolver();
 }
