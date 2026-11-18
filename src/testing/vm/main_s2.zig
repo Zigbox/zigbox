@@ -360,6 +360,7 @@ const script_lazy =
     \\    echo "$l"
     \\  done > /tmp/s2-lazy.out
     \\  end=$(ctl counter); show /tmp/s2-lazy.out
+    \\  ctl trace | sed 's/^/s2: lazy: trace: /'
     \\  [ -s /tmp/s2-ready ] || { fail "a ready line" "$(last /tmp/s2-lazy.out 5)"; finish; }
     \\  ms=$(( $(cut -d' ' -f1 /tmp/s2-ready) - t0 )); line=$(cut -d' ' -f2- /tmp/s2-ready)
     \\  at=$(word "$(cat /tmp/s2-at-ready)" served)
@@ -409,10 +410,14 @@ const script_fill =
     \\  echo "s2: fill: gc plan: $(head -c 400 /tmp/s2-gc.out)"
     \\  grep -q '"objects":0,' /tmp/s2-gc.out && grep -q '"partials":0,' /tmp/s2-gc.out &&
     \\    ok "gc plans no removal of objects or chunks" || fail "gc plans nothing" "see above"
+    \\  i=0
     \\  while :; do
     \\    p=$(pct); [ "$p" = 100 ] && break
-    \\    [ $(( $(now) - t0 )) -gt 300000 ] && break; sleep 2
+    \\    [ $(( $(now) - t0 )) -gt 300000 ] && break; sleep 2; i=$(( i + 1 ))
+    \\    [ $(( i % 15 )) = 0 ] && echo "s2: fill: at $(( $(now) - t0 )) ms: $p%, $(ctl counter)"
     \\  done
+    \\  ctl trace > /tmp/s2-tf; { head -n 40 /tmp/s2-tf; echo ...; tail -n 5 /tmp/s2-tf; } |
+    \\    sed 's/^/s2: fill: trace: /'
     \\  ms=$(( $(now) - t0 )); rec fill_ms $ms
     \\  [ "$p" = 100 ] && ok "local_percent 100 after $ms ms" || fail "100 in 300 s" "${p:-none}"
     \\  with fill $Z stop fill > /tmp/s2-stop.out 2>&1 || fail "stop" "$(last /tmp/s2-stop.out)"
@@ -480,9 +485,10 @@ const script_netcut =
     \\    ok "/data/e.bin fails with EIO in $ms ms" || fail "EIO in 35 s" "$ms ms, exit $st"
     \\  with n $Z logs cut > /tmp/s2-logs.out 2>&1
     \\  grep -q E1203 /tmp/s2-logs.out && ok "zbx logs shows E1203" || fail "E1203 in logs" "none"
-    \\  t0=$(now); with n $Z exec cut -- tail -c 4096 /models/weights.bin > /dev/null 2>&1
+    \\  t0=$(now); with n $Z exec cut -- sha256sum /models/weights.bin > /tmp/s2-e3.out 2>&1
     \\  st=$?; ms=$(( $(now) - t0 )); rec cut_second_ms $ms
-    \\  [ $st != 0 ] && [ $ms -lt 7000 ] && ok "a second missing file fails in $ms ms" ||
+    \\  [ $st != 0 ] && eio /tmp/s2-e3.out && [ $ms -lt 7000 ] &&
+    \\    ok "a second missing file fails with EIO in $ms ms" ||
     \\    fail "the second read fails in 7 s" "$ms ms, exit $st"
     \\  with n $Z exec cut -- cat /app/config | grep -qx 'name=lazy-3g' &&
     \\    ok "cat /app/config still works" || fail "cat /app/config while down" "no config"

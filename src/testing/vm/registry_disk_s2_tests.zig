@@ -1,6 +1,6 @@
 //! Tests of demo-s2's disk-backed registry against real sockets on 127.0.0.1: a push in pieces
 //! and a pull back, `Range`, the counter by kind, the throttle with connections served at once,
-//! the byte flip and "down".
+//! the byte flip and "down", and the request trace.
 
 const std = @import("std");
 const assert = std.debug.assert;
@@ -246,4 +246,41 @@ test "registry_disk_s2: the flip and down" {
     var copy: [100_000]u8 = undefined;
     try fixture.registry.read_blob(digest[7..], 0, &copy);
     try std.testing.expectEqualSlices(u8, &blob, &copy);
+}
+
+test "registry_disk_s2: the trace lists each request since the last reset" {
+    // Goal: `/control/trace` shows each blob request's class, range and times, in order, and a
+    // reset empties it, so a demo run shows where a client's time went.
+    // Method: push a blob, reset, read a range and the whole blob, and parse the trace.
+    var fixture: Fixture = try .init(1 << 30);
+    defer fixture.deinit();
+    const port = fixture.registry.port;
+    const out = try std.testing.allocator.alloc(u8, response_bytes_max);
+    defer std.testing.allocator.free(out);
+    var blob: [10_000]u8 = undefined;
+    pattern(&blob);
+    const digest = try push_blob(port, &blob, out);
+    _ = try send(port, "GET /control/reset HTTP/1.1\r\n\r\n", .{}, "", out);
+    const get_range = "GET /v2/t/blobs/{s} HTTP/1.1\r\nRange: bytes=100-199\r\n\r\n";
+    _ = try send(port, get_range, .{&digest}, "", out);
+    _ = try send(port, "GET /v2/t/blobs/{s} HTTP/1.1\r\n\r\n", .{&digest}, "", out);
+    const traced = try send(port, "GET /control/trace HTTP/1.1\r\n\r\n", .{}, "", out);
+    var lines = std.mem.splitScalar(u8, body_of(traced), '\n');
+    const wanted = [_]struct { class: []const u8, first: []const u8, length: []const u8 }{
+        .{ .class = "chunks", .first = "100", .length = "100" },
+        .{ .class = "whole", .first = "0", .length = "10000" },
+    };
+    for (wanted) |want| {
+        var words = std.mem.tokenizeScalar(u8, lines.next().?, ' ');
+        var times: [3]u32 = undefined;
+        for (&times) |*time| time.* = try std.fmt.parseInt(u32, words.next().?, 10);
+        try std.testing.expect(times[0] <= times[1] and times[1] <= times[2]);
+        try std.testing.expectEqualStrings(want.class, words.next().?);
+        try std.testing.expectEqualStrings(want.first, words.next().?);
+        try std.testing.expectEqualStrings(want.length, words.next().?);
+    }
+    try std.testing.expectEqualStrings("dropped 0", lines.next().?);
+    _ = try send(port, "GET /control/reset HTTP/1.1\r\n\r\n", .{}, "", out);
+    const empty = try send(port, "GET /control/trace HTTP/1.1\r\n\r\n", .{}, "", out);
+    try std.testing.expectEqualStrings("dropped 0\n", body_of(empty));
 }

@@ -34,8 +34,14 @@ const tag_bytes_max = 128;
 const media_bytes_max = 96;
 const listen_backlog = 64;
 const accept_poll_ms = 50;
+/// Requests the trace keeps between two `reset`s; later ones are only counted.
+pub const trace_entries_max = 1024;
+const trace_line_bytes_max = 112;
 
 comptime {
+    // Three u32 times, the longest class name, two u64s, five spaces and a newline; and the
+    // last line, `dropped` and a u32, fits in the room one line leaves.
+    assert(3 * 10 + "manifests".len + 2 * 20 + 6 + 20 <= trace_line_bytes_max);
     assert(piece_bytes % 8 == 0);
     assert(upload_buffer_bytes >= piece_bytes);
     assert(manifest_bytes_max <= upload_buffer_bytes);
@@ -64,6 +70,27 @@ pub const Snapshot = struct {
 };
 
 const Class = enum(u8) { chunks, index, whole, manifests };
+
+/// One request in the trace, in milliseconds since the last `reset`: when its connection was
+/// accepted, when its head had arrived and when its answer ended. It shows where a client's
+/// time goes: in connecting, in the throttle or between requests.
+const TraceEntry = struct {
+    accept_ms: u32,
+    head_ms: u32,
+    done_ms: u32,
+    class: Class,
+    first: u64,
+    length: u64,
+};
+
+/// What `handle` learns about a request for its trace entry.
+const Note = struct {
+    accept_ns: u64,
+    head_ns: u64 = 0,
+    class: Class = .manifests,
+    first: u64 = 0,
+    length: u64 = 0,
+};
 
 const Upload = struct {
     active: bool = false,
@@ -110,12 +137,18 @@ pub const Registry = struct {
     index_ranges: [index_ranges_max]IndexRange = undefined,
     index_count: u32 = 0,
     threads: [workers_max]?std.Thread = @splat(null),
+    /// Guarded by `lock`, as the throttle is.
+    trace_epoch_ns: u64 = 0,
+    trace: [trace_entries_max]TraceEntry = undefined,
+    trace_count: u32 = 0,
+    trace_dropped: u32 = 0,
+    trace_text: [trace_entries_max * trace_line_bytes_max]u8 = undefined,
 
     /// Makes `<root>/blobs` and `<root>/uploads` and listens on 127.0.0.1 with an ephemeral
     /// port; serving starts at `start`. `registry` must not move afterwards.
     pub fn init(registry: *Registry, root: [:0]const u8, bytes_per_second: u64) !void {
         assert(bytes_per_second > 0);
-        registry.* = .{ .bytes_per_second = bytes_per_second };
+        registry.* = .{ .bytes_per_second = bytes_per_second, .trace_epoch_ns = now_ns() };
         try make_directory(linux.AT.FDCWD, root);
         const directory: linux.O = .{ .DIRECTORY = true, .CLOEXEC = true };
         const opened = linux.openat(linux.AT.FDCWD, root, directory, 0);
@@ -168,6 +201,11 @@ pub const Registry = struct {
     pub fn reset(registry: *Registry) void {
         for (&registry.counts) |*count| count.store(0, .release);
         registry.requests.store(0, .release);
+        registry.acquire();
+        registry.trace_epoch_ns = now_ns();
+        registry.trace_count = 0;
+        registry.trace_dropped = 0;
+        registry.release();
         assert(registry.snapshot().total == 0);
     }
 
@@ -235,12 +273,12 @@ pub const Registry = struct {
             const accepted = linux.accept4(registry.listener, null, null, linux.SOCK.CLOEXEC);
             if (linux.errno(accepted) != .SUCCESS) continue; // Another worker took it.
             const socket: i32 = @intCast(accepted);
-            registry.handle(socket);
+            registry.handle(socket, now_ns());
             _ = linux.close(socket);
         }
     }
 
-    fn handle(registry: *Registry, socket: i32) void {
+    fn handle(registry: *Registry, socket: i32, accept_ns: u64) void {
         var head: [http.head_bytes_max]u8 = undefined;
         var filled: usize = 0;
         const head_len = http.read_head(socket, &head, &filled, &registry.stopping) orelse return;
@@ -248,6 +286,12 @@ pub const Registry = struct {
         if (std.mem.startsWith(u8, request.path, "/control/")) {
             return registry.control(socket, request);
         }
+        var note: Note = .{ .accept_ns = accept_ns, .head_ns = now_ns() };
+        registry.serve(socket, request, &note);
+        registry.trace_add(&note);
+    }
+
+    fn serve(registry: *Registry, socket: i32, request: http.Request, note: *Note) void {
         // Down: the connection ends with no answer, as a dropped network looks to a client.
         if (registry.down.load(.acquire)) return;
         _ = registry.requests.fetchAdd(1, .acq_rel);
@@ -256,7 +300,7 @@ pub const Registry = struct {
         }
         const route = parse_route(request.path) orelse return answer_text(socket, 404, not_found);
         switch (route.kind) {
-            .blob => registry.serve_blob(socket, request, route),
+            .blob => registry.serve_blob(socket, request, route, note),
             .uploads => registry.upload_open(socket, request, route),
             .upload => registry.upload_piece(socket, request, route),
             .manifest => switch (request.method) {
@@ -274,11 +318,18 @@ pub const Registry = struct {
         if (std.mem.eql(u8, verb, "flip-on")) registry.flipping.store(true, .release);
         if (std.mem.eql(u8, verb, "flip-off")) registry.flipping.store(false, .release);
         if (std.mem.eql(u8, verb, "reset")) registry.reset();
+        if (std.mem.eql(u8, verb, "trace")) return registry.answer_trace(socket);
         var buffer: [256]u8 = undefined;
         answer_text(socket, 200, registry.snapshot().format_line(&buffer));
     }
 
-    fn serve_blob(registry: *Registry, socket: i32, request: http.Request, route: Route) void {
+    fn serve_blob(
+        registry: *Registry,
+        socket: i32,
+        request: http.Request,
+        route: Route,
+        note: *Note,
+    ) void {
         const hex = digest_hex(route.rest) orelse return answer_text(socket, 404, not_found);
         if (request.method != .get and request.method != .head) {
             return answer_text(socket, 404, not_found);
@@ -308,6 +359,13 @@ pub const Registry = struct {
         const class: Class = if (head.status == 200)
             .whole
         else if (registry.is_index(hex, first, last)) .index else .chunks;
+        note.* = .{
+            .accept_ns = note.accept_ns,
+            .head_ns = note.head_ns,
+            .class = class,
+            .first = first,
+            .length = last - first + 1,
+        };
         registry.send_file(socket, fd, hex, first, last - first + 1, class);
     }
 
@@ -362,6 +420,52 @@ pub const Registry = struct {
         registry.release();
         if (duration > 0) assert(due > now);
         sleep_ns(due -| now);
+    }
+
+    fn trace_add(registry: *Registry, note: *const Note) void {
+        assert(note.accept_ns <= note.head_ns);
+        const done_ns = now_ns();
+        registry.acquire();
+        defer registry.release();
+        if (registry.trace_count == trace_entries_max) {
+            registry.trace_dropped += 1;
+            return;
+        }
+        const epoch = registry.trace_epoch_ns;
+        registry.trace[registry.trace_count] = .{
+            .accept_ms = since_ms(epoch, note.accept_ns),
+            .head_ms = since_ms(epoch, note.head_ns),
+            .done_ms = since_ms(epoch, done_ns),
+            .class = note.class,
+            .first = note.first,
+            .length = note.length,
+        };
+        registry.trace_count += 1;
+    }
+
+    /// The trace as text, one request a line: accepted, head and done times in ms, the class,
+    /// the first byte and the length; then how many requests it dropped.
+    fn answer_trace(registry: *Registry, socket: i32) void {
+        registry.acquire();
+        var writer: std.Io.Writer = .fixed(&registry.trace_text);
+        for (registry.trace[0..registry.trace_count]) |entry| {
+            writer.print("{d} {d} {d} {t} {d} {d}\n", .{
+                entry.accept_ms, entry.head_ms, entry.done_ms,
+                entry.class,     entry.first,   entry.length,
+            }) catch unreachable; // A line is under trace_line_bytes_max.
+        }
+        // The room one line leaves holds it (the comptime assert at the top).
+        writer.print("dropped {d}\n", .{registry.trace_dropped}) catch unreachable;
+        const body = writer.buffered();
+        // Sent after the lock is let go, so a slow reader never holds up the throttle. Only
+        // the guest script asks for the trace, one request at a time, so `trace_text` is not
+        // written again while it goes out.
+        registry.release();
+        var rendered: [http.response_head_bytes_max]u8 = undefined;
+        const head: http.Head = .{ .status = 200, .length = body.len };
+        if (http.write_all(socket, http.render_head(head, &rendered))) {
+            _ = http.write_all(socket, body);
+        }
     }
 
     fn is_index(registry: *Registry, hex: *const [64]u8, first: u64, last: u64) bool {
@@ -767,6 +871,10 @@ fn pread_all(fd: i32, out: []u8, offset: u64) !void {
         at += got;
     }
     assert(at == out.len);
+}
+
+fn since_ms(epoch_ns: u64, at_ns: u64) u32 {
+    return @intCast(@min((at_ns -| epoch_ns) / std.time.ns_per_ms, std.math.maxInt(u32)));
 }
 
 pub fn now_ns() u64 {
