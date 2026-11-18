@@ -4468,8 +4468,6 @@ const RefusingLazy = struct {
     }
 };
 
-/// `--lazy` serves an image's tree: `--rootfs` (no tree) is refused. A detached run is served
-/// by its supervisor.
 /// `--lazy`'s refusals, before anything of the run starts (no index fetched, no process made):
 /// a run of a directory (E1208), and a host where this user cannot open `/dev/fuse` (E1201).
 /// The kernel's refusal of the mount itself shows only in the setup child, also as E1201.
