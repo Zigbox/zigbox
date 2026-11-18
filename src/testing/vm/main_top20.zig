@@ -3,7 +3,9 @@
 //! timeout. One line per image says whether it pulled, whether it ran, the exit code, a verdict
 //! and the reason. A seccomp refusal is told apart: the image runs again under
 //! `strace`, and every syscall that returned EPERM and is not on the allowlist is named in the
-//! `seccomp=` field. The weekly workflow runs this against the real Docker Hub; locally, name a
+//! `seccomp=` field. Each image runs twice, by its floating tag and by its pinned digest, in the
+//! same VM; a `top20-compare:` line per image tells an image that moved upstream from a runtime
+//! regression. The weekly workflow runs this against the real Docker Hub; locally, name a
 //! mirror with `-Dmirror=mirror.gcr.io`. `zig build top20 -Daccel=tcg` for software emulation.
 
 const std = @import("std");
@@ -37,16 +39,23 @@ const Entry = struct {
     known: []const u8,
     probe: []const u8,
     env: []const u8,
+    /// The same image by the index digest its tag named on `list.pinned_date`.
+    pinned: []const u8,
 };
 
 const images = blk: {
+    @setEvalBranchQuota(100_000);
     var all: [list.images.len]Entry = undefined;
     for (list.images, 0..) |entry, index| {
+        if (!checks_top20.pinned_matches(entry.ref, entry.pinned)) {
+            @compileError("top20.zon: the pin of " ++ entry.ref ++ " is not its name by digest");
+        }
         all[index] = .{
             .ref = entry.ref,
             .known = entry.known,
             .probe = entry.probe,
             .env = entry.env,
+            .pinned = entry.pinned,
         };
     }
     break :blk all;
@@ -72,6 +81,13 @@ const allowed = blk: {
 comptime {
     std.debug.assert(images.len == 20);
     std.debug.assert(allowed.len > 200);
+    // Two entries pinned to one digest would be one image listed twice.
+    @setEvalBranchQuota(100_000);
+    for (images, 0..) |entry, index| {
+        for (images[index + 1 ..]) |later| {
+            std.debug.assert(!std.mem.eql(u8, entry.pinned, later.pinned));
+        }
+    }
 }
 
 pub fn main(init: std.process.Init) !u8 {
@@ -200,6 +216,24 @@ fn is_selected(only: []const u8, ref: []const u8) bool {
     return false;
 }
 
+/// The verdicts of one list, floating or pinned.
+const Counts = struct {
+    passed: u32 = 0,
+    known: u32 = 0,
+    failed: u32 = 0,
+
+    fn add(counts: *Counts, verdict: checks_top20.Verdict) void {
+        switch (verdict) {
+            .pass => counts.passed += 1,
+            .known => counts.known += 1,
+            .fail => counts.failed += 1,
+        }
+    }
+};
+
+/// Both runs of every selected image, then every result line again, the comparison lines and a
+/// count per list. The run fails when either list has a failure: a pin that fails is a
+/// regression, and a floating tag that fails still fails the canary, as before the pins.
 fn run_all(
     session: *Session,
     out: *Io.Writer,
@@ -207,43 +241,114 @@ fn run_all(
     traced: bool,
     only: []const u8,
 ) !u32 {
-    try out.print("\ntop20: {d} images from {s} ({s})\n", .{ images.len, list.date, list.source });
-    var lines: [images.len][]const u8 = undefined;
-    var failures: u32 = 0;
-    var known: u32 = 0;
-    var selected: u32 = 0;
+    try out.print("\ntop20: {d} images from {s} ({s}), pinned on {s}\n", .{
+        images.len, list.date, list.source, list.pinned_date,
+    });
+    var pairs: [images.len]?Pair = @splat(null);
+    var floating: Counts = .{};
+    var pinned: Counts = .{};
     for (images, 0..) |entry, index| {
-        if (!is_selected(only, entry.ref)) {
-            lines[index] = "";
-            continue;
-        }
-        selected += 1;
-        const result = try try_image(session, out, entry, traced);
-        try clear_store(session, out);
-        var buffer: [1024]u8 = undefined;
-        const line = try checks_top20.format_line(&buffer, result);
-        lines[index] = try arena.dupe(u8, line);
-        try out.print("\ntop20-result: {s}\n", .{lines[index]});
-        if (result.seccomp.len > 0 and result.verdict == .fail) {
-            try out.print("top20: SECCOMP: {s} was refused {s}\n", .{ entry.ref, result.seccomp });
-        }
-        switch (result.verdict) {
-            .pass => if (entry.known.len > 0) {
-                const note = "top20: NOTE: {s} passes; its known reason no longer holds\n";
-                try out.print(note, .{entry.ref});
-            },
-            .known => known += 1,
-            .fail => failures += 1,
+        if (!is_selected(only, entry.ref)) continue;
+        const pair = try try_both(session, out, arena, entry, traced);
+        floating.add(pair.floating.side.verdict);
+        pinned.add(pair.pinned.side.verdict);
+        pairs[index] = pair;
+    }
+    try out.print("\ntop20: results ({s}, pinned on {s})\n", .{ list.date, list.pinned_date });
+    for (pairs) |maybe| {
+        const pair = maybe orelse continue;
+        try out.print("top20-result: {s}\ntop20-result: {s}\n", .{
+            pair.floating.line, pair.pinned.line,
+        });
+    }
+    for (pairs) |maybe| {
+        if (maybe) |pair| try out.print("top20-compare: {s}\n", .{pair.compare});
+    }
+    const summary = "top20: {s}{d} passed, {d} known not to run, {d} failed\n";
+    try out.print(summary, .{ "", floating.passed, floating.known, floating.failed });
+    try out.print(summary, .{ "pinned: ", pinned.passed, pinned.known, pinned.failed });
+    return floating.failed + pinned.failed;
+}
+
+/// One run of an image: its result line and verdict.
+const Outcome = struct { line: []const u8, side: checks_top20.Side };
+
+/// Both runs of one image and the line that compares them.
+const Pair = struct { floating: Outcome, pinned: Outcome, compare: []const u8 };
+
+/// Asks where the floating tag points now, runs the tag, then the pin. When the tag still names
+/// the pinned index the content is the same, so the store is kept between the two runs and the
+/// pinned pull finds every blob there (fewer downloads, and the same anonymous pull count);
+/// otherwise it is cleared first, as the guest's disk holds one image at a time.
+fn try_both(
+    session: *Session,
+    out: *Io.Writer,
+    arena: std.mem.Allocator,
+    entry: Entry,
+    traced: bool,
+) !Pair {
+    const now = try resolve_tag(session, out, arena, entry.ref);
+    const tag = checks_top20.tag_of(now, entry.pinned);
+    const floating = try try_one(session, out, arena, entry, entry.ref, traced);
+    if (tag != .same) try clear_store(session, out);
+    const pinned = try try_one(session, out, arena, entry, entry.pinned, traced);
+    try clear_store(session, out);
+    var buffer: [512]u8 = undefined;
+    const line = try checks_top20.format_compare(&buffer, .{
+        .ref = entry.ref,
+        .floating = floating.side,
+        .pinned = pinned.side,
+        .tag = tag,
+        .now = now,
+    });
+    const compare = try arena.dupe(u8, line);
+    try out.print("\ntop20-compare: {s}\n", .{compare});
+    return .{ .floating = floating, .pinned = pinned, .compare = compare };
+}
+
+/// The index digest the floating tag names now, from `zbx pull --resolve-only --output json`
+/// (no layer is fetched); null when the resolve fails or names a single manifest.
+fn resolve_tag(
+    session: *Session,
+    out: *Io.Writer,
+    arena: std.mem.Allocator,
+    ref: []const u8,
+) !?[]const u8 {
+    std.debug.assert(std.mem.indexOfScalar(u8, ref, '@') == null);
+    const format = z ++ " pull --resolve-only --output json {s} </dev/null";
+    const command = try std.fmt.allocPrint(session.scratch_allocator(), format, .{ref});
+    const resolved = try split_long(session, command);
+    try H.show_split(out, command, resolved);
+    if (resolved.status != 0) return null;
+    const digest = checks_top20.index_digest_of(resolved.streams.stdout) orelse return null;
+    std.debug.assert(checks_top20.is_digest(digest));
+    return try arena.dupe(u8, digest);
+}
+
+/// Pulls and runs `pulled_as` (the entry's tag or its pin) and prints its result line.
+fn try_one(
+    session: *Session,
+    out: *Io.Writer,
+    arena: std.mem.Allocator,
+    entry: Entry,
+    pulled_as: []const u8,
+    traced: bool,
+) !Outcome {
+    const result = try try_image(session, out, entry, pulled_as, traced);
+    std.debug.assert(std.mem.eql(u8, result.ref, pulled_as));
+    var buffer: [1024]u8 = undefined;
+    const line = try arena.dupe(u8, try checks_top20.format_line(&buffer, result));
+    try out.print("\ntop20-result: {s}\n", .{line});
+    if (result.seccomp.len > 0 and result.verdict == .fail) {
+        try out.print("top20: SECCOMP: {s} was refused {s}\n", .{ pulled_as, result.seccomp });
+    }
+    if (result.verdict == .pass) {
+        if (entry.known.len > 0) {
+            const note = "top20: NOTE: {s} passes; its known reason no longer holds\n";
+            try out.print(note, .{pulled_as});
         }
     }
-    try out.print("\ntop20: results ({s})\n", .{list.date});
-    for (lines) |line| {
-        if (line.len > 0) try out.print("top20-result: {s}\n", .{line});
-    }
-    const passed = selected - failures - known;
-    const summary = "top20: {d} passed, {d} known not to run, {d} failed\n";
-    try out.print(summary, .{ passed, known, failures });
-    return failures;
+    return .{ .line = line, .side = .{ .verdict = result.verdict, .pulled = result.pulled } };
 }
 
 /// The two files the container's output goes to. They are the demo user's, as a terminal or a
@@ -279,32 +384,59 @@ fn split_long(session: *Session, command: []const u8) !H.SplitResult {
     return .{ .streams = streams, .status = result.status };
 }
 
-fn try_image(
+/// Pulls `result.ref` and returns the reference to run it by (`checks_top20.run_reference`), or
+/// null when there is none: the pull failed, or a pin's pull printed no manifest digest. `result`
+/// then holds the verdict and the reason.
+fn pull_image(
     session: *Session,
     out: *Io.Writer,
     entry: Entry,
+    result: *checks_top20.Result,
+) !?[]const u8 {
+    std.debug.assert(result.verdict == .fail);
+    const arena = session.scratch_allocator();
+    const pull = try std.fmt.allocPrint(arena, z ++ " pull {s} </dev/null", .{result.ref});
+    const pulled = try split_long(session, pull);
+    try H.show_split(out, pull, pulled);
+    result.pulled = pulled.status == 0;
+    result.status = pulled.status;
+    if (result.pulled) {
+        const buffer = try arena.alloc(u8, 256);
+        const stdout = pulled.streams.stdout;
+        if (checks_top20.run_reference(buffer, result.ref, stdout)) |run_ref| return run_ref;
+        result.reason = "the pull printed no manifest digest to run the pin by";
+        return null;
+    }
+    const stderr = try arena.dupe(u8, pulled.streams.stderr);
+    const missing: checks_top20.Observed = .{ .pulled = false, .status = 0, .stderr = stderr };
+    result.verdict = checks_top20.judge(missing, entry.known);
+    result.reason = reason_of(entry, result.verdict, stderr, "error[");
+    return null;
+}
+
+/// Pulls `pulled_as` and runs the image's default command. The entry gives the known reason,
+/// the probe and the environment; the result line names `pulled_as`.
+fn try_image(
+    session: *Session,
+    out: *Io.Writer,
+    entry_given: Entry,
+    pulled_as: []const u8,
     traced: bool,
 ) !checks_top20.Result {
     const arena = session.scratch_allocator();
-    const pull = try std.fmt.allocPrint(arena, z ++ " pull {s} </dev/null", .{entry.ref});
-    const pulled = try split_long(session, pull);
-    try H.show_split(out, pull, pulled);
     var result: checks_top20.Result = .{
-        .ref = entry.ref,
-        .pulled = pulled.status == 0,
+        .ref = pulled_as,
+        .pulled = false,
         .ran = false,
-        .status = pulled.status,
+        .status = 0,
         .verdict = .fail,
         .seccomp = "",
         .reason = "-",
     };
-    if (!result.pulled) {
-        const stderr = try arena.dupe(u8, pulled.streams.stderr);
-        const missing: checks_top20.Observed = .{ .pulled = false, .status = 0, .stderr = stderr };
-        result.verdict = checks_top20.judge(missing, entry.known);
-        result.reason = reason_of(entry, result.verdict, stderr, "error[");
-        return result;
-    }
+    // A pin runs by another reference than it was pulled by; every later command uses that one.
+    var entry = entry_given;
+    entry.ref = try pull_image(session, out, entry_given, &result) orelse return result;
+    std.debug.assert(result.pulled);
     const probe = checks_top20.parse_probe(entry.probe);
     const run = try run_command(arena, entry, probe);
     const ran = try split_long(session, run);

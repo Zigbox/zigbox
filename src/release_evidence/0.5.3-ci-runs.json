@@ -1,0 +1,17 @@
+{
+ "total_count": 1,
+ "workflow_runs": [
+  {
+   "id": 44198012387,
+   "name": "ci",
+   "path": ".github/workflows/ci.yml",
+   "event": "push",
+   "head_sha": "87498d04ea854cfbe7114699556a43866a0fcbc4",
+   "status": "completed",
+   "conclusion": "success",
+   "run_attempt": 2,
+   "created_at": "2026-11-17T23:17:10Z",
+   "html_url": "https://github.com/Zigbox/zigbox/actions/runs/44198012387"
+  }
+ ]
+}

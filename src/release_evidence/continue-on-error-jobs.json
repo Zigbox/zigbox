@@ -1,0 +1,115 @@
+{
+  "total_count": 2,
+  "jobs": [
+    {
+      "id": 135071738974,
+      "run_id": 44380683397,
+      "name": "continue-on-error probe",
+      "workflow_name": "coe-probe",
+      "status": "completed",
+      "conclusion": "success",
+      "head_branch": "vm/coe-probe",
+      "head_sha": "9d2971ea1d9bcbea757c9288beea55373a947db6",
+      "html_url": "https://github.com/Zigbox/zigbox/actions/runs/44380683397/job/135071738974",
+      "run_attempt": 1,
+      "runner_id": 1000020449,
+      "runner_name": "GitHub Actions 1000020449",
+      "runner_group_name": "GitHub Actions",
+      "labels": [
+        "ubuntu-24.04"
+      ],
+      "steps": [
+        {
+          "name": "Set up job",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 1,
+          "started_at": "2026-11-18T19:27:16Z",
+          "completed_at": "2026-11-18T19:27:16Z"
+        },
+        {
+          "name": "Fails, continue-on-error",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 2,
+          "started_at": "2026-11-18T19:27:16Z",
+          "completed_at": "2026-11-18T19:27:16Z"
+        },
+        {
+          "name": "Succeeds",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 3,
+          "started_at": "2026-11-18T19:27:16Z",
+          "completed_at": "2026-11-18T19:27:16Z"
+        },
+        {
+          "name": "Skipped",
+          "status": "completed",
+          "conclusion": "skipped",
+          "number": 4,
+          "started_at": "2026-11-18T19:27:16Z",
+          "completed_at": "2026-11-18T19:27:16Z"
+        },
+        {
+          "name": "Complete job",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 5,
+          "started_at": "2026-11-18T19:27:16Z",
+          "completed_at": "2026-11-18T19:27:16Z"
+        }
+      ],
+      "created_at": "2026-11-18T19:27:14Z",
+      "started_at": "2026-11-18T19:27:15Z",
+      "completed_at": "2026-11-18T19:27:18Z"
+    },
+    {
+      "id": 135071789190,
+      "run_id": 44380683397,
+      "name": "delete the scratch branch",
+      "workflow_name": "coe-probe",
+      "status": "completed",
+      "conclusion": "success",
+      "head_branch": "vm/coe-probe",
+      "head_sha": "9d2971ea1d9bcbea757c9288beea55373a947db6",
+      "html_url": "https://github.com/Zigbox/zigbox/actions/runs/44380683397/job/135071789190",
+      "run_attempt": 1,
+      "runner_id": 1000020450,
+      "runner_name": "GitHub Actions 1000020450",
+      "runner_group_name": "GitHub Actions",
+      "labels": [
+        "ubuntu-24.04"
+      ],
+      "steps": [
+        {
+          "name": "Set up job",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 1,
+          "started_at": "2026-11-18T19:27:22Z",
+          "completed_at": "2026-11-18T19:27:22Z"
+        },
+        {
+          "name": "Run gh api -X DELETE \"repos/$GITHUB_REPOSITORY/git/refs/heads/$GITHUB_REF_NAME\"",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 2,
+          "started_at": "2026-11-18T19:27:22Z",
+          "completed_at": "2026-11-18T19:27:26Z"
+        },
+        {
+          "name": "Complete job",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 3,
+          "started_at": "2026-11-18T19:27:26Z",
+          "completed_at": "2026-11-18T19:27:26Z"
+        }
+      ],
+      "created_at": "2026-11-18T19:27:18Z",
+      "started_at": "2026-11-18T19:27:21Z",
+      "completed_at": "2026-11-18T19:27:28Z"
+    }
+  ]
+}
