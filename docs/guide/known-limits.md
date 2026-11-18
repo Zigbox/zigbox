@@ -27,21 +27,23 @@ problems we know about. If you hit something not listed here, please
 
 ## Experimental
 
-Built, demonstrated in CI, and in the release since 0.5.1, but new: the flags and the output may
-still change, and fewer hosts have run them.
+Built, demonstrated in CI and released, but new: the flags and the output may still change, and
+fewer hosts have run them. Devices and GPUs are in the release since 0.5.1, Dockerfile import since
+0.5.2.
 
 - **Dockerfile import** (`zbx import`): translates a Dockerfile into a `zbx.build.zon` you can read
   and commit, with a report of what it did not carry over. It never runs the Dockerfile.
-  - Covered: stages, `FROM` an image (pinned by digest in the lock), `COPY` and `ADD` (files,
-    URLs and git, pinned), `RUN` with a cache mount or a read-only bind from another stage,
-    `ENV`, `ARG`, `WORKDIR`, `USER`, `SHELL`, `LABEL`, `ENTRYPOINT` and `CMD`; `--chown` and
-    `--chmod` on a copy.
+  - Covered: stages, `FROM` an image (pinned by digest in the lock), `COPY`, `ADD` of a file of
+    the context and `ADD` of an https URL with `--checksum=sha256:`, `RUN` with a cache mount or
+    a read-only bind from another stage, `ENV`, `ARG`, `WORKDIR`, `USER`, `SHELL`, `LABEL`,
+    `ENTRYPOINT` and `CMD`; `--chown` and `--chmod` on a copy.
   - Not covered: `EXPOSE`, `VOLUME`, `HEALTHCHECK`, `STOPSIGNAL` and `MAINTAINER` are kept only
-    as labels and reported (W0811). `ONBUILD`, `FROM scratch` with steps, and other
-    `RUN --mount` kinds (secret, ssh, tmpfs, a bind from the context or from an image) are
-    refused (E0811). A copy from an image, and `--exclude` on a copy from a stage, are
-    translated but `zbx build` refuses them for now (E0802). `WORKDIR` sets the directory and
-    does not create it, as Docker does.
+    as labels and reported (W0811). Refused (E0811): `ONBUILD`; `FROM scratch` with steps;
+    `FROM --platform` other than the host's; `ADD` of a git repository, of a URL without
+    `--checksum`, and of a local archive it would unpack; and other `RUN --mount` kinds (secret,
+    ssh, tmpfs, a bind from the context or from an image). A copy from an image, and `--exclude`
+    on a copy from a stage, are translated but `zbx build` refuses them for now (E0802).
+    `WORKDIR` sets the directory but, unlike Docker, does not create it.
 - **Devices and GPUs** (`--device`, `--gpu`): pass a host device node, or devices from a CDI spec,
   into one container.
   - Covered: `--device /dev/<path>`, with your supplementary groups kept so the node opens;
