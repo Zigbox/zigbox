@@ -169,8 +169,15 @@ pub const Server = struct {
         };
     }
 
+    /// The container is gone: the fetches stop here, before the summary is made, so a range
+    /// in flight is answered and counted and the summary's bytes are every byte the sources
+    /// sent. Bounded: a fetch in flight ends within its attempt (`lazy_attempt_timeout_ms`),
+    /// and a reader still waiting returns `Stopped` at once.
     fn ended(context: *anyopaque) void {
         const server: *Server = @ptrCast(@alignCast(context));
+        if (server.resolving) |*resolving| {
+            if (resolving.started) resolving.resolver.stop();
+        }
         server.whole_check();
         const resolving = &(server.resolving orelse return);
         const call = resolving.remote.ended orelse return;
