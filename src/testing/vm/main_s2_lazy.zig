@@ -228,9 +228,8 @@ const lazy_served =
     \\  fail "still nothing materialized" "$(ls -A $CACHE)"
     \\T=$($U $Z run --lazy -d $D -- true 2>&1); S=$?
     \\echo "lazy: detached: exit $S: $T"
-    \\[ $S = 125 ] && echo "$T" | grep -q 'error\[ZBX-E1208\]' &&
-    \\  ok "a detached lazy run is refused (E1208, 125)" ||
-    \\  fail "a detached lazy run is refused (E1208, 125)" "exit $S"
+    \\[ $S = 0 ] && ok "a detached lazy run starts (S2 slice 6)" ||
+    \\  fail "a detached lazy run starts" "exit $S"
     \\
 ;
 

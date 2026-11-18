@@ -76,8 +76,7 @@ footer{border-top:1px solid var(--line);padding-block:24px;color:var(--muted);
 <p class="summary">--lazy does not work with another option given</p>
 <dl class="facts"><div><dt>Kind</dt><dd>error</dd></div><div><dt>Blame</dt><dd>user</dd></div><div><dt>Exit code</dt><dd>1 (125 in zbx run)</dd></div></dl>
 <h2>What it means</h2>
-<p>Lazy start arrives in 0.6.0: this zbx (0.5.3) refuses --lazy with E0004.</p>
-<p>zbx run --lazy starts a container before its image is all on disk, serving the files from the store as the container reads them. The server runs in the zbx process that runs the container, so for now the run must stay in the foreground: -d with --lazy is not yet supported. It also needs an image (not --rootfs, which runs a directory as it is).</p>
+<p>zbx run --lazy starts a container before its image is all on disk, serving the image's files as the container reads them. It needs an image: --rootfs runs a directory as it is, so it does not take --lazy.</p>
 <p>The cause names the option. Nothing was started. Leave out --lazy, or the other option. A program that uses zigbox as a library sees this code too when it gives peer sources to a run that cannot take them.</p>
 <h2>Offline</h2>
 <p>The same text, without a network:</p>

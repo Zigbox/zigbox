@@ -76,7 +76,6 @@ footer{border-top:1px solid var(--line);padding-block:24px;color:var(--muted);
 <p class="summary">the image is too large for lazy start</p>
 <dl class="facts"><div><dt>Kind</dt><dd>error</dd></div><div><dt>Blame</dt><dd>user</dd></div><div><dt>Exit code</dt><dd>1 (125 in zbx run)</dd></div></dl>
 <h2>What it means</h2>
-<p>Lazy start arrives in 0.6.0: this zbx (0.5.3) refuses --lazy with E0004.</p>
 <p>zbx run --lazy serves the image's files from memory it sets aside when the run starts: a table with room for a fixed number of entries (files, directories and links) and a fixed number of bytes of directory listings. This image has more of one than that room; the cause says which, and the limit.</p>
 <p>The container was not started. Run it without --lazy: the whole image is then read before the container starts, with no such limit.</p>
 <h2>Offline</h2>

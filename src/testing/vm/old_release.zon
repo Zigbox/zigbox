@@ -26,4 +26,7 @@
     // The same for `demo-m2b`: v0.5.2, the release before M2b. Its `zbx` starts a detached
     // container (a version-9 run record); this `zbx` lists it, stops it and reads its record.
     .m2b_tag = "v0.5.2",
+    // The same for `demo-s2`: v0.5.1, a release without lazy start. Its `zbx` reads the store
+    // and run records this `zbx` leaves, and its `zbx ps` skips a lazy run's newer record.
+    .s2_tag = "v0.5.1",
 }
