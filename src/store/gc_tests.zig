@@ -884,6 +884,41 @@ test "a partial image's record keeps its tree and the objects fetched so far" {
     try testing.expect(files.kind_of(object_path("/src/etc/extra", &kept)) != null);
 }
 
+test "a partial image naming many more files than the store holds plans, and keeps the rest" {
+    // Goal: a lazy run's partial record names every file of its image, most never fetched, so
+    // its tree names far more objects than the store holds (demo-s2 step 4: 20,000 files, a few
+    // hundred local). The set of kept objects was sized to the stored count and refused the
+    // plan as full. Method: an image of 64 more files whose objects are all gone but one; gc
+    // plans nothing and the one object fetched stays.
+    start();
+    support.make_source(&files, 0);
+    var index: u32 = 0;
+    while (index < 64) : (index += 1) {
+        var name: [32]u8 = undefined;
+        const path = std.fmt.bufPrint(&name, "/src/etc/many-{d}", .{index}) catch
+            unreachable; // Short.
+        // At most the chunk size, so each file is one object and no chunk list.
+        var content: [8]u8 = undefined;
+        const text = std.fmt.bufPrint(&content, "m{d}", .{index}) catch unreachable; // Short.
+        files.put_file(path, 0o644, text);
+    }
+    const tree = import_source();
+    drop_root(tree);
+    index = 1;
+    while (index < 64) : (index += 1) {
+        var name: [32]u8 = undefined;
+        const path = std.fmt.bufPrint(&name, "/src/etc/many-{d}", .{index}) catch
+            unreachable; // Short.
+        var buffer: [constants.sim_fs_path_bytes_max]u8 = undefined;
+        files.remove_path(object_path(path, &buffer));
+    }
+    record_image(tree, put_blob("config bytes"), put_blob("layer bytes"), true);
+    const planned = try make_plan(&.{});
+    try testing.expectEqual(@as(u64, 0), planned.counts.total());
+    var kept: [constants.sim_fs_path_bytes_max]u8 = undefined;
+    try testing.expect(files.kind_of(object_path("/src/etc/many-0", &kept)) != null);
+}
+
 test "the sets are sized to the store, and a store beyond the room is refused with the limit" {
     // Goal: the old limit of about 49,000 objects is gone: tables for 100,000 and a million fit
     // the room; the smallest that does not fit is refused, not cut.

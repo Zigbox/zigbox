@@ -533,8 +533,9 @@ const Counter = struct {
     }
 };
 
-/// Sizes the sets to the store: one slot per stored object (and per tree) is room for the most
-/// that can be kept. A store too big for the tables is refused, and the message says so.
+/// Sizes the sets to the store: one slot per stored object (and per tree) is the least room,
+/// and the objects get the rest. A store too big for the tables is refused, and the message
+/// says so.
 fn size_tables(run: *Run) Error!void {
     assert(run.objects.slots.len == 0);
     const objects = try count_shards(run, "objects");
@@ -551,10 +552,13 @@ fn size_tables(run: *Run) Error!void {
     at += tops_bytes;
     run.blobs_live = sets.KeySet.init(@alignCast(tables[at..][0..blobs_bytes]));
     at += blobs_bytes;
-    run.objects = sets.KeySet.init(@alignCast(tables[at..][0..found.objects_bytes]));
-    at += found.objects_bytes;
     run.trees = sets.KeySet.init(@alignCast(tables[at..][0..found.trees_bytes]));
+    at += found.trees_bytes;
+    // The objects take all the rest, not only room for the stored ones: a partial image's tree
+    // (a lazy run's) names every file of the image, fetched or not, and a walk puts each one.
+    run.objects = sets.KeySet.init(@alignCast(tables[at..]));
     assert(run.objects.slots.len * 3 >= objects * 4);
+    assert(run.trees.slots.len * 3 >= trees * 4);
 }
 
 /// Marks everything the roots and the live containers keep.
