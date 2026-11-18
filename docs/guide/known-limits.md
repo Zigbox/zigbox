@@ -13,19 +13,45 @@ problems we know about. If you hit something not listed here, please
   will not find one. The commands look like Docker's, but the flags are not a drop-in match.
 - **More than one service at a time.** No Compose, no networks between containers, no restart
   policies. Several cooperating services are the job of Zigcube, a separate project.
-- **Running a Dockerfile.** `zbx build` reads `zbx.build.zon`, never a Dockerfile.
+- **Running a Dockerfile.** `zbx build` reads `zbx.build.zon`, never a Dockerfile. `zbx import`
+  translates one into a build file (see [Experimental](#experimental)); it never runs it.
 - Live migration, and checkpoint and restore.
 
 ## Not built yet
 
-- **Dockerfile import:** translating a Dockerfile into a `zbx.build.zon` you can read and commit.
-  Planned.
-- **GPU access** in containers. Planned.
 - **Pull from other registries.** `zbx pull` works with Docker Hub, GitHub's registry
   (`ghcr.io`) and Amazon ECR (with your AWS credentials). Other registries, and logging in to pull
   from them, are not supported. `zbx push` can log in to a registry.
 - **Networks between containers.** A container gets no network (the default), the host's
   (`--net host`), or user-mode networking (`--net user`, `--publish`).
+
+## Experimental
+
+Built, demonstrated in CI, and in the release since 0.5.1, but new: the flags and the output may
+still change, and fewer hosts have run them.
+
+- **Dockerfile import** (`zbx import`): translates a Dockerfile into a `zbx.build.zon` you can read
+  and commit, with a report of what it did not carry over. It never runs the Dockerfile.
+  - Covered: stages, `FROM` an image (pinned by digest in the lock), `COPY` and `ADD` (files,
+    URLs and git, pinned), `RUN` with a cache mount or a read-only bind from another stage,
+    `ENV`, `ARG`, `WORKDIR`, `USER`, `SHELL`, `LABEL`, `ENTRYPOINT` and `CMD`; `--chown` and
+    `--chmod` on a copy.
+  - Not covered: `EXPOSE`, `VOLUME`, `HEALTHCHECK`, `STOPSIGNAL` and `MAINTAINER` are kept only
+    as labels and reported (W0811). `ONBUILD`, `FROM scratch` with steps, and other
+    `RUN --mount` kinds (secret, ssh, tmpfs, a bind from the context or from an image) are
+    refused (E0811). A copy from an image, and `--exclude` on a copy from a stage, are
+    translated but `zbx build` refuses them for now (E0802). `WORKDIR` sets the directory and
+    does not create it, as Docker does.
+- **Devices and GPUs** (`--device`, `--gpu`): pass a host device node, or devices from a CDI spec,
+  into one container.
+  - Covered: `--device /dev/<path>`, with your supplementary groups kept so the node opens;
+    `--device vendor/class=name` from a JSON CDI spec; `--gpu dri` and `--gpu all`, with
+    `zbx doctor` naming what it finds.
+  - Not covered: `--gpu` has not been run on a real GPU, and `--gpu dri` has not run in CI
+    (the test VM has no render node). Paths with `:` (by-path and by-id names), paths over 48
+    bytes, YAML CDI specs, specs over 64 KiB and most CDI hooks are refused, each with a code.
+    `--device /dev/net/tun` is passed in but cannot be used, because a container has no
+    `CAP_NET_ADMIN`.
 
 ## Platform notes
 
@@ -53,11 +79,13 @@ unique size (`null` if the tree cannot be read; the text shows `?`). `size_uniqu
 
 ## Known problems
 
-Found while writing this guide, with `zbx 0.4.0`:
-
+- **`zbx ps` of 0.5.x hides containers started by a newer `zbx`.** A container whose record was
+  written by a newer release (for example a lazy-started one, from 0.6.0) is skipped without a
+  word: it is not listed, and nothing says that a container was left out. Use the newer `zbx`
+  to see it. Found while building lazy start (S2, slice 6).
 - **Pushing through a published port** to a registry in another container can stall and fail with
-  [E0503](https://zigbox.org/errors/box/E0503) after 30 seconds; trying again works. Seen in CI,
-  where the registry runs behind `pasta`; a direct connection does not stall.
+  [E0503](https://zigbox.org/errors/box/E0503) after 30 seconds; trying again works. Seen with
+  `zbx 0.4.0` in CI, where the registry runs behind `pasta`; a direct connection does not stall.
 
 ## Reporting a problem
 

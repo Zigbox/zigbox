@@ -315,6 +315,7 @@ const roots = [_][]const u8{
     "src/tidy.zig",
     "src/fuzz.zig",
     "src/size_check.zig",
+    "src/release_evidence.zig",
     "src/errors_site.zig",
     "src/vm_image/kernel_fetch.zig",
     "src/mac_release.zig",

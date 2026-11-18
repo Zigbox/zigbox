@@ -50,6 +50,8 @@ on:
       - 'packaging/homebrew/**'
       - 'src/package.zig'
       - 'src/package_*.zig'
+      - 'src/release_evidence.zig'
+      - 'src/release_evidence/**'
       - 'src/package/**'
       - 'packaging/**'
       - 'build.zig'
@@ -272,16 +274,18 @@ jobs:
           gh api "repos/Zigbox/homebrew-tap/contents/Formula/zigbox.rb?ref=main" --jq .path
           gh api "repos/Zigbox/website/actions/workflows/deploy.yml" --jq .state
 
-  # The draft: notes from docs/releases/<version>.md, targeting the release commit. A draft makes
-  # no tag. An existing draft is reused (its notes refreshed), so a re-run finishes the release.
+  # The draft: notes from docs/releases/<version>.md, then the CI evidence table, targeting the
+  # release commit. A draft makes no tag. An existing draft is reused (its notes refreshed), so a
+  # re-run finishes the release.
   draft:
     name: draft the release
     needs: [plan, mac-check, preflight]
     if: ${{ needs.plan.outputs.go == 'true' && needs.plan.outputs.published != 'true' }}
     runs-on: ubuntu-24.04
-    timeout-minutes: 10
+    timeout-minutes: 15
     permissions:
       contents: write
+      actions: read # the evidence table reads the release commit's runs and jobs
     env:
       GH_TOKEN: ${{ github.token }}
       TAG: ${{ needs.plan.outputs.tag }}
@@ -301,9 +305,46 @@ jobs:
           ref: ${{ github.workflow_sha }}
           path: .release-tools
           persist-credentials: false
-          sparse-checkout: /.github/actions/
+          # The evidence renderer comes from the workflow's commit too, with its one import.
+          sparse-checkout: |
+            /.github/actions/
+            /src/release_evidence.zig
+            /src/constants.zig
           sparse-checkout-cone-mode: false
       - uses: ./.release-tools/.github/actions/setup-gh
+      - uses: ./.release-tools/.github/actions/setup-zig
+      # The CI evidence table (docs/releases/automation.md, "The evidence table"): the GitHub
+      # Actions API's own record of every job and step of the release commit's `ci` run and of
+      # the jobs of this run that `draft` needs, rendered by src/release_evidence.zig, which refuses anything but passed, expected
+      # failure observed or skipped. gh reads the token from GH_TOKEN in the environment; it is
+      # never printed and never on a command line. The notes are the release document, then
+      # the table.
+      - name: Render the CI evidence
+        run: |
+          set -euo pipefail
+          dir="$RUNNER_TEMP/evidence"
+          mkdir -p "$dir"
+          # ci: the newest push run at the release commit, every job. The Mac gate is this
+          # run's own mac-check, not mac.yml (docs/releases/automation.md), so the release run
+          # itself is the second gate, limited to the jobs this one needs, which have ended.
+          gh api -X GET "repos/$GITHUB_REPOSITORY/actions/workflows/ci.yml/runs" \
+            -f head_sha="$SHA" -f event=push -f per_page=100 > "$dir/ci-runs.json"
+          id=$(jq -r '.workflow_runs | sort_by(.created_at) | last | .id // empty' \
+            "$dir/ci-runs.json")
+          [ -n "$id" ] || { echo "::error::release: no ci run at $SHA"; exit 1; }
+          gh api -X GET "repos/$GITHUB_REPOSITORY/actions/runs/$id/jobs" -f per_page=100 \
+            > "$dir/ci-jobs.json"
+          gh api "repos/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID" > "$dir/release-run.json"
+          gh api -X GET "repos/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID/jobs" \
+            -f per_page=100 > "$dir/release-jobs.json"
+          zig run .release-tools/src/release_evidence.zig -- \
+            --product "$GITHUB_REPOSITORY@$SHA" \
+            --gate ci "$dir/ci-runs.json" "$dir/ci-jobs.json" \
+            --current release "$dir/release-run.json" "$dir/release-jobs.json" \
+            "plan the release,macOS gates (hosted),the tap and the site are reachable" \
+            > "$dir/table.md"
+          { cat "docs/releases/$VERSION.md"; echo; cat "$dir/table.md"; } > "$dir/notes.md"
+          cat "$dir/table.md" >> "$GITHUB_STEP_SUMMARY"
       - uses: ./.release-tools/.github/actions/find-draft
         id: found
         with:
@@ -314,7 +355,7 @@ jobs:
           ID: ${{ steps.found.outputs.id }}
         run: |
           set -euo pipefail
-          notes="docs/releases/$VERSION.md"
+          notes="$RUNNER_TEMP/evidence/notes.md"
           if [ -n "$ID" ]; then
             # tag_name and target_commitish are passed again: a PATCH of a draft without them
             # turns its tag into an "untagged-..." placeholder, and every later find-draft,
@@ -989,6 +1030,17 @@ jobs:
             echo "release: load local actions from ./.release-tools/.github/actions/, not ./.github/actions/" >&2
             exit 1
           fi
+      # The draft's evidence command line, on 0.5.3's recorded API answers (no token needed).
+      - name: The evidence table renders 0.5.3's recorded runs
+        run: |
+          f=src/release_evidence
+          zig run src/release_evidence.zig -- \
+            --product Zigbox/zigbox@87498d04ea854cfbe7114699556a43866a0fcbc4 \
+            --gate ci "$f/0.5.3-ci-runs.json" "$f/0.5.3-ci-jobs.json" \
+            --current release "$f/0.5.3-release-run.json" "$f/0.5.3-release-jobs.json" \
+            "plan the release,macOS gates (hosted),the tap and the site are reachable" \
+            > "$RUNNER_TEMP/table.md"
+          diff -u "$f/0.5.3-table.md" "$RUNNER_TEMP/table.md"
       - name: Sign with a throwaway key
         run: .github/release-sign-test.sh "$RUNNER_TEMP/out"
       - name: The draft check passes the honest draft and refuses tampered ones
