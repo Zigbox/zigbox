@@ -13,6 +13,7 @@ const constants = @import("../constants.zig");
 const host_mod = @import("../host.zig");
 const doctor = @import("../doctor.zig");
 const errors = @import("../diag/errors.zig");
+const fuse_diagnose = @import("../fuse/diagnose.zig");
 const Diag = @import("../diag/diag.zig").Diag;
 const client = @import("../dbus/client.zig");
 const codes = @import("../diag/codes.zig");
@@ -281,6 +282,7 @@ fn step_kind_failed(
             listener_failed(diag, operation, plan.listen_port, failure);
         },
         .mount_overlay => overlay_failed(diag, operation, failure),
+        .mount_fuse => fuse_diagnose.mount_refused(diag, operation, failure.err, failure.errno),
         .set_rlimit => {
             const resource: knobs.Resource = @fromBackingInt(@intCast(step.index));
             knobs_diagnose.rlimit_failed(

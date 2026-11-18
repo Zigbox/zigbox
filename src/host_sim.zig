@@ -401,6 +401,7 @@ pub const HostSim = struct {
         .channel = channel,
         .listen_loopback = listen_loopback,
         .mount_fuse = mount_fuse,
+        .open_fuse_device = open_fuse_device,
         .tcp4_socket = tcp4_socket,
         .send_handle = send_handle,
         .receive_handle = receive_handle,
@@ -880,6 +881,15 @@ pub const HostSim = struct {
         try sim.begin_call();
         if (sim.world.fuse_refused) return sim.model_error(sim_world.errno_perm);
         return sim.world.make_listener() orelse sim.model_error(sim_world.errno_nomem);
+    }
+
+    /// The model's `/dev/fuse` opens unless the world says why it does not (its errno).
+    fn open_fuse_device(context: *anyopaque) host.Error!void {
+        const sim = from_context(context);
+        try sim.begin_call();
+        const errno = sim.world.fuse_device_errno;
+        assert(errno < 4096);
+        if (errno != 0) return sim.model_error(errno);
     }
 
     fn tcp4_socket(context: *anyopaque) host.Error!host.Handle {

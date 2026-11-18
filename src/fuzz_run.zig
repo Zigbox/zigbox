@@ -828,6 +828,7 @@ fn step_failure(scenario: *const Scenario, kind: plan_mod.Kind) ?codes.Code {
         .set_no_new_privs, .install_seccomp => return .E0208,
         .make_tmp_dir, .mount_tmp, .make_run_dir, .mount_run, .remount_readonly => return .E0209,
         .mount_overlay => return .E0425,
+        .mount_fuse => return .E1201, // A lazy plan's FUSE mount: the host lacks lazy start.
         .set_rlimit => return .E0312,
         .write_sysctl => return .E0318,
         .unshare_cgroup => return .E0322,

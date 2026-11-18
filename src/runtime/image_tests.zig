@@ -412,10 +412,15 @@ test "a lazy run refused: by its server, by the kernel's FUSE, or by a serve tha
         const text = digest.text();
         const spec = spec_for(&text, "lazy-3", false);
         try testing.expectError(error.StartFailed, start_lazy(&spec, &fake, &diag));
-        try testing.expectEqual(@as(?codes.Code, .E0205), diag.code);
-        try testing.expectEqual(@as(u32, 1), diag.causes.count);
+        // The kernel's refusal of the mount is the host's lack of lazy start: E1201, not E0205.
+        try testing.expectEqual(@as(?codes.Code, .E1201), diag.code);
+        try testing.expectEqual(@as(u32, 2), diag.causes.count);
         try testing.expectEqualStrings(
             "mounting the image's tree over FUSE failed: operation not permitted (EPERM)",
+            diag.causes.items[0].slice(),
+        );
+        try testing.expectEqualStrings(
+            "the kernel refused the FUSE mount in the user namespace",
             diag.last_cause().?,
         );
         try testing.expectEqual(@as(u32, 0), fake.served);

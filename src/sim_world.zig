@@ -404,6 +404,9 @@ pub const World = struct {
     overlay_refused: bool,
     /// The kernel refuses the lazy plan's FUSE mount (no `/dev/fuse`, a policy).
     fuse_refused: bool,
+    /// Why `/dev/fuse` does not open for this user (its errno: ENOENT missing, EACCES denied);
+    /// zero when it opens.
+    fuse_device_errno: u16,
     broken_pipe_ignored: bool,
     /// Listener `i` is on its way through a channel: made, sent, not yet received.
     listener_in_flight: [constants.sim_listeners_max]bool,
@@ -556,6 +559,7 @@ pub const World = struct {
         world.rlimit_read_refused = false;
         world.overlay_refused = false;
         world.fuse_refused = false;
+        world.fuse_device_errno = 0;
         world.broken_pipe_ignored = false;
         world.listener_in_flight = @splat(false);
         world.listener_new_net = @splat(false);

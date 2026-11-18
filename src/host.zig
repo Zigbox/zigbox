@@ -550,6 +550,10 @@ pub const VTable = struct {
     /// reads its requests from. A failure carries the failing call's errno and leaves nothing
     /// open.
     mount_fuse: *const fn (context: *anyopaque, target: [:0]const u8) Error!Handle,
+    /// Opens `/dev/fuse` read-write (close-on-exec) and closes it at once: whether this user may
+    /// use the device a lazy run mounts, asked before anything of the run starts. A failure
+    /// carries the open's errno and leaves nothing open.
+    open_fuse_device: *const fn (context: *anyopaque) Error!void,
     /// Makes a new, unconnected IPv4 TCP socket in the caller's network namespace: `socket`
     /// (close-on-exec) and nothing else. A failure carries the errno.
     tcp4_socket: *const fn (context: *anyopaque) Error!Handle,
@@ -1170,6 +1174,13 @@ pub const Host = struct {
         const result = try host.vtable.mount_fuse(host.context, target);
         assert(host.vtable.last_errno(host.context) == 0);
         return result;
+    }
+
+    /// Whether this user may open `/dev/fuse` (`open_fuse_device` in the vtable).
+    pub fn open_fuse_device(host: Host) Error!void {
+        assert(@intFromPtr(host.vtable) != 0);
+        try host.vtable.open_fuse_device(host.context);
+        assert(host.vtable.last_errno(host.context) == 0);
     }
 
     /// Makes an unconnected IPv4 TCP socket in this process's network namespace.
