@@ -430,7 +430,11 @@ const script_fill =
     \\}
     \\reuse() {
     \\  ctl reset >/dev/null
-    \\  with pull $Z run --lazy $IMG2 -- /app/start > /tmp/s2-reuse.out 2>&1; st=$?
+    \\  # The pull store, from a directory of its own: the pull's zbx.lock has no entry for v2
+    \\  # (E0522), and a directory without one resolves the name at the registry.
+    \\  fresh reuse
+    \\  ( cd "$H/reuse" && $U XDG_DATA_HOME=$H/pull $Z run --lazy $IMG2 -- /app/start ) \
+    \\    > /tmp/s2-reuse.out 2>&1; st=$?
     \\  c=$(ctl counter); served=$(word "$c" served); show /tmp/s2-reuse.out
     \\  echo "s2: reuse: registry: $c"; rec source_bytes $served
     \\  [ $st = 0 ] && grep -qx "ready $READY2" /tmp/s2-reuse.out &&
