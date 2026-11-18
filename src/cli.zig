@@ -4115,8 +4115,10 @@ fn run_container(
         .binding = binding_of(subject.binding),
     };
     const ran = ran_of(invocation, &prepared);
-    if (given.detach) return run_detached(host, invocation, &container, times, storage, &ran, diag);
     const lazy: Lazy = if (!given.lazy) .none else if (prepared.remote) .remote else .local;
+    if (given.detach) {
+        return run_detached(host, invocation, &container, times, storage, &ran, lazy, diag);
+    }
     return run_foreground(host, invocation, &container, times, storage, &ran, lazy, diag);
 }
 
@@ -4259,7 +4261,7 @@ fn run_foreground(
     };
     const handle = &storage.handle;
     if (container.listen != null) try check_listen_send(host, invocation, diag);
-    if (lazy == .remote) try attach_remote(host, invocation, storage, diag);
+    if (lazy == .remote) try attach_remote(host, invocation, storage, null, diag);
     // The serving threads end with the container's mount namespace: joined after the run.
     defer if (lazy != .none) lazy_finish(storage);
     runtime.start(host, container, options, handle, diag) catch {
@@ -4295,10 +4297,14 @@ fn lazy_of(refusing: *RefusingLazy) runtime.Lazy {
 fn lazy_finish(storage: *Storage) void {
     if (comptime builtin.os.tag != .linux) return; // As in `lazy_of`: no real server there.
     const server = lazy_server orelse return;
-    if (server.report()) |report| {
-        storage.lazy_remote.lines.summary(&report, server.source_names());
-    }
     const remote = server.remote != null;
+    // A detached run's summary went to its log before the log closed (`LazyRemote.ended`).
+    const summarized = remote and storage.lazy_remote.summarized;
+    if (server.report()) |report| {
+        if (!summarized) storage.lazy_remote.lines.summary(&report, server.source_names());
+    }
+    // A fill that ended after the last tick (or a run shorter than one).
+    server.whole_check();
     server.finish();
     if (remote) lazy_start.finish(&storage.pull, lazy_workspace);
     assert(server.fd == -1);
@@ -4314,10 +4320,11 @@ pub var lazy_workspace: ?*lazy_start.Workspace = null;
 /// Null, or a path it cannot read, counts the store's disk as never full.
 pub var free_bytes: ?*const fn (path: [:0]const u8) ?u64 = null;
 
-/// `Services.lazy` of a run: only `run --lazy` in the foreground with the real server fetches.
+/// `Services.lazy` of a run: only `run --lazy` with the real server fetches, in the foreground or
+/// detached (the supervisor serves it after the fork).
 fn lazy_workspace_of(invocation: *const Invocation) ?*lazy_start.Workspace {
     if (invocation.command != .run) return null;
-    if (!invocation.run.lazy or invocation.run.detach) return null;
+    if (!invocation.run.lazy) return null;
     if (lazy_server == null) return null;
     return lazy_workspace;
 }
@@ -4333,6 +4340,16 @@ const LazyRemote = struct {
     root: [@sizeOf(@FieldType(layout.Store, "root"))]u8,
     root_len: u32,
     index_fetched: u64,
+    host: Host,
+    /// The image the run fetches, for `whole`; `image` is its record's scratch.
+    manifest: Sha256,
+    image: @import("store/images.zig").Image,
+    /// A detached run (`attach_remote` given a `FrameSink`): the lines go to the run's log,
+    /// and, until the start is reported, to the caller as warnings as well.
+    handle: ?*runtime.Handle,
+    frames: ?*FrameSink,
+    /// The summary went to the log at the container's end (`ended`).
+    summarized: bool,
 
     fn free(context: *anyopaque) u64 {
         const remote: *const LazyRemote = @ptrCast(@alignCast(context));
@@ -4346,6 +4363,33 @@ const LazyRemote = struct {
         const remote: *const LazyRemote = @ptrCast(@alignCast(context));
         remote.lines.progress(remote.index_fetched, report);
     }
+
+    /// Every object is local: the image's record is rewritten whole.
+    fn whole(context: *anyopaque) void {
+        const remote: *LazyRemote = @ptrCast(@alignCast(context));
+        assert(remote.root_len > 0);
+        var store: layout.Store = undefined;
+        store.at(remote.host, remote.root[0..remote.root_len]);
+        lazy_start.record_whole(&store, remote.manifest, &remote.image);
+    }
+
+    /// A detached run's line: into its log, and to the caller while it waits for the start.
+    fn sink(context: *anyopaque, text: []const u8) void {
+        const remote: *LazyRemote = @ptrCast(@alignCast(context));
+        assert(text.len > 0);
+        runtime.log_line(remote.handle.?, text);
+        remote.frames.?.warning(text[0..@min(text.len, constants.output_bytes_max - 1)]);
+    }
+
+    /// A detached run's container has ended: the summary goes to its log before it closes.
+    fn ended(context: *anyopaque) void {
+        const remote: *LazyRemote = @ptrCast(@alignCast(context));
+        assert(remote.handle != null);
+        const server = lazy_server.?;
+        const report = server.report() orelse return;
+        remote.lines.summary(&report, server.source_names());
+        remote.summarized = true;
+    }
 };
 
 /// Gives the server the verified index of an image the store lacks and its registry, before
@@ -4354,10 +4398,12 @@ fn attach_remote(
     host: Host,
     invocation: *const Invocation,
     storage: *Storage,
+    frames: ?*FrameSink,
     diag: *Diag,
 ) RunError!void {
     assert(diag.code == null);
     assert(invocation.run.lazy);
+    assert((frames != null) == invocation.run.detach);
     const server = lazy_server.?; // `lazy_workspace_of` gave a workspace only with a server.
     const ws = lazy_workspace.?;
     const remote = &storage.lazy_remote;
@@ -4371,16 +4417,28 @@ fn attach_remote(
     @memcpy(remote.root[0 .. store.root_len + 1], store.root[0 .. store.root_len + 1]);
     remote.root_len = store.root_len;
     remote.index_fetched = ws.index_fetched;
+    remote.host = host;
+    remote.manifest = storage.pull.library.resolved.manifest_digest;
     const mode = invocation.options.mode();
     remote.lines = .init(host, mode, mode != .json and host.color_enabled(.stderr));
+    remote.handle = if (frames != null) &storage.handle else null;
+    remote.frames = frames;
+    remote.summarized = false;
+    if (frames != null) remote.lines.sink = .{ .context = remote, .call = LazyRemote.sink };
     const reference = &storage.pull.library.reference;
     ws.range.init(&ws.client, reference, ws.layer, server.threaded.io());
+    const ended: ?lazy_server_mod.Call = if (frames == null) null else .{
+        .context = remote,
+        .call = LazyRemote.ended,
+    };
     server.attach(.{
         .index = ws.index,
         .registry = ws.range.source(),
         .log = remote.lines.log(),
         .free = .{ .context = remote, .query = LazyRemote.free },
         .started = .{ .context = remote, .call = LazyRemote.started },
+        .whole = .{ .context = remote, .call = LazyRemote.whole },
+        .ended = ended,
     });
 }
 
@@ -4410,14 +4468,13 @@ const RefusingLazy = struct {
     }
 };
 
-/// `--lazy` in slice 4 runs an image from the store in the foreground: its server lives in this
-/// process, so `-d` (which leaves it) and `--rootfs` (no tree) are refused.
+/// `--lazy` serves an image's tree: `--rootfs` (no tree) is refused. A detached run is served
+/// by its supervisor.
 fn check_lazy(given: *const RunArgs, invocation: *const Invocation, diag: *Diag) RunError!void {
     assert(given.lazy);
     assert(diag.code == null);
-    if (!given.detach and invocation.operand != null) return;
-    const flag: []const u8 = if (given.detach) "-d" else "--rootfs";
-    lazy_diagnose.flag_refused(diag, flag);
+    if (invocation.operand != null) return;
+    lazy_diagnose.flag_refused(diag, "--rootfs");
     return error.StartFailed;
 }
 
@@ -4656,15 +4713,35 @@ const FrameSink = struct {
     host: Host,
     fd: host_mod.Handle,
     options: Options,
+    /// One frame at a time: a lazy run's resolver threads send lines while the start warns.
+    lock: std.atomic.Mutex = .unlocked,
+    /// The start has been reported: nothing more is sent (`LazyRemote.sink`).
+    ended: bool = false,
+
+    /// Sends one warning frame, whole, unless the start has been reported.
+    fn warning(sink: *FrameSink, text: []const u8) void {
+        assert(text.len < constants.output_bytes_max);
+        while (!sink.lock.tryLock()) std.Thread.yield() catch {};
+        defer sink.lock.unlock();
+        if (sink.ended) return;
+        write_frame(sink.host, sink.fd, frame_warning, null, text) catch return;
+    }
+
+    /// The start is reported next: later lines of a lazy run go to its log alone.
+    fn end(sink: *FrameSink) void {
+        while (!sink.lock.tryLock()) std.Thread.yield() catch {};
+        defer sink.lock.unlock();
+        sink.ended = true;
+    }
 };
 
 fn frame_warning_call(context: *anyopaque, diag: *const Diag) void {
-    const sink: *const FrameSink = @ptrCast(@alignCast(context));
+    const sink: *FrameSink = @ptrCast(@alignCast(context));
     assert(diag.code != null);
     assert(sink.options.runs_container);
     var buffer: [constants.output_bytes_max]u8 = undefined;
     const text = render.render(diag, sink.options.mode(), false, &buffer);
-    write_frame(sink.host, sink.fd, frame_warning, null, text) catch return;
+    sink.warning(text);
 }
 
 fn run_detached(
@@ -4674,11 +4751,13 @@ fn run_detached(
     times: Times,
     storage: *Storage,
     ran: *const Ran,
+    lazy: Lazy,
     diag: *Diag,
 ) RunError!u8 {
     assert(diag.code == null);
     assert(container.command.len > 0);
     assert(invocation.run.detach);
+    assert(invocation.run.lazy == (lazy != .none));
     assert(times.grace_ms <= constants.wait_timeout_ms_max);
     const pipe = host.pipe() catch |err| return supervisor_failed(host, diag, err);
     // A write to a caller that has gone is an error to ignore, not a signal that kills us.
@@ -4696,7 +4775,7 @@ fn run_detached(
         },
         .supervisor => {
             host.close(pipe.read);
-            const code = supervise(host, invocation, container, times, storage, pipe.write);
+            const code = supervise(host, invocation, container, times, storage, lazy, pipe.write);
             // exit_now closes the pipe: `supervise` may already have, and that number may be
             // another file by now.
             host.exit_now(code);
@@ -4717,16 +4796,19 @@ fn supervisor_failed(host: Host, diag: *Diag, err: host_mod.Error) RunError {
 
 /// The supervisor: starts the container, says how it went, waits for it. The caller of
 /// `run -d` is waiting on `fd` for the first frame that is not a warning. Never writes to
-/// the terminal (its streams are on /dev/null).
+/// the terminal (its streams are on /dev/null). A lazy run's server, its threads and its
+/// registry client's I/O start here, after the fork, and end before the supervisor does.
 fn supervise(
     host: Host,
     invocation: *const Invocation,
     container: *const runtime_spec.Spec,
     times: Times,
     storage: *Storage,
+    lazy: Lazy,
     fd: host_mod.Handle,
 ) u8 {
     var sink: FrameSink = .{ .host = host, .fd = fd, .options = invocation.options };
+    var refusing: RefusingLazy = .{ .host = host };
     assert(times.grace_ms <= constants.wait_timeout_ms_max);
     assert(container.command.len > 0);
     const options: runtime.StartOptions = .{
@@ -4736,20 +4818,21 @@ fn supervise(
         .detached = true,
         .image_workspace = &storage.image,
         .tree_check = tree_check_of(storage),
+        .lazy = if (lazy != .none) lazy_of(&refusing) else null,
     };
     var diag: Diag = undefined;
     diag.reset();
     const handle = &storage.handle;
+    if (lazy == .remote) {
+        attach_remote(host, invocation, storage, &sink, &diag) catch {
+            return supervise_failed(host, invocation, fd, &diag);
+        };
+    }
+    // The serving threads end with the container's mount namespace: joined after the run, and
+    // the registry token wiped, before `exit_now` (which runs no caller's `defer`).
+    defer if (lazy != .none) lazy_finish(storage);
     runtime.start(host, container, options, handle, &diag) catch {
-        if (diag.code == null) {
-            diag.raise(.B0001);
-            diag.cause("a failure reached the supervisor with no diagnostic", .{});
-        }
-        var buffer: [constants.output_bytes_max]u8 = undefined;
-        const text = render.render(&diag, invocation.options.mode(), false, &buffer);
-        const code = diag.exit_code_in(.container_run);
-        write_frame(host, fd, frame_failed, code, text) catch return code;
-        return code;
+        return supervise_failed(host, invocation, fd, &diag);
     };
     const started_bytes_max = constants.container_name_bytes_max +
         constants.scope_name_bytes_max + 24 + constants.store_digest_text_bytes + 1;
@@ -4763,10 +4846,30 @@ fn supervise(
         scope,
         tree,
     }) catch unreachable; // A name, a pid, a scope name and a tree fit the buffer.
+    sink.end();
     write_frame(host, fd, frame_started, null, made) catch {};
     host.close(fd); // The caller can go; the container's end is ours to see to.
     _ = runtime.wait(handle);
     return constants.exit_ok;
+}
+
+/// The supervisor's start failed: the diagnostic goes to the caller as the failed frame.
+fn supervise_failed(
+    host: Host,
+    invocation: *const Invocation,
+    fd: host_mod.Handle,
+    diag: *Diag,
+) u8 {
+    if (diag.code == null) {
+        diag.raise(.B0001);
+        diag.cause("a failure reached the supervisor with no diagnostic", .{});
+    }
+    assert(diag.code != null);
+    var buffer: [constants.output_bytes_max]u8 = undefined;
+    const text = render.render(diag, invocation.options.mode(), false, &buffer);
+    const code = diag.exit_code_in(.container_run);
+    write_frame(host, fd, frame_failed, code, text) catch return code;
+    return code;
 }
 
 /// Reads exactly `into.len` bytes; false at the end of the pipe.
@@ -5515,7 +5618,7 @@ test "a lazy run wipes the registry token on an early exit as well as at its end
     // a token-shaped marker in the run's client workspace, then a lazy run of a pulled image
     // that a bad `--memory` ends after the image is prepared; the marker is gone. A plain run
     // ended the same way keeps it, so the check is not vacuous. The run is parsed without
-    // `--lazy` and then marked lazy, so its code runs past the parse-time gate in every build.
+    // `--lazy` and then marked lazy, so one command line serves both runs.
     const pull_tests = @import("pull_tests.zig");
     const reference = @import("registry/test_registry.zig").TestRegistry.reference(.open);
     var world: pull_tests.World = undefined;
@@ -5541,6 +5644,25 @@ test "a lazy run wipes the registry token on an early exit as well as at its end
         try testing.expect(std.mem.indexOf(u8, world.sim.stderr(), "--memory") != null);
         const kept = std.mem.eql(u8, client.token[0..marker.len], marker);
         try testing.expectEqual(!lazy, kept);
+    }
+}
+
+test "run -d --lazy is taken; only --rootfs is refused with E1208" {
+    // Goal: S2 slice 6: a detached lazy run is no longer refused. Method: `check_lazy` passes
+    // `-d` with an image and refuses `--rootfs`. The supervisor's serving needs the real FUSE
+    // server: the VM demo runs it.
+    var diag: Diag = undefined;
+    const lines = [_][]const []const u8{
+        &.{ "run", "-d", "--lazy", "alpine", "--", "/bin/sh" },
+        &.{ "run", "-d", "--lazy", "--rootfs", "/srv/alpine", "--", "/bin/sh" },
+    };
+    for (lines, [_]bool{ true, false }) |line, image| {
+        diag.reset();
+        var invocation: Invocation = undefined;
+        try parse(line, &invocation, &diag);
+        const checked = check_lazy(&invocation.run, &invocation, &diag);
+        if (image) try checked else try testing.expectError(error.StartFailed, checked);
+        try testing.expectEqual(@as(?codes.Code, if (image) null else .E1208), diag.code);
     }
 }
 

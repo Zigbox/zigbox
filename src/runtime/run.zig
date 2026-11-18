@@ -236,6 +236,13 @@ pub const Lazy = struct {
     record: ?*const fn (context: *anyopaque) ?records.Lazy = null,
     /// Given `StartOptions.lazy_sources` before `prepare`, when there are any.
     peers: ?*const fn (context: *anyopaque, sources: []const lazy_mod.Source) void = null,
+    /// Called about every `lazy_progress_interval_ms` while the container runs, on the thread
+    /// that waits for it, before the record is asked for: the server's own bookkeeping (the
+    /// image's record rewritten whole once every object is local).
+    progress: ?*const fn (context: *anyopaque) void = null,
+    /// Called once when the container has ended, before its log is closed: a detached run's
+    /// last lines (the summary) still reach the log.
+    ended: ?*const fn (context: *anyopaque) void = null,
 
     fn record_now(lazy: *const Lazy) records.Lazy {
         const none: records.Lazy = .{
@@ -306,6 +313,8 @@ pub const Handle = struct {
     listen: ?spec_mod.Listen,
     /// A lazy run's server, asked for the record's `.lazy`; null for any other run.
     lazy: ?Lazy,
+    /// The `.lazy` the record was last written with, so a tick writes it only when it changed.
+    lazy_saved: ?records.Lazy,
     /// For `--net user`: where pasta is, and the file its output goes to (empty: none).
     pasta_path: text_util.Bounded(constants.pasta_path_bytes_max),
     pasta_log: text_util.Bounded(constants.state_path_bytes_max + 80),
@@ -344,6 +353,9 @@ pub const Handle = struct {
     log: logfile.Writer,
     log_active: bool,
     log_warned: bool,
+    /// Held around every write to `log` and its close: a lazy run's resolver lines
+    /// (`log_line`) come from other threads than the one that waits for the container.
+    log_lock: std.atomic.Mutex,
     mirror: bool,
     /// The prefix of streamed lines (`StartOptions.stream_prefix`); the line each of the two
     /// streams (stdout, stderr) is in the middle of (prefix included, `stream_line_len` bytes,
@@ -430,6 +442,14 @@ pub fn init_handle(
     handle.publish_count = 0;
     handle.listen = container.listen;
     handle.lazy = options.lazy;
+    handle.lazy_saved = null;
+    if (options.lazy != null) {
+        handle.wait_options.tick = .{
+            .context = handle,
+            .call = lazy_tick,
+            .interval_ms = constants.lazy_progress_interval_ms,
+        };
+    }
     handle.pasta_path = .{};
     handle.pasta_log = .{};
     handle.end_reason = .none;
@@ -810,6 +830,7 @@ pub fn wait(handle: *Handle) ExitReason {
     // The last partial lines go while a closed pipe is still an error, not a signal.
     stream_finish(handle);
     if (copies) host.ignore_broken_pipe(false);
+    lazy_ended(handle);
     close_log(handle);
     host.begin_step(host_mod.step_none);
     // The container is gone (or zbx lost it, and `abandon` below ends it): pasta goes now, and
@@ -1397,6 +1418,7 @@ fn remove_logs(handle: *Handle, dir: *const records.Dir, pruned: *const records.
 fn reset_log(handle: *Handle, options: StartOptions) void {
     handle.log_active = false;
     handle.log_warned = false;
+    handle.log_lock = .unlocked;
     handle.mirror = options.mirror;
     assert(options.stream_prefix.len <= stream_prefix_bytes_max);
     @memcpy(handle.stream_prefix[0..options.stream_prefix.len], options.stream_prefix);
@@ -1445,10 +1467,36 @@ fn open_log(handle: *Handle, options: StartOptions) [2]bool {
 
 fn close_log(handle: *Handle) void {
     assert(handle.name_len > 0);
+    log_lock(handle);
+    defer handle.log_lock.unlock();
     if (!handle.log_active) return;
     handle.log.close();
     handle.log_active = false;
     assert(!handle.log.fd_open);
+}
+
+/// A lazy run's container has ended: its server's last lines, before the log closes.
+fn lazy_ended(handle: *Handle) void {
+    const lazy = &(handle.lazy orelse return);
+    const ended = lazy.ended orelse return;
+    ended(lazy.context);
+}
+
+fn log_lock(handle: *Handle) void {
+    while (!handle.log_lock.tryLock()) std.Thread.yield() catch {};
+}
+
+/// A line of zbx's own into the container's log, as its stderr: a detached lazy run's resolver
+/// lines, so `zbx logs` shows them (S2 slice 6). Safe from any thread. Dropped when the run
+/// keeps no log, or it has been closed; a write that fails is dropped too (the container's own
+/// output says it, once, through `log_sink`).
+pub fn log_line(handle: *Handle, bytes: []const u8) void {
+    assert(bytes.len > 0);
+    log_lock(handle);
+    defer handle.log_lock.unlock();
+    if (!handle.log_active) return;
+    const time = @min(handle.host.time_now(), constants.log_time_max - 1);
+    handle.log.append(.stderr, time, bytes) catch {};
 }
 
 /// Tells the caller once per run that the output is not being kept. A detached run's supervisor
@@ -1478,6 +1526,8 @@ fn log_sink(context: *anyopaque, stream: host_mod.Stream, bytes: []const u8) boo
         };
     }
     if (handle.stream_prefix_len > 0) stream_lines(handle, stream, bytes);
+    log_lock(handle);
+    defer handle.log_lock.unlock();
     if (!handle.log_active) return keep;
     const which: logfile.Stream = if (stream == .stdout) .stdout else .stderr;
     const time = @min(handle.host.time_now(), constants.log_time_max - 1);
@@ -1645,7 +1695,22 @@ fn diagnostic_json(diag: *const Diag, buffer: *[constants.diag_json_bytes_max]u8
     return std.fmt.bufPrint(buffer, format, .{codes.full_name(diag.code.?)}) catch unreachable;
 }
 
+/// A lazy run's tick while it runs: the server's progress, and the record written again when
+/// what it fetched changed (`zbx ps` shows `local_percent` rising as the fill goes).
+fn lazy_tick(context: *anyopaque) void {
+    const handle: *Handle = @ptrCast(@alignCast(context));
+    assert(handle.status == .running);
+    const lazy = &(handle.lazy orelse unreachable); // The tick is set only for a lazy run.
+    if (lazy.progress) |progress| progress(lazy.context);
+    const now = lazy.record_now();
+    if (handle.lazy_saved) |saved| {
+        if (std.meta.eql(saved, now)) return;
+    }
+    save_record(handle, .running, null, null);
+}
+
 fn save_record(handle: *Handle, exit: records.Exit, ended: ?u64, why: ?*const Diag) void {
+    if (handle.lazy) |*lazy| handle.lazy_saved = lazy.record_now();
     const dir = handle.record_dir orelse return;
     assert(handle.name_len > 0);
     if (exit == .running) assert(ended == null);
@@ -1679,7 +1744,7 @@ fn save_record(handle: *Handle, exit: records.Exit, ended: ?u64, why: ?*const Di
         .devices = handle.devices,
         .user = handle.user,
         .binding = handle.binding,
-        .lazy = if (handle.lazy) |*lazy| lazy.record_now() else null,
+        .lazy = handle.lazy_saved,
         .rlimits = handle.rlimits,
         .sysctls = handle.sysctls,
         .diagnostic = if (why) |found| diagnostic_json(found, &json) else "",

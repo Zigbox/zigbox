@@ -136,6 +136,9 @@ pub const Schedule = struct {
     stopping: bool,
     /// Counts entries that landed or failed, so whoever ticks knows to wake the readers.
     settled: u64,
+    /// When a reader last asked for a chunk that was not local (or when the resolver started):
+    /// the fill waits until `lazy_fill_idle_ms` after it.
+    demand_ms: u64,
     report: lazy.Report,
 
     /// `objects` holds one entry per catalog object.
@@ -172,6 +175,7 @@ pub const Schedule = struct {
             .events_count = 0,
             .stopping = false,
             .settled = 0,
+            .demand_ms = 0,
             .report = std.mem.zeroes(lazy.Report),
         };
         for (&schedule.pending) |*entry| entry.* = std.mem.zeroes(Pending);
@@ -203,6 +207,7 @@ pub const Schedule = struct {
         assert(chunk < schedule.catalog.objects[object].wanted.hashes.len);
         assert(ask.began_ms <= now);
         const deadline_ms = ask.began_ms + constants.lazy_read_deadline_ms;
+        if (ask.purpose == .on_demand) schedule.demand_ms = @max(schedule.demand_ms, now);
         if (schedule.find(object, chunk)) |index| {
             const entry = &schedule.pending[index];
             if (ask.purpose == .on_demand) {
@@ -624,6 +629,12 @@ pub const Schedule = struct {
         assert(job.count == 1);
         assert(schedule.registry == job.source);
         const fill_slot = slot >= constants.lazy_fetches_max;
+        // A fill request is kept short: a reader that arrives waits behind it for the shared
+        // registry client (docs/decisions/2026-11-18-s2-fill-idle.md).
+        const range_max = if (fill_slot)
+            constants.lazy_fill_range_bytes_max
+        else
+            constants.lazy_range_bytes_max;
         while (job.count < job_chunks_max) {
             const end = job.offset + job.length;
             var found: ?u16 = null;
@@ -633,12 +644,22 @@ pub const Schedule = struct {
                 if (schedule.candidate(entry, now) != job.source) continue;
                 const where = schedule.location(entry);
                 if (where.offset != end) continue;
-                if (job.length + where.length > constants.lazy_range_bytes_max) continue;
+                if (job.length + where.length > range_max) continue;
                 found = @intCast(at);
                 break;
             }
             schedule.take(job, found orelse return);
         }
+    }
+
+    /// Whether the fill may take work now: no reader has asked a source for a chunk for
+    /// `lazy_fill_idle_ms`. Else the time it may, for a fill slot's wake-up.
+    pub fn fill_idle_at(schedule: *const Schedule, now: u64) ?u64 {
+        assert(schedule.demand_ms < 1 << 62);
+        assert(now < 1 << 62);
+        const idle_at = schedule.demand_ms + constants.lazy_fill_idle_ms;
+        if (now >= idle_at) return null;
+        return idle_at;
     }
 
     /// The job in `slot` ended; `results[i]` is what happened to its entry `i`, `sent` the

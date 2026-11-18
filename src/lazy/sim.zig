@@ -664,6 +664,10 @@ fn take_jobs(sim: *Sim) void {
         if (end.* != null) continue;
         const slot: u32 = @intCast(at);
         if (!sim.resolver.slot_take(slot, &sim.work[slot], sim.now_ms)) continue;
+        // The fill yields: no fill request starts within `lazy_fill_idle_ms` of a reader's ask.
+        if (sim.work[slot].purposes[0] == .fill) {
+            assert(sim.resolver.schedule.fill_idle_at(sim.now_ms) == null);
+        }
         sim.elapsed_ms = 0;
         sim.resolver.slot_fetch(slot, &sim.work[slot]);
         end.* = sim.now_ms + @max(1, sim.elapsed_ms);

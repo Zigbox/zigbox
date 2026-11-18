@@ -252,6 +252,9 @@ pub const Resolver = struct {
         assert(resolver.io == null);
         for (resolver.threads) |thread| assert(thread == null);
         resolver.io = io;
+        // The fill waits `lazy_fill_idle_ms` from the start too: the container's first reads
+        // come right after it.
+        resolver.schedule.demand_ms = now_ms(io);
         errdefer resolver.stop();
         for (&resolver.threads, 0..) |*thread, slot| {
             const slot_index: u32 = @intCast(slot);
@@ -524,7 +527,13 @@ pub const Resolver = struct {
                 // A deadline the tick failed is news to its readers.
                 if (resolver.schedule.settled != settled) resolver.readers.broadcast(io);
                 if (resolver.slot_take(slot, &work, now)) break true;
-                const wait_ms = if (wake) |at|
+                const wake_fill = if (slot < constants.lazy_fetches_max)
+                    wake
+                else if (resolver.schedule.fill_idle_at(now)) |at|
+                    earliest(wake, at)
+                else
+                    wake;
+                const wait_ms = if (wake_fill) |at|
                     @max(at, now + 1) - now
                 else
                     constants.lazy_down_probe_ms;
@@ -554,11 +563,17 @@ pub const Resolver = struct {
     pub fn slot_take(resolver: *Resolver, slot: u32, work: *Work, now: u64) bool {
         assert(slot < slots);
         assert(!resolver.schedule.jobs[slot].active);
+        const fill_slot = slot >= constants.lazy_fetches_max;
+        // The fill yields to readers: no fill request starts until none has asked for
+        // `lazy_fill_idle_ms`, queued fill entries included.
+        if (fill_slot) {
+            if (resolver.schedule.fill_idle_at(now) != null) return false;
+        }
         if (resolver.schedule.next_job(slot, now)) |job| {
             resolver.copy_work(job, work);
             return true;
         }
-        if (slot < constants.lazy_fetches_max) return false;
+        if (!fill_slot) return false;
         if (!resolver.fill_due(now)) return false;
         var plan: FillPlan = undefined;
         plan.cursor = resolver.fill;
@@ -929,6 +944,11 @@ pub const Resolver = struct {
         if (resolver.io) |io| resolver.store_mutex.unlock(io);
     }
 };
+
+fn earliest(current: ?u64, candidate: u64) u64 {
+    assert(candidate < std.math.maxInt(u64));
+    return if (current) |held| @min(held, candidate) else candidate;
+}
 
 fn now_ms(io: Io) u64 {
     const now = Io.Clock.awake.now(io);

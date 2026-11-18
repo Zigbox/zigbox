@@ -67,6 +67,17 @@ pub const Remote = struct {
     free: lazy_mod.FreeBytes,
     /// Called once, when the resolver has started, with its first report: the progress line.
     started: ?Started = null,
+    /// Called once, on the thread that waits for the run (its progress tick, or `whole_check`
+    /// at its end), when every object of the image is local: the caller rewrites the image's
+    /// record whole.
+    whole: ?Call = null,
+    /// Called once when the container has ended, before its log closes (`run.Lazy.ended`).
+    ended: ?Call = null,
+};
+
+pub const Call = struct {
+    context: *anyopaque,
+    call: *const fn (context: *anyopaque) void,
 };
 
 pub const Started = struct {
@@ -104,6 +115,8 @@ pub const Server = struct {
     /// Set by `attach` for an image that is not all local; null serves the store's own objects.
     remote: ?Remote,
     resolving: ?Resolving,
+    /// `Remote.whole` was called.
+    whole_told: bool,
 
     /// Readies `server` for one run on `host` (the real host).
     pub fn init(server: *Server, host: Host) void {
@@ -113,6 +126,7 @@ pub const Server = struct {
         server.state = .idle;
         server.remote = null;
         server.resolving = null;
+        server.whole_told = false;
     }
 
     /// Serves the run's chunks through the chunk resolver, from the store or `remote`'s sources,
@@ -150,7 +164,36 @@ pub const Server = struct {
             .serve = serve,
             .record = record,
             .peers = peers,
+            .progress = progress,
+            .ended = ended,
         };
+    }
+
+    fn ended(context: *anyopaque) void {
+        const server: *Server = @ptrCast(@alignCast(context));
+        server.whole_check();
+        const resolving = &(server.resolving orelse return);
+        const call = resolving.remote.ended orelse return;
+        call.call(call.context);
+    }
+
+    fn progress(context: *anyopaque) void {
+        const server: *Server = @ptrCast(@alignCast(context));
+        server.whole_check();
+    }
+
+    /// Tells `Remote.whole`, once, when the resolver has every object of the image local (the
+    /// fill's end, or the reads alone).
+    pub fn whole_check(server: *Server) void {
+        if (server.whole_told) return;
+        const resolving = &(server.resolving orelse return);
+        if (!resolving.started) return;
+        const found = resolving.resolver.report();
+        assert(found.objects_local <= found.objects_total);
+        if (found.objects_local < found.objects_total) return;
+        server.whole_told = true;
+        const whole = resolving.remote.whole orelse return;
+        whole.call(whole.context);
     }
 
     /// The run's peer sources, kept for the resolver. A run with nothing to fetch (no `attach`)
@@ -298,7 +341,7 @@ pub const Server = struct {
             .registry = remote.registry,
             .log = remote.log,
             .free = remote.free,
-            .fill = false,
+            .fill = true,
         }) catch |err| {
             // `run.start` left room for the registry under `lazy_sources_max`.
             assert(err == error.OutOfMemory);

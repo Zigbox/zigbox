@@ -1,6 +1,6 @@
 error[ZBX-E1208]: --lazy does not work with another option given
-  cause  '--lazy' serves an image from the store to a run in the foreground, and
-         does not take '--rootfs'
+  cause  '--lazy' serves an image's files as the container reads them, and does
+         not take '--rootfs'
   fix    leave out --lazy, or the other option
   more   zbx explain E1208 · rerun with --verbose for the full cause chain
   docs   https://zigbox.github.io/zigbox/errors/E1208.html

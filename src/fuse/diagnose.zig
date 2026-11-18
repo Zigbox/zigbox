@@ -65,15 +65,8 @@ pub fn flag_refused(diag: *Diag, flag: []const u8) void {
     assert(diag.code == null);
     diag.raise(.E1208);
     diag.while_("reading the command line", .{});
-    if (std.mem.eql(u8, flag, "-d")) {
-        // A scope cut, not a rule: a detached lazy run, served by the supervisor, is a later
-        // slice's (docs/demos/s2.md).
-        diag.cause("'--lazy' does not yet support '-d': its files are served by this zbx " ++
-            "process, which a detached run leaves", .{});
-    } else {
-        diag.cause("'--lazy' serves an image from the store to a run in the foreground, and " ++
-            "does not take '{s}'", .{flag});
-    }
+    diag.cause("'--lazy' serves an image's files as the container reads them, and does not " ++
+        "take '{s}'", .{flag});
     diag.context("cmd", "run", .{});
     diag.context("arg", "{s}", .{flag});
     diag.fix(.{ .sentence = "leave out --lazy, or the other option" });

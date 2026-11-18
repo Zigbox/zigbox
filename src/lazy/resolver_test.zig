@@ -856,6 +856,53 @@ test "resolver: a lie on a job that ends after its read's deadline is still name
     for (&resolver.schedule.pending) |*entry| try testing.expect(entry.state == .free);
 }
 
+test "resolver: a read that arrives mid-fill is served before the next fill request" {
+    // Goal: the supervisor's condition on `lazy_fill_idle_ms` (S2 slice 6): the fill takes no
+    // request until no reader has asked for `lazy_fill_idle_ms`; a read that arrives while a fill
+    // request is in flight is taken next, and no fill request starts until the idle time has
+    // passed again since that read.
+    // Method: one peer (no coalescing), the fill on, a fake clock driven by hand: the fill
+    // slot is refused before the idle time, takes one chunk at it, and while that is in flight
+    // a read of a chunk the fill queued arrives.
+    setup(&.{ 4 * chunk_bytes, 4 * chunk_bytes });
+    try open_resolver(1, false, true);
+    defer close_resolver();
+    const resolver = &fixture.resolver;
+    const fill_slot = constants.lazy_fetches_max;
+    const idle = constants.lazy_fill_idle_ms;
+    var work: Work = undefined;
+    try testing.expect(!resolver.slot_take(fill_slot, &work, idle - 1));
+    try testing.expect(resolver.slot_take(fill_slot, &work, idle));
+    try testing.expectEqual(schedule_mod.Purpose.fill, work.purposes[0]);
+    try testing.expect(resolver.schedule.queued_fill() > 0);
+    resolver.slot_fetch(fill_slot, &work);
+    // Mid-fill: a read of object 1's last chunk, which the fill has queued.
+    const arrived = idle + 1;
+    var out: [chunk_bytes]u8 = @splat(0);
+    const step = resolver.read_begin(1, 3, &out, arrived);
+    try testing.expect(step == .wait);
+    resolver.slot_finish(fill_slot, &work, arrived + 1);
+    for (fill_slot..constants.lazy_slots) |slot| {
+        try testing.expect(!resolver.slot_take(@intCast(slot), &work, arrived + 1));
+        try testing.expect(!resolver.slot_take(@intCast(slot), &work, arrived + idle - 1));
+    }
+    var read_work: Work = undefined;
+    try testing.expect(resolver.slot_take(0, &read_work, arrived + 1));
+    try testing.expectEqual(schedule_mod.Purpose.on_demand, read_work.purposes[0]);
+    try testing.expectEqual(@as(lazy.ObjectIndex, 1), read_work.objects[0]);
+    try testing.expectEqual(@as(u32, 3), read_work.chunks[0]);
+    resolver.slot_fetch(0, &read_work);
+    resolver.slot_finish(0, &read_work, arrived + 2);
+    const done = resolver.read_poll(step.wait, &out, arrived + 2);
+    try testing.expect(done == .done);
+    try testing.expectEqualSlices(u8, truth(1, 3), out[0..done.done]);
+    // Idle again since the read: the fill goes on.
+    try testing.expect(resolver.slot_take(fill_slot, &work, arrived + idle));
+    try testing.expectEqual(schedule_mod.Purpose.fill, work.purposes[0]);
+    resolver.slot_fetch(fill_slot, &work);
+    resolver.slot_finish(fill_slot, &work, arrived + idle);
+}
+
 test "resolver: objects_local counts each whole object once and never goes down" {
     // Goal: with the fill off, `objects_local` counts an object whole at init, counts an
     // object once when its last chunk lands, and does not drop when a gc removes an object.

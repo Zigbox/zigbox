@@ -5176,8 +5176,6 @@ pub const registry = [_]Entry{
         .blame = .user,
         .summary = "the image is too large for lazy start",
         .explanation =
-        \\Lazy start arrives in 0.6.0: this zbx (0.5.3) refuses --lazy with E0004.
-        \\
         \\zbx run --lazy serves the image's files from memory it sets aside when
         \\the run starts: a table with room for a fixed number of entries (files,
         \\directories and links) and a fixed number of bytes of directory
@@ -5194,13 +5192,9 @@ pub const registry = [_]Entry{
         .blame = .user,
         .summary = "--lazy does not work with another option given",
         .explanation =
-        \\Lazy start arrives in 0.6.0: this zbx (0.5.3) refuses --lazy with E0004.
-        \\
         \\zbx run --lazy starts a container before its image is all on disk,
-        \\serving the files from the store as the container reads them. The server
-        \\runs in the zbx process that runs the container, so for now the run must
-        \\stay in the foreground: -d with --lazy is not yet supported. It also needs
-        \\an image (not --rootfs, which runs a directory as it is).
+        \\serving the image's files as the container reads them. It needs an
+        \\image: --rootfs runs a directory as it is, so it does not take --lazy.
         \\
         \\The cause names the option. Nothing was started. Leave out --lazy, or
         \\the other option. A program that uses zigbox as a library sees this code

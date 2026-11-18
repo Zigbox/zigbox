@@ -1,7 +1,7 @@
 error[ZBX-E1208]: --lazy does not work with another option given
   while  reading the command line
-  cause  '--lazy' serves an image from the store to a run in the foreground, and
-         does not take '--rootfs'
+  cause  '--lazy' serves an image's files as the container reads them, and does
+         not take '--rootfs'
   cmd    run
   arg    --rootfs
   fix    leave out --lazy, or the other option

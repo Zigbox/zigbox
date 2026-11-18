@@ -1,6 +1,7 @@
 //! What a lazy run shows (S2 slice 5): the resolver's events as coded lines on stderr (`W1202`,
 //! `E1203`, `E1206`), at most `lazy_errors_shown_max` a run and then one count line; the progress
-//! line when the server starts and the summary line after the run.
+//! line when the server starts and the summary line after the run. A detached run's lines go
+//! to its log instead (`Lines.sink`, S2 slice 6), where `zbx logs` shows them.
 //!
 //! A line names the object's id and the chunk, not the file: the catalog has no paths (a cut,
 //! recorded in docs/demos/s2.md).
@@ -27,9 +28,24 @@ pub const Lines = struct {
     color: bool,
     /// Events seen; those past `lazy_errors_shown_max` are counted, not shown.
     seen: std.atomic.Value(u64),
+    /// Where the lines go instead of stderr: a detached run's log (`zbx logs`).
+    sink: ?Sink = null,
+
+    pub const Sink = struct {
+        context: *anyopaque,
+        /// Takes one whole line; called from any thread.
+        call: *const fn (context: *anyopaque, text: []const u8) void,
+    };
 
     pub fn init(host: Host, mode: render.Mode, color: bool) Lines {
         return .{ .host = host, .mode = mode, .color = color, .seen = .init(0) };
+    }
+
+    fn put(lines: *const Lines, text: []const u8) void {
+        if (text.len == 0) return;
+        if (lines.sink) |sink| return sink.call(sink.context, text);
+        // A line that cannot be written is lost.
+        lines.host.write_all(.stderr, text) catch return;
     }
 
     pub fn log(lines: *Lines) lazy.Log {
@@ -52,14 +68,14 @@ pub const Lines = struct {
         var buffer: [constants.output_bytes_max]u8 = undefined;
         const text = render.render(&diag, lines.mode, lines.color, &buffer);
         // A line that cannot be written is lost; the read already got `EIO`.
-        lines.host.write_all(.stderr, text) catch return;
+        lines.put(text);
     }
 
     /// The progress line, once (`started`): the index's size and what is not yet local.
     pub fn progress(lines: *const Lines, index_bytes: u64, report: *const lazy.Report) void {
         var buffer: [line_bytes_max]u8 = undefined;
         const text = progress_text(&buffer, index_bytes, report);
-        lines.host.write_all(.stderr, text) catch return;
+        lines.put(text);
     }
 
     /// After the run: the summary line, and the count of lines not shown when there are any.
@@ -70,7 +86,7 @@ pub const Lines = struct {
     ) void {
         var buffer: [line_bytes_max * 2]u8 = undefined;
         const text = summary_text(&buffer, report, names, lines.hidden(report));
-        lines.host.write_all(.stderr, text) catch return;
+        lines.put(text);
     }
 };
 

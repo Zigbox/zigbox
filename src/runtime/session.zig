@@ -756,6 +756,15 @@ pub const Session = struct {
         /// Where the container's output goes while it runs (the session must have been started
         /// to capture it). Null: it is read and dropped.
         sink: ?Sink = null,
+        /// Called about every `Tick.interval_ms` while the container runs, on this thread
+        /// (a lazy run's progress, `run.zig`). Null: nothing is called.
+        tick: ?Tick = null,
+    };
+
+    pub const Tick = struct {
+        context: *anyopaque,
+        call: *const fn (context: *anyopaque) void,
+        interval_ms: u32,
     };
 
     /// Takes what the container wrote. False: stop reading that stream, so the container's
@@ -780,14 +789,27 @@ pub const Session = struct {
         const began = host.monotonic_ms();
         var stage: enum { running, terminated, killed } = .running;
         var deadline: u64 = began + options.timeout_ms;
+        var tick_at: u64 = began + if (options.tick) |tick| tick.interval_ms else 0;
         const status = while (true) {
             const timed = stage != .killed and (stage != .running or options.timeout_ms > 0);
             const left: u64 = if (timed) deadline -| host.monotonic_ms() else 0;
-            const slice_ms: u32 = if (timed) @intCast(@max(left, 1)) else 0;
+            const slice_ms = slice_with_tick(
+                if (timed) @intCast(@max(left, 1)) else 0,
+                if (options.tick != null) tick_at -| host.monotonic_ms() else null,
+            );
             const event = session.next_event(slice_ms, options.sink) catch |err| {
                 host.block_signals(false) catch {};
                 return err;
             };
+            // A slice that ended for the tick, not for the run's time (a wait without time, or
+            // before its deadline), calls it and waits on.
+            if (event == .timeout and options.tick != null) {
+                if (!timed or host.monotonic_ms() >= tick_at) {
+                    options.tick.?.call(options.tick.?.context);
+                    tick_at = host.monotonic_ms() + options.tick.?.interval_ms;
+                    continue;
+                }
+            }
             switch (event) {
                 .output => unreachable, // `next_event` takes output itself.
                 .exited => |ended| break ended,
@@ -820,6 +842,14 @@ pub const Session = struct {
         session.drain_output(options.sink);
         host.block_signals(false) catch {}; // The child is gone; a mask that stays is harmless.
         return session.reported_status(status);
+    }
+
+    /// The time a wait slice may take: the run's (zero: for ever), cut to the next tick's.
+    fn slice_with_tick(run_ms: u32, tick_ms: ?u64) u32 {
+        const until_tick = tick_ms orelse return run_ms;
+        const tick_slice: u32 = @intCast(@max(@min(until_tick, std.math.maxInt(u32)), 1));
+        if (run_ms == 0) return tick_slice;
+        return @min(run_ms, tick_slice);
     }
 
     /// The next event that is not output: while the container's streams have bytes, they are

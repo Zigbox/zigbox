@@ -146,6 +146,22 @@ pub fn wipe(pull: *pull_commands.Workspace, lazy: ?*Workspace) void {
     assert(ws.client.basic_len == 0);
 }
 
+/// Rewrites the partial record of `manifest` whole (version 3), once every object of its tree is
+/// local: `zbx images` and `store ls` no longer show it partial, and a run without `--lazy` uses
+/// the farm. The record is read again first, so tags added since the start are kept. A record
+/// that is gone or already whole is left alone, and one that cannot be written stays partial
+/// (a later lazy run of it serves it from the store and tries again).
+pub fn record_whole(store: *Store, manifest: Sha256, image: *images.Image) void {
+    assert(manifest.bytes.len == constants.oci_digest_bytes);
+    var errno: u16 = 0;
+    images.load(store, manifest, image, &errno) catch return;
+    if (!image.partial) return;
+    image.partial = false;
+    var failure: @import("store/fs.zig").Failure = undefined;
+    images.save(store, image, &failure) catch return;
+    assert(!image.partial);
+}
+
 /// Whether the store has a whole record of `manifest`: a pulled image, which a lazy start must
 /// not turn into a partial one. `image` is only scratch here; the caller loads it again.
 fn held_whole(store: *Store, manifest: Sha256, image: *images.Image) bool {

@@ -2262,6 +2262,18 @@ pub const lazy_fetches_max: u32 = 8;
 pub const lazy_fill_fetches_max: u32 = 2;
 /// After two reads of consecutive chunks of one file, the chunks fetched ahead of the reader.
 pub const lazy_readahead_chunks: u32 = 4;
+/// The fill starts, and goes on, only once no read has asked a source for a chunk for this
+/// long: a start-up's reads come in bursts, and the fill must not take the registry's bandwidth
+/// between them (docs/decisions/2026-11-18-s2-fill-idle.md).
+pub const lazy_fill_idle_ms: u32 = 2_000;
+/// One fill request asks for at most this many bytes, a whole number of chunks. Registry
+/// fetches share one client in turn, so a read that arrives while fill requests are in flight
+/// waits for at most `lazy_fill_fetches_max` of them: 4 MiB, about 100 ms at 40 MiB/s.
+pub const lazy_fill_range_bytes_max: u32 = 2 * 1024 * 1024;
+/// While a lazy run is running, its supervisor writes the run record again at most this often
+/// when what it fetched changed, so `zbx ps` shows `local_percent` rising as the fill goes, and
+/// rewrites the image's record whole once every object is local.
+pub const lazy_progress_interval_ms: u32 = 1_000;
 /// Below this many free bytes on the store's disk the fill stops; below a quarter of it a read's
 /// fetch fails (E1206).
 pub const lazy_store_free_bytes_min: u64 = 1024 * 1024 * 1024;
@@ -2291,6 +2303,13 @@ comptime {
     assert(lazy_down_fail_ms < lazy_attempt_timeout_ms);
     assert(lazy_down_fail_ms < lazy_down_probe_ms);
     assert(lazy_fill_fetches_max < lazy_fetches_max);
+    assert(lazy_fill_idle_ms > 0);
+    assert(lazy_fill_idle_ms < lazy_read_deadline_ms);
+    assert(lazy_fill_range_bytes_max >= store_chunk_bytes);
+    assert(lazy_fill_range_bytes_max <= lazy_range_bytes_max);
+    assert(lazy_fill_range_bytes_max % store_chunk_bytes == 0);
+    assert(lazy_progress_interval_ms > 0);
+    assert(lazy_progress_interval_ms <= lazy_fill_idle_ms);
     assert(lazy_readahead_chunks <= lazy_job_chunks_max);
     assert(lazy_range_bytes_max % store_chunk_bytes == 0);
     assert(lazy_job_chunks_max >= 1);
