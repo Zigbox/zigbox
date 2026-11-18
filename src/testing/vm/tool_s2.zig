@@ -49,7 +49,8 @@ fn say(text: []const u8) void {
 }
 
 fn generate(root_path: [:0]const u8, variant: fixture.Variant) !void {
-    const opened = linux.openat(linux.AT.FDCWD, root_path, .{ .DIRECTORY = true, .CLOEXEC = true }, 0);
+    const open_flags: linux.O = .{ .DIRECTORY = true, .CLOEXEC = true };
+    const opened = linux.openat(linux.AT.FDCWD, root_path, open_flags, 0);
     if (linux.errno(opened) != .SUCCESS) return error.RootNotFound;
     const root: i32 = @intCast(opened);
     defer _ = linux.close(root);
@@ -131,7 +132,8 @@ fn forward(port: u16, target: u16) !void {
             continue;
         }
         _ = relays.fetchAdd(1, .acq_rel);
-        const thread = std.Thread.spawn(.{ .stack_size = 1024 * 1024 }, relay, .{ client, target }) catch {
+        const spawn: std.Thread.SpawnConfig = .{ .stack_size = 1024 * 1024 };
+        const thread = std.Thread.spawn(spawn, relay, .{ client, target }) catch {
             _ = relays.fetchSub(1, .acq_rel);
             _ = linux.close(client);
             continue;
@@ -190,7 +192,8 @@ fn send_all(socket: i32, bytes: []const u8) bool {
     assert(bytes.len > 0);
     var at: usize = 0;
     while (at < bytes.len) {
-        const sent = linux.sendto(socket, bytes[at..].ptr, bytes.len - at, linux.MSG.NOSIGNAL, null, 0);
+        const rest = bytes[at..];
+        const sent = linux.sendto(socket, rest.ptr, rest.len, linux.MSG.NOSIGNAL, null, 0);
         if (linux.errno(sent) != .SUCCESS) return false;
         at += sent;
     }

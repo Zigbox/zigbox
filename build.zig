@@ -1023,8 +1023,8 @@ fn lazy_start_of(step: []const u8) bool {
     return std.mem.eql(u8, step, "demo-s2-lazy") or std.mem.eql(u8, step, "demo-s2");
 }
 
-/// The options of demo-s2-lazy's and demo-s2's zbx: a release's, with lazy start turned on. 0.5.2 ships it
-/// dormant (docs/decisions/2026-11-16-0.5.2-s2-dormant.md); 0.6.0 drops the option.
+/// The options of demo-s2-lazy's and demo-s2's zbx: a release's, with lazy start turned on.
+/// 0.5.2 ships it dormant (docs/decisions/2026-11-16-0.5.2-s2-dormant.md); 0.6.0 drops the option.
 fn lazy_start_options(b: *std.Build) *std.Build.Step.Options {
     const manifest = @import("build.zig.zon");
     const options = b.addOptions();

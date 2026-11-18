@@ -19,7 +19,8 @@ const Fixture = struct {
         var tmp = std.testing.tmpDir(.{});
         errdefer tmp.cleanup();
         var path: [128:0]u8 = undefined;
-        const root = try std.mem.printSentinel(&path, ".zig-cache/tmp/{s}/registry", .{tmp.sub_path}, 0);
+        const format = ".zig-cache/tmp/{s}/registry";
+        const root = try std.mem.printSentinel(&path, format, .{tmp.sub_path}, 0);
         const registry = try std.testing.allocator.create(Registry);
         errdefer std.testing.allocator.destroy(registry);
         try registry.init(root, bytes_per_second);
@@ -142,18 +143,21 @@ test "registry_disk_s2: push in pieces, pull whole and by range, counted by kind
     const whole = try send(port, "GET /v2/t/blobs/{s} HTTP/1.1\r\n\r\n", .{&digest}, "", out);
     try std.testing.expectEqual(@as(u16, 200), status_of(whole));
     try std.testing.expectEqualSlices(u8, &blob, body_of(whole));
-    const ranged = try send(port, "GET /v2/t/blobs/{s} HTTP/1.1\r\nRange: bytes=70000-70099\r\n\r\n", .{&digest}, "", out);
+    const get_range = "GET /v2/t/blobs/{s} HTTP/1.1\r\nRange: bytes={s}\r\n\r\n";
+    const ranged = try send(port, get_range, .{ &digest, "70000-70099" }, "", out);
     try std.testing.expectEqual(@as(u16, 206), status_of(ranged));
     try std.testing.expectEqualSlices(u8, blob[70000..70100], body_of(ranged));
-    try std.testing.expectEqualStrings("bytes 70000-70099/204800", header_of(ranged, "Content-Range"));
+    const content_range = header_of(ranged, "Content-Range");
+    try std.testing.expectEqualStrings("bytes 70000-70099/204800", content_range);
     fixture.registry.add_index_range(digest[7..], 10, 19);
-    const index = try send(port, "GET /v2/t/blobs/{s} HTTP/1.1\r\nRange: bytes=10-19\r\n\r\n", .{&digest}, "", out);
+    const index = try send(port, get_range, .{ &digest, "10-19" }, "", out);
     try std.testing.expectEqual(@as(u16, 206), status_of(index));
-    const past = try send(port, "GET /v2/t/blobs/{s} HTTP/1.1\r\nRange: bytes=1-204800\r\n\r\n", .{&digest}, "", out);
+    const past = try send(port, get_range, .{ &digest, "1-204800" }, "", out);
     try std.testing.expectEqual(@as(u16, 416), status_of(past));
     const manifest = "{\"layers\":[]}";
-    const put = try send(port, "PUT /v2/t/manifests/v1 HTTP/1.1\r\nContent-Type: application/x\r\n" ++
-        "Content-Length: {d}\r\n\r\n", .{manifest.len}, manifest, out);
+    const put_head = "PUT /v2/t/manifests/v1 HTTP/1.1\r\nContent-Type: application/x\r\n" ++
+        "Content-Length: {d}\r\n\r\n";
+    const put = try send(port, put_head, .{manifest.len}, manifest, out);
     try std.testing.expectEqual(@as(u16, 201), status_of(put));
     const got = try send(port, "GET /v2/t/manifests/v1 HTTP/1.1\r\n\r\n", .{}, "", out);
     try std.testing.expectEqualStrings(manifest, body_of(got));
@@ -175,12 +179,13 @@ test "registry_disk_s2: push in pieces, pull whole and by range, counted by kind
 const Pull = struct {
     port: u16,
     digest: *const [71]u8,
-    length: usize = 0,
+    length: u64 = 0,
 
     fn run(pull: *Pull) void {
         const out = std.heap.page_allocator.alloc(u8, response_bytes_max) catch return;
         defer std.heap.page_allocator.free(out);
-        const got = send(pull.port, "GET /v2/t/blobs/{s} HTTP/1.1\r\n\r\n", .{pull.digest}, "", out) catch return;
+        const get = "GET /v2/t/blobs/{s} HTTP/1.1\r\n\r\n";
+        const got = send(pull.port, get, .{pull.digest}, "", out) catch return;
         pull.length = body_of(got).len;
     }
 };

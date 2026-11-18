@@ -117,7 +117,8 @@ pub const Registry = struct {
         assert(bytes_per_second > 0);
         registry.* = .{ .bytes_per_second = bytes_per_second };
         try make_directory(linux.AT.FDCWD, root);
-        const opened = linux.openat(linux.AT.FDCWD, root, .{ .DIRECTORY = true, .CLOEXEC = true }, 0);
+        const directory: linux.O = .{ .DIRECTORY = true, .CLOEXEC = true };
+        const opened = linux.openat(linux.AT.FDCWD, root, directory, 0);
         if (linux.errno(opened) != .SUCCESS) return error.RegistryRootFailed;
         registry.root = @intCast(opened);
         try make_directory(registry.root, "blobs");
@@ -193,7 +194,8 @@ pub const Registry = struct {
         registry.acquire();
         defer registry.release();
         assert(registry.index_count < index_ranges_max);
-        registry.index_ranges[registry.index_count] = .{ .blob = blob.*, .first = first, .last = last };
+        const range: IndexRange = .{ .blob = blob.*, .first = first, .last = last };
+        registry.index_ranges[registry.index_count] = range;
         registry.index_count += 1;
     }
 
@@ -243,7 +245,9 @@ pub const Registry = struct {
         var filled: usize = 0;
         const head_len = http.read_head(socket, &head, &filled, &registry.stopping) orelse return;
         const request = http.parse(head[0..filled], head_len) orelse return;
-        if (std.mem.startsWith(u8, request.path, "/control/")) return registry.control(socket, request);
+        if (std.mem.startsWith(u8, request.path, "/control/")) {
+            return registry.control(socket, request);
+        }
         // Down: the connection ends with no answer, as a dropped network looks to a client.
         if (registry.down.load(.acquire)) return;
         _ = registry.requests.fetchAdd(1, .acq_rel);
@@ -276,7 +280,9 @@ pub const Registry = struct {
 
     fn serve_blob(registry: *Registry, socket: i32, request: http.Request, route: Route) void {
         const hex = digest_hex(route.rest) orelse return answer_text(socket, 404, not_found);
-        if (request.method != .get and request.method != .head) return answer_text(socket, 404, not_found);
+        if (request.method != .get and request.method != .head) {
+            return answer_text(socket, 404, not_found);
+        }
         const fd = registry.open_blob(hex) catch return answer_text(socket, 404, not_found);
         defer _ = linux.close(fd);
         const size = linux.lseek(fd, 0, linux.SEEK.END);
@@ -354,7 +360,7 @@ pub const Registry = struct {
         registry.throttle_next_ns = slot_start + duration;
         const due = registry.throttle_next_ns;
         registry.release();
-        assert(due > now or duration == 0);
+        if (duration > 0) assert(due > now);
         sleep_ns(due -| now);
     }
 
@@ -372,7 +378,8 @@ pub const Registry = struct {
     fn open_blob(registry: *Registry, hex: *const [64]u8) !i32 {
         assert(valid_hex(hex));
         var path: [80:0]u8 = undefined;
-        const name = std.mem.printSentinel(&path, "blobs/{s}", .{hex}, 0) catch unreachable; // Fits.
+        // The buffer is sized for the longest name.
+        const name = std.mem.printSentinel(&path, "blobs/{s}", .{hex}, 0) catch unreachable;
         const opened = linux.openat(registry.root, name, .{ .CLOEXEC = true }, 0);
         if (linux.errno(opened) != .SUCCESS) return error.BlobUnknown;
         return @intCast(opened);
@@ -399,8 +406,14 @@ pub const Registry = struct {
             if (upload.active) continue;
             const id = registry.upload_next;
             var path: [32:0]u8 = undefined;
+            // The buffer is sized for the longest name.
             const name = std.mem.printSentinel(&path, "uploads/{d}", .{id}, 0) catch unreachable;
-            const flags: linux.O = .{ .ACCMODE = .WRONLY, .CREAT = true, .TRUNC = true, .CLOEXEC = true };
+            const flags: linux.O = .{
+                .ACCMODE = .WRONLY,
+                .CREAT = true,
+                .TRUNC = true,
+                .CLOEXEC = true,
+            };
             const opened = linux.openat(registry.root, name, flags, 0o644);
             if (linux.errno(opened) != .SUCCESS) return null;
             registry.upload_next += 1;
@@ -423,8 +436,12 @@ pub const Registry = struct {
 
     /// `PATCH` appends a piece; `PUT ?digest=` appends the last one and closes the upload.
     fn upload_piece(registry: *Registry, socket: i32, request: http.Request, route: Route) void {
-        const upload = registry.find_upload(route.rest) orelse return answer_text(socket, 404, not_found);
-        if (request.method != .patch and request.method != .put) return answer_text(socket, 404, not_found);
+        const upload = registry.find_upload(route.rest) orelse {
+            return answer_text(socket, 404, not_found);
+        };
+        if (request.method != .patch and request.method != .put) {
+            return answer_text(socket, 404, not_found);
+        }
         if (request.header("Content-Range")) |spanned| {
             const dash = std.mem.indexOfScalar(u8, spanned, '-') orelse spanned.len;
             const first = std.fmt.parseInt(u64, spanned[0..dash], 10) catch upload.length + 1;
@@ -436,7 +453,9 @@ pub const Registry = struct {
             registry.upload_end(upload, null);
             return;
         }
-        if (request.method == .patch) return answer_upload(socket, route.repo, upload.id, upload.length);
+        if (request.method == .patch) {
+            return answer_upload(socket, route.repo, upload.id, upload.length);
+        }
         const wanted = http.query_value(request.query, "digest");
         const hex = digest_hex(wanted) orelse {
             registry.upload_end(upload, null);
@@ -452,7 +471,13 @@ pub const Registry = struct {
     }
 
     /// Reads `length` body bytes into the upload's file and hash.
-    fn receive(registry: *Registry, socket: i32, request: http.Request, upload: *Upload, length: u64) bool {
+    fn receive(
+        registry: *Registry,
+        socket: i32,
+        request: http.Request,
+        upload: *Upload,
+        length: u64,
+    ) bool {
         assert(upload.active);
         const early = request.early[0..@intCast(@min(length, request.early.len))];
         if (!append(upload, early)) return false;
@@ -472,11 +497,14 @@ pub const Registry = struct {
     fn upload_end(registry: *Registry, upload: *Upload, hex: ?*const [64]u8) void {
         assert(upload.active);
         var path: [32:0]u8 = undefined;
+        // The buffer is sized for the longest name.
         const name = std.mem.printSentinel(&path, "uploads/{d}", .{upload.id}, 0) catch unreachable;
         _ = linux.close(upload.fd);
         if (hex) |digest| {
             var target_path: [80:0]u8 = undefined;
-            const target = std.mem.printSentinel(&target_path, "blobs/{s}", .{digest}, 0) catch unreachable;
+            // The buffer is sized for the longest name.
+            const target = std.mem.printSentinel(&target_path, "blobs/{s}", .{digest}, 0) catch
+                unreachable; // The buffer is sized for the longest name.
             _ = linux.renameat(registry.root, name, registry.root, target);
         } else {
             _ = linux.unlinkat(registry.root, name, 0);
@@ -505,12 +533,16 @@ pub const Registry = struct {
         var hash: [32]u8 = undefined;
         Sha256.hash(bytes, &hash, .{});
         var digest: [71]u8 = undefined;
-        _ = std.fmt.bufPrint(&digest, "sha256:{s}", .{std.fmt.bytesToHex(hash, .lower)}) catch unreachable;
+        const hex = std.fmt.bytesToHex(hash, .lower);
+        _ = std.fmt.bufPrint(&digest, "sha256:{s}", .{&hex}) catch unreachable; // 71 bytes exactly.
         if (!registry.store_manifest(route.repo, route.rest, media, bytes, &digest)) {
             return answer_text(socket, 413, "");
         }
         var location: [256]u8 = undefined;
-        const where = std.fmt.bufPrint(&location, "/v2/{s}/manifests/{s}", .{ route.repo, &digest }) catch unreachable;
+        // A route's repository is at most 64 bytes, so the location fits.
+        const where = std.fmt.bufPrint(&location, "/v2/{s}/manifests/{s}", .{
+            route.repo, &digest,
+        }) catch unreachable; // A short repository and a digest fit.
         var rendered: [http.response_head_bytes_max]u8 = undefined;
         const head: http.Head = .{ .status = 201, .digest = &digest, .location = where };
         _ = http.write_all(socket, http.render_head(head, &rendered));
@@ -555,7 +587,9 @@ pub const Registry = struct {
     }
 
     fn manifest_get(registry: *Registry, socket: i32, request: http.Request, route: Route) void {
-        if (request.method != .get and request.method != .head) return answer_text(socket, 404, not_found);
+        if (request.method != .get and request.method != .head) {
+            return answer_text(socket, 404, not_found);
+        }
         var body: [manifest_bytes_max]u8 = undefined;
         var media: [media_bytes_max]u8 = undefined;
         var digest: [71]u8 = undefined;
@@ -594,20 +628,29 @@ fn answer_text(socket: i32, status: u16, body: []const u8) void {
 fn answer_upload(socket: i32, repo: []const u8, id: u32, length: u64) void {
     assert(repo.len <= repo_bytes_max);
     var location: [128]u8 = undefined;
-    const where = std.fmt.bufPrint(&location, "/v2/{s}/blobs/uploads/{d}", .{ repo, id }) catch unreachable;
+    // Each buffer holds its longest text: a short repository and two u64s.
+    const where = std.fmt.bufPrint(&location, "/v2/{s}/blobs/uploads/{d}", .{ repo, id }) catch
+        unreachable; // A short repository and a u64 fit.
     var range: [32]u8 = undefined;
-    const kept = std.fmt.bufPrint(&range, "0-{d}", .{length -| 1}) catch unreachable;
-    var uuid: [16]u8 = undefined;
-    const name = std.fmt.bufPrint(&uuid, "{d}", .{id}) catch unreachable;
+    const kept = std.fmt.bufPrint(&range, "0-{d}", .{length -| 1}) catch unreachable; // Fits.
+    var uuid: [24]u8 = undefined;
+    const name = std.fmt.bufPrint(&uuid, "{d}", .{id}) catch unreachable; // Fits.
     var rendered: [http.response_head_bytes_max]u8 = undefined;
-    const head: http.Head = .{ .status = 202, .location = where, .range = kept, .upload_uuid = name };
+    const head: http.Head = .{
+        .status = 202,
+        .location = where,
+        .range = kept,
+        .upload_uuid = name,
+    };
     _ = http.write_all(socket, http.render_head(head, &rendered));
 }
 
 fn answer_blob_created(socket: i32, repo: []const u8, digest: []const u8) void {
     assert(digest.len == 71);
     var location: [192]u8 = undefined;
-    const where = std.fmt.bufPrint(&location, "/v2/{s}/blobs/{s}", .{ repo, digest }) catch unreachable;
+    // A short repository and a digest fit.
+    const where = std.fmt.bufPrint(&location, "/v2/{s}/blobs/{s}", .{ repo, digest }) catch
+        unreachable; // A short repository and a digest fit.
     var rendered: [http.response_head_bytes_max]u8 = undefined;
     const head: http.Head = .{ .status = 201, .digest = digest, .location = where };
     _ = http.write_all(socket, http.render_head(head, &rendered));

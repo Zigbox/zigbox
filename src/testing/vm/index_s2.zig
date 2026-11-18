@@ -43,7 +43,12 @@ pub fn anchor_of(arena: std.mem.Allocator, manifest: []const u8) !?Anchor {
         if (layer.digest.len != 71 or !std.mem.startsWith(u8, layer.digest, "sha256:")) {
             return error.BadManifest;
         }
-        var anchor: Anchor = .{ .blob = layer.digest[7..71].*, .offset = 0, .length = 0, .size = 0 };
+        var anchor: Anchor = .{
+            .blob = layer.digest[7..71].*,
+            .offset = 0,
+            .length = 0,
+            .size = 0,
+        };
         var fields = std.mem.splitScalar(u8, text, ' ');
         anchor.offset = try field(fields.next(), "offset=");
         anchor.length = try field(fields.next(), "length=");
@@ -88,7 +93,8 @@ pub const Located = struct {
 
 /// The chunk whose BLAKE3 is `hash`; null when the index lists none.
 pub fn locate(index: []const u8, hash: *const [32]u8) !?Located {
-    if (index.len < header_bytes or !std.mem.eql(u8, index[0..8], "zbx-lazy")) return error.BadIndex;
+    if (index.len < header_bytes) return error.BadIndex;
+    if (!std.mem.eql(u8, index[0..8], "zbx-lazy")) return error.BadIndex;
     const trees = read_u32(index, 56);
     const objects = read_u32(index, 60);
     const chunks = read_u32(index, 64);
@@ -103,7 +109,8 @@ pub fn locate(index: []const u8, hash: *const [32]u8) !?Located {
     if (chunks_at + @as(usize, chunks) * chunk_record_bytes > index.len) return error.BadIndex;
     var chunk: u32 = 0;
     while (chunk < chunks) : (chunk += 1) {
-        const record = index[chunks_at + @as(usize, chunk) * chunk_record_bytes ..][0..chunk_record_bytes];
+        const record_at = chunks_at + @as(usize, chunk) * chunk_record_bytes;
+        const record = index[record_at..][0..chunk_record_bytes];
         if (!std.mem.eql(u8, record[0..32], hash)) continue;
         const owner = owner_of(index[objects_at..chunks_at], chunk) orelse return error.BadIndex;
         return .{
@@ -125,7 +132,9 @@ fn owner_of(objects: []const u8, chunk: u32) ?Owner {
         const record = objects[at..][0..object_record_bytes];
         const first = std.mem.readInt(u32, record[40..44], .little);
         const count = std.mem.readInt(u32, record[44..48], .little);
-        if (chunk >= first and chunk - first < count) return .{ .id = record[0..32].*, .first = first };
+        if (chunk >= first and chunk - first < count) {
+            return .{ .id = record[0..32].*, .first = first };
+        }
     }
     return null;
 }
@@ -172,7 +181,8 @@ test "index_s2: the anchor, the inflate and a chunk's place" {
     const arena = arena_state.allocator();
     const hex = "abababababababababababababababababababababababababababababababab";
     const manifest = "{\"schemaVersion\":2,\"layers\":[{\"digest\":\"sha256:" ++ hex ++ "\"," ++
-        "\"annotations\":{\"" ++ annotation ++ "\":\"offset=10 length=30 size=99 digest=b3:00\"}}]}";
+        "\"annotations\":{\"" ++ annotation ++
+        "\":\"offset=10 length=30 size=99 digest=b3:00\"}}]}";
     const anchor = (try anchor_of(arena, manifest)).?;
     try std.testing.expectEqualStrings(hex, &anchor.blob);
     try std.testing.expectEqual(@as(u64, 10), anchor.offset);

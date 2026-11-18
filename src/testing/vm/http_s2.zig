@@ -172,7 +172,8 @@ pub const response_head_bytes_max = 1024;
 
 /// Renders `head` into `buffer`.
 pub fn render_head(head: Head, buffer: *[response_head_bytes_max]u8) []const u8 {
-    assert(head.status >= 200 and head.status < 600);
+    assert(head.status >= 200);
+    assert(head.status < 600);
     var writer: std.Io.Writer = .fixed(buffer);
     writer.print("HTTP/1.1 {d} {s}\r\nContent-Length: {d}\r\nConnection: close\r\n", .{
         head.status, reason(head.status), head.length,
@@ -188,9 +189,9 @@ pub fn render_head(head: Head, buffer: *[response_head_bytes_max]u8) []const u8 
     for (optional) |pair| {
         if (pair[1].len == 0) continue;
         assert(pair[1].len < 256); // Paths, digests and ranges: the buffer holds them all.
-        writer.print("{s}: {s}\r\n", .{ pair[0], pair[1] }) catch unreachable;
+        writer.print("{s}: {s}\r\n", .{ pair[0], pair[1] }) catch unreachable; // See above.
     }
-    writer.writeAll("Accept-Ranges: bytes\r\n\r\n") catch unreachable;
+    writer.writeAll("Accept-Ranges: bytes\r\n\r\n") catch unreachable; // Room is left for it.
     return writer.buffered();
 }
 
@@ -237,7 +238,8 @@ test "http_s2: a response head" {
     // Goal: the head carries the status, the length and only the headers that are set.
     // Method: render a 206 and look for each line.
     var buffer: [response_head_bytes_max]u8 = undefined;
-    const text = render_head(.{ .status = 206, .length = 8, .content_range = "bytes 2-9/10" }, &buffer);
+    const head: Head = .{ .status = 206, .length = 8, .content_range = "bytes 2-9/10" };
+    const text = render_head(head, &buffer);
     try std.testing.expect(std.mem.startsWith(u8, text, "HTTP/1.1 206 Partial Content\r\n"));
     try std.testing.expect(std.mem.indexOf(u8, text, "Content-Length: 8\r\n") != null);
     try std.testing.expect(std.mem.indexOf(u8, text, "Content-Range: bytes 2-9/10\r\n") != null);

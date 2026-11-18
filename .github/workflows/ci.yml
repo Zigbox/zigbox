@@ -53,6 +53,7 @@ jobs:
       demo_m9: ${{ steps.pick.outputs.demo_m9 }}
       demo_m10: ${{ steps.pick.outputs.demo_m10 }}
       demo_s2_lazy: ${{ steps.pick.outputs.demo_s2_lazy }}
+      demo_s2: ${{ steps.pick.outputs.demo_s2 }}
       demo_c4: ${{ steps.pick.outputs.demo_c4 }}
     steps:
       # Two commits: on a pull request the checkout is the merge commit, whose first parent is the
@@ -858,7 +859,7 @@ jobs:
         run: zig build demo-c4 -Daccel=kvm
 
   # The S2 slice 4 check (docs/briefs/S2-lazy-start.md): `zbx run --lazy` serves the pinned Alpine
-  # minirootfs, imported into the store, over FUSE (no registry). Slice 6's demo-s2 replaces it.
+  # minirootfs, imported into the store, over FUSE (no registry). Slice 6's demo-s2 covers it with a registry.
   demo-s2-lazy:
     name: demo-s2-lazy (Ubuntu 24.04 VM, KVM, zbx run --lazy over FUSE)
     needs: changes
@@ -889,3 +890,49 @@ jobs:
           key: vm-alpine-${{ hashFiles('src/testing/vm/alpine.zon') }}
       - name: Run the S2 lazy check
         run: zig build demo-s2-lazy -Daccel=kvm
+
+  # The S2 demo (docs/briefs/S2-lazy-start.md, "The demo"; docs/demos/s2.md, "demo-s2"): two
+  # 3 GiB images pushed to a throttled registry on the runner, then the brief's nine steps.
+  demo-s2:
+    name: demo-s2 (Ubuntu 24.04 VM, KVM, lazy start from a throttled registry)
+    needs: changes
+    if: ${{ needs.changes.outputs.demo_s2 == 'true' }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      # The whole history: step 9 builds the release before S2 in a git worktree, and a shallow
+      # clone does not have its tag.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+      # The registry's blobs (about 6 GiB) and the guest's overlay (up to about 15 GiB) do not
+      # fit next to the runner image's preinstalled toolchains.
+      - name: Free disk
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL
+          df -h /
+      - uses: ./.github/actions/setup-zig
+      - name: Install QEMU
+        uses: ./.github/actions/install-apt
+        with:
+          packages: qemu-system-x86 qemu-utils
+      - name: Enable KVM
+        run: |
+          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' | sudo tee /etc/udev/rules.d/99-kvm4all.rules
+          sudo udevadm control --reload-rules
+          sudo udevadm trigger --name-match=kvm
+      - name: Cache the VM base image
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: .zig-cache/zbx-vm/ubuntu-24.04-server-cloudimg-amd64.img
+          key: vm-image-${{ hashFiles('src/testing/vm/lib/image.zon') }}
+      - name: Cache the Alpine rootfs
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: .zig-cache/zbx-vm/alpine-*.tar.gz
+          key: vm-alpine-${{ hashFiles('src/testing/vm/alpine.zon') }}
+      # Step 8's fallback pulls alpine:3.20, which has no lazy index, through the mirror.
+      - name: Run the S2 demo
+        env:
+          ZBX_REGISTRY_MIRRORS: mirror.gcr.io
+        run: zig build demo-s2 -Daccel=kvm

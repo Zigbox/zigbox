@@ -174,7 +174,8 @@ pub fn site_size(site: u32) u64 {
     var state: u64 = seed ^ (@as(u64, site) *% 0x9e37_79b9_7f4a_7c15);
     const value = splitmix(&state);
     const size = 1 + value % site_file_bytes_max;
-    assert(size >= 1 and size <= site_file_bytes_max);
+    assert(size >= 1);
+    assert(size <= site_file_bytes_max);
     return size;
 }
 
@@ -202,7 +203,7 @@ pub const Stream = struct {
         const length: usize = @intCast(@min(stream.left, block_bytes));
         stream.prng.fill(buffer[0..length]);
         stream.left -= length;
-        assert(length == block_bytes or stream.left == 0);
+        if (stream.left > 0) assert(length == block_bytes);
         return buffer[0..length];
     }
 };
