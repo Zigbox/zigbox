@@ -170,6 +170,144 @@ pub fn format_line(buffer: []u8, result: Result) std.fmt.BufPrintError![]const u
     );
 }
 
+/// The text of a manifest digest as zbx prints it: `sha256:` and 64 lowercase hex digits.
+pub fn is_digest(text: []const u8) bool {
+    const prefix = "sha256:";
+    if (text.len != prefix.len + 64) return false;
+    if (!std.mem.startsWith(u8, text, prefix)) return false;
+    for (text[prefix.len..]) |char| {
+        switch (char) {
+            '0'...'9', 'a'...'f' => {},
+            else => return false,
+        }
+    }
+    return true;
+}
+
+/// A pinned entry of `top20.zon` names the floating entry's image by digest and nothing else:
+/// `nginx:latest` pins as `nginx@sha256:...`. A digest is never a tag (REVIEW.md), so a pin with
+/// a tag in it, or one of another image, is refused when the harness compiles.
+pub fn pinned_matches(floating: []const u8, pinned: []const u8) bool {
+    if (std.mem.indexOfScalar(u8, floating, '@') != null) return false;
+    const colon = std.mem.indexOfScalar(u8, floating, ':') orelse return false;
+    const at = std.mem.indexOfScalar(u8, pinned, '@') orelse return false;
+    if (!std.mem.eql(u8, floating[0..colon], pinned[0..at])) return false;
+    return is_digest(pinned[at + 1 ..]);
+}
+
+/// The digest a pinned reference names: the text after its `@`.
+pub fn pinned_digest(pinned: []const u8) []const u8 {
+    const at = std.mem.indexOfScalar(u8, pinned, '@').?;
+    const digest = pinned[at + 1 ..];
+    assert(at > 0);
+    assert(is_digest(digest));
+    return digest;
+}
+
+/// The reference a pulled image is run by. A tag runs by its name (the pull locked it). A pin
+/// names the multi-arch index, but `zbx run` finds an image by the platform manifest it was
+/// pulled as (a run by the index digest is refused with E0522), so a pin runs by the manifest
+/// digest its pull printed on stdout: the same content, one level down. Null when the pull
+/// printed no digest or the buffer is too small.
+pub fn run_reference(buffer: []u8, pulled: []const u8, stdout: []const u8) ?[]const u8 {
+    assert(pulled.len > 0);
+    const at = std.mem.indexOfScalar(u8, pulled, '@') orelse return pulled;
+    const manifest = last_line(stdout);
+    if (!is_digest(manifest)) return null;
+    const text = std.fmt.bufPrint(buffer, "{s}@{s}", .{ pulled[0..at], manifest }) catch
+        return null;
+    assert(std.mem.indexOfScalar(u8, text, '@').? == at);
+    assert(std.mem.endsWith(u8, text, manifest));
+    return text;
+}
+
+/// The `index_digest` of `zbx pull --resolve-only --output json` (`zbx.pull.resolve/1`): the
+/// digest the floating tag names now. Null when the text has none (a single-manifest tag, whose
+/// member is null, or output that is not the object).
+pub fn index_digest_of(json: []const u8) ?[]const u8 {
+    if (std.mem.indexOf(u8, json, "\"schema\":\"zbx.pull.resolve/1\"") == null) return null;
+    const member = "\"index_digest\":\"";
+    const found = std.mem.indexOf(u8, json, member) orelse return null;
+    const start = found + member.len;
+    const end = std.mem.indexOfScalarPos(u8, json, start, '"') orelse return null;
+    assert(end >= start);
+    const digest = json[start..end];
+    return if (is_digest(digest)) digest else null;
+}
+
+/// Where the floating tag points now, against the pin: the same index, another one, or not
+/// known (the resolve failed or printed no index digest).
+pub const Tag = enum { same, moved, unknown };
+
+pub fn tag_of(now: ?[]const u8, pinned: []const u8) Tag {
+    const digest = now orelse return .unknown;
+    assert(is_digest(digest));
+    return if (std.mem.eql(u8, digest, pinned_digest(pinned))) .same else .moved;
+}
+
+/// What a floating and a pinned result say together. A failure of the floating tag alone, while
+/// the pin runs, is the image's change upstream; a failure of the pin is the runtime's, since the
+/// pin's content has not changed since it last passed. The same content judged two ways is
+/// neither: the run is not repeatable.
+pub const Change = enum {
+    ok,
+    known,
+    upstream_moved,
+    regression,
+    regression_pinned,
+    flaky,
+
+    pub fn text(change: Change) []const u8 {
+        return switch (change) {
+            .ok => "ok",
+            .known => "known",
+            .upstream_moved => "upstream image moved",
+            .regression => "runtime regression",
+            .regression_pinned => "runtime regression (pinned only)",
+            .flaky => "flaky (same content, different results)",
+        };
+    }
+};
+
+pub fn classify(floating: Verdict, pinned: Verdict, tag: Tag) Change {
+    if (floating == .fail) {
+        if (pinned == .fail) return .regression;
+        return if (tag == .same) .flaky else .upstream_moved;
+    }
+    if (pinned == .fail) return if (tag == .same) .flaky else .regression_pinned;
+    if (floating == pinned) return if (floating == .pass) .ok else .known;
+    // A pass on one and a known reason on the other: the two contents behave differently.
+    return if (tag == .same) .flaky else .upstream_moved;
+}
+
+/// One image's comparison: the floating reference, both verdicts, where the tag points and its
+/// current index digest when the resolve gave one.
+pub const Compare = struct {
+    ref: []const u8,
+    floating: Verdict,
+    pinned: Verdict,
+    tag: Tag,
+    now: ?[]const u8,
+};
+
+/// The comparison line, then the tag's current digest when it moved, so that a refresh of the
+/// pins can start there.
+pub fn format_compare(buffer: []u8, compare: Compare) std.fmt.BufPrintError![]const u8 {
+    assert(compare.ref.len > 0);
+    if (compare.tag != .unknown) assert(compare.now != null);
+    const change = classify(compare.floating, compare.pinned, compare.tag);
+    const head = try std.fmt.bufPrint(buffer, "{s} | floating={s} | pinned={s} | tag={s} | {s}", .{
+        compare.ref,
+        @tagName(compare.floating),
+        @tagName(compare.pinned),
+        @tagName(compare.tag),
+        change.text(),
+    });
+    if (compare.tag != .moved) return head;
+    const tail = try std.fmt.bufPrint(buffer[head.len..], " | now {s}", .{compare.now.?});
+    return buffer[0 .. head.len + tail.len];
+}
+
 fn yes_no(flag: bool) []const u8 {
     return if (flag) "yes" else "no";
 }
@@ -319,4 +457,118 @@ test "a probed port is published 20000 above, and a high one as it is" {
     try std.testing.expectEqual(@as(u16, 65535), published_port(45535));
     try std.testing.expectEqual(@as(u16, 45536), published_port(45536));
     try std.testing.expectEqual(@as(u16, 65535), published_port(65535));
+}
+
+test "a pin names its floating entry's image by a digest, never by a tag" {
+    // Goal: the compile-time check of top20.zon's pins. Method: a good pin, and each way one
+    // can be wrong: another image, a tag, a short or upper-case digest, a floating digest.
+    const digest = "sha256:" ++ "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+    try testing.expect(is_digest(digest));
+    try testing.expect(pinned_matches("nginx:latest", "nginx@" ++ digest));
+    try testing.expect(pinned_matches("openjdk:28-ea-jdk-slim", "openjdk@" ++ digest));
+    try testing.expect(!pinned_matches("nginx:latest", "httpd@" ++ digest));
+    try testing.expect(!pinned_matches("nginx:latest", "nginx:latest"));
+    try testing.expect(!pinned_matches("nginx:latest", "nginx:latest@" ++ digest));
+    try testing.expect(!pinned_matches("nginx:latest", "nginx@" ++ digest[0..70]));
+    const upper = "sha256:" ++ "0123456789ABCDEF0123456789ABCDEF0123456789ABCDEF0123456789ABCDEF";
+    try testing.expect(!pinned_matches("nginx:latest", "nginx@" ++ upper));
+    try testing.expect(!pinned_matches("nginx@" ++ digest, "nginx@" ++ digest));
+    try testing.expect(!is_digest("sha512:" ++ digest["sha256:".len..]));
+    try testing.expectEqualStrings(digest, pinned_digest("nginx@" ++ digest));
+}
+
+test "a pin runs by the manifest digest its pull printed, a tag by its name" {
+    // Goal: the run reference of each list. Method: the stdout of a real pull by index digest
+    // (hello-world, 2026-11-18: the warning went to stderr, the platform manifest to stdout), a
+    // tag, a pull that printed no digest, and a buffer too small.
+    var buffer: [160]u8 = undefined;
+    const index = "hello-world@sha256:" ++
+        "1e4c05b897a751332ce85c7e9449da2d93514ea2dea6dbb0e2753c9e949b2bfa";
+    const stdout = "sha256:d1a8d0a4eeb63aff09f5f34d4d80505e0ba81905f36158cc3970d8e07179e59e\n";
+    try testing.expectEqualStrings(
+        "hello-world@sha256:d1a8d0a4eeb63aff09f5f34d4d80505e0ba81905f36158cc3970d8e07179e59e",
+        run_reference(&buffer, index, stdout).?,
+    );
+    try testing.expectEqualStrings("redis:latest", run_reference(&buffer, "redis:latest", "").?);
+    try testing.expect(run_reference(&buffer, index, "") == null);
+    try testing.expect(run_reference(&buffer, index, "sha256:12\n") == null);
+    var small: [20]u8 = undefined;
+    try testing.expect(run_reference(&small, index, stdout) == null);
+}
+
+test "the floating tag's index digest is read from the resolve's JSON" {
+    // Goal: the `tag=` field. Method: the output of a real `zbx pull --resolve-only --output json
+    // hello-world:latest` (2026-11-18, its config and layers cut), a single manifest (null), and
+    // text that is not the object.
+    const real = "{\"schema\":\"zbx.pull.resolve/1\",\"reference\":" ++
+        "\"docker.io/library/hello-world:latest\",\"registry\":\"docker.io\"," ++
+        "\"repository\":\"library/hello-world\",\"index_digest\":\"sha256:" ++
+        "1e4c05b897a751332ce85c7e9449da2d93514ea2dea6dbb0e2753c9e949b2bfa\"," ++
+        "\"manifest_digest\":\"sha256:" ++
+        "d1a8d0a4eeb63aff09f5f34d4d80505e0ba81905f36158cc3970d8e07179e59e\"," ++
+        "\"manifest_size\":1023,\"platform\":\"linux/amd64\",\"layers\":[]}\n";
+    const now = index_digest_of(real).?;
+    try testing.expectEqualStrings(
+        "sha256:1e4c05b897a751332ce85c7e9449da2d93514ea2dea6dbb0e2753c9e949b2bfa",
+        now,
+    );
+    const single = "{\"schema\":\"zbx.pull.resolve/1\",\"index_digest\":null}";
+    try testing.expect(index_digest_of(single) == null);
+    try testing.expect(index_digest_of("error[ZBX-E0505]: \"index_digest\":\"x\"") == null);
+    const pin = "hello-world@sha256:" ++
+        "1e4c05b897a751332ce85c7e9449da2d93514ea2dea6dbb0e2753c9e949b2bfa";
+    try testing.expectEqual(Tag.same, tag_of(now, pin));
+    const other = "sha256:" ++ "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+    try testing.expectEqual(Tag.moved, tag_of(other, pin));
+    try testing.expectEqual(Tag.unknown, tag_of(null, pin));
+}
+
+test "floating against pinned tells an image that moved from a runtime regression" {
+    // Goal: the class of every pair of verdicts. Method: each pair, with the tag moved, the same
+    // or unknown where that changes the answer.
+    try testing.expectEqual(Change.ok, classify(.pass, .pass, .moved));
+    try testing.expectEqual(Change.known, classify(.known, .known, .same));
+    try testing.expectEqual(Change.upstream_moved, classify(.fail, .pass, .moved));
+    try testing.expectEqual(Change.upstream_moved, classify(.fail, .known, .unknown));
+    try testing.expectEqual(Change.flaky, classify(.fail, .pass, .same));
+    try testing.expectEqual(Change.regression, classify(.fail, .fail, .moved));
+    try testing.expectEqual(Change.regression, classify(.fail, .fail, .same));
+    try testing.expectEqual(Change.regression_pinned, classify(.pass, .fail, .moved));
+    try testing.expectEqual(Change.regression_pinned, classify(.known, .fail, .unknown));
+    try testing.expectEqual(Change.flaky, classify(.pass, .fail, .same));
+    try testing.expectEqual(Change.upstream_moved, classify(.known, .pass, .moved));
+    try testing.expectEqual(Change.flaky, classify(.pass, .known, .same));
+}
+
+test "the comparison line names the class, and the tag's digest when it moved" {
+    // Goal: the job summary's comparison line. Method: a moved tag, the same one, an unknown.
+    var buffer: [256]u8 = undefined;
+    const other = "sha256:" ++ "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+    const moved: Compare = .{
+        .ref = "nginx:latest",
+        .floating = .fail,
+        .pinned = .pass,
+        .tag = .moved,
+        .now = other,
+    };
+    try testing.expectEqualStrings(
+        "nginx:latest | floating=fail | pinned=pass | tag=moved | upstream image moved | now " ++
+            other,
+        try format_compare(&buffer, moved),
+    );
+    var same = moved;
+    same.floating = .pass;
+    same.tag = .same;
+    try testing.expectEqualStrings(
+        "nginx:latest | floating=pass | pinned=pass | tag=same | ok",
+        try format_compare(&buffer, same),
+    );
+    var unknown = moved;
+    unknown.tag = .unknown;
+    unknown.now = null;
+    unknown.pinned = .fail;
+    try testing.expectEqualStrings(
+        "nginx:latest | floating=fail | pinned=fail | tag=unknown | runtime regression",
+        try format_compare(&buffer, unknown),
+    );
 }

@@ -1,9 +1,11 @@
 # The top-20 check (docs/demos/m4.md): pull and run the twenty most-pulled official Docker Hub
 # images (src/testing/vm/top20.zon) in the test VM. Weekly and on demand, never on a pull
 # request. It uses the real Docker Hub, not the mirror the PR demos use, so it can meet the
-# anonymous pull limit; a 429 shows as that image's reason. One line per image goes to the job
-# summary; the job fails if an image fails without a documented reason. Weekly and on demand
-# (and on vm/top20-* scratch branches), never on a pull request.
+# anonymous pull limit; a 429 shows as that image's reason. Each image runs twice in the same VM,
+# by its floating tag and by its pinned digest; one line per run, and one line comparing the two
+# (upstream image moved, or runtime regression: docs/demos/m4.md, "Floating and pinned"), go to
+# the job summary. The job fails if a run of either list fails without a documented reason.
+# Weekly and on demand (and on vm/top20-* scratch branches), never on a pull request.
 name: top20
 
 on:
@@ -41,17 +43,24 @@ jobs:
         with:
           path: .zig-cache/zbx-vm
           key: vm-image-${{ hashFiles('src/testing/vm/lib/image.zon') }}
-      - name: Pull and run the twenty images
+      - name: Pull and run the twenty images, by tag and by pinned digest
         run: zig build top20 -Daccel=kvm 2>&1 | tee top20.log
         shell: bash
       - name: Results
         if: always()
         run: |
           {
-            echo '### Top 20 official images'
+            echo '### Top 20 official images: floating tag against pinned digest'
+            echo
+            echo '```'
+            grep '^top20-compare: ' top20.log | sort -u | sed 's/^top20-compare: //'
+            echo '```'
+            echo
+            echo '### Every run'
             echo
             echo '```'
             grep '^top20-result: ' top20.log | sort -u | sed 's/^top20-result: //'
+            grep -E '^top20: (pinned: )?[0-9]+ passed' top20.log | sort -u
             echo '```'
           } >> "$GITHUB_STEP_SUMMARY"
       # Not on cancel, and never on main (schedule and dispatch run there).

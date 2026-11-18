@@ -3,6 +3,25 @@
 //   https://hub.docker.com/v2/repositories/library/?page_size=25&ordering=pull_count
 // Refresh it by reading that list again and changing `date`; a changed list is a reviewed change.
 //
+// Each image is run twice: by its floating tag (`ref`, the canary: what users pull today) and
+// by `pinned`, the same image by digest: the multi-arch index digest the tag named on
+// `pinned_date`. The pin's content never changes, so when the floating run fails and the pinned
+// one passes, the image moved upstream; when the pin fails, the runtime regressed (the report:
+// docs/demos/m4.md, "Floating and pinned"). A pin is a digest, never a tag (REVIEW.md); the
+// harness refuses at compile time a pin that is not `<the ref's name>@sha256:<64 hex>`.
+//
+// Refresh the pins (a reviewed change, normally after a run has shown a tag moved and the
+// floating run passes): for each entry, read the index digest of `library/<name>:<tag>`,
+// read-only and anonymous, from Docker Hub's registry API:
+//   token=$(curl -fsS "https://auth.docker.io/token?service=registry.docker.io&scope=repository:library/<name>:pull" | jq -r .token)
+//   curl -fsSI -H "Authorization: Bearer $token" \
+//     -H 'Accept: application/vnd.oci.image.index.v1+json, application/vnd.docker.distribution.manifest.list.v2+json' \
+//     https://registry-1.docker.io/v2/library/<name>/manifests/<tag> | grep -i '^docker-content-digest:'
+// (a HEAD request: Docker Hub does not count it against the anonymous pull limit). Its
+// `Content-Type` must be an index or a manifest list, not a single manifest. Write the digest as
+// `<name>@sha256:...`, and change `pinned_date`. A run's comparison line for a moved tag also
+// prints the tag's current digest (`now sha256:...`), from `zbx pull --resolve-only`.
+//
 // An `env` is a variable the image's entrypoint asks for, given with `-e NAME=VALUE` (M6): the
 // three databases refuse to start without a root password. An empty `env` is none.
 //
@@ -15,33 +34,34 @@
 // the guest lacks is judged by its connection). An entry with a `known` reason is an image that
 // cannot run its default command as a rootless, unconfigured container: the run records that
 // reason instead of a failure, and the harness still runs it, so a note that is no longer true
-// shows as a pass with a NOTE line.
+// shows as a pass with a NOTE line. `known`, `probe` and `env` hold for both runs of an entry.
 // openjdk is deprecated on the Hub: it has no `latest` tag, only early-access ones, so this is the
 // newest slim JDK tag; if the Hub drops it the run says so (E0508) and the entry is replaced.
 // An empty `known` means the image must pass. A failure without a reason fails the whole run.
 .{
     .date = "2026-10-27",
     .source = "Docker Hub official images, ordered by pull count",
+    .pinned_date = "2026-11-18",
     .images = .{
-        .{ .ref = "nginx:latest", .known = "", .probe = "80|GET / HTTP/1.0\\r\\n\\r\\n|HTTP/", .env = "" },
-        .{ .ref = "memcached:latest", .known = "", .probe = "11211|version\\r\\n|VERSION", .env = "" },
-        .{ .ref = "busybox:latest", .known = "", .probe = "", .env = "" },
-        .{ .ref = "alpine:latest", .known = "", .probe = "", .env = "" },
-        .{ .ref = "postgres:latest", .known = "", .probe = "5432||", .env = "POSTGRES_PASSWORD=top20-pass" },
-        .{ .ref = "redis:latest", .known = "", .probe = "6379|PING\\r\\n|PONG", .env = "" },
-        .{ .ref = "ubuntu:latest", .known = "", .probe = "", .env = "" },
-        .{ .ref = "python:latest", .known = "", .probe = "", .env = "" },
-        .{ .ref = "node:latest", .known = "", .probe = "", .env = "" },
-        .{ .ref = "mysql:latest", .known = "", .probe = "3306||", .env = "MYSQL_ROOT_PASSWORD=top20-pass" },
-        .{ .ref = "mongo:latest", .known = "", .probe = "27017||", .env = "" },
-        .{ .ref = "httpd:latest", .known = "", .probe = "80|GET / HTTP/1.0\\r\\n\\r\\n|HTTP/", .env = "" },
-        .{ .ref = "rabbitmq:latest", .known = "", .probe = "5672||", .env = "" },
-        .{ .ref = "docker:latest", .known = "its entrypoint starts dockerd, which mounts filesystems and opens raw sockets: mount is refused by the seccomp profile and the user namespace holds no CAP_SYS_ADMIN of the host, so a daemon cannot run in a rootless container", .probe = "", .env = "" },
-        .{ .ref = "traefik:latest", .known = "", .probe = "80|GET / HTTP/1.0\\r\\n\\r\\n|HTTP/", .env = "" },
-        .{ .ref = "hello-world:latest", .known = "", .probe = "", .env = "" },
-        .{ .ref = "mariadb:latest", .known = "", .probe = "3306||", .env = "MARIADB_ROOT_PASSWORD=top20-pass" },
-        .{ .ref = "golang:latest", .known = "", .probe = "", .env = "" },
-        .{ .ref = "openjdk:28-ea-jdk-slim", .known = "", .probe = "", .env = "" },
-        .{ .ref = "registry:latest", .known = "", .probe = "5000|GET /v2/ HTTP/1.0\\r\\n\\r\\n|200", .env = "" },
+        .{ .ref = "nginx:latest", .known = "", .probe = "80|GET / HTTP/1.0\\r\\n\\r\\n|HTTP/", .env = "", .pinned = "nginx@sha256:228c696e9e835b6087a7061482758db21bfff046cc577402a208acf10465eb66" },
+        .{ .ref = "memcached:latest", .known = "", .probe = "11211|version\\r\\n|VERSION", .env = "", .pinned = "memcached@sha256:a395a1bcf5e0e2b0fa4a0142e12b4e24a2320ba4b7c6ffa8655a1a86e8f29dee" },
+        .{ .ref = "busybox:latest", .known = "", .probe = "", .env = "", .pinned = "busybox@sha256:a46257e06c82ad85242d0d38077d0a52d9896389ca60a1a59d3463db586e5fa4" },
+        .{ .ref = "alpine:latest", .known = "", .probe = "", .env = "", .pinned = "alpine@sha256:f59abe656b692d901e184be3445e084786602108599d2a51d229c0f5a48c71bf" },
+        .{ .ref = "postgres:latest", .known = "", .probe = "5432||", .env = "POSTGRES_PASSWORD=top20-pass", .pinned = "postgres@sha256:2ea8630df176ad090ec92136dee850397c5af8781e4bcf2e4162593691c61bbc" },
+        .{ .ref = "redis:latest", .known = "", .probe = "6379|PING\\r\\n|PONG", .env = "", .pinned = "redis@sha256:1f88291b4c57bdf249f02eb085a8669889b2d2954e91d4de5118a5da6b78dd53" },
+        .{ .ref = "ubuntu:latest", .known = "", .probe = "", .env = "", .pinned = "ubuntu@sha256:d66b366dac61b575bee2aef07e9c26e8070096fbe84a3d4d3eb0da069b5d76db" },
+        .{ .ref = "python:latest", .known = "", .probe = "", .env = "", .pinned = "python@sha256:46837ed3105db0029b6d656816185c6258e3b39690532fb782428e0a5fd76182" },
+        .{ .ref = "node:latest", .known = "", .probe = "", .env = "", .pinned = "node@sha256:e18c3ccdf7d71619990b0e85639f506e2028a95410999cab24cc373cbd10e0ac" },
+        .{ .ref = "mysql:latest", .known = "", .probe = "3306||", .env = "MYSQL_ROOT_PASSWORD=top20-pass", .pinned = "mysql@sha256:3819b2b23835c4a73c8b022fafc33c8095c0f81c929a8b7a84613d2fba6c52f5" },
+        .{ .ref = "mongo:latest", .known = "", .probe = "27017||", .env = "", .pinned = "mongo@sha256:b0c835c26e5997413e985000f1013c275377cd9607761c1784d486f6dd620b7f" },
+        .{ .ref = "httpd:latest", .known = "", .probe = "80|GET / HTTP/1.0\\r\\n\\r\\n|HTTP/", .env = "", .pinned = "httpd@sha256:32e9403360ab2f1047523e72f256527fb9aee68b342abf6ad03f0d629157f3d9" },
+        .{ .ref = "rabbitmq:latest", .known = "", .probe = "5672||", .env = "", .pinned = "rabbitmq@sha256:183272aa2ff82718cabeef343de8d9a900931ea65fda4e563fed2a6d9efde578" },
+        .{ .ref = "docker:latest", .known = "its entrypoint starts dockerd, which mounts filesystems and opens raw sockets: mount is refused by the seccomp profile and the user namespace holds no CAP_SYS_ADMIN of the host, so a daemon cannot run in a rootless container", .probe = "", .env = "", .pinned = "docker@sha256:4bbc7223f81db790097c6dea42fb93e05b8fead4f0431fbe6ccaba6e8473201c" },
+        .{ .ref = "traefik:latest", .known = "", .probe = "80|GET / HTTP/1.0\\r\\n\\r\\n|HTTP/", .env = "", .pinned = "traefik@sha256:b7b1b31e6440de0b1f7c4e0f6cf0a0f3f004866761d30c025fe00c80daaf7d9c" },
+        .{ .ref = "hello-world:latest", .known = "", .probe = "", .env = "", .pinned = "hello-world@sha256:1e4c05b897a751332ce85c7e9449da2d93514ea2dea6dbb0e2753c9e949b2bfa" },
+        .{ .ref = "mariadb:latest", .known = "", .probe = "3306||", .env = "MARIADB_ROOT_PASSWORD=top20-pass", .pinned = "mariadb@sha256:54f493ea0d60b621a5bff84e5b20100f8b86b6efa6b79158e04756c5194a5e4d" },
+        .{ .ref = "golang:latest", .known = "", .probe = "", .env = "", .pinned = "golang@sha256:205c7636d74e0ffbe3d007162df7d74f859f5a8c8322dfb9f907977686c126cf" },
+        .{ .ref = "openjdk:28-ea-jdk-slim", .known = "", .probe = "", .env = "", .pinned = "openjdk@sha256:c2592278730b8f918bc0c36eda3a689023cfd34512473ee417c522cc0a7757fa" },
+        .{ .ref = "registry:latest", .known = "", .probe = "5000|GET /v2/ HTTP/1.0\\r\\n\\r\\n|200", .env = "", .pinned = "registry@sha256:82f6ff4a7f982960c8aa51617fea3aabc485df6e55cce80d22deb1de36f1bc3c" },
     },
 }
